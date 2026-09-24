@@ -1,15 +1,16 @@
 use crate::bundle::{
-    atomic_write_json, finalize_root_hash, hash_descriptor, now_epoch_ms, read_json_bounded,
-    Bundle, INDEX_PAGE_SIZE,
+    finalize_root_hash, hash_descriptor, now_epoch_ms, read_json_bounded, Bundle, INDEX_PAGE_SIZE,
 };
 use crate::hash::{hash_bytes, node_bloom_might_contain};
+#[cfg(test)]
+use crate::HCD_SCHEMA_VERSION;
 use crate::{
     extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, AnnotationSet,
     ApplyResult, AssetDescriptor, FidelityWarning, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeStylePatch, PatchBatch,
     PatchOperation, RevisionRecord, TextExtractEntry, TextExtractPage, TextNodeLookup,
     HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
-    HCD_SCHEMA_VERSION, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -116,7 +117,8 @@ pub fn apply_patch(
     let new_index_prefix = format!("indexes/rev-{new_revision:020}");
     let new_index_root = bundle.root().join(&new_index_prefix);
     let content_changed = !splices.is_empty() || !styles.is_empty() || !images.is_empty();
-    if content_changed {
+    let mut index_root_href = manifest.index_root_href.clone();
+    if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
     }
 
@@ -154,6 +156,7 @@ pub fn apply_patch(
 
     for page_number in 0..manifest.index_page_count {
         let mut page = bundle.read_index_page(&manifest, page_number)?;
+        let mut page_changed = false;
         for descriptor in &mut page.chunks {
             let candidates: Vec<&String> = target_node_ids
                 .iter()
@@ -281,6 +284,20 @@ pub fn apply_patch(
                     let replacement = splice_text(current_text, node_splices)?;
                     let replacement_hash = hash_bytes(replacement.as_bytes());
                     replace_node_text(&mut html, &entry.node_id, &replacement, &replacement_hash)?;
+                    if manifest.source.format == "pdf" {
+                        set_element_attribute(
+                            &mut html,
+                            &entry.node_id,
+                            "data-hcd-patched",
+                            "true",
+                        )?;
+                        set_element_attribute(
+                            &mut html,
+                            &entry.node_id,
+                            "title",
+                            "Edited PDF text; preview placement is approximate",
+                        )?;
+                    }
                     entry.node_hash = replacement_hash;
                     found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
                     html_nodes.insert(entry.node_id.clone(), replacement);
@@ -297,6 +314,7 @@ pub fn apply_patch(
             }
 
             if chunk_changed {
+                page_changed = true;
                 let (html_href, html_hash) = bundle.write_chunk_object(&html)?;
                 let (map_href, map_hash) = bundle.write_json_object("maps", &source_map)?;
                 descriptor.html_href = html_href;
@@ -310,13 +328,17 @@ pub fn apply_patch(
             hash_descriptor(&mut root_hasher, descriptor);
         }
 
-        if content_changed {
+        if content_changed && (index_root_href.is_none() || page_changed) {
             page.revision = new_revision;
-            let new_path = new_index_root.join(format!("{page_number:06}.json"));
-            // Each index page is bounded to 128 descriptors. The descriptors
-            // and their content-addressed objects can be reused, but the
-            // page-level revision must belong to the new immutable view.
-            atomic_write_json(&new_path, &page)?;
+            if let Some(root) = &index_root_href {
+                index_root_href = Some(bundle.replace_index_page(root, page_number, &page)?);
+            } else {
+                let new_path = new_index_root.join(format!(
+                    "{page_number:06}.json{}",
+                    manifest.storage_codec.suffix()
+                ));
+                crate::bundle::atomic_write_json_encoded(&new_path, &page)?;
+            }
         }
     }
 
@@ -339,7 +361,11 @@ pub fn apply_patch(
     manifest.annotation_root_hash = annotation_root_hash.clone();
     manifest.annotation_href = annotation_href;
     if content_changed {
-        manifest.index_prefix = new_index_prefix.clone();
+        if index_root_href.is_some() {
+            manifest.index_root_href = index_root_href;
+        } else {
+            manifest.index_prefix = new_index_prefix.clone();
+        }
     }
 
     let result = ApplyResult {
@@ -366,11 +392,17 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             }))
+            .chain(splices.keys().filter(|_| manifest.source.format == "pdf").map(|node_id| FidelityWarning {
+                code: "PDF_EDITED_TEXT_OVERLAY_APPROXIMATE".to_string(),
+                message: "edited PDF text is painted over its original page raster for preview; source typography and background cannot be restored exactly".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .collect(),
         idempotent_replay: false,
     };
     let record = RevisionRecord {
-        schema_version: HCD_SCHEMA_VERSION.to_string(),
+        schema_version: manifest.schema_version.clone(),
         document_id: manifest.document_id.clone(),
         revision: new_revision,
         parent_revision: Some(new_revision - 1),
@@ -380,6 +412,7 @@ pub fn apply_patch(
         root_hash,
         annotation_root_hash,
         index_prefix: manifest.index_prefix.clone(),
+        index_root_href: manifest.index_root_href.clone(),
         asset_index_href,
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: result.dirty_node_ids.clone(),
@@ -1437,7 +1470,7 @@ fn apply_annotations(
         )?
     } else {
         AnnotationSet {
-            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            schema_version: manifest.schema_version.clone(),
             annotations: Vec::new(),
         }
     };
@@ -1666,7 +1699,9 @@ mod tests {
     fn patch_revisions_every_bounded_index_page() {
         let temp = tempfile::tempdir().unwrap();
         let bundle_path = temp.path().join("bundle");
-        let mut writer = crate::BundleWriter::create(&bundle_path).unwrap();
+        let mut writer =
+            crate::BundleWriter::create_with_codec(&bundle_path, crate::StorageCodec::Gzip)
+                .unwrap();
         writer.write_styles("").unwrap();
         for index in 0..=crate::INDEX_PAGE_SIZE {
             let node_id = format!("n_{index:032x}");
@@ -1688,10 +1723,10 @@ mod tests {
                             node_id,
                             node_hash,
                             source: crate::SourceAnchor {
-                                part: "text/source.txt".to_string(),
+                                part: "text/document".to_string(),
                                 text_ordinal: index as u64 + 1,
                                 paragraph_id: None,
-                                text_id: None,
+                                text_id: Some(format!("bytes:{index}:{}", index + 1)),
                                 node_kind: "line".to_string(),
                                 editable: true,
                             },
@@ -1705,18 +1740,20 @@ mod tests {
         writer
             .finish(crate::HcdManifest {
                 schema_version: HCD_SCHEMA_VERSION.to_string(),
+                storage_codec: crate::StorageCodec::Gzip,
                 document_id: "multi-index".to_string(),
                 profile: "semantic-flow".to_string(),
                 revision: 0,
                 source: crate::SourceDescriptor {
                     format: "txt".to_string(),
                     sha256: "0".repeat(64),
-                    size_bytes: 1,
+                    size_bytes: 1000,
                 },
                 root_hash: String::new(),
                 annotation_root_hash: String::new(),
                 annotation_href: None,
                 index_prefix: String::new(),
+                index_root_href: None,
                 index_page_count: 0,
                 chunk_count: 0,
                 styles_href: String::new(),
@@ -1727,6 +1764,20 @@ mod tests {
             })
             .unwrap();
         let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let original = bundle.manifest().unwrap();
+        let original_second_page = original.index_root_href.clone().unwrap();
+        let descriptor = bundle.read_index_page(&original, 0).unwrap().chunks[0].clone();
+        assert!(bundle.read_chunk_verified(&descriptor).is_ok());
+        assert!(bundle.read_map_verified(&descriptor).is_ok());
+        let mut forged = descriptor.clone();
+        forged.byte_length += 1;
+        assert!(bundle.read_chunk_verified(&forged).is_err());
+        forged = descriptor.clone();
+        forged.html_hash = "f".repeat(64);
+        assert!(bundle.read_chunk_verified(&forged).is_err());
+        forged = descriptor;
+        forged.map_hash = "f".repeat(64);
+        assert!(bundle.read_map_verified(&forged).is_err());
         let first = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
         apply_patch(
             &bundle,
@@ -1753,7 +1804,29 @@ mod tests {
         let manifest = bundle.manifest().unwrap();
         assert_eq!(manifest.index_page_count, 2);
         assert_eq!(bundle.read_index_page(&manifest, 0).unwrap().revision, 1);
-        assert_eq!(bundle.read_index_page(&manifest, 1).unwrap().revision, 1);
+        assert_eq!(bundle.read_index_page(&manifest, 1).unwrap().revision, 0);
+        assert_ne!(
+            manifest.index_root_href.as_deref(),
+            Some(original_second_page.as_str())
+        );
+        let (historical, _) = crate::manifest_at_revision(&bundle, &manifest, Some(0)).unwrap();
+        assert_eq!(bundle.read_index_page(&historical, 0).unwrap().revision, 0);
+        assert_eq!(bundle.read_index_page(&historical, 1).unwrap().revision, 0);
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+        assert!(crate::bundle_stats(&bundle)
+            .unwrap()
+            .orphan_hrefs
+            .is_empty());
+        let orphan_href = format!("chunks/sha256/{}.html.gz", "f".repeat(64));
+        std::fs::write(bundle_path.join(&orphan_href), b"interrupted write").unwrap();
+        assert_eq!(
+            crate::bundle_stats(&bundle).unwrap().orphan_hrefs,
+            vec![orphan_href.clone()]
+        );
+        crate::remove_orphan_objects(&bundle).unwrap();
+        assert!(!bundle_path.join(orphan_href).exists());
+        assert!(bundle_path.join(original_second_page).exists());
         let mut rendered = Vec::new();
         crate::render_standalone_html(
             &bundle,

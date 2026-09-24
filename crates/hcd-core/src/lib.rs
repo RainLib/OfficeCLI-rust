@@ -4,6 +4,7 @@ mod hash;
 mod html;
 mod patch;
 mod presentation;
+mod stats;
 mod types;
 mod validate;
 
@@ -23,14 +24,17 @@ pub use presentation::{
     manifest_at_revision, render_standalone_html, render_standalone_html_with_transform,
     HtmlPresentationOptions, HtmlPresentationReport, DEFAULT_HTML_PRESENTATION_MAX_BYTES,
 };
+pub use stats::{bundle_stats, remove_orphan_objects, BundleStats, StorageCategory};
 pub use types::*;
 pub use validate::validate_bundle;
 
-pub const HCD_SCHEMA_VERSION: &str = "hcd/1";
+pub const HCD_SCHEMA_VERSION: &str = "hcd/2";
+pub const HCD_SCHEMA_VERSION_1: &str = "hcd/1";
 pub const HCD_PATCH_SCHEMA_VERSION: &str = "hcd-patch/1";
 pub const HCD_PATCH_SCHEMA_VERSION_2: &str = "hcd-patch/2";
 pub const HCD_PATCH_SCHEMA_VERSION_3: &str = "hcd-patch/3";
-pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
+pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
+pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
 pub const HCD_PATCH_SCHEMA_V2_JSON: &str = include_str!("../schemas/hcd-patch-2.schema.json");
 pub const HCD_PATCH_SCHEMA_V3_JSON: &str = include_str!("../schemas/hcd-patch-3.schema.json");
@@ -52,7 +56,7 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V2_JSON).unwrap();
         let patch_v3: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V3_JSON).unwrap();
-        assert_eq!(hcd["$id"], "urn:officecli:hcd:1");
+        assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
         assert_eq!(patch_v3["$id"], "urn:officecli:hcd-patch:3");

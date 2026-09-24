@@ -44,6 +44,8 @@ impl Default for HcdCapabilities {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HcdManifest {
     pub schema_version: String,
+    #[serde(default)]
+    pub storage_codec: StorageCodec,
     pub document_id: String,
     pub profile: String,
     pub revision: u64,
@@ -53,6 +55,8 @@ pub struct HcdManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotation_href: Option<String>,
     pub index_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_root_href: Option<String>,
     pub index_page_count: usize,
     pub chunk_count: usize,
     pub styles_href: String,
@@ -64,6 +68,23 @@ pub struct HcdManifest {
     pub state: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<FidelityWarning>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageCodec {
+    #[default]
+    None,
+    Gzip,
+}
+
+impl StorageCodec {
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Gzip => ".gz",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -372,6 +393,8 @@ pub struct RevisionRecord {
     pub root_hash: String,
     pub annotation_root_hash: String,
     pub index_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_root_href: Option<String>,
     /// Immutable asset index used by this revision. Older bundles omit this
     /// field and resolve to the original `assets/index.json`.
     #[serde(default = "default_asset_index_href")]

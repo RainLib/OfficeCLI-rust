@@ -1,7 +1,7 @@
 use crate::common::{
     base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
     escape_attribute, escape_text, finish_import, source_identity, write_fidelity_report,
-    ExportOptions, ImportOptions,
+    ExportOptions, ImportOptions, PdfRasterMode,
 };
 use handler_common::DocumentHandler;
 use hayro::hayro_interpret::InterpreterSettings;
@@ -285,12 +285,20 @@ where
     }
 }
 
+struct PageRaster {
+    bytes: Vec<u8>,
+    extension: &'static str,
+    lossy: bool,
+}
+
 fn render_page_raster(
     pdf: &Pdf,
     page_index: usize,
     page_width: f32,
     page_height: f32,
-) -> Result<Vec<u8>, String> {
+    mode: PdfRasterMode,
+    quality: u8,
+) -> Result<PageRaster, String> {
     let width = (page_width * HCD_PDF_RASTER_SCALE).ceil().max(1.0) as u32;
     let height = (page_height * HCD_PDF_RASTER_SCALE).ceil().max(1.0) as u32;
     if width > MAX_HCD_PDF_RASTER_DIMENSION || height > MAX_HCD_PDF_RASTER_DIMENSION {
@@ -318,6 +326,43 @@ fn render_page_raster(
         render_pdf_page(page, &InterpreterSettings::default(), &settings)
     }))
     .map_err(|_| format!("Hayro panicked while rendering page {}", page_index + 1))?;
+    let rgb = if mode == PdfRasterMode::Lossless {
+        Vec::new()
+    } else {
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        for pixel in pixmap.data_as_u8_slice().chunks_exact(4) {
+            let alpha = u16::from(pixel[3]);
+            for channel in &pixel[..3] {
+                rgb.push((u16::from(*channel) + 255 - alpha).min(255) as u8);
+            }
+        }
+        rgb
+    };
+    let jpeg = if mode == PdfRasterMode::Lossless {
+        None
+    } else {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
+            .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+            .map_err(|error| {
+                format!("failed to encode page {} as JPEG: {error}", page_index + 1)
+            })?;
+        Some(bytes)
+    };
+    if mode == PdfRasterMode::Lossy {
+        let bytes = jpeg.expect("lossy mode encoded JPEG");
+        if bytes.len() > MAX_HCD_PDF_RASTER_PNG_BYTES {
+            return Err(format!(
+                "rendered JPEG page {} exceeds the 64 MiB asset limit",
+                page_index + 1
+            ));
+        }
+        return Ok(PageRaster {
+            bytes,
+            extension: "jpg",
+            lossy: true,
+        });
+    }
     let png = pixmap
         .into_png()
         .map_err(|error| format!("failed to encode page {} as PNG: {error}", page_index + 1))?;
@@ -328,7 +373,39 @@ fn render_page_raster(
             png.len()
         ));
     }
-    Ok(png)
+    if let Some(jpeg) = jpeg {
+        if jpeg.len() * 100 <= png.len() * 85 {
+            let decoded = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
+                .map_err(|error| format!("failed to verify JPEG page {}: {error}", page_index + 1))?
+                .into_rgb8();
+            let squared_error: u64 = rgb
+                .iter()
+                .zip(decoded.as_raw())
+                .map(|(original, candidate)| {
+                    let difference = i32::from(*original) - i32::from(*candidate);
+                    (difference * difference) as u64
+                })
+                .sum();
+            let mse = squared_error as f64 / rgb.len() as f64;
+            let psnr = if mse == 0.0 {
+                f64::INFINITY
+            } else {
+                10.0 * (65025.0 / mse).log10()
+            };
+            if psnr >= 35.0 {
+                return Ok(PageRaster {
+                    bytes: jpeg,
+                    extension: "jpg",
+                    lossy: true,
+                });
+            }
+        }
+    }
+    Ok(PageRaster {
+        bytes: png,
+        extension: "png",
+        lossy: false,
+    })
 }
 
 pub(crate) fn import_pdf<F>(
@@ -389,9 +466,9 @@ where
             reader.page_count()
         )));
     }
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(
-        ".hcd-pdf-page{display:block;padding:0;margin:0 auto 18pt;background:#fff;overflow:hidden;box-shadow:0 2px 12px #0003}.hcd-pdf-page[data-hcd-continuation=\"true\"]{background:transparent;box-shadow:none}.hcd-pdf-page-raster{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none}.hcd-pdf-image{position:absolute;display:block;z-index:1}.hcd-pdf-visual-node{pointer-events:none;background:transparent}.hcd-pdf-text{position:absolute;min-width:max-content;white-space:nowrap;margin:0;line-height:1;z-index:2;cursor:text}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text{color:transparent!important;text-shadow:none!important}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node{pointer-events:auto;cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node:hover{background:rgba(255,59,48,.10);outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) .hcd-pdf-text:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8);outline-offset:0}.hcd-empty-page{position:absolute;inset:0}",
+        ".hcd-pdf-page{display:block;padding:0;margin:0 auto 18pt;background:#fff;overflow:hidden;box-shadow:0 2px 12px #0003}.hcd-pdf-page[data-hcd-continuation=\"true\"]{background:transparent;box-shadow:none}.hcd-pdf-page-raster{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none}.hcd-pdf-image{position:absolute;display:block;z-index:1}.hcd-pdf-visual-node{pointer-events:none;background:transparent}.hcd-pdf-text{position:absolute;min-width:max-content;white-space:nowrap;margin:0;line-height:1;z-index:2;cursor:text}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text{color:transparent!important;text-shadow:none!important}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text:has(span[data-hcd-patched=\"true\"]){background:#fff;z-index:3;outline:1px dashed #b45f06;outline-offset:1px}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text span[data-hcd-patched=\"true\"]{color:#111!important}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node{pointer-events:auto;cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node:hover{background:rgba(255,59,48,.10);outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) .hcd-pdf-text:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8);outline-offset:0}.hcd-empty-page{position:absolute;inset:0}",
     )?;
     let raster_source = std::fs::read(source)?;
     let (raster_pdf, raster_initialization_error) = match Pdf::new(Arc::new(raster_source)) {
@@ -403,6 +480,7 @@ where
     };
     let mut replaced_control_characters = 0usize;
     let mut rasterized_pages = 0usize;
+    let mut lossy_pages = 0usize;
     let mut raster_fallbacks = Vec::new();
     let mut assets = BTreeMap::<String, AssetDescriptor>::new();
     for page in 1..=reader.page_count() {
@@ -416,7 +494,14 @@ where
             )
             .map_err(pdf_parse_error)?;
         let page_raster = raster_pdf.as_ref().and_then(|pdf| {
-            match render_page_raster(pdf, page - 1, page_width, page_height) {
+            match render_page_raster(
+                pdf,
+                page - 1,
+                page_width,
+                page_height,
+                options.pdf_raster_mode,
+                options.pdf_raster_quality,
+            ) {
                 Ok(png) => Some(png),
                 Err(error) => {
                     raster_fallbacks.push(format!("page {page}: {error}"));
@@ -502,10 +587,10 @@ where
             page_raster: None,
             source_raster: false,
         };
-        if let Some(png) = page_raster {
+        if let Some(raster) = page_raster {
             let (href, hash, byte_length) = chunks
                 .writer
-                .write_asset_from_reader("png", &mut Cursor::new(png))?;
+                .write_asset_from_reader(raster.extension, &mut Cursor::new(raster.bytes))?;
             if !assets.contains_key(&hash) {
                 (chunks.emit)(&ImportEvent::AssetReady {
                     hash: hash.clone(),
@@ -524,6 +609,7 @@ where
             }
             chunks.set_page_raster(&href, &hash);
             rasterized_pages += 1;
+            lossy_pages += usize::from(raster.lossy);
         }
         for image in rendered_images {
             chunks.push_image(image)?;
@@ -573,7 +659,7 @@ where
     }
     manifest.warnings.push(FidelityWarning {
         code: "PDF_SOURCE_VISUAL_LAYER_READ_ONLY".to_string(),
-        message: format!("{rasterized_pages} of {} PDF pages were composited by the pure-Rust renderer as a read-only 96-DPI visual authority layer; extractable nodeId text remains selectable/editable but is transparent in source-view mode, and scanned text requires OCR before text patching", reader.page_count()),
+        message: format!("{rasterized_pages} of {} PDF pages were composited as a read-only 96-DPI visual layer; {lossy_pages} page(s) use lossy JPEG at quality {}; extractable nodeId text remains selectable/editable but is transparent in source-view mode, and scanned text requires OCR before text patching", reader.page_count(), options.pdf_raster_quality),
         node_id: None,
         source_part: None,
     });
@@ -593,13 +679,13 @@ where
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: FidelityLevel::Visual,
         preserved: vec![
-            format!("page order and {rasterized_pages} fully composited source-page presentation raster(s) at CSS 96-DPI scale"),
+            format!("page order and {rasterized_pages} fully composited source-page presentation raster(s) at CSS 96-DPI scale; {lossy_pages} lossy JPEG page(s)"),
             "extractable nodeId text and text block coordinates in a separate interaction layer"
                 .to_string(),
             "the immutable source PDF as the export boundary".to_string(),
         ],
         flattened: vec![
-            "PDF drawing operations, fonts, vector graphics, masks and shaping are flattened into read-only page PNGs; the pure-Rust renderer remains best-effort for unsupported PDF features".to_string(),
+            "PDF drawing operations, fonts, vector graphics, masks and shaping are flattened into read-only page PNG/JPEG assets; JPEG pages are visually lossy and the pure-Rust renderer remains best-effort for unsupported PDF features".to_string(),
         ],
         dropped: vec!["scanned text without an OCR layer".to_string()],
         warnings: manifest.warnings.clone(),
@@ -770,6 +856,7 @@ mod tests {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
     use lopdf::{dictionary, Document, Object, Stream};
+    use std::fs;
     use std::io::Write as IoWrite;
 
     #[test]
@@ -930,6 +1017,57 @@ mod tests {
             Some("/page[1]/image[1]")
         );
         assert!(image_entry.source.editable);
+    }
+
+    #[test]
+    fn pdf_raster_modes_keep_small_text_quality_gate() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/hdoc/pdf-raster-quality.pdf");
+        let temp = tempfile::tempdir().unwrap();
+        let mut rasters = Vec::new();
+        for (name, mode) in [
+            ("lossless", PdfRasterMode::Lossless),
+            ("auto", PdfRasterMode::Auto),
+            ("lossy", PdfRasterMode::Lossy),
+        ] {
+            let output = temp.path().join(name);
+            let mut options = ImportOptions::new(format!("pdf-raster-{name}"));
+            options.pdf_raster_mode = mode;
+            if mode == PdfRasterMode::Lossy {
+                options.pdf_raster_quality = 70;
+            }
+            import_pdf(&source, &output, &options, |_| Ok(())).unwrap();
+            let assets: Vec<AssetDescriptor> =
+                serde_json::from_slice(&fs::read(output.join("assets/index.json")).unwrap())
+                    .unwrap();
+            assert_eq!(assets.len(), 1);
+            rasters.push((
+                assets[0].href.clone(),
+                fs::read(output.join(&assets[0].href)).unwrap(),
+            ));
+        }
+        assert!(rasters[0].0.ends_with(".png"));
+        assert!(rasters[1].0.ends_with(".jpg"));
+        assert!(rasters[2].0.ends_with(".jpg"));
+        assert!(rasters[1].1.len() * 100 <= rasters[0].1.len() * 85);
+        let original = image::load_from_memory(&rasters[0].1).unwrap().into_rgb8();
+        let selected = image::load_from_memory(&rasters[1].1).unwrap().into_rgb8();
+        let squared_error: u64 = original
+            .as_raw()
+            .iter()
+            .zip(selected.as_raw())
+            .map(|(a, b)| {
+                let difference = i32::from(*a) - i32::from(*b);
+                (difference * difference) as u64
+            })
+            .sum();
+        let mse = squared_error as f64 / original.as_raw().len() as f64;
+        let psnr = if mse == 0.0 {
+            f64::INFINITY
+        } else {
+            10.0 * (65025.0 / mse).log10()
+        };
+        assert!(psnr >= 35.0, "auto PSNR was {psnr:.2} dB");
     }
 
     fn compressed_repeated(byte: u8, decoded_size: usize) -> Vec<u8> {

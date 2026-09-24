@@ -145,26 +145,18 @@ fn office_zip_text_parts(path: &Path, prefix: &str, suffix: &str) -> Vec<String>
 }
 
 fn first_image_map_entry(bundle: &Path) -> Value {
-    let manifest: Value =
-        serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    let prefix = manifest["indexPrefix"].as_str().unwrap();
-    for page in 0..manifest["indexPageCount"].as_u64().unwrap() {
-        let index: Value = serde_json::from_slice(
-            &std::fs::read(bundle.join(prefix).join(format!("{page:06}.json"))).unwrap(),
-        )
-        .unwrap();
-        for chunk in index["chunks"].as_array().unwrap() {
-            let map: Value = serde_json::from_slice(
-                &std::fs::read(bundle.join(chunk["mapHref"].as_str().unwrap())).unwrap(),
-            )
-            .unwrap();
-            if let Some(entry) = map["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|entry| entry["source"]["nodeKind"] == "image")
+    let opened = hcd_core::Bundle::open(bundle).unwrap();
+    let manifest = opened.manifest().unwrap();
+    for page in 0..manifest.index_page_count {
+        let index = opened.read_index_page(&manifest, page).unwrap();
+        for chunk in index.chunks {
+            let map = opened.read_map_verified(&chunk).unwrap();
+            if let Some(entry) = map
+                .entries
+                .into_iter()
+                .find(|entry| entry.source.node_kind == "image")
             {
-                return entry.clone();
+                return serde_json::to_value(entry).unwrap();
             }
         }
     }
@@ -172,23 +164,13 @@ fn first_image_map_entry(bundle: &Path) -> Value {
 }
 
 fn bundle_html(bundle: &Path) -> String {
-    let manifest: Value =
-        serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    let opened = hcd_core::Bundle::open(bundle).unwrap();
+    let manifest = opened.manifest().unwrap();
     let mut output = String::new();
-    for page in 0..manifest["indexPageCount"].as_u64().unwrap() {
-        let index: Value = serde_json::from_slice(
-            &std::fs::read(
-                bundle
-                    .join(manifest["indexPrefix"].as_str().unwrap())
-                    .join(format!("{page:06}.json")),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        for chunk in index["chunks"].as_array().unwrap() {
-            output.push_str(
-                &std::fs::read_to_string(bundle.join(chunk["htmlHref"].as_str().unwrap())).unwrap(),
-            );
+    for page in 0..manifest.index_page_count {
+        let index = opened.read_index_page(&manifest, page).unwrap();
+        for chunk in index.chunks {
+            output.push_str(&opened.read_chunk_verified(&chunk).unwrap());
         }
     }
     output

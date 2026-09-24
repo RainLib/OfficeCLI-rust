@@ -24,6 +24,7 @@ pub struct ImportOptions {
     pub document_id: String,
     pub chunk_soft_bytes: usize,
     pub chunk_blocks: usize,
+    pub storage_codec: hcd_core::StorageCodec,
 }
 
 impl ImportOptions {
@@ -32,6 +33,7 @@ impl ImportOptions {
             document_id: document_id.into(),
             chunk_soft_bytes: DEFAULT_CHUNK_SOFT_BYTES,
             chunk_blocks: DEFAULT_CHUNK_BLOCKS,
+            storage_codec: hcd_core::StorageCodec::Gzip,
         }
     }
 }
@@ -2986,7 +2988,7 @@ where
         .push_str(&page_layout.presentation_css());
     hcd_core::validate_css_text(&rendered_styles.css)?;
     let numbering = load_word_numbering(&mut archive)?;
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(&rendered_styles.css)?;
 
     let text_parts = ordered_text_parts(&archive);
@@ -3037,6 +3039,7 @@ where
 
     let manifest = HcdManifest {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
+        storage_codec: options.storage_codec,
         document_id: options.document_id.clone(),
         profile: "semantic-flow".to_string(),
         revision: 0,
@@ -3049,6 +3052,7 @@ where
         annotation_root_hash: String::new(),
         annotation_href: None,
         index_prefix: String::new(),
+        index_root_href: None,
         index_page_count: 0,
         chunk_count: 0,
         styles_href: "styles.css".to_string(),

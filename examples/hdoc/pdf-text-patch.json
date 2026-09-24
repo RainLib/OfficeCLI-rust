@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "hcd-patch/1",
+  "documentId": "doc-49f66587f01df0d7882616a65cfabca1",
+  "patchId": "quality-text-1",
+  "baseRevision": 0,
+  "operations": [
+    {
+      "op": "text.splice",
+      "nodeId": "n_dcf047ab4cab1b7538d5a2de56b6fe57",
+      "start": 0,
+      "deleteCount": 0,
+      "insertText": "Edited: ",
+      "precondition": {
+        "nodeHash": "1d8be170d277be92e1cdcda050fbf894390bd69ef1ad563e32d8b87bce572621"
+      }
+    }
+  ]
+}

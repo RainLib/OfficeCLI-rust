@@ -365,7 +365,7 @@ where
     }
     let (slide_width_emu, slide_height_emu) = presentation_size(&mut archive)?;
     let theme_colors = presentation_theme_colors(&mut archive)?;
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(
         ".hcd-slide{display:block;overflow:hidden;background:#fff;font-family:Arial,'Helvetica Neue','PingFang SC','Microsoft YaHei',sans-serif}.hcd-slide-shape{box-sizing:border-box;white-space:pre-wrap}.hcd-slide-picture,.hcd-slide-chart{box-sizing:border-box;overflow:hidden}.hcd-slide-picture img,.hcd-slide-chart img{display:block;width:100%;height:100%;object-fit:contain}.hcd-slide-table-frame{box-sizing:border-box;overflow:hidden}.hcd-ppt-table{border-collapse:collapse}.hcd-ppt-table td{box-sizing:border-box;overflow:hidden;vertical-align:top}.hcd-slide-text{white-space:pre-wrap;margin:0}.hcd-ppt-run{white-space:pre-wrap}.hcd-empty-slide{min-height:10em}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:not([data-hcd-node-kind=\"image\"]):hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
     )?;

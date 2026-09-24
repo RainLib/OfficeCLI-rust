@@ -2056,7 +2056,7 @@ where
     let scratch = tempfile::tempdir()?;
     let mut shared_strings = SharedStringStore::build(&mut archive, scratch.path())?;
     let (rendered_styles, style_catalog) = render_xlsx_styles(&mut archive)?;
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(&rendered_styles)?;
     let mut format_stats = XlsxFormatStats::default();
 
