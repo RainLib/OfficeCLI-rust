@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
@@ -60,6 +60,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [error, setError] = useState('')
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [presence, setPresence] = useState<Array<{ name: string; color: string }>>([])
+  const lastSemantic = useRef<string | null>(null)
   const localUser = useMemo(() => {
     const id = session.userId || crypto.randomUUID()
     return { name: session.displayName || `协作者 ${id.slice(0, 4)}`, color: presenceColor(id) }
@@ -76,7 +77,11 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       CollaborationCaret.configure({ provider, user: localUser })],
     editable: !readOnly,
     editorProps: { attributes: { class: 'hcd-editor-body' } },
-    onUpdate: () => { if (!readOnly) setStatus('编辑中') },
+    onUpdate: ({ editor: changedEditor }) => {
+      const semantic = JSON.stringify(jsonToSnapshot(changedEditor.getJSON()).map(block => block.content))
+      if (lastSemantic.current !== null && semantic !== lastSemantic.current && !readOnly) setStatus('编辑中')
+      lastSemantic.current = semantic
+    },
   }, [ydoc])
   useEffect(() => {
     editor?.setEditable(!readOnly)
