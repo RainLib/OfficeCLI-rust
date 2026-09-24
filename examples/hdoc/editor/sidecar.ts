@@ -168,7 +168,8 @@ const server = new Server({
       throw new Error(`HCD collaboration persistence failed: ${response.status} ${await response.text()}`)
     }
   },
-  async onChange({ documentName, document }) {
+  async onChange({ documentName, document, transactionOrigin }) {
+    if (transactionOrigin === 'hcd-canonical-ids') return
     schedule(documentName, document)
   },
 })
