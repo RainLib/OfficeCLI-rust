@@ -51,6 +51,12 @@ async function currentProjection(documentId: string): Promise<Projection> {
 type Pending = { document: Y.Doc; first: number; last: number; timer: ReturnType<typeof setTimeout> | null; saving: boolean }
 const pending = new Map<string, Pending>()
 
+function announceSave(documentId: string, status: 'editing' | 'saving' | 'saved' | 'failed', revision?: number) {
+  server.hocuspocus.documents.get(documentId)?.broadcastStateless(JSON.stringify({
+    type: 'hcd-save-status', status, revision,
+  }))
+}
+
 function schedule(documentId: string, document: Y.Doc) {
   const now = Date.now()
   const item = pending.get(documentId) || { document, first: now, last: now, timer: null, saving: false }
@@ -60,6 +66,7 @@ function schedule(documentId: string, document: Y.Doc) {
   const due = Math.min(item.last + 30_000, item.first + 60_000)
   item.timer = setTimeout(() => void checkpoint(documentId), Math.max(0, due - now))
   pending.set(documentId, item)
+  announceSave(documentId, 'editing')
 }
 
 function yBlocks(document: Y.Doc): Y.XmlElement[] {
@@ -79,6 +86,7 @@ async function checkpoint(documentId: string) {
   item.saving = true
   if (item.timer) clearTimeout(item.timer)
   item.timer = null
+  announceSave(documentId, 'saving')
   try {
     const selected = room(documentId)
     const projection = await currentProjection(selected.documentId)
@@ -106,9 +114,11 @@ async function checkpoint(documentId: string) {
       }, 'hcd-canonical-ids')
     }
     item.first = Date.now()
+    announceSave(documentId, 'saved', saved.revision)
     console.log(`HCD checkpoint ${documentId} revision ${saved.revision}`)
   } catch (error) {
     console.error(error)
+    announceSave(documentId, 'failed')
     item.timer = setTimeout(() => void checkpoint(documentId), 5000)
   } finally {
     item.saving = false
@@ -153,7 +163,10 @@ const server = new Server({
       headers: { 'Content-Type': 'application/octet-stream' },
       body: Buffer.from(Y.encodeStateAsUpdate(document)),
     }, selected.epoch)
-    if (!response.ok) throw new Error(`HCD collaboration persistence failed: ${response.status} ${await response.text()}`)
+    if (!response.ok) {
+      announceSave(documentName, 'failed')
+      throw new Error(`HCD collaboration persistence failed: ${response.status} ${await response.text()}`)
+    }
   },
   async onChange({ documentName, document }) {
     schedule(documentName, document)
