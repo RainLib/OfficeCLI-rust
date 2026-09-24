@@ -3,9 +3,9 @@ use handler_common::{HandlerError, OutputFormat};
 use hcd_core::{
     hash_file, manifest_at_revision, render_standalone_html_with_transform, Bundle, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions, PatchBatch,
-    HCD_SCHEMA_VERSION,
+    StorageCodec, HCD_SCHEMA_VERSION,
 };
-use hcd_formats::{ExportOptions, ImportOptions};
+use hcd_formats::{ExportOptions, ImportOptions, PdfRasterMode};
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,14 @@ pub enum HdocSubcommand {
     Import(HdocImportCommand),
     /// Validate an HCD bundle and all content hashes
     Validate(HdocValidateCommand),
+    /// Measure HCD storage, compression, revision growth and unreferenced objects
+    Stats(HdocStatsCommand),
+    /// List or delete unreferenced immutable objects after checking all revisions
+    Gc(HdocGcCommand),
+    /// Read one decoded and verified index page from a selected revision
+    GetIndexPage(HdocGetIndexPageCommand),
+    /// Read one decoded and verified HTML chunk and source map
+    GetChunk(HdocGetChunkCommand),
     /// Extract one cursor page of node-local text and source anchors
     ExtractText(HdocExtractTextCommand),
     /// Resolve one current text node by stable HCD nodeId
@@ -69,11 +77,66 @@ pub struct HdocImportCommand {
     /// Maximum top-level blocks per ordinary chunk
     #[arg(long, default_value_t = hcd_core::DEFAULT_CHUNK_BLOCKS)]
     pub chunk_blocks: usize,
+    /// Encoding for HCD text objects; gzip saves space while keeping random-access chunks
+    #[arg(long, value_enum, default_value_t = HdocStorageCodec::Gzip)]
+    pub storage_codec: HdocStorageCodec,
+    /// PDF page preview encoding; auto uses JPEG only when it passes a visual quality gate
+    #[arg(long, value_enum, default_value_t = HdocPdfRasterMode::Auto)]
+    pub pdf_raster_mode: HdocPdfRasterMode,
+    /// JPEG quality for PDF auto/lossy raster modes (70-100)
+    #[arg(long, default_value_t = 92, value_parser = clap::value_parser!(u8).range(70..=100))]
+    pub pdf_raster_quality: u8,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum HdocStorageCodec {
+    Gzip,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum HdocPdfRasterMode {
+    Auto,
+    Lossless,
+    Lossy,
 }
 
 #[derive(Args)]
 pub struct HdocValidateCommand {
     pub bundle: String,
+}
+
+#[derive(Args)]
+pub struct HdocStatsCommand {
+    pub bundle: String,
+}
+
+#[derive(Args)]
+pub struct HdocGcCommand {
+    pub bundle: String,
+    /// Delete verified unreferenced objects; omitted means dry run
+    #[arg(long)]
+    pub delete: bool,
+}
+
+#[derive(Args)]
+pub struct HdocGetIndexPageCommand {
+    pub bundle: String,
+    /// Zero-based index page number
+    pub page: usize,
+    /// Revision to read; defaults to the current head
+    #[arg(long)]
+    pub revision: Option<u64>,
+}
+
+#[derive(Args)]
+pub struct HdocGetChunkCommand {
+    pub bundle: String,
+    /// Zero-based chunk sequence number
+    pub sequence: usize,
+    /// Revision to read; defaults to the current head
+    #[arg(long)]
+    pub revision: Option<u64>,
 }
 
 #[derive(Args)]
@@ -223,6 +286,10 @@ pub fn handle_hdoc(
     match command.command {
         HdocSubcommand::Import(command) => import(command, format),
         HdocSubcommand::Validate(command) => validate(command, format),
+        HdocSubcommand::Stats(command) => stats(command, format),
+        HdocSubcommand::Gc(command) => gc(command, format),
+        HdocSubcommand::GetIndexPage(command) => get_index_page(command, format),
+        HdocSubcommand::GetChunk(command) => get_chunk(command, format),
         HdocSubcommand::ExtractText(command) => extract_text(command, format),
         HdocSubcommand::GetNode(command) => get_node(command, format),
         HdocSubcommand::GetImage(command) => get_image(command, format),
@@ -259,6 +326,16 @@ fn import(
     let mut options = ImportOptions::new(document_id);
     options.chunk_soft_bytes = command.chunk_bytes;
     options.chunk_blocks = command.chunk_blocks;
+    options.storage_codec = match command.storage_codec {
+        HdocStorageCodec::Gzip => StorageCodec::Gzip,
+        HdocStorageCodec::None => StorageCodec::None,
+    };
+    options.pdf_raster_mode = match command.pdf_raster_mode {
+        HdocPdfRasterMode::Auto => PdfRasterMode::Auto,
+        HdocPdfRasterMode::Lossless => PdfRasterMode::Lossless,
+        HdocPdfRasterMode::Lossy => PdfRasterMode::Lossy,
+    };
+    options.pdf_raster_quality = command.pdf_raster_quality;
     let manifest =
         hcd_formats::import_document(&command.source, &command.output, &options, |event| {
             if events.is_some() {
@@ -307,6 +384,127 @@ fn validate(
         },
     )
     .map(|(output, _)| (output, valid))
+}
+
+fn stats(command: HdocStatsCommand, format: OutputFormat) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let stats = hcd_core::bundle_stats(&bundle).map_err(handler_error)?;
+    render(
+        &stats,
+        format,
+        format!(
+            "HCD uses {} bytes; {} orphan object(s) use {} bytes",
+            stats.total_stored_bytes,
+            stats.orphan_hrefs.len(),
+            stats.orphan_stored_bytes
+        ),
+    )
+}
+
+fn gc(command: HdocGcCommand, format: OutputFormat) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let before = hcd_core::bundle_stats(&bundle).map_err(handler_error)?;
+    if command.delete {
+        hcd_core::remove_orphan_objects(&bundle).map_err(handler_error)?;
+    }
+    let result = serde_json::json!({
+        "deleted": command.delete,
+        "orphanCount": before.orphan_hrefs.len(),
+        "orphanBytes": before.orphan_stored_bytes,
+        "orphanHrefs": before.orphan_hrefs,
+    });
+    render(
+        &result,
+        format,
+        if command.delete {
+            format!(
+                "Deleted {} unreferenced HCD object(s)",
+                result["orphanCount"]
+            )
+        } else {
+            format!(
+                "Dry run: {} unreferenced HCD object(s)",
+                result["orphanCount"]
+            )
+        },
+    )
+}
+
+fn get_index_page(
+    command: HdocGetIndexPageCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let head = bundle.manifest().map_err(handler_error)?;
+    let (manifest, revision) =
+        manifest_at_revision(&bundle, &head, command.revision).map_err(handler_error)?;
+    let page = bundle
+        .read_index_page(&manifest, command.page)
+        .map_err(handler_error)?;
+    if page.page != command.page || page.revision > revision {
+        return Err(HandlerError::ValidationError(format!(
+            "index page {} does not belong to revision {revision}",
+            command.page
+        )));
+    }
+    let result = serde_json::json!({"requestedRevision": revision, "indexPage": page});
+    render(
+        &result,
+        format,
+        format!(
+            "Index page {} contains {} chunk(s)",
+            command.page,
+            page.chunks.len()
+        ),
+    )
+}
+
+fn get_chunk(
+    command: HdocGetChunkCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let head = bundle.manifest().map_err(handler_error)?;
+    let (manifest, revision) =
+        manifest_at_revision(&bundle, &head, command.revision).map_err(handler_error)?;
+    if command.sequence >= manifest.chunk_count {
+        return Err(HandlerError::InvalidArgument(format!(
+            "chunk sequence {} exceeds revision {revision} chunk count {}",
+            command.sequence, manifest.chunk_count
+        )));
+    }
+    let page = bundle
+        .read_index_page(&manifest, command.sequence / hcd_core::INDEX_PAGE_SIZE)
+        .map_err(handler_error)?;
+    let descriptor = page
+        .chunks
+        .into_iter()
+        .find(|chunk| chunk.sequence == command.sequence)
+        .ok_or_else(|| {
+            HandlerError::ValidationError(format!(
+                "index page is missing chunk sequence {}",
+                command.sequence
+            ))
+        })?;
+    let html = bundle
+        .read_chunk_verified(&descriptor)
+        .map_err(handler_error)?;
+    let map = bundle
+        .read_map_verified(&descriptor)
+        .map_err(handler_error)?;
+    if map.chunk_id != descriptor.chunk_id {
+        return Err(HandlerError::ValidationError(format!(
+            "source map does not belong to chunk {}",
+            descriptor.chunk_id
+        )));
+    }
+    let result = serde_json::json!({
+        "revision": revision,
+        "descriptor": descriptor,
+        "html": html,
+        "map": map,
+    });
+    render(&result, format, html)
 }
 
 fn extract_text(
@@ -627,12 +825,14 @@ fn render_html(
     format: OutputFormat,
 ) -> Result<(String, bool), HandlerError> {
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
-    let validation = hcd_core::validate_bundle(&bundle).map_err(handler_error)?;
-    if !validation.valid {
-        return Err(HandlerError::ValidationError(format!(
-            "cannot render an invalid HCD bundle with {} issue(s)",
-            validation.issues.len()
-        )));
+    if command.chunk_limit.is_none() {
+        let validation = hcd_core::validate_bundle(&bundle).map_err(handler_error)?;
+        if !validation.valid {
+            return Err(HandlerError::ValidationError(format!(
+                "cannot render an invalid HCD bundle with {} issue(s)",
+                validation.issues.len()
+            )));
+        }
     }
     let output = Path::new(&command.output);
     let style_path = command.style.clone();
@@ -1150,7 +1350,15 @@ fn handler_error(error: HcdError) -> HandlerError {
         HcdError::ResourceLimit(message) | HcdError::InvalidPatch(message) => {
             HandlerError::InvalidArgument(message)
         }
-        HcdError::InvalidBundle(message) => HandlerError::ValidationError(message),
+        HcdError::RevisionConflict(message) => {
+            HandlerError::InvalidArgument(format!("revision conflict: {message}"))
+        }
+        HcdError::PreconditionFailed(message) => {
+            HandlerError::InvalidArgument(format!("node precondition failed: {message}"))
+        }
+        HcdError::InvalidBundle(message) | HcdError::SourceMismatch(message) => {
+            HandlerError::ValidationError(message)
+        }
         HcdError::NodeNotFound(node) => HandlerError::PathNotFound(node),
         HcdError::Unsupported(message) => HandlerError::UnsupportedMode(message),
         HcdError::Io(error) => HandlerError::IoError(error),

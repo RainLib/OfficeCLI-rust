@@ -68,6 +68,17 @@ pub struct ImportOptions {
     pub document_id: String,
     pub chunk_soft_bytes: usize,
     pub chunk_blocks: usize,
+    pub storage_codec: hcd_core::StorageCodec,
+    pub pdf_raster_mode: PdfRasterMode,
+    pub pdf_raster_quality: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PdfRasterMode {
+    #[default]
+    Auto,
+    Lossless,
+    Lossy,
 }
 
 impl ImportOptions {
@@ -76,6 +87,9 @@ impl ImportOptions {
             document_id: document_id.into(),
             chunk_soft_bytes: DEFAULT_CHUNK_SOFT_BYTES,
             chunk_blocks: DEFAULT_CHUNK_BLOCKS,
+            storage_codec: hcd_core::StorageCodec::Gzip,
+            pdf_raster_mode: PdfRasterMode::Auto,
+            pdf_raster_quality: 92,
         }
     }
 }
@@ -132,6 +146,7 @@ pub(crate) fn base_manifest(
 ) -> HcdManifest {
     HcdManifest {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
+        storage_codec: options.storage_codec,
         document_id: options.document_id.clone(),
         profile: profile.to_string(),
         revision: 0,
@@ -144,6 +159,7 @@ pub(crate) fn base_manifest(
         annotation_root_hash: String::new(),
         annotation_href: None,
         index_prefix: String::new(),
+        index_root_href: None,
         index_page_count: 0,
         chunk_count: 0,
         styles_href: "styles.css".to_string(),

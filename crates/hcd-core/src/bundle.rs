@@ -1,15 +1,28 @@
 use crate::hash::{hash_bytes, node_bloom};
 use crate::{
     AssetDescriptor, ChunkDescriptor, ChunkIndexPage, ChunkSourceMap, HcdError, HcdManifest,
-    RevisionRecord, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES,
+    RevisionRecord, StorageCodec, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES,
 };
+use flate2::read::MultiGzDecoder;
+use flate2::{Compression, GzBuilder};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const INDEX_PAGE_SIZE: usize = 128;
+const INDEX_TREE_FANOUT: usize = 128;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexTreeNode {
+    first_page: usize,
+    child_span: usize,
+    children: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Bundle {
@@ -45,12 +58,158 @@ impl Bundle {
         manifest: &HcdManifest,
         page: usize,
     ) -> Result<ChunkIndexPage, HcdError> {
-        let href = format!("{}/{page:06}.json", manifest.index_prefix);
+        if page >= manifest.index_page_count {
+            return Err(HcdError::InvalidBundle(format!(
+                "index page {page} exceeds page count {}",
+                manifest.index_page_count
+            )));
+        }
+        if let Some(root) = &manifest.index_root_href {
+            let href = self.index_page_href(root, page)?;
+            return self.read_index_object(&href);
+        }
+        let href = format!(
+            "{}/{page:06}.json{}",
+            manifest.index_prefix,
+            manifest.storage_codec.suffix()
+        );
         read_json_bounded(
             &self.resolve_href(&href)?,
             MAX_CONTROL_PART_BYTES,
             "index page",
         )
+    }
+
+    fn read_index_object<T: serde::de::DeserializeOwned>(&self, href: &str) -> Result<T, HcdError> {
+        let path = self.resolve_href(href)?;
+        let hash = href
+            .rsplit_once('/')
+            .and_then(|(_, name)| name.split_once('.'))
+            .map(|(hash, _)| hash)
+            .ok_or_else(|| HcdError::InvalidBundle(format!("invalid index object href {href}")))?;
+        let decoded = read_bytes_bounded(&path, MAX_CONTROL_PART_BYTES, "index object")?;
+        if hash_bytes(&decoded) != hash {
+            return Err(HcdError::InvalidBundle(format!(
+                "index object {href} does not match its content hash"
+            )));
+        }
+        Ok(serde_json::from_slice(&decoded)?)
+    }
+
+    fn index_page_href(&self, root: &str, page: usize) -> Result<String, HcdError> {
+        let mut href = root.to_string();
+        for _ in 0..12 {
+            let node: IndexTreeNode = self.read_index_object(&href)?;
+            if node.children.is_empty()
+                || node.children.len() > INDEX_TREE_FANOUT
+                || node.child_span == 0
+                || page < node.first_page
+            {
+                return Err(HcdError::InvalidBundle(format!(
+                    "invalid index tree node {href}"
+                )));
+            }
+            let child = (page - node.first_page) / node.child_span;
+            let next = node
+                .children
+                .get(child)
+                .ok_or_else(|| HcdError::InvalidBundle(format!("index tree has no page {page}")))?;
+            if node.child_span == 1 {
+                return Ok(next.clone());
+            }
+            href = next.clone();
+        }
+        Err(HcdError::ResourceLimit(
+            "index tree exceeds depth 12".to_string(),
+        ))
+    }
+
+    pub(crate) fn index_tree_objects(&self, root: &str) -> Result<HashSet<String>, HcdError> {
+        let mut objects = HashSet::new();
+        self.collect_index_tree_objects(root, &mut objects, 0)?;
+        Ok(objects)
+    }
+
+    fn collect_index_tree_objects(
+        &self,
+        href: &str,
+        objects: &mut HashSet<String>,
+        depth: usize,
+    ) -> Result<(), HcdError> {
+        if depth >= 12 || objects.len() > 1_000_000 {
+            return Err(HcdError::ResourceLimit(
+                "index tree exceeds traversal limit".to_string(),
+            ));
+        }
+        if !objects.insert(href.to_string()) {
+            return Ok(());
+        }
+        let node: IndexTreeNode = self.read_index_object(href)?;
+        if node.children.is_empty()
+            || node.children.len() > INDEX_TREE_FANOUT
+            || node.child_span == 0
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "invalid index tree node {href}"
+            )));
+        }
+        for child in node.children {
+            if node.child_span == 1 {
+                objects.insert(child);
+            } else {
+                self.collect_index_tree_objects(&child, objects, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn replace_index_page(
+        &self,
+        root: &str,
+        page_number: usize,
+        page: &ChunkIndexPage,
+    ) -> Result<String, HcdError> {
+        if page.page != page_number {
+            return Err(HcdError::InvalidBundle(
+                "index page number mismatch".to_string(),
+            ));
+        }
+        let codec = self.manifest()?.storage_codec;
+        let page_href = write_index_object(&self.root, codec, "pages", page)?;
+        self.replace_index_path(root, page_number, &page_href, codec, 0)
+    }
+
+    fn replace_index_path(
+        &self,
+        href: &str,
+        page: usize,
+        replacement: &str,
+        codec: StorageCodec,
+        depth: usize,
+    ) -> Result<String, HcdError> {
+        if depth >= 12 {
+            return Err(HcdError::ResourceLimit(
+                "index tree exceeds depth 12".to_string(),
+            ));
+        }
+        let mut node: IndexTreeNode = self.read_index_object(href)?;
+        if node.child_span == 0 || page < node.first_page {
+            return Err(HcdError::InvalidBundle(format!(
+                "invalid index tree node {href}"
+            )));
+        }
+        let child = (page - node.first_page) / node.child_span;
+        let old = node
+            .children
+            .get(child)
+            .ok_or_else(|| HcdError::InvalidBundle(format!("index tree has no page {page}")))?
+            .clone();
+        node.children[child] = if node.child_span == 1 {
+            replacement.to_string()
+        } else {
+            self.replace_index_path(&old, page, replacement, codec, depth + 1)?
+        };
+        write_index_object(&self.root, codec, "nodes", &node)
     }
 
     pub fn read_map(&self, descriptor: &ChunkDescriptor) -> Result<ChunkSourceMap, HcdError> {
@@ -59,6 +218,24 @@ impl Bundle {
             MAX_CONTROL_PART_BYTES,
             "source map",
         )
+    }
+
+    pub fn read_map_verified(
+        &self,
+        descriptor: &ChunkDescriptor,
+    ) -> Result<ChunkSourceMap, HcdError> {
+        let bytes = read_bytes_bounded(
+            &self.resolve_href(&descriptor.map_href)?,
+            MAX_CONTROL_PART_BYTES,
+            "source map",
+        )?;
+        if hash_bytes(&bytes) != descriptor.map_hash {
+            return Err(HcdError::InvalidBundle(format!(
+                "source map {} does not match its descriptor hash",
+                descriptor.map_href
+            )));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn read_asset_index(&self) -> Result<Vec<AssetDescriptor>, HcdError> {
@@ -122,6 +299,19 @@ impl Bundle {
         )
     }
 
+    pub fn read_chunk_verified(&self, descriptor: &ChunkDescriptor) -> Result<String, HcdError> {
+        let html = self.read_chunk(descriptor)?;
+        if html.len() as u64 != descriptor.byte_length
+            || hash_bytes(html.as_bytes()) != descriptor.html_hash
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "HTML chunk {} does not match its descriptor length/hash",
+                descriptor.chunk_id
+            )));
+        }
+        Ok(html)
+    }
+
     pub fn resolve_href(&self, href: &str) -> Result<PathBuf, HcdError> {
         let relative = safe_relative_path(href)?;
         let mut resolved = self.root.clone();
@@ -166,8 +356,14 @@ impl Bundle {
         value: &T,
     ) -> Result<(String, String), HcdError> {
         let bytes = serde_json::to_vec(value)?;
+        if bytes.len() as u64 > MAX_CONTROL_PART_BYTES {
+            return Err(HcdError::ResourceLimit(format!(
+                "{directory} object exceeds the {MAX_CONTROL_PART_BYTES} byte limit"
+            )));
+        }
         let hash = hash_bytes(&bytes);
-        let href = format!("{directory}/sha256/{hash}.json");
+        let codec = self.manifest()?.storage_codec;
+        let href = format!("{directory}/sha256/{hash}.json{}", codec.suffix());
         write_content_addressed(&self.root, &href, &bytes)?;
         Ok((href, hash))
     }
@@ -181,7 +377,8 @@ impl Bundle {
             )));
         }
         let hash = hash_bytes(html.as_bytes());
-        let href = format!("chunks/sha256/{hash}.html");
+        let codec = self.manifest()?.storage_codec;
+        let href = format!("chunks/sha256/{hash}.html{}", codec.suffix());
         write_content_addressed(&self.root, &href, html.as_bytes())?;
         Ok((href, hash))
     }
@@ -243,8 +440,10 @@ pub(crate) struct BundleWriteGuard {
 
 pub struct BundleWriter {
     root: PathBuf,
+    storage_codec: StorageCodec,
     pending: Vec<ChunkDescriptor>,
     page_count: usize,
+    index_pages: Vec<String>,
     chunk_count: usize,
     root_hasher: Sha256,
     finished: bool,
@@ -259,6 +458,13 @@ struct ChunkWriteOptions {
 
 impl BundleWriter {
     pub fn create(root: impl AsRef<Path>) -> Result<Self, HcdError> {
+        Self::create_with_codec(root, StorageCodec::None)
+    }
+
+    pub fn create_with_codec(
+        root: impl AsRef<Path>,
+        storage_codec: StorageCodec,
+    ) -> Result<Self, HcdError> {
         let root = root.as_ref().to_path_buf();
         if root.exists() {
             return Err(HcdError::InvalidBundle(format!(
@@ -280,11 +486,13 @@ impl BundleWriter {
             fs::create_dir_all(root.join(directory))?;
         }
         fs::write(root.join("assets/index.json"), b"[]")?;
-        fs::write(root.join(".importing"), b"hcd/1\n")?;
+        fs::write(root.join(".importing"), b"hcd/2\n")?;
         Ok(Self {
             root,
+            storage_codec,
             pending: Vec::with_capacity(INDEX_PAGE_SIZE),
             page_count: 0,
+            index_pages: Vec::new(),
             chunk_count: 0,
             root_hasher: Sha256::new(),
             finished: false,
@@ -367,12 +575,15 @@ impl BundleWriter {
         }
 
         let html_hash = hash_bytes(html.as_bytes());
-        let html_href = format!("chunks/sha256/{html_hash}.html");
+        let html_href = format!(
+            "chunks/sha256/{html_hash}.html{}",
+            self.storage_codec.suffix()
+        );
         write_content_addressed(&self.root, &html_href, html.as_bytes())?;
 
         let map_bytes = serde_json::to_vec(&source_map)?;
         let map_hash = hash_bytes(&map_bytes);
-        let map_href = format!("maps/sha256/{map_hash}.json");
+        let map_href = format!("maps/sha256/{map_hash}.json{}", self.storage_codec.suffix());
         write_content_addressed(&self.root, &map_href, &map_bytes)?;
 
         let html_nodes = crate::extract_html_text_nodes(&html)?;
@@ -457,6 +668,7 @@ impl BundleWriter {
     pub fn finish(mut self, mut manifest: HcdManifest) -> Result<HcdManifest, HcdError> {
         self.flush_index_page()?;
         manifest.schema_version = HCD_SCHEMA_VERSION.to_string();
+        manifest.storage_codec = self.storage_codec;
         manifest.revision = 0;
         let bundle = Bundle {
             root: self.root.clone(),
@@ -466,6 +678,8 @@ impl BundleWriter {
         manifest.annotation_root_hash = hash_bytes(b"[]");
         manifest.annotation_href = None;
         manifest.index_prefix = "indexes/rev-00000000000000000000".to_string();
+        manifest.index_root_href =
+            build_index_tree(&self.root, self.storage_codec, &self.index_pages)?;
         manifest.index_page_count = self.page_count;
         manifest.chunk_count = self.chunk_count;
         manifest.styles_href = "styles.css".to_string();
@@ -482,6 +696,7 @@ impl BundleWriter {
             root_hash: manifest.root_hash.clone(),
             annotation_root_hash: manifest.annotation_root_hash.clone(),
             index_prefix: manifest.index_prefix.clone(),
+            index_root_href: manifest.index_root_href.clone(),
             asset_index_href: "assets/index.json".to_string(),
             created_at_epoch_ms: now_epoch_ms(),
             dirty_node_ids: Vec::new(),
@@ -511,15 +726,68 @@ impl BundleWriter {
             page: self.page_count,
             chunks: std::mem::take(&mut self.pending),
         };
-        atomic_write_json(
-            &self
-                .root
-                .join("indexes/rev-00000000000000000000")
-                .join(format!("{:06}.json", self.page_count)),
-            &page,
-        )?;
+        let href = write_index_object(&self.root, self.storage_codec, "pages", &page)?;
+        self.index_pages.push(href);
         self.page_count += 1;
         Ok(())
+    }
+}
+
+fn write_index_object<T: Serialize>(
+    root: &Path,
+    codec: StorageCodec,
+    kind: &str,
+    value: &T,
+) -> Result<String, HcdError> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() as u64 > MAX_CONTROL_PART_BYTES {
+        return Err(HcdError::ResourceLimit(
+            "index object exceeds 16 MiB".to_string(),
+        ));
+    }
+    let hash = hash_bytes(&bytes);
+    let href = format!("indexes/{kind}/sha256/{hash}.json{}", codec.suffix());
+    write_content_addressed(root, &href, &bytes)?;
+    Ok(href)
+}
+
+fn build_index_tree(
+    root: &Path,
+    codec: StorageCodec,
+    pages: &[String],
+) -> Result<Option<String>, HcdError> {
+    if pages.is_empty() {
+        return Ok(None);
+    }
+    let mut children = pages.to_vec();
+    let mut child_span = 1usize;
+    loop {
+        let mut parents = Vec::with_capacity(children.len().div_ceil(INDEX_TREE_FANOUT));
+        for (group, entries) in children.chunks(INDEX_TREE_FANOUT).enumerate() {
+            let first_page = group
+                .checked_mul(INDEX_TREE_FANOUT)
+                .and_then(|offset| offset.checked_mul(child_span))
+                .ok_or_else(|| {
+                    HcdError::ResourceLimit("index tree page range overflow".to_string())
+                })?;
+            parents.push(write_index_object(
+                root,
+                codec,
+                "nodes",
+                &IndexTreeNode {
+                    first_page,
+                    child_span,
+                    children: entries.to_vec(),
+                },
+            )?);
+        }
+        if parents.len() == 1 {
+            return Ok(parents.pop());
+        }
+        children = parents;
+        child_span = child_span
+            .checked_mul(INDEX_TREE_FANOUT)
+            .ok_or_else(|| HcdError::ResourceLimit("index tree span overflow".to_string()))?;
     }
 }
 
@@ -550,19 +818,37 @@ pub(crate) fn read_text_bounded(
         .map_err(|error| HcdError::InvalidBundle(format!("{kind} is not UTF-8: {error}")))
 }
 
-fn read_bytes_bounded(path: &Path, maximum_bytes: u64, kind: &str) -> Result<Vec<u8>, HcdError> {
+pub(crate) fn read_bytes_bounded(
+    path: &Path,
+    maximum_bytes: u64,
+    kind: &str,
+) -> Result<Vec<u8>, HcdError> {
     let metadata = fs::metadata(path)?;
-    if metadata.len() > maximum_bytes {
+    let compressed = path.extension().is_some_and(|extension| extension == "gz");
+    let maximum_stored_bytes = if compressed {
+        maximum_bytes
+            .saturating_add(maximum_bytes / 16)
+            .saturating_add(64 * 1024)
+    } else {
+        maximum_bytes
+    };
+    if metadata.len() > maximum_stored_bytes {
         return Err(HcdError::ResourceLimit(format!(
-            "{kind} {} is {} bytes; maximum is {maximum_bytes}",
+            "{kind} {} is {} stored bytes; maximum is {maximum_stored_bytes}",
             path.display(),
             metadata.len()
         )));
     }
     let mut bytes = Vec::with_capacity(metadata.len().min(maximum_bytes) as usize);
-    fs::File::open(path)?
-        .take(maximum_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)?;
+    let file = fs::File::open(path)?;
+    if compressed {
+        MultiGzDecoder::new(file)
+            .take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+    } else {
+        file.take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+    }
     if bytes.len() as u64 > maximum_bytes {
         return Err(HcdError::ResourceLimit(format!(
             "{kind} {} grew beyond the {maximum_bytes} byte limit while reading",
@@ -577,6 +863,33 @@ pub(crate) fn atomic_write_json<T: serde::Serialize>(
     value: &T,
 ) -> Result<(), HcdError> {
     atomic_write(path, &serde_json::to_vec(value)?)
+}
+
+pub(crate) fn atomic_write_json_encoded<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<(), HcdError> {
+    atomic_write_encoded(path, &serde_json::to_vec(value)?)
+}
+
+pub(crate) fn atomic_write_encoded(path: &Path, bytes: &[u8]) -> Result<(), HcdError> {
+    if path.extension().is_some_and(|extension| extension == "gz") {
+        let mut encoder = GzBuilder::new()
+            .mtime(0)
+            .write(Vec::new(), Compression::new(6));
+        encoder.write_all(bytes)?;
+        atomic_write(path, &encoder.finish()?)
+    } else {
+        atomic_write(path, bytes)
+    }
+}
+
+pub(crate) fn hash_decoded_file(path: &Path, maximum_bytes: u64) -> Result<String, HcdError> {
+    Ok(hash_bytes(&read_bytes_bounded(
+        path,
+        maximum_bytes,
+        "content object",
+    )?))
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), HcdError> {
@@ -603,7 +916,7 @@ pub(crate) fn write_content_addressed(
     let path = root.join(relative);
     if path.exists() {
         let expected_hash = hash_bytes(bytes);
-        let existing_hash = crate::hash_file(&path)?;
+        let existing_hash = hash_decoded_file(&path, bytes.len() as u64)?;
         if existing_hash != expected_hash {
             return Err(HcdError::InvalidBundle(format!(
                 "content-addressed object {} contains hash {} instead of {}",
@@ -614,7 +927,7 @@ pub(crate) fn write_content_addressed(
         }
         return Ok(());
     }
-    atomic_write(&path, bytes)
+    atomic_write_encoded(&path, bytes)
 }
 
 pub(crate) fn safe_relative_path(value: &str) -> Result<PathBuf, HcdError> {
@@ -764,6 +1077,7 @@ mod tests {
         writer.write_styles("article { color: #000; }").unwrap();
         let manifest = HcdManifest {
             schema_version: String::new(),
+            storage_codec: crate::StorageCodec::None,
             document_id: "doc-1".to_string(),
             profile: "semantic-flow".to_string(),
             revision: 99,
@@ -776,6 +1090,7 @@ mod tests {
             annotation_root_hash: String::new(),
             annotation_href: None,
             index_prefix: String::new(),
+            index_root_href: None,
             index_page_count: 0,
             chunk_count: 0,
             styles_href: String::new(),
@@ -829,6 +1144,7 @@ mod tests {
     fn test_manifest() -> HcdManifest {
         HcdManifest {
             schema_version: String::new(),
+            storage_codec: crate::StorageCodec::None,
             document_id: "doc-1".to_string(),
             profile: "semantic-flow".to_string(),
             revision: 99,
@@ -841,6 +1157,7 @@ mod tests {
             annotation_root_hash: String::new(),
             annotation_href: None,
             index_prefix: String::new(),
+            index_root_href: None,
             index_page_count: 0,
             chunk_count: 0,
             styles_href: String::new(),
@@ -860,6 +1177,32 @@ mod tests {
             read_json_bounded::<serde_json::Value>(&path, 32, "test control object").unwrap_err();
         assert!(matches!(error, HcdError::ResourceLimit(_)));
         assert!(error.to_string().contains("maximum is 32"));
+    }
+
+    #[test]
+    fn gzip_reader_rejects_truncation_trailing_data_and_expansion() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("object.json.gz");
+        atomic_write_encoded(&path, b"{\"value\":1}").unwrap();
+        assert_eq!(
+            read_bytes_bounded(&path, 128, "test").unwrap(),
+            b"{\"value\":1}"
+        );
+
+        let valid = fs::read(&path).unwrap();
+        fs::write(&path, &valid[..valid.len() - 4]).unwrap();
+        assert!(read_bytes_bounded(&path, 128, "test").is_err());
+
+        let mut trailing = valid.clone();
+        trailing.extend_from_slice(b"not gzip");
+        fs::write(&path, trailing).unwrap();
+        assert!(read_bytes_bounded(&path, 128, "test").is_err());
+
+        atomic_write_encoded(&path, &vec![b'x'; 4096]).unwrap();
+        assert!(matches!(
+            read_bytes_bounded(&path, 1024, "test"),
+            Err(HcdError::ResourceLimit(_))
+        ));
     }
 
     #[cfg(unix)]

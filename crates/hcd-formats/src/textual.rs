@@ -243,7 +243,7 @@ where
             "HTML HCD import currently requires UTF-8 input: {error}"
         ))
     })?;
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(
         ".hcd-source{display:block}.hcd-source-block{white-space:pre-wrap;margin:.25em 0}.hcd-heading{font-weight:bold}.hcd-pre{font-family:monospace;white-space:pre-wrap}.hcd-source-list{margin:.25em 0}.hcd-source-table{border-collapse:collapse}.hcd-source-table td,.hcd-source-table th{padding:.25em;border:1px solid #ccc}",
     )?;
@@ -368,7 +368,7 @@ where
     let source_text = source_text.strip_prefix('\u{feff}').unwrap_or(source_text);
     let source_base = bytes.len().saturating_sub(source_text.len());
 
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(&format!(
         "{MARKDOWN_STYLES}{MARKDOWN_PRINT_FIDELITY_STYLES}"
     ))?;
@@ -1365,7 +1365,7 @@ fn import_markdown_inner_legacy<F>(
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(
         ".hcd-source{display:block}.hcd-source-block{white-space:pre-wrap;margin:.35em 0}.hcd-markdown-heading{font-weight:700}.hcd-markdown-code{font-family:monospace;background:#f6f8fa;padding:.35em}.hcd-markdown-quote{border-left:3px solid #bbb;padding-left:.75em;color:#555}.hcd-markdown-list{margin:.2em 0;padding-left:1.5em}.hcd-markdown-task{list-style:none}.hcd-markdown-task-marker{display:inline-block;margin-right:.4em}.hcd-markdown-image{border:1px dashed #9aa4b2;padding:.1em .35em;border-radius:.25em}.hcd-markdown-table{border-collapse:collapse;margin:.6em 0;min-width:20em}.hcd-markdown-table th,.hcd-markdown-table td{border:1px solid #b8c0cc;padding:.35em .6em;text-align:left}.hcd-markdown-table th{background:#eef2f7;font-weight:700}",
     )?;
@@ -2141,7 +2141,7 @@ fn import_text_inner<F>(
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
-    let mut writer = BundleWriter::create(output)?;
+    let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(
         ".hcd-source{display:block;font-family:HCDSans,HCDEmoji,HCDFallback,\"Noto Sans SC\",\"PingFang SC\",\"Microsoft YaHei\",Arial,sans-serif;font-size:16px;line-height:1.6}.hcd-source-block{white-space:pre-wrap;margin:0;min-height:1.6em}",
     )?;

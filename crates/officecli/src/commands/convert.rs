@@ -939,6 +939,9 @@ fn convert_via_pdf2docx(
     output_path: &std::path::Path,
 ) -> Result<(), HandlerError> {
     let pdf2docx = find_pdf2docx()?;
+    let clip_image_res_ratio =
+        std::env::var("OFFICECLI_PDF_CLIP_IMAGE_RES_RATIO").unwrap_or_else(|_| "1.0".to_string());
+    let clip_image_res_ratio = parse_pdf_clip_image_res_ratio(&clip_image_res_ratio)?;
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -952,6 +955,7 @@ fn convert_via_pdf2docx(
         .arg("convert")
         .arg(input_file)
         .arg(output_path)
+        .arg(format!("--clip_image_res_ratio={clip_image_res_ratio}"))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -974,6 +978,20 @@ fn convert_via_pdf2docx(
     }
 
     Ok(())
+}
+
+fn parse_pdf_clip_image_res_ratio(raw: &str) -> Result<f64, HandlerError> {
+    let ratio = raw.parse::<f64>().map_err(|_| {
+        HandlerError::OperationFailed(format!(
+            "invalid OFFICECLI_PDF_CLIP_IMAGE_RES_RATIO '{raw}' (expected 0.5..=4.0)"
+        ))
+    })?;
+    if !ratio.is_finite() || !(0.5..=4.0).contains(&ratio) {
+        return Err(HandlerError::OperationFailed(format!(
+            "invalid OFFICECLI_PDF_CLIP_IMAGE_RES_RATIO '{raw}' (expected 0.5..=4.0)"
+        )));
+    }
+    Ok(ratio)
 }
 
 /// Find the pdf2docx executable. The optional OFFICECLI_PDF2DOCX_BIN env var
@@ -1281,6 +1299,14 @@ mod tests {
     #[test]
     fn test_valid_pdf_to_docx_with_pdf2docx_engine() {
         assert!(validate_conversion("pdf", "docx", ConvertEngine::Pdf2Docx).is_ok());
+    }
+
+    #[test]
+    fn test_pdf_clip_image_ratio_validation() {
+        assert_eq!(parse_pdf_clip_image_res_ratio("1.5").unwrap(), 1.5);
+        for invalid in ["0", "4.1", "NaN", "infinite"] {
+            assert!(parse_pdf_clip_image_res_ratio(invalid).is_err());
+        }
     }
 
     #[test]

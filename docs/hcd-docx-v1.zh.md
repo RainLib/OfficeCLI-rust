@@ -1,5 +1,7 @@
 # Office/PDF/HTML/Markdown/TXT ↔ 分片 HCD v1
 
+新导入包使用 `hcd/2` 压缩存储及写时复制索引；其存储与命令变更见 [HCD/2 存储与体积优化](hcd-storage-v2.zh.md)。本页保留 HCD 编辑模型和旧命令示例。
+
 本实现为 OfficeCLI 增加一条独立于既有 `DocumentHandler`/`view_as_html()` 的 HCD 链路，覆盖 DOCX、XLSX、PPTX、PDF、HTML、UTF-8 Markdown 和 UTF-8 TXT。HTML fragment 是唯一可编辑正文；JSON 仅包含清单、索引、节点 hash、源文件 anchor、revision 和保真信息，不保存正文副本。
 
 各格式采用自然分片：

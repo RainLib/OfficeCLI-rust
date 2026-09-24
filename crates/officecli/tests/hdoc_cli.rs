@@ -12,26 +12,14 @@ fn manifest(bundle: &Path) -> Value {
 }
 
 fn bundle_node_ids(bundle: &Path) -> Vec<String> {
-    let manifest = manifest(bundle);
-    let index_prefix = manifest["indexPrefix"].as_str().unwrap();
+    let opened = hcd_core::Bundle::open(bundle).unwrap();
+    let manifest = opened.manifest().unwrap();
     let mut ids = Vec::new();
-    for page in 0..manifest["indexPageCount"].as_u64().unwrap() {
-        let index: Value = serde_json::from_slice(
-            &std::fs::read(bundle.join(index_prefix).join(format!("{page:06}.json"))).unwrap(),
-        )
-        .unwrap();
-        for chunk in index["chunks"].as_array().unwrap() {
-            let map: Value = serde_json::from_slice(
-                &std::fs::read(bundle.join(chunk["mapHref"].as_str().unwrap())).unwrap(),
-            )
-            .unwrap();
-            ids.extend(
-                map["entries"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|entry| entry["nodeId"].as_str().unwrap().to_string()),
-            );
+    for page in 0..manifest.index_page_count {
+        let index = opened.read_index_page(&manifest, page).unwrap();
+        for chunk in index.chunks {
+            let map = opened.read_map_verified(&chunk).unwrap();
+            ids.extend(map.entries.into_iter().map(|entry| entry.node_id));
         }
     }
     ids
@@ -268,14 +256,12 @@ fn hdoc_cli_import_patch_validate_export_roundtrip() {
         .stdout(predicate::str::contains("Secret ***"));
     assert!(report.exists());
 
-    let map_path = std::fs::read_dir(bundle.join("maps/sha256"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let map: Value = serde_json::from_slice(&std::fs::read(map_path).unwrap()).unwrap();
-    assert!(map["entries"]
+    let opened = hcd_core::Bundle::open(&bundle).unwrap();
+    let current = opened.manifest().unwrap();
+    let descriptor = &opened.read_index_page(&current, 0).unwrap().chunks[0];
+    let map = opened.read_map_verified(descriptor).unwrap();
+    let map_json = serde_json::to_value(map).unwrap();
+    assert!(map_json["entries"]
         .as_array()
         .unwrap()
         .iter()

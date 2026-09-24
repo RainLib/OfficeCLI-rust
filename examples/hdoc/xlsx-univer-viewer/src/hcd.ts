@@ -18,18 +18,23 @@ export interface ChunkDescriptor {
   sequence: number;
   chunkId: string;
   htmlHref: string;
+  htmlHash: string;
+  byteLength: number;
   mapHref: string;
+  mapHash: string;
   nodeCount: number;
   grid?: GridChunkAddress;
 }
 
 export interface HcdManifest {
-  schemaVersion: 'hcd/1';
+  schemaVersion: 'hcd/1' | 'hcd/2';
+  storageCodec?: 'none' | 'gzip';
   documentId: string;
   profile: string;
   revision: number;
   rootHash: string;
   indexPrefix: string;
+  indexRootHref?: string;
   indexPageCount: number;
   stylesHref: string;
 }
@@ -53,6 +58,12 @@ interface ChunkIndexPage {
   chunks: ChunkDescriptor[];
 }
 
+interface IndexTreeNode {
+  firstPage: number;
+  childSpan: number;
+  children: string[];
+}
+
 export interface LoadedChunk {
   descriptor: ChunkDescriptor;
   html: string;
@@ -71,10 +82,70 @@ async function fetchChecked(url: URL): Promise<Response> {
   return response;
 }
 
+async function fetchDecoded(url: URL, maxBytes: number, expectedHash?: string): Promise<Uint8Array<ArrayBuffer>> {
+  const response = await fetchChecked(url);
+  const storedLimit = maxBytes + Math.floor(maxBytes / 16) + 64 * 1024;
+  const storedReader = response.body?.getReader();
+  if (!storedReader) throw new Error(`HCD object ${url} has no response body`);
+  const storedParts: Uint8Array[] = [];
+  let storedLength = 0;
+  while (true) {
+    const { done, value } = await storedReader.read();
+    if (done) break;
+    storedLength += value.byteLength;
+    if (storedLength > storedLimit) {
+      await storedReader.cancel();
+      throw new Error(`HCD object ${url} exceeds ${storedLimit} stored bytes`);
+    }
+    storedParts.push(value);
+  }
+  let bytes = new Uint8Array(storedLength);
+  let storedOffset = 0;
+  for (const part of storedParts) {
+    bytes.set(part, storedOffset);
+    storedOffset += part.byteLength;
+  }
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('此浏览器不支持 gzip HCD 解压');
+    }
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const reader = stream.getReader();
+    const parts: Uint8Array[] = [];
+    let length = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes) {
+        await reader.cancel();
+        throw new Error(`HCD object ${url} exceeds ${maxBytes} decoded bytes`);
+      }
+      parts.push(value);
+    }
+    bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const part of parts) {
+      bytes.set(part, offset);
+      offset += part.byteLength;
+    }
+  }
+  if (bytes.byteLength > maxBytes) throw new Error(`HCD object ${url} exceeds ${maxBytes} bytes`);
+  if (expectedHash) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    const actual = Array.from(digest, (value) => value.toString(16).padStart(2, '0')).join('');
+    if (actual !== expectedHash) throw new Error(`HCD object ${url} failed SHA-256 verification`);
+  }
+  return bytes;
+}
+
+const textDecoder = new TextDecoder('utf-8', { fatal: true });
+
 export class HcdBundleClient {
   readonly baseUrl: URL;
   manifest!: HcdManifest;
   descriptors: ChunkDescriptor[] = [];
+  private indexNodes = new Map<string, IndexTreeNode>();
 
   constructor(baseUrl: string) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
@@ -84,10 +155,40 @@ export class HcdBundleClient {
     return new URL(href, this.baseUrl);
   }
 
+  private async readText(href: string, maxBytes: number, expectedHash?: string): Promise<string> {
+    return textDecoder.decode(await fetchDecoded(this.resolve(href), maxBytes, expectedHash));
+  }
+
+  private async readJson<T>(href: string, maxBytes = 16 * 1024 * 1024, expectedHash?: string): Promise<T> {
+    const addressHash = href.match(/\/sha256\/([a-f0-9]{64})\.json(?:\.gz)?$/)?.[1];
+    return JSON.parse(await this.readText(href, maxBytes, expectedHash ?? addressHash)) as T;
+  }
+
+  private async indexPageHref(page: number): Promise<string> {
+    if (!this.manifest.indexRootHref) {
+      const extension = this.manifest.storageCodec === 'gzip' ? '.json.gz' : '.json';
+      return `${this.manifest.indexPrefix}/${page.toString().padStart(6, '0')}${extension}`;
+    }
+    let href = this.manifest.indexRootHref;
+    for (let depth = 0; depth < 12; depth += 1) {
+      let node = this.indexNodes.get(href);
+      if (!node) {
+        node = await this.readJson<IndexTreeNode>(href);
+        this.indexNodes.set(href, node);
+      }
+      const child = Math.floor((page - node.firstPage) / node.childSpan);
+      const next = node.children[child];
+      if (!next) throw new Error(`HCD index tree is missing page ${page}`);
+      if (node.childSpan === 1) return next;
+      href = next;
+    }
+    throw new Error('HCD index tree exceeds depth 12');
+  }
+
   async open(): Promise<void> {
-    this.manifest = await (await fetchChecked(this.resolve('manifest.json'))).json() as HcdManifest;
-    if (this.manifest.schemaVersion !== 'hcd/1' || this.manifest.profile !== 'grid') {
-      throw new Error(`需要 hcd/1 grid bundle，实际为 ${this.manifest.schemaVersion} ${this.manifest.profile}`);
+    this.manifest = await this.readJson<HcdManifest>('manifest.json');
+    if (!['hcd/1', 'hcd/2'].includes(this.manifest.schemaVersion) || this.manifest.profile !== 'grid') {
+      throw new Error(`需要 HCD grid bundle，实际为 ${this.manifest.schemaVersion} ${this.manifest.profile}`);
     }
     if (this.manifest.indexPageCount > 10_000) {
       throw new Error(`indexPageCount ${this.manifest.indexPageCount} 超过前端安全上限 10000`);
@@ -98,8 +199,8 @@ export class HcdBundleClient {
         { length: Math.min(8, this.manifest.indexPageCount - offset) },
         async (_, index) => {
           const page = offset + index;
-          const href = `${this.manifest.indexPrefix}/${page.toString().padStart(6, '0')}.json`;
-          return await (await fetchChecked(this.resolve(href))).json() as ChunkIndexPage;
+          const href = await this.indexPageHref(page);
+          return this.readJson<ChunkIndexPage>(href);
         },
       );
       pages.push(...await Promise.all(batch));
@@ -144,13 +245,16 @@ export class HcdBundleClient {
 
   async readChunk(descriptor: ChunkDescriptor): Promise<LoadedChunk> {
     const [html, map] = await Promise.all([
-      fetchChecked(this.resolve(descriptor.htmlHref)).then((response) => response.text()),
-      fetchChecked(this.resolve(descriptor.mapHref)).then((response) => response.json() as Promise<ChunkSourceMap>),
+      this.readText(descriptor.htmlHref, 2 * 1024 * 1024, descriptor.htmlHash),
+      this.readJson<ChunkSourceMap>(descriptor.mapHref, 16 * 1024 * 1024, descriptor.mapHash),
     ]);
+    if (new TextEncoder().encode(html).byteLength !== descriptor.byteLength) {
+      throw new Error(`HCD chunk ${descriptor.chunkId} has an unexpected decoded length`);
+    }
     return { descriptor, html, map };
   }
 
   async readStyles(): Promise<string> {
-    return (await fetchChecked(this.resolve(this.manifest.stylesHref))).text();
+    return this.readText(this.manifest.stylesHref, 16 * 1024 * 1024);
   }
 }

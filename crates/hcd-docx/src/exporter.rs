@@ -456,6 +456,7 @@ mod tests {
     fn test_manifest() -> HcdManifest {
         HcdManifest {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
+            storage_codec: hcd_core::StorageCodec::None,
             document_id: "test-document".to_string(),
             profile: "semantic-flow".to_string(),
             revision: 0,
@@ -468,6 +469,7 @@ mod tests {
             annotation_root_hash: String::new(),
             annotation_href: None,
             index_prefix: String::new(),
+            index_root_href: None,
             index_page_count: 0,
             chunk_count: 0,
             styles_href: "styles.css".to_string(),

@@ -1,8 +1,6 @@
-use crate::{
-    hash_bytes, Bundle, HcdError, HcdManifest, MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES,
-    MAX_REVISION,
-};
+use crate::{Bundle, HcdError, HcdManifest, MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES, MAX_REVISION};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -168,6 +166,7 @@ pub fn manifest_at_revision(
     manifest.root_hash = record.root_hash;
     manifest.annotation_root_hash = record.annotation_root_hash;
     manifest.index_prefix = record.index_prefix;
+    manifest.index_root_href = record.index_root_href;
     Ok((manifest, revision))
 }
 
@@ -194,6 +193,28 @@ pub fn render_standalone_html_with_transform(
 ) -> Result<HtmlPresentationReport, HcdError> {
     let head = bundle.manifest()?;
     let (manifest, revision) = manifest_at_revision(bundle, &head, options.revision)?;
+    if options.chunk_limit.is_some() {
+        let mut descriptors = Sha256::new();
+        for page_number in 0..manifest.index_page_count {
+            let page = bundle.read_index_page(&manifest, page_number)?;
+            if page.page != page_number || page.revision > revision {
+                return Err(HcdError::InvalidBundle(format!(
+                    "index page {page_number} does not belong to revision {revision}"
+                )));
+            }
+            for descriptor in &page.chunks {
+                crate::bundle::hash_descriptor(&mut descriptors, descriptor);
+            }
+        }
+        let asset_index_href = bundle.asset_index_href_for_revision(revision)?;
+        let actual_root =
+            crate::bundle::finalize_root_hash(bundle, descriptors, &asset_index_href)?;
+        if actual_root != manifest.root_hash {
+            return Err(HcdError::InvalidBundle(format!(
+                "revision {revision} root hash does not match its index, stylesheet and asset index"
+            )));
+        }
+    }
     let first_chunk = options.chunk_start;
     if first_chunk > manifest.chunk_count {
         return Err(HcdError::InvalidBundle(format!(
@@ -243,6 +264,9 @@ pub fn render_standalone_html_with_transform(
         )));
     }
     let styles = std::fs::read(&styles_path)?;
+    crate::validate_css_text(&String::from_utf8(styles.clone()).map_err(|error| {
+        HcdError::InvalidBundle(format!("HCD stylesheet is not UTF-8: {error}"))
+    })?)?;
     write_bounded(output, &mut written, options.max_output_bytes, &styles)?;
     if manifest.profile == "grid" {
         write_bounded(
@@ -289,7 +313,7 @@ pub fn render_standalone_html_with_transform(
     let end_index_page = chunk_end.div_ceil(crate::INDEX_PAGE_SIZE);
     for page_number in first_index_page..end_index_page {
         let page = bundle.read_index_page(&manifest, page_number)?;
-        if page.revision != revision || page.page != page_number {
+        if page.revision > revision || page.page != page_number {
             return Err(HcdError::InvalidBundle(format!(
                 "index page {page_number} does not belong to revision {revision}"
             )));
@@ -304,20 +328,7 @@ pub fn render_standalone_html_with_transform(
                     descriptor.sequence
                 )));
             }
-            let html = bundle.read_chunk(&descriptor)?;
-            if html.len() > MAX_CHUNK_BYTES || html.len() as u64 != descriptor.byte_length {
-                return Err(HcdError::InvalidBundle(format!(
-                    "chunk {} byte length mismatch",
-                    descriptor.chunk_id
-                )));
-            }
-            let actual_hash = hash_bytes(html.as_bytes());
-            if actual_hash != descriptor.html_hash {
-                return Err(HcdError::InvalidBundle(format!(
-                    "chunk {} expected hash {}, actual {actual_hash}",
-                    descriptor.chunk_id, descriptor.html_hash
-                )));
-            }
+            let html = bundle.read_chunk_verified(&descriptor)?;
             let presented_html = if let Some(base_href) = &options.asset_base_href {
                 rewrite_asset_references(&html, &asset_hrefs, base_href)
             } else {

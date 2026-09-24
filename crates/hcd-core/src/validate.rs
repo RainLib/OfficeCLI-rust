@@ -1,10 +1,12 @@
 use crate::bundle::{
-    finalize_root_hash, hash_descriptor, read_json_bounded, read_text_bounded, Bundle,
+    finalize_root_hash, hash_decoded_file, hash_descriptor, read_bytes_bounded, read_json_bounded,
+    read_text_bounded, Bundle,
 };
-use crate::hash::{hash_file, node_bloom_might_contain};
+use crate::hash::{hash_bytes, hash_file, node_bloom_might_contain};
 use crate::{
-    AnnotationSet, HcdError, RevisionRecord, ValidationIssue, ValidationReport, HCD_SCHEMA_VERSION,
-    MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES, MAX_REVISION,
+    AnnotationSet, HcdError, RevisionRecord, StorageCodec, ValidationIssue, ValidationReport,
+    HCD_SCHEMA_VERSION, HCD_SCHEMA_VERSION_1, MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES,
+    MAX_REVISION,
 };
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -129,7 +131,9 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
         }
     };
     let mut issues = Vec::new();
-    if manifest.schema_version != HCD_SCHEMA_VERSION {
+    if manifest.schema_version != HCD_SCHEMA_VERSION
+        && manifest.schema_version != HCD_SCHEMA_VERSION_1
+    {
         issues.push(issue(
             "SCHEMA_VERSION",
             format!("unsupported schema version {}", manifest.schema_version),
@@ -209,7 +213,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                 continue;
             }
         };
-        if page.schema_version != HCD_SCHEMA_VERSION {
+        if page.schema_version != manifest.schema_version {
             issues.push(issue(
                 "INDEX_SCHEMA_VERSION",
                 format!("unsupported index schema {}", page.schema_version),
@@ -234,7 +238,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             ));
         }
         for descriptor in page.chunks {
-            validate_descriptor(&descriptor, &mut issues);
+            validate_descriptor(&descriptor, manifest.storage_codec, &mut issues);
             if descriptor.sequence != expected_sequence {
                 issues.push(issue(
                     "CHUNK_SEQUENCE",
@@ -262,14 +266,17 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             };
             match fs::metadata(&html_path) {
                 Ok(metadata) => {
-                    if metadata.len() as usize > MAX_CHUNK_BYTES {
+                    if metadata.len() as usize > MAX_CHUNK_BYTES + MAX_CHUNK_BYTES / 16 + 64 * 1024
+                    {
                         issues.push(issue(
                             "CHUNK_TOO_LARGE",
                             format!("chunk is {} bytes", metadata.len()),
                             &descriptor.html_href,
                         ));
                     }
-                    if metadata.len() != descriptor.byte_length {
+                    if manifest.storage_codec == StorageCodec::None
+                        && metadata.len() != descriptor.byte_length
+                    {
                         issues.push(issue(
                             "CHUNK_SIZE_MISMATCH",
                             format!(
@@ -290,20 +297,37 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     continue;
                 }
             }
-            match hash_file(&html_path) {
-                Ok(hash) if hash != descriptor.html_hash => issues.push(issue(
-                    "CHUNK_HASH_MISMATCH",
-                    format!("expected {}, actual {hash}", descriptor.html_hash),
+            let html = match bundle.read_chunk(&descriptor) {
+                Ok(html) => html,
+                Err(error) => {
+                    issues.push(issue(
+                        "CHUNK_READ_ERROR",
+                        error.to_string(),
+                        &descriptor.html_href,
+                    ));
+                    continue;
+                }
+            };
+            if html.len() as u64 != descriptor.byte_length {
+                issues.push(issue(
+                    "CHUNK_SIZE_MISMATCH",
+                    format!(
+                        "manifest says {}, decoded content is {}",
+                        descriptor.byte_length,
+                        html.len()
+                    ),
                     &descriptor.html_href,
-                )),
-                Ok(_) => {}
-                Err(error) => issues.push(issue(
-                    "CHUNK_READ_ERROR",
-                    error.to_string(),
-                    &descriptor.html_href,
-                )),
+                ));
             }
-            match validate_html_fragment(&html_path, &asset_hashes) {
+            let html_hash = hash_bytes(html.as_bytes());
+            if html_hash != descriptor.html_hash {
+                issues.push(issue(
+                    "CHUNK_HASH_MISMATCH",
+                    format!("expected {}, actual {html_hash}", descriptor.html_hash),
+                    &descriptor.html_href,
+                ));
+            }
+            match validate_html_fragment_bytes(html.as_bytes(), &asset_hashes) {
                 Ok(fragments) => {
                     for fragment in fragments {
                         match table_fragments.observe(&fragment) {
@@ -327,10 +351,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     &descriptor.html_href,
                 )),
             }
-            let canonical_nodes = match bundle
-                .read_chunk(&descriptor)
-                .and_then(|html| crate::extract_html_text_nodes(&html))
-            {
+            let canonical_nodes = match crate::extract_html_text_nodes(&html) {
                 Ok(nodes) => nodes,
                 Err(error) => {
                     issues.push(issue(
@@ -367,25 +388,31 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     continue;
                 }
             };
-            match hash_file(&map_path) {
-                Ok(hash) if hash != descriptor.map_hash => issues.push(issue(
+            let map_bytes =
+                match read_bytes_bounded(&map_path, MAX_CONTROL_PART_BYTES, "source map") {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        issues.push(issue(
+                            "MAP_READ_ERROR",
+                            error.to_string(),
+                            &descriptor.map_href,
+                        ));
+                        continue;
+                    }
+                };
+            let map_hash = hash_bytes(&map_bytes);
+            if map_hash != descriptor.map_hash {
+                issues.push(issue(
                     "MAP_HASH_MISMATCH",
-                    format!("expected {}, actual {hash}", descriptor.map_hash),
+                    format!("expected {}, actual {map_hash}", descriptor.map_hash),
                     &descriptor.map_href,
-                )),
-                Ok(_) => {}
-                Err(error) => {
-                    issues.push(issue(
-                        "MAP_READ_ERROR",
-                        error.to_string(),
-                        &descriptor.map_href,
-                    ));
-                    continue;
-                }
+                ));
             }
-            match bundle.read_map(&descriptor) {
+            match serde_json::from_slice::<crate::ChunkSourceMap>(&map_bytes)
+                .map_err(HcdError::from)
+            {
                 Ok(source_map) => {
-                    if source_map.schema_version != HCD_SCHEMA_VERSION {
+                    if source_map.schema_version != manifest.schema_version {
                         issues.push(issue(
                             "MAP_SCHEMA_VERSION",
                             format!("unsupported map schema {}", source_map.schema_version),
@@ -615,6 +642,20 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
             "manifest.json",
         ));
     }
+    if manifest.schema_version == HCD_SCHEMA_VERSION
+        && manifest.index_page_count > 0
+        && !manifest.index_root_href.as_ref().is_some_and(|href| {
+            valid_index_tree_href(href)
+                && href.ends_with(&format!(".json{}", manifest.storage_codec.suffix()))
+        })
+    {
+        issues.push(issue(
+            "INDEX_ROOT_INVALID",
+            "hcd/2 requires a content-addressed index root using the selected storage codec"
+                .to_string(),
+            "manifest.json",
+        ));
+    }
     let expected_pages = manifest.chunk_count.div_ceil(crate::INDEX_PAGE_SIZE);
     if manifest.index_page_count != expected_pages {
         issues.push(issue(
@@ -647,7 +688,7 @@ fn validate_revision_chain(
                 break;
             }
         };
-        if record.schema_version != HCD_SCHEMA_VERSION {
+        if record.schema_version != manifest.schema_version {
             issues.push(issue(
                 "REVISION_SCHEMA_VERSION",
                 format!("unsupported revision schema {}", record.schema_version),
@@ -696,6 +737,16 @@ fn validate_revision_chain(
                 &path,
             ));
         }
+        if record.index_root_href.as_ref().is_some_and(|href| {
+            !valid_index_tree_href(href)
+                || !href.ends_with(&format!(".json{}", manifest.storage_codec.suffix()))
+        }) {
+            issues.push(issue(
+                "REVISION_INDEX_ROOT_INVALID",
+                "indexRootHref must address an immutable index node".to_string(),
+                &path,
+            ));
+        }
 
         if revision == 0 {
             if record.patch_id.is_some()
@@ -720,7 +771,8 @@ fn validate_revision_chain(
         if revision == manifest.revision
             && (record.root_hash != manifest.root_hash
                 || record.annotation_root_hash != manifest.annotation_root_hash
-                || record.index_prefix != manifest.index_prefix)
+                || record.index_prefix != manifest.index_prefix
+                || record.index_root_href != manifest.index_root_href)
         {
             issues.push(issue(
                 "REVISION_HEAD_MISMATCH",
@@ -814,20 +866,33 @@ fn validate_patch_revision(
         ));
     }
     if let Some(previous) = previous {
-        let expected_index = if content_changed {
-            format!("indexes/rev-{:020}", record.revision)
+        if record.index_root_href.is_some() || previous.index_root_href.is_some() {
+            if record.index_prefix != previous.index_prefix
+                || (content_changed && record.index_root_href == previous.index_root_href)
+                || (!content_changed && record.index_root_href != previous.index_root_href)
+            {
+                issues.push(issue(
+                    "REVISION_INDEX_TRANSITION_INVALID",
+                    "content revisions must replace the index root; annotation revisions must reuse it".to_string(),
+                    path,
+                ));
+            }
         } else {
-            previous.index_prefix.clone()
-        };
-        if record.index_prefix != expected_index {
-            issues.push(issue(
-                "REVISION_INDEX_TRANSITION_INVALID",
-                format!(
-                    "revision {} indexPrefix is {}, expected {expected_index}",
-                    record.revision, record.index_prefix
-                ),
-                path,
-            ));
+            let expected_index = if content_changed {
+                format!("indexes/rev-{:020}", record.revision)
+            } else {
+                previous.index_prefix.clone()
+            };
+            if record.index_prefix != expected_index {
+                issues.push(issue(
+                    "REVISION_INDEX_TRANSITION_INVALID",
+                    format!(
+                        "revision {} indexPrefix is {}, expected {expected_index}",
+                        record.revision, record.index_prefix
+                    ),
+                    path,
+                ));
+            }
         }
         if !content_changed && record.root_hash != previous.root_hash {
             issues.push(issue(
@@ -837,6 +902,16 @@ fn validate_patch_revision(
             ));
         }
     }
+}
+
+fn valid_index_tree_href(href: &str) -> bool {
+    let Some(name) = href.strip_prefix("indexes/nodes/sha256/") else {
+        return false;
+    };
+    let hash = name
+        .strip_suffix(".json.gz")
+        .or_else(|| name.strip_suffix(".json"));
+    hash.is_some_and(valid_sha256)
 }
 
 fn validate_revision_dirty_set(
@@ -871,7 +946,11 @@ fn validate_revision_dirty_set(
     }
 }
 
-fn validate_descriptor(descriptor: &crate::ChunkDescriptor, issues: &mut Vec<ValidationIssue>) {
+fn validate_descriptor(
+    descriptor: &crate::ChunkDescriptor,
+    codec: StorageCodec,
+    issues: &mut Vec<ValidationIssue>,
+) {
     let path = &descriptor.html_href;
     if !valid_prefixed_id(&descriptor.chunk_id, "c_", 32) {
         issues.push(issue(
@@ -900,7 +979,12 @@ fn validate_descriptor(descriptor: &crate::ChunkDescriptor, issues: &mut Vec<Val
         ));
     }
     if !valid_sha256(&descriptor.html_hash)
-        || descriptor.html_href != format!("chunks/sha256/{}.html", descriptor.html_hash)
+        || descriptor.html_href
+            != format!(
+                "chunks/sha256/{}.html{}",
+                descriptor.html_hash,
+                codec.suffix()
+            )
     {
         issues.push(issue(
             "CHUNK_ADDRESS_MISMATCH",
@@ -909,7 +993,8 @@ fn validate_descriptor(descriptor: &crate::ChunkDescriptor, issues: &mut Vec<Val
         ));
     }
     if !valid_sha256(&descriptor.map_hash)
-        || descriptor.map_href != format!("maps/sha256/{}.json", descriptor.map_hash)
+        || descriptor.map_href
+            != format!("maps/sha256/{}.json{}", descriptor.map_hash, codec.suffix())
     {
         issues.push(issue(
             "MAP_ADDRESS_MISMATCH",
@@ -1175,7 +1260,11 @@ fn load_annotations(
         }
         return None;
     };
-    let expected_href = format!("annotations/sha256/{}.json", manifest.annotation_root_hash);
+    let expected_href = format!(
+        "annotations/sha256/{}.json{}",
+        manifest.annotation_root_hash,
+        manifest.storage_codec.suffix()
+    );
     if *href != expected_href {
         issues.push(issue(
             "ANNOTATION_ADDRESS_MISMATCH",
@@ -1190,7 +1279,7 @@ fn load_annotations(
             return None;
         }
     };
-    match hash_file(&path) {
+    match hash_decoded_file(&path, MAX_CONTROL_PART_BYTES) {
         Ok(hash) if hash != manifest.annotation_root_hash => issues.push(issue(
             "ANNOTATION_HASH_MISMATCH",
             format!("expected {}, actual {hash}", manifest.annotation_root_hash),
@@ -1210,7 +1299,7 @@ fn load_annotations(
                 return None;
             }
         };
-    if set.schema_version != HCD_SCHEMA_VERSION {
+    if set.schema_version != manifest.schema_version {
         issues.push(issue(
             "ANNOTATION_SCHEMA_VERSION",
             format!("unsupported annotation schema {}", set.schema_version),
@@ -1535,12 +1624,19 @@ fn encode_node_id(value: &[u8; 16]) -> String {
     output
 }
 
+#[cfg(test)]
 fn validate_html_fragment(
     path: &std::path::Path,
     asset_hashes: &HashSet<String>,
 ) -> Result<Vec<HcdTableFragment>, HcdError> {
-    let file = fs::File::open(path)?;
-    let mut reader = Reader::from_reader(BufReader::new(file));
+    validate_html_fragment_bytes(&fs::read(path)?, asset_hashes)
+}
+
+fn validate_html_fragment_bytes(
+    bytes: &[u8],
+    asset_hashes: &HashSet<String>,
+) -> Result<Vec<HcdTableFragment>, HcdError> {
+    let mut reader = Reader::from_reader(BufReader::new(bytes));
     reader.config_mut().check_end_names = true;
     let mut buffer = Vec::with_capacity(16 * 1024);
     let mut depth = 0usize;

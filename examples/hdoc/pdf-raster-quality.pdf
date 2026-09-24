@@ -1,0 +1,217 @@
+%PDF-1.3
+%“Œ‹ž ReportLab Generated PDF document http://www.reportlab.com
+1 0 obj
+<<
+/F1 2 0 R /F2 3 0 R
+>>
+endobj
+2 0 obj
+<<
+/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font
+>>
+endobj
+3 0 obj
+<<
+/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font
+>>
+endobj
+4 0 obj
+<<
+/Contents 8 0 R /MediaBox [ 0 0 595.2756 841.8898 ] /Parent 7 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+5 0 obj
+<<
+/PageMode /UseNone /Pages 7 0 R /Type /Catalog
+>>
+endobj
+6 0 obj
+<<
+/Author (anonymous) /CreationDate (D:20260924103303+08'00') /Creator (ReportLab PDF Library - www.reportlab.com) /Keywords () /ModDate (D:20260924103303+08'00') /Producer (ReportLab PDF Library - www.reportlab.com) 
+  /Subject (unspecified) /Title (untitled) /Trapped /False
+>>
+endobj
+7 0 obj
+<<
+/Count 1 /Kids [ 4 0 R ] /Type /Pages
+>>
+endobj
+8 0 obj
+<<
+/Length 4959
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 18 Tf 21.6 TL ET
+BT 1 0 0 1 42 791.8898 Tm (HCD PDF raster quality comparison) Tj T* ET
+BT /F1 6 Tf 7.2 TL ET
+BT 1 0 0 1 42 771.8898 Tm (6 pt: The quick brown fox jumps over 0123456789. Small labels and thin strokes.) Tj T* ET
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 42 751.8898 Tm (7 pt: The quick brown fox jumps over 0123456789. Small labels and thin strokes.) Tj T* ET
+BT /F1 8 Tf 9.6 TL ET
+BT 1 0 0 1 42 731.8898 Tm (8 pt: The quick brown fox jumps over 0123456789. Small labels and thin strokes.) Tj T* ET
+BT /F1 9 Tf 10.8 TL ET
+BT 1 0 0 1 42 711.8898 Tm (9 pt: The quick brown fox jumps over 0123456789. Small labels and thin strokes.) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 42 691.8898 Tm (10 pt: The quick brown fox jumps over 0123456789. Small labels and thin strokes.) Tj T* ET
+BT /F1 12 Tf 14.4 TL ET
+BT 1 0 0 1 42 671.8898 Tm (12 pt: The quick brown fox jumps over 0123456789. Small labels and thin strokes.) Tj T* ET
+.35 w
+n 42 621.8898 m 553.2756 621.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 626.8898 Tm (Row 01) Tj T* ET
+BT 1 0 0 1 533.6536 626.8898 Tm (0.00) Tj T* ET
+.7 w
+n 42 601.8898 m 553.2756 601.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 606.8898 Tm (Row 02) Tj T* ET
+BT 1 0 0 1 525.8696 606.8898 Tm (137.53) Tj T* ET
+.35 w
+n 42 581.8898 m 553.2756 581.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 586.8898 Tm (Row 03) Tj T* ET
+BT 1 0 0 1 525.8696 586.8898 Tm (275.06) Tj T* ET
+.7 w
+n 42 561.8898 m 553.2756 561.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 566.8898 Tm (Row 04) Tj T* ET
+BT 1 0 0 1 525.8696 566.8898 Tm (412.59) Tj T* ET
+.35 w
+n 42 541.8898 m 553.2756 541.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 546.8898 Tm (Row 05) Tj T* ET
+BT 1 0 0 1 525.8696 546.8898 Tm (550.12) Tj T* ET
+.7 w
+n 42 521.8898 m 553.2756 521.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 526.8898 Tm (Row 06) Tj T* ET
+BT 1 0 0 1 525.8696 526.8898 Tm (687.65) Tj T* ET
+.35 w
+n 42 501.8898 m 553.2756 501.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 506.8898 Tm (Row 07) Tj T* ET
+BT 1 0 0 1 525.8696 506.8898 Tm (825.18) Tj T* ET
+.7 w
+n 42 481.8898 m 553.2756 481.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 486.8898 Tm (Row 08) Tj T* ET
+BT 1 0 0 1 525.8696 486.8898 Tm (962.71) Tj T* ET
+.35 w
+n 42 461.8898 m 553.2756 461.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 466.8898 Tm (Row 09) Tj T* ET
+BT 1 0 0 1 520.0316 466.8898 Tm (1,100.24) Tj T* ET
+.7 w
+n 42 441.8898 m 553.2756 441.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 446.8898 Tm (Row 10) Tj T* ET
+BT 1 0 0 1 520.0316 446.8898 Tm (1,237.77) Tj T* ET
+.35 w
+n 42 421.8898 m 553.2756 421.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 426.8898 Tm (Row 11) Tj T* ET
+BT 1 0 0 1 520.0316 426.8898 Tm (1,375.30) Tj T* ET
+.7 w
+n 42 401.8898 m 553.2756 401.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 406.8898 Tm (Row 12) Tj T* ET
+BT 1 0 0 1 520.0316 406.8898 Tm (1,512.83) Tj T* ET
+.35 w
+n 42 381.8898 m 553.2756 381.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 386.8898 Tm (Row 13) Tj T* ET
+BT 1 0 0 1 520.0316 386.8898 Tm (1,650.36) Tj T* ET
+.7 w
+n 42 361.8898 m 553.2756 361.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 366.8898 Tm (Row 14) Tj T* ET
+BT 1 0 0 1 520.0316 366.8898 Tm (1,787.89) Tj T* ET
+.35 w
+n 42 341.8898 m 553.2756 341.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 346.8898 Tm (Row 15) Tj T* ET
+BT 1 0 0 1 520.0316 346.8898 Tm (1,925.42) Tj T* ET
+.7 w
+n 42 321.8898 m 553.2756 321.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 326.8898 Tm (Row 16) Tj T* ET
+BT 1 0 0 1 520.0316 326.8898 Tm (2,062.95) Tj T* ET
+.35 w
+n 42 301.8898 m 553.2756 301.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 306.8898 Tm (Row 17) Tj T* ET
+BT 1 0 0 1 520.0316 306.8898 Tm (2,200.48) Tj T* ET
+.7 w
+n 42 281.8898 m 553.2756 281.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 286.8898 Tm (Row 18) Tj T* ET
+BT 1 0 0 1 520.0316 286.8898 Tm (2,338.01) Tj T* ET
+.35 w
+n 42 261.8898 m 553.2756 261.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 266.8898 Tm (Row 19) Tj T* ET
+BT 1 0 0 1 520.0316 266.8898 Tm (2,475.54) Tj T* ET
+.7 w
+n 42 241.8898 m 553.2756 241.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 246.8898 Tm (Row 20) Tj T* ET
+BT 1 0 0 1 520.0316 246.8898 Tm (2,613.07) Tj T* ET
+.35 w
+n 42 221.8898 m 553.2756 221.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 226.8898 Tm (Row 21) Tj T* ET
+BT 1 0 0 1 520.0316 226.8898 Tm (2,750.60) Tj T* ET
+.7 w
+n 42 201.8898 m 553.2756 201.8898 l S
+BT /F1 7 Tf 8.4 TL ET
+BT 1 0 0 1 48 206.8898 Tm (Row 22) Tj T* ET
+BT 1 0 0 1 520.0316 206.8898 Tm (2,888.13) Tj T* ET
+n 42 621.8898 m 42 201.8898 l S
+n 142 621.8898 m 142 201.8898 l S
+n 242 621.8898 m 242 201.8898 l S
+n 342 621.8898 m 342 201.8898 l S
+n 442 621.8898 m 442 201.8898 l S
+.15 .45 .75 rg
+n 60 85 35 8 re f*
+n 110 85 35 15 re f*
+n 160 85 35 22 re f*
+n 210 85 35 29 re f*
+n 260 85 35 36 re f*
+n 310 85 35 43 re f*
+n 360 85 35 50 re f*
+n 410 85 35 57 re f*
+0 0 0 rg
+BT /F1 6 Tf 7.2 TL ET
+BT 1 0 0 1 42 70 Tm (6 pt caption beneath graph and table) Tj T* ET
+ 
+endstream
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000073 00000 n 
+0000000114 00000 n 
+0000000221 00000 n 
+0000000333 00000 n 
+0000000536 00000 n 
+0000000604 00000 n 
+0000000900 00000 n 
+0000000959 00000 n 
+trailer
+<<
+/ID 
+[<e08517b69869ff232b5469fb7a5a9674><e08517b69869ff232b5469fb7a5a9674>]
+% ReportLab generated PDF document -- digest (http://www.reportlab.com)
+
+/Info 6 0 R
+/Root 5 0 R
+/Size 9
+>>
+startxref
+5969
+%%EOF

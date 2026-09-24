@@ -10,7 +10,7 @@ mod xlsx;
 use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
-pub use common::{ExportOptions, ImportOptions};
+pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
 
 /// Expand presentation-only Markdown features without changing canonical HCD.
 /// The transform is bounded to one chunk and safe to call after every revision.
@@ -33,6 +33,7 @@ where
             let mut docx_options = hcd_docx::ImportOptions::new(&options.document_id);
             docx_options.chunk_soft_bytes = options.chunk_soft_bytes;
             docx_options.chunk_blocks = options.chunk_blocks;
+            docx_options.storage_codec = options.storage_codec;
             hcd_docx::import_docx(source, output, &docx_options, emit)
         }
         "xlsx" => xlsx::import_xlsx(source, output.as_ref(), options, emit),
