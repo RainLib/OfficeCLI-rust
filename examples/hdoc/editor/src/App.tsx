@@ -31,6 +31,16 @@ function presenceColor(id: string) {
   for (const character of id) value = (value * 31 + character.charCodeAt(0)) >>> 0
   return palette[value % palette.length]
 }
+function browserUserId(): string {
+  const key = 'hcd-editor-browser-user-v1'
+  try {
+    const existing = localStorage.getItem(key)
+    if (existing && /^[0-9a-f-]{36}$/.test(existing)) return existing
+    const created = crypto.randomUUID()
+    localStorage.setItem(key, created)
+    return created
+  } catch { return crypto.randomUUID() }
+}
 
 export function App() {
   const [documentId, setDocumentId] = useState(sessionStorage.getItem('hcd-document') || '')
@@ -73,7 +83,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [menu, setMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null)
   const [linkOpen, setLinkOpen] = useState(false)
   const [linkHref, setLinkHref] = useState('')
-  const [presence, setPresence] = useState<Array<{ name: string; color: string }>>([])
+  const [presence, setPresence] = useState<Array<{ id: string; name: string; color: string; connections: number }>>([])
   const [layout, setLayout] = useState<LayoutPreferences>(readLayout)
   const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>('settings')
   const [activeTab, setActiveTab] = useState<'home' | 'insert' | 'view' | 'revisions'>('home')
@@ -84,11 +94,11 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
-  const localUser = useMemo(() => {
-    const id = session.userId || crypto.randomUUID()
-    return { name: session.displayName || `协作者 ${id.slice(0, 4)}`, color: presenceColor(id) }
-  }, [session.userId, session.displayName])
   const ydoc = useMemo(() => new Y.Doc(), [session.documentId])
+  const localUser = useMemo(() => {
+    const id = session.userId || browserUserId()
+    return { id, clientId: ydoc.clientID, name: session.displayName?.trim() || `协作者 ${id.slice(0, 4)}`, color: presenceColor(id) }
+  }, [session.userId, session.displayName, ydoc])
   const provider = useMemo(() => new HocuspocusProvider({
     url: session.collabUrl || import.meta.env.VITE_HCD_COLLAB_URL || 'ws://127.0.0.1:8768',
     name: `${session.documentId}:${session.collaborationEpoch ?? 0}`,
@@ -97,7 +107,21 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   }), [session.documentId, session.collaborationEpoch, session.token, ydoc])
   const editor = useEditor({
     extensions: [...schemaExtensions, Collaboration.configure({ document: ydoc }),
-      CollaborationCaret.configure({ provider, user: localUser })],
+      CollaborationCaret.configure({ provider, user: localUser, render: user => {
+        const cursor = document.createElement('span')
+        const samePerson = user.id === localUser.id
+        const earlierConnection = Array.from(provider.awareness?.getStates().values() || []).some(value =>
+          value.user?.id === user.id && typeof value.user?.clientId === 'number' && value.user.clientId < user.clientId)
+        if (samePerson || earlierConnection) { cursor.style.display = 'none'; return cursor }
+        cursor.className = 'collaboration-carets__caret'
+        cursor.style.borderColor = user.color
+        const label = document.createElement('span')
+        label.className = 'collaboration-carets__label'
+        label.style.backgroundColor = user.color
+        label.textContent = String(user.name || '协作者').slice(0, 64)
+        cursor.append(label)
+        return cursor
+      } })],
     editable: !readOnly,
     editorProps: { attributes: { class: 'hcd-editor-body' } },
     onUpdate: ({ editor: changedEditor }) => {
@@ -135,16 +159,25 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         }
       }
     }
-    const refreshPresence = () => setPresence(Array.from(provider.awareness?.getStates().values() || [])
-      .map(value => value.user as { name?: string; color?: string } | undefined)
-      .filter((value): value is { name: string; color: string } => Boolean(value?.name && value?.color)))
+    const refreshPresence = () => {
+      const unique = new Map<string, { id: string; name: string; color: string; connections: number }>()
+      for (const [clientId, value] of provider.awareness?.getStates() || []) {
+        const user = value.user as { id?: string; name?: string; color?: string } | undefined
+        if (!user?.name) continue
+        const id = user.id || (user.name === localUser.name && user.color === localUser.color ? localUser.id : `client:${clientId}`)
+        const previous = unique.get(id)
+        if (previous) { previous.connections += 1; continue }
+        unique.set(id, { id, name: user.name.trim().slice(0, 64), color: user.color || presenceColor(id), connections: 1 })
+      }
+      setPresence(Array.from(unique.values()).sort((left, right) => Number(right.id === localUser.id) - Number(left.id === localUser.id)))
+    }
     provider.on('status', connection)
     provider.on('synced', () => setStatus('已同步'))
     provider.on('stateless', saveState)
     provider.awareness?.on('change', refreshPresence)
     refreshPresence()
     return () => { provider.off('status', connection); provider.off('stateless', saveState); provider.awareness?.off('change', refreshPresence); provider.destroy(); ydoc.destroy() }
-  }, [provider, ydoc])
+  }, [provider, ydoc, localUser])
   useEffect(() => {
     let alive = true
     const refresh = async () => {
@@ -278,7 +311,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       <div className="document-identity"><span className="brand">HCD</span><div className="document-title"><strong title={session.documentId}>{session.documentId}</strong><small>{session.format.toUpperCase()} · r{revision ?? '…'}</small></div><span className="status" role="status">{status}</span></div>
       <nav className="header-tabs" aria-label="编辑功能"><button className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}>开始</button><button className={activeTab === 'insert' ? 'active' : ''} onClick={() => setActiveTab('insert')}>插入</button><button className={activeTab === 'view' ? 'active' : ''} onClick={() => setActiveTab('view')}>视图</button><button className={activeTab === 'revisions' ? 'active' : ''} onClick={() => { setActiveTab('revisions'); setRightPanel('revisions') }}>修订</button></nav>
       <div className="header-actions">
-        {layout.showCollaborators && <div className="presence" aria-label="在线协作者">{presence.map((user, index) => <span key={`${user.name}-${index}`} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}<span>{presence.length} 人在线</span></div>}
+        {layout.showCollaborators && <details className="presence"><summary aria-label={`在线协作者，${presence.length} 人`}><span className="presence-avatars">{presence.slice(0, 3).map(user => <span key={user.id} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}</span><span>{presence.length} 人在线</span></summary><div className="presence-menu"><strong>在线协作者</strong>{presence.map(user => <div key={user.id} className="presence-person"><span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><span>{user.name}{user.id === localUser.id ? '（你）' : ''}</span>{user.connections > 1 && <small>{user.connections} 个窗口</small>}</div>)}</div></details>}
         <ExportControl session={session} revision={revision} beforeExport={save} /><button className="settings-trigger" aria-label="界面设置" aria-expanded={rightPanel === 'settings'} onClick={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')}>⚙</button><button className="ghost" onClick={onClose}>关闭</button>
       </div>
     </header>}
