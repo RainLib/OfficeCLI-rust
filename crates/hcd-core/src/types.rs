@@ -390,6 +390,11 @@ pub struct RevisionRecord {
     pub patch_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_base_revision: Option<u64>,
+    /// Identity that created this revision. Older revision records omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
     pub root_hash: String,
     pub annotation_root_hash: String,
     pub index_prefix: String,

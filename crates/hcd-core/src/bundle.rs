@@ -693,6 +693,8 @@ impl BundleWriter {
             patch_id: None,
             patch_hash: None,
             patch_base_revision: None,
+            author_id: None,
+            author_name: None,
             root_hash: manifest.root_hash.clone(),
             annotation_root_hash: manifest.annotation_root_hash.clone(),
             index_prefix: manifest.index_prefix.clone(),
