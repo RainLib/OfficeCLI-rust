@@ -473,6 +473,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                             &entry,
                             &descriptor.map_href,
                             &manifest.source,
+                            manifest.capabilities.structure_patch,
                             &mut textual_range_end,
                             &mut issues,
                         );
@@ -766,6 +767,32 @@ fn validate_revision_chain(
             }
         } else {
             validate_patch_revision(&record, previous.as_ref(), &mut patch_ids, &path, issues);
+            if let Some(patch_id) = record
+                .patch_id
+                .as_deref()
+                .filter(|id| id.starts_with("restore-"))
+            {
+                let target = patch_id
+                    .strip_prefix("restore-")
+                    .and_then(|value| value.split_once('-'))
+                    .and_then(|(target, suffix)| {
+                        let target = target.parse::<u64>().ok()?;
+                        (suffix == revision.to_string() && target < revision).then_some(target)
+                    });
+                match target.and_then(|target| bundle.revision(target).ok()) {
+                    Some(historical) if record.structural_change
+                        && record.root_hash == historical.root_hash
+                        && record.annotation_root_hash == historical.annotation_root_hash
+                        && record.index_root_href == historical.index_root_href
+                        && record.index_prefix == historical.index_prefix
+                        && record.asset_index_href == historical.asset_index_href => {},
+                    _ => issues.push(issue(
+                        "REVISION_RESTORE_TARGET_INVALID",
+                        "restore revision must reference the exact roots and indexes of an earlier revision".to_string(),
+                        &path,
+                    )),
+                }
+            }
         }
 
         if revision == manifest.revision
@@ -854,9 +881,14 @@ fn validate_patch_revision(
         issues,
     );
 
+    let restore = record
+        .patch_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("restore-"));
     let content_changed = !record.dirty_node_ids.is_empty();
-    if content_changed == record.dirty_chunk_ids.is_empty()
-        || content_changed == record.dirty_source_parts.is_empty()
+    if !restore
+        && (content_changed == record.dirty_chunk_ids.is_empty()
+            || content_changed == record.dirty_source_parts.is_empty())
     {
         issues.push(issue(
             "REVISION_DIRTY_SET_INCONSISTENT",
@@ -866,6 +898,20 @@ fn validate_patch_revision(
         ));
     }
     if let Some(previous) = previous {
+        if restore {
+            if !record.structural_change
+                || content_changed
+                || !record.dirty_chunk_ids.is_empty()
+                || !record.dirty_source_parts.is_empty()
+            {
+                issues.push(issue(
+                    "REVISION_RESTORE_DIRTY_SET_INVALID",
+                    "restore revision must be structural and reuse existing immutable objects without dirty sets".to_string(),
+                    path,
+                ));
+            }
+            return;
+        }
         if record.index_root_href.is_some() || previous.index_root_href.is_some() {
             if record.index_prefix != previous.index_prefix
                 || (content_changed && record.index_root_href == previous.index_root_href)
@@ -1091,6 +1137,7 @@ fn validate_map_entry(
     entry: &crate::NodeMapEntry,
     path: &str,
     source: &crate::SourceDescriptor,
+    structure_patch: bool,
     textual_range_end: &mut u64,
     issues: &mut Vec<ValidationIssue>,
 ) {
@@ -1138,13 +1185,21 @@ fn validate_map_entry(
         }
     }
     if matches!(source.format.as_str(), "html" | "md" | "txt") {
-        validate_textual_source_range(entry, source, textual_range_end, path, issues);
+        validate_textual_source_range(
+            entry,
+            source,
+            structure_patch,
+            textual_range_end,
+            path,
+            issues,
+        );
     }
 }
 
 fn validate_textual_source_range(
     entry: &crate::NodeMapEntry,
     source: &crate::SourceDescriptor,
+    structure_patch: bool,
     previous_end: &mut u64,
     path: &str,
     issues: &mut Vec<ValidationIssue>,
@@ -1172,6 +1227,9 @@ fn validate_textual_source_range(
         ));
         return;
     };
+    if structure_patch && value.starts_with("editor:") && entry.source.node_kind == "editor-text" {
+        return;
+    }
     let parsed = value
         .strip_prefix("bytes:")
         .and_then(|range| range.split_once(':'))
@@ -1187,7 +1245,7 @@ fn validate_textual_source_range(
         ));
         return;
     };
-    if start > end || end > source.size_bytes || start < *previous_end {
+    if start > end || end > source.size_bytes || (!structure_patch && start < *previous_end) {
         issues.push(issue(
             "TEXTUAL_SOURCE_RANGE_INVALID",
             format!(
@@ -1198,7 +1256,9 @@ fn validate_textual_source_range(
         ));
         return;
     }
-    *previous_end = end;
+    if !structure_patch {
+        *previous_end = end;
+    }
 }
 
 fn valid_sha256(value: &str) -> bool {
