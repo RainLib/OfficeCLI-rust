@@ -589,7 +589,20 @@ fn is_block_tag(
 ) -> Result<bool, HcdError> {
     if matches!(
         name,
-        "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "table"
+        "p" | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "li"
+            | "table"
+            | "pre"
+            | "blockquote"
+            | "dl"
+            | "figure"
+            | "aside"
+            | "details"
     ) {
         return Ok(true);
     }
@@ -1340,6 +1353,67 @@ fn filter_annotations(
 mod tests {
     use super::*;
     use crate::{BundleWriter, HcdCapabilities, SourceDescriptor, StorageCodec};
+
+    #[test]
+    fn markdown_complex_blocks_do_not_hide_editable_paragraphs() {
+        let values = ["Title", "Quoted", "Body", "Code", "Cell"];
+        let entries: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| NodeMapEntry {
+                node_id: format!("n_{index:032x}"),
+                node_hash: hash_bytes(value.as_bytes()),
+                source: SourceAnchor {
+                    part: "markdown/document".to_string(),
+                    text_ordinal: index as u64,
+                    paragraph_id: None,
+                    text_id: None,
+                    node_kind: "text".to_string(),
+                    editable: true,
+                },
+            })
+            .collect();
+        let span = |index: usize| {
+            format!(
+                "<span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span>",
+                entries[index].node_id, entries[index].node_hash, values[index]
+            )
+        };
+        let html = format!(
+            "<section><h1>{}</h1><blockquote><p>{}</p></blockquote><p>{}</p><pre><code>{}</code></pre><table><tr><td>{}</td></tr></table></section>",
+            span(0), span(1), span(2), span(3), span(4)
+        );
+        let chunk_id = "c_00000000000000000000000000000000".to_string();
+        let descriptor = ChunkDescriptor {
+            sequence: 0,
+            chunk_id: chunk_id.clone(),
+            region: "body".to_string(),
+            html_href: String::new(),
+            html_hash: hash_bytes(html.as_bytes()),
+            map_href: String::new(),
+            map_hash: String::new(),
+            byte_length: html.len() as u64,
+            block_count: 5,
+            node_count: 5,
+            text_chars: values.iter().map(|value| value.chars().count()).sum(),
+            node_bloom: String::new(),
+            first_node_id: None,
+            last_node_id: None,
+            continuation: false,
+            grid: None,
+        };
+        let map = ChunkSourceMap {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            chunk_id,
+            entries,
+        };
+        let blocks = scan_chunk(&html, &map, &descriptor, "markdown-test").unwrap();
+        assert_eq!(blocks.len(), 5);
+        assert_eq!(blocks.iter().filter(|block| !block.read_only).count(), 2);
+        assert_eq!(blocks[0].content.kind, EditorBlockKind::Heading);
+        assert_eq!(blocks[2].content.kind, EditorBlockKind::Paragraph);
+        assert!(blocks[1].read_only && blocks[3].read_only && blocks[4].read_only);
+    }
 
     fn fixture() -> (tempfile::TempDir, Bundle) {
         let temp = tempfile::tempdir().unwrap();
