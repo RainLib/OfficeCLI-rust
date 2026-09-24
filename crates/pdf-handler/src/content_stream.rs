@@ -970,6 +970,12 @@ pub fn encode_chunk_with_font(
             return Ok(format_pdf_hex_bytes(&bytes));
         }
 
+        if !font.type_is(b"Font") {
+            return Err(HandlerError::OperationFailed(format!(
+                "font '{}' has no Type=Font dictionary",
+                font_name
+            )));
+        }
         let encoding = font.get_font_encoding(doc).map_err(|e| {
             HandlerError::OperationFailed(format!(
                 "failed to resolve encoding for '{}': {:?}",
@@ -1104,9 +1110,11 @@ pub fn pick_fonts_for_text(
 
         // 3. If not subsetted, check via standard encoding
         if let Some(font_dict) = page_fonts.get(font_name) {
-            if let Ok(encoding) = font_dict.get_font_encoding(doc) {
-                if font_supports_char_via_encoding(&encoding, ch) {
-                    return true;
+            if font_dict.type_is(b"Font") {
+                if let Ok(encoding) = font_dict.get_font_encoding(doc) {
+                    if font_supports_char_via_encoding(&encoding, ch) {
+                        return true;
+                    }
                 }
             }
         }
@@ -2385,8 +2393,10 @@ fn parse_page_content_stream_inner(
     if let Ok(fonts) = doc.get_page_fonts(page_id) {
         for (name, font) in fonts {
             let font_name = String::from_utf8_lossy(&name).to_string();
-            if let Ok(encoding) = font.get_font_encoding(doc) {
-                encodings.insert(font_name.clone(), encoding);
+            if font.type_is(b"Font") {
+                if let Ok(encoding) = font.get_font_encoding(doc) {
+                    encodings.insert(font_name.clone(), encoding);
+                }
             }
             if let Ok(to_unicode) = font.get(b"ToUnicode") {
                 if let Ok(ref_id) = to_unicode.as_reference() {

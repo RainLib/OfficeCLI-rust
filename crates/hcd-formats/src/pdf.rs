@@ -134,11 +134,19 @@ where
         let left = x - self.page_llx;
         let top = self.page_height - (y - self.page_lly) - height;
         let kind = xobject_kind.as_str();
+        // HTML attributes use f32's shortest decimal representation. Hash that
+        // exact representation so a later patch parses the same geometry back.
+        let html_number = |value: f32| -> Result<f64, HcdError> {
+            value
+                .to_string()
+                .parse()
+                .map_err(|_| HcdError::InvalidBundle("non-finite PDF image geometry".to_string()))
+        };
         let geometry = hcd_core::ImageGeometry {
-            x: left as f64,
-            y: top as f64,
-            width: width as f64,
-            height: height as f64,
+            x: html_number(left)?,
+            y: html_number(top)?,
+            width: html_number(width)?,
+            height: html_number(height)?,
             unit: hcd_core::ImageGeometryUnit::Pt,
         };
         let node_hash = hash_bytes(b"");
@@ -484,8 +492,14 @@ where
     let mut raster_fallbacks = Vec::new();
     let mut assets = BTreeMap::<String, AssetDescriptor>::new();
     for page in 1..=reader.page_count() {
-        let (page_width, page_height, llx, lly) =
+        let (raw_page_width, raw_page_height, llx, lly) =
             pdf_handler::html_preview::page_dimensions(&reader, page);
+        // The source page box is unrotated. Hayro applies /Rotate while rendering,
+        // so its output dimensions must also drive the raster canvas and preview.
+        let rendered_dimensions = raster_pdf
+            .as_ref()
+            .and_then(|pdf| pdf.pages().get(page - 1))
+            .map(|page| page.render_dimensions());
         let mut parsed = reader
             .parse_page_text_blocks_bounded(
                 page,
@@ -497,8 +511,8 @@ where
             match render_page_raster(
                 pdf,
                 page - 1,
-                page_width,
-                page_height,
+                rendered_dimensions.map_or(raw_page_width, |size| size.0),
+                rendered_dimensions.map_or(raw_page_height, |size| size.1),
                 options.pdf_raster_mode,
                 options.pdf_raster_quality,
             ) {
@@ -524,6 +538,11 @@ where
                 )
                 .map_err(pdf_parse_error)?;
         }
+        let (page_width, page_height) = if page_raster.is_some() {
+            rendered_dimensions.unwrap_or((raw_page_width, raw_page_height))
+        } else {
+            (raw_page_width, raw_page_height)
+        };
         let mut rendered_images = Vec::with_capacity(parsed.image_blocks.len());
         for image in &parsed.image_blocks {
             let mut href = None;
@@ -920,7 +939,7 @@ mod tests {
         ));
         let content_id = document.add_object(Stream::new(
             dictionary! {},
-            b"0.1 0.6 0.9 rg 0 0 200 300 re f q 40 0 0 30 10 20 cm /Im1 Do Q BT /F1 12 Tf 20 250 Td (Hello HCD) Tj ET".to_vec(),
+            b"0.1 0.6 0.9 rg 0 0 200 300 re f q 40 0 0 30 10 20.123456 cm /Im1 Do Q BT /F1 12 Tf 20 250 Td (Hello HCD) Tj ET".to_vec(),
         ));
         let resources_id = document.add_object(dictionary! {
             "Font" => dictionary! { "F1" => font_id },
@@ -992,8 +1011,9 @@ mod tests {
         assert!(html.contains("data-hcd-node-kind=\"pdf-image\""));
         assert!(html.contains("data-hcd-source-path=\"/page[1]/image[1]\""));
         assert!(html.contains("data-hcd-xobject=\"Im1\""));
-        assert!(html.contains("data-hcd-transform=\"40,0,0,30,10,20\""));
+        assert!(html.contains("data-hcd-transform=\"40,0,0,30,10,20.123"));
         assert!(html.contains("data-hcd-geometry=\"xobject-ctm\""));
+        assert_eq!(hcd_core::extract_html_image_nodes(&html).unwrap().len(), 1);
 
         let source_map = bundle.read_map(&index.chunks[0]).unwrap();
         assert_eq!(source_map.entries.len(), 2);
