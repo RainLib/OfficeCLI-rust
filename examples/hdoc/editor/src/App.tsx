@@ -83,14 +83,33 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   }, [editor, readOnly])
   useEffect(() => {
     const connection = ({ status: next }: { status: string }) => setStatus(next === 'connected' ? '已连接' : '连接中')
+    const saveState = ({ payload }: { payload: string }) => {
+      let message: { type?: string; status?: string; revision?: number }
+      try { message = JSON.parse(payload) } catch { return }
+      if (message.type !== 'hcd-save-status') return
+      if (message.status === 'editing') setStatus('编辑中')
+      if (message.status === 'saving') setStatus('保存中')
+      if (message.status === 'failed') {
+        setStatus('保存失败')
+        setError('自动保存失败，正在重试')
+      }
+      if (message.status === 'saved') {
+        setStatus('已保存')
+        setError(previous => previous === '自动保存失败，正在重试' ? '' : previous)
+        if (Number.isSafeInteger(message.revision)) {
+          setRevision(previous => Math.max(previous ?? 0, message.revision!))
+        }
+      }
+    }
     const refreshPresence = () => setPresence(Array.from(provider.awareness?.getStates().values() || [])
       .map(value => value.user as { name?: string; color?: string } | undefined)
       .filter((value): value is { name: string; color: string } => Boolean(value?.name && value?.color)))
     provider.on('status', connection)
     provider.on('synced', () => setStatus('已同步'))
+    provider.on('stateless', saveState)
     provider.awareness?.on('change', refreshPresence)
     refreshPresence()
-    return () => { provider.off('status', connection); provider.awareness?.off('change', refreshPresence); provider.destroy(); ydoc.destroy() }
+    return () => { provider.off('status', connection); provider.off('stateless', saveState); provider.awareness?.off('change', refreshPresence); provider.destroy(); ydoc.destroy() }
   }, [provider, ydoc])
   useEffect(() => {
     let alive = true
