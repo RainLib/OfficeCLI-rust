@@ -60,6 +60,8 @@ The built-in app uses the Vite proxy for `/v1`. Products can import `EmbeddedHcd
 
 PDF and PPTX text boxes use the same Tiptap/ProseMirror editing core as DOCX, scoped to one fixed-page text node. Their current patch protocol stores plain text only, so the strict box schema prevents formatting from being silently lost. Select a mapped text node, type, undo with `Cmd/Ctrl+Z`, and save; the updated page and revision should appear immediately. The reference screenshot is `docs/screenshots/hcd-fixed-tiptap-text-box.jpg`.
 
+PDF editing mounts Tiptap inside the selected canonical page text element in the sandboxed preview frame. The page raster is masked at that element while editing, so the text appears once at its page position; save from the top bar or use `Cmd/Ctrl+Enter`, and use `Esc` to cancel. The direct-node screenshot is `docs/screenshots/hcd-pdf-direct-node-edit.jpg`.
+
 For PDF, **插入 → 新增文字框** places a plain-text box on the original page. Type in place, save, then click the box again to edit it. The `hcd-patch/5` `pdf.text.insert` operation assigns a stable node ID and records page coordinates; PDF export draws the box at those coordinates. The rendered fixture export is at `docs/screenshots/hcd-pdf-text-insert-export.png`. This operation adds text to an existing page; it does not add a PDF page. Lines and tables in a raster-backed PDF remain page artwork rather than editable table cells, so PDF cell merging is not supported by this operation.
 
 ## Storage and save flow

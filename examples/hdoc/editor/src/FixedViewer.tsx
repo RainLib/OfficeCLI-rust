@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent } from 'react'
+import { createPortal } from 'react-dom'
 import type { Editor } from '@tiptap/core'
 import { redo, undo } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
@@ -208,7 +209,34 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   const [pageHeightPt, setPageHeightPt] = useState(0)
   const [primaryPage, setPrimaryPage] = useState(false)
   const [nodes, setNodes] = useState<TextNode[]>([])
+  const [directTarget, setDirectTarget] = useState<HTMLElement | null>(null)
+  const [newTarget, setNewTarget] = useState<HTMLElement | null>(null)
   const marker = useRef<HTMLDivElement>(null)
+  const frame = useRef<HTMLIFrameElement>(null)
+  function findDirectTarget() {
+    if (session.format !== 'pdf' || !selected) { setDirectTarget(null); return }
+    const target = frame.current?.contentDocument?.querySelector<HTMLElement>(`.hcd-pdf-text[data-hcd-text-node="${selected.nodeId}"]`)
+    setDirectTarget(target || null)
+  }
+  useEffect(() => { findDirectTarget() }, [selected?.nodeId, session.format, srcDoc])
+  useEffect(() => {
+    if (session.format !== 'pdf' || !newBox || !primaryPage || newBox.page !== pageNumber) {
+      setNewTarget(null)
+      return
+    }
+    const page = frame.current?.contentDocument?.querySelector<HTMLElement>('.hcd-pdf-page[data-hcd-continuation="false"]')
+    if (!page) return
+    const target = page.ownerDocument.createElement('p')
+    target.className = 'hcd-pdf-text hcd-draft-text'
+    Object.assign(target.style, {
+      position: 'absolute', left: newBox.left, top: newBox.top, width: newBox.width,
+      height: newBox.height, fontSize: `${newBox.fontSizePt}pt`,
+      fontFamily: 'Arial, Helvetica, sans-serif', lineHeight: newBox.height,
+    })
+    page.append(target)
+    setNewTarget(target)
+    return () => target.remove()
+  }, [session.format, newBox, primaryPage, pageNumber, srcDoc])
   useEffect(() => {
     const node = marker.current
     if (!node) return
@@ -268,7 +296,8 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
         setPrimaryPage(canvas?.getAttribute('data-hcd-continuation') === 'false')
         const heightPt = html.match(/height:([0-9.]+)pt/)?.[1]
         if (heightPt) setFrameHeight(Math.max(200, Math.ceil(Number(heightPt) * 4 / 3) + 4))
-        setSrcDoc(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}${safeCss}</style></head><body data-hcd-image-hitboxes="off" data-hcd-text-hitboxes="off">${html}</body></html>`)
+        const directCss = session.format === 'pdf' ? `.hcd-pdf-page[data-hcd-source-raster="true"] .hcd-pdf-text:has(>.hcd-direct-editor),.hcd-draft-text{background:#fff!important;color:#111!important;z-index:4;outline:1px solid #1769e8;outline-offset:1px}.hcd-pdf-text:has(>.hcd-direct-editor)>span[data-hcd-id]{display:none}.hcd-direct-editor{display:block;width:100%;min-width:max-content;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text{outline:0;min-height:inherit;padding:0;margin:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text p{position:static!important;margin:0;padding:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}` : ''
+        setSrcDoc(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}${safeCss}${directCss}</style></head><body data-hcd-image-hitboxes="off" data-hcd-text-hitboxes="off">${html}</body></html>`)
       }
     }
     void render().catch(cause => { if (live) setSrcDoc(`<p style="padding:24px;color:#b33">${String(cause).replaceAll('<', '&lt;')}</p>`) })
@@ -285,13 +314,16 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
     onPlace({ page: pageNumber, xPt, yPt: pageHeightPt - topPt - heightPt, widthPt, heightPt,
       fontSizePt: 12, left: `${xPt}pt`, top: `${topPt}pt`, width: `${widthPt}pt`, height: `${heightPt}pt` })
   }
+  // PDF needs same-origin DOM access for the portal; scripts remain disabled by the sandbox.
+  const frameSandbox = session.format === 'pdf' ? 'allow-same-origin' : ''
   return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? frameHeight : 900, width: session.format === 'pdf' && srcDoc ? canvasWidth : undefined }}>
-    {srcDoc ? <iframe sandbox="" title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight }} />
+    {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight }} onLoad={findDirectTarget} />
       : <div className="skeleton">第 {descriptor.sequence + 1} 个分片</div>}
+    {!readOnly && session.format === 'pdf' && selected && directTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /></div>, directTarget)}
+    {!readOnly && session.format === 'pdf' && newBox && newTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /></div>, newTarget)}
     {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => selected?.nodeId === node.nodeId ? null : <button key={node.nodeId} className="fixed-page-hitbox" style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`编辑文字：${node.text.slice(0, 48) || '空文字框'}`} title={node.text || '空文字框'} onClick={() => onSelect(node)} />)}
       {placingText && session.format === 'pdf' && primaryPage && <button className="fixed-placement-layer" aria-label={`在第 ${pageNumber} 页放置新文字框`} onClick={place} />}
-      {selected?.left && selected.top && selected.width && selected.height && <div className="fixed-inline-editor" style={{ left: selected.left, top: selected.top, width: selected.width, maxWidth: `calc(100% - ${selected.left})`, minHeight: selected.height, fontSize: selected.fontSize, fontFamily: selected.fontFamily, fontWeight: selected.fontWeight, fontStyle: selected.fontStyle, color: selected.color, lineHeight: selected.lineHeight }}><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div className="fixed-inline-actions"><button onClick={onCancel} disabled={saving}>取消</button><button className="primary" onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}>{saving ? '保存中…' : '保存'}</button></div></div>}
-      {newBox?.page === pageNumber && primaryPage && <div className="fixed-inline-editor fixed-new-text" style={{ left: newBox.left, top: newBox.top, width: newBox.width, minHeight: newBox.height, fontSize: `${newBox.fontSizePt}pt`, fontFamily: 'Arial, Helvetica, sans-serif', lineHeight: newBox.height }}><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /><div className="fixed-inline-actions"><button onClick={onCancelNew} disabled={saving}>取消</button><button className="primary" onClick={() => onSaveNew(newBox, newDraft)} disabled={saving || !newDraft.trim()}>{saving ? '保存中…' : '新增'}</button></div></div>}
+      {session.format !== 'pdf' && selected?.left && selected.top && selected.width && selected.height && <div className="fixed-inline-editor" style={{ left: selected.left, top: selected.top, width: selected.width, maxWidth: `calc(100% - ${selected.left})`, minHeight: selected.height, fontSize: selected.fontSize, fontFamily: selected.fontFamily, fontWeight: selected.fontWeight, fontStyle: selected.fontStyle, color: selected.color, lineHeight: selected.lineHeight }}><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div className="fixed-inline-actions"><button onClick={onCancel} disabled={saving}>取消</button><button className="primary" onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}>{saving ? '保存中…' : '保存'}</button></div></div>}
     </div>}
     {!readOnly && nodes.some(node => node.editable && (!node.left || !node.top || !node.width || !node.height)) && <div className="fixed-text-panel"><strong>第 {descriptor.sequence + 1} 页未定位文字</strong><div className="fixed-text-list">{nodes.filter(node => node.editable && (!node.left || !node.top || !node.width || !node.height)).map(node => <button key={node.nodeId} className={selected?.nodeId === node.nodeId ? 'selected' : ''} onClick={() => onSelect(node)} title={node.nodeId}>{node.text || '（空文字框）'}</button>)}</div>{selected && (!selected.left || !selected.top || !selected.width || !selected.height) && <div className="fixed-text-form"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div><button onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}>保存</button><button onClick={onCancel}>取消</button></div></div>}</div>}
     {!readOnly && srcDoc && nodes.length === 0 && session.format === 'pdf' && <div className="fixed-text-panel">本页没有可映射的文字节点；扫描图像里的文字需要 OCR 后才能编辑。</div>}
