@@ -104,6 +104,14 @@ impl PdfHandler {
         )
     }
 
+    pub fn add_white_masks(
+        &self,
+        page_num: usize,
+        masks: &[(f32, f32, f32, f32)],
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_white_masks(self.reader.borrow_mut().document_mut(), page_num, masks)
+    }
+
     pub fn add_link_annotation(
         &self,
         page_num: usize,

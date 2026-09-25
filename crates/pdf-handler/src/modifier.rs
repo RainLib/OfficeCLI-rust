@@ -1153,6 +1153,49 @@ pub fn add_code_panel(
     write_content_to_page(doc, page_id, &new_content)
 }
 
+/// Draw opaque white rectangles over the original page before adding HCD text.
+/// All masks on one page are appended in a single content rewrite.
+pub fn add_white_masks(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    masks: &[(f32, f32, f32, f32)],
+) -> Result<(), HandlerError> {
+    if masks.is_empty() {
+        return Ok(());
+    }
+    for &(x, y, width, height) in masks {
+        if [x, y, width, height].iter().any(|value| !value.is_finite())
+            || x < 0.0
+            || y < 0.0
+            || width <= 0.0
+            || height <= 0.0
+            || x + width > 14_402.0
+            || y + height > 14_402.0
+        {
+            return Err(HandlerError::InvalidArgument(
+                "PDF text mask dimensions are invalid".to_string(),
+            ));
+        }
+    }
+    let page_id = *doc
+        .get_pages()
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|error| HandlerError::OperationFailed(format!("page content read: {error}")))?;
+    let mut drawing = String::with_capacity(masks.len().saturating_mul(72));
+    for &(x, y, width, height) in masks {
+        drawing.push_str(&format!(
+            "\nq 1 1 1 rg {x:.2} {y:.2} {width:.2} {height:.2} re f Q\n"
+        ));
+    }
+    let mut updated = Vec::with_capacity(content.len() + drawing.len());
+    updated.extend_from_slice(&content);
+    updated.extend_from_slice(drawing.as_bytes());
+    write_content_to_page(doc, page_id, &updated)
+}
+
 /// Add a safe URI link annotation and a visible underline to the page.
 pub fn add_link_annotation(
     doc: &mut LopdfDocument,

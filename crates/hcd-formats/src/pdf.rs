@@ -873,6 +873,9 @@ struct PdfOverlayPosition {
     page: usize,
     x: f32,
     y: f32,
+    width: f32,
+    height: f32,
+    page_width: f32,
     size: f32,
 }
 
@@ -881,6 +884,14 @@ fn pdf_html_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let start = tag.find(&needle)? + needle.len();
     let end = tag[start..].find('"')? + start;
     Some(&tag[start..end])
+}
+
+fn pdf_style_point(style: &str, name: &str) -> Option<f32> {
+    style
+        .split(';')
+        .find_map(|property| property.trim().strip_prefix(name))
+        .and_then(|value| value.strip_suffix("pt"))
+        .and_then(|value| value.parse::<f32>().ok())
 }
 
 fn pdf_overlay_position(
@@ -960,18 +971,52 @@ fn pdf_overlay_position(
     }
     let style = pdf_html_attribute(tag, "style")
         .ok_or_else(|| HcdError::InvalidBundle("PDF overlay lacks style".to_string()))?;
-    let size = style
-        .split(';')
-        .find_map(|property| property.trim().strip_prefix("font-size:"))
-        .and_then(|value| value.strip_suffix("pt"))
-        .and_then(|value| value.parse::<f32>().ok())
+    let size = pdf_style_point(style, "font-size:")
         .ok_or_else(|| HcdError::InvalidBundle("PDF overlay lacks point font size".to_string()))?;
     if !size.is_finite() || !(1.0..=256.0).contains(&size) {
         return Err(HcdError::InvalidBundle(
             "PDF overlay font size is outside bounds".to_string(),
         ));
     }
-    Ok(PdfOverlayPosition { page, x, y, size })
+    let section_start = html[..start]
+        .rfind("<section class=\"hcd-pdf-page\"")
+        .ok_or_else(|| HcdError::InvalidBundle("PDF overlay has no page section".to_string()))?;
+    let section_end = html[section_start..]
+        .find('>')
+        .map(|offset| section_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PDF page section is unclosed".to_string()))?;
+    if section_end >= start {
+        return Err(HcdError::InvalidBundle(
+            "PDF overlay page section is invalid".to_string(),
+        ));
+    }
+    let section = &html[section_start..=section_end];
+    let page_label = page.to_string();
+    if pdf_html_attribute(section, "data-hcd-page") != Some(page_label.as_str()) {
+        return Err(HcdError::InvalidBundle(
+            "PDF overlay page does not match its section".to_string(),
+        ));
+    }
+    let page_width = pdf_html_attribute(section, "style")
+        .and_then(|style| pdf_style_point(style, "width:"))
+        .ok_or_else(|| HcdError::InvalidBundle("PDF page lacks point width".to_string()))?;
+    if !page_width.is_finite()
+        || !(1.0..=14_400.0).contains(&page_width)
+        || x + width > page_width + 0.1
+    {
+        return Err(HcdError::InvalidBundle(
+            "PDF overlay exceeds its page width".to_string(),
+        ));
+    }
+    Ok(PdfOverlayPosition {
+        page,
+        x,
+        y,
+        width,
+        height,
+        page_width,
+        size,
+    })
 }
 
 fn pdf_overlay_positions(
@@ -1041,6 +1086,7 @@ pub(crate) fn export_pdf(
         .suffix(".pdf")
         .tempfile_in(parent)?;
     std::fs::copy(source, temp.path())?;
+    let mut masked_overlays = false;
     if !nodes.is_empty() {
         let temp_path = temp.path().to_str().ok_or_else(|| {
             HcdError::InvalidBundle("temporary PDF path is not UTF-8".to_string())
@@ -1066,8 +1112,47 @@ pub(crate) fn export_pdf(
                 )));
             }
         }
+        // Keep source-backed export in the same visual order as the raster preview:
+        // original artwork, white text-box masks, then HCD-only text.
+        let mut masks: BTreeMap<usize, Vec<(f32, f32, f32, f32)>> = BTreeMap::new();
+        for node in &added_text {
+            if node.text.is_empty() {
+                continue;
+            }
+            let position = overlay_positions.get(&node.node_id).ok_or_else(|| {
+                HcdError::InvalidBundle(format!("PDF overlay {} is missing", node.node_id))
+            })?;
+            let estimated_width: f32 = node
+                .text
+                .chars()
+                .map(|character| {
+                    if character.is_ascii() {
+                        position.size * 0.6
+                    } else {
+                        position.size
+                    }
+                })
+                .sum();
+            let cover_width = position
+                .width
+                .max(estimated_width)
+                .min(position.page_width - position.x)
+                + 2.0;
+            masks.entry(position.page).or_default().push((
+                (position.x - 1.0).max(0.0),
+                (position.y - 1.0).max(0.0),
+                cover_width,
+                position.height + 2.0,
+            ));
+        }
+        masked_overlays = !masks.is_empty();
+        for (page, rectangles) in masks {
+            handler
+                .add_white_masks(page, &rectangles)
+                .map_err(|error| HcdError::Unsupported(error.to_string()))?;
+        }
         // Adding a text block changes the PDF content stream's text ordinals.
-        // Rewrite original mapped blocks first, then append HCD-only boxes.
+        // Original mapped blocks have already been rewritten above.
         for node in added_text {
             let position = overlay_positions.get(&node.node_id).ok_or_else(|| {
                 HcdError::InvalidBundle(format!("PDF overlay {} is missing", node.node_id))
@@ -1101,6 +1186,16 @@ pub(crate) fn export_pdf(
     temp.persist(target)
         .map_err(|error| HcdError::Io(error.error))?;
 
+    let mut warnings = manifest.warnings;
+    if masked_overlays {
+        warnings.push(FidelityWarning {
+            code: "HCD_PDF_VISUAL_MASK_NOT_REDACTION".to_string(),
+            message: "new HCD text boxes visually mask covered source artwork; underlying original PDF text remains extractable and this is not redaction".to_string(),
+            node_id: None,
+            source_part: None,
+        });
+    }
+
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if dirty_parts.is_empty() {
@@ -1117,7 +1212,7 @@ pub(crate) fn export_pdf(
                 .to_string(),
         ],
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
-        warnings: manifest.warnings,
+        warnings,
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
