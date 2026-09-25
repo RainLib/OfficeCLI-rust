@@ -231,6 +231,22 @@ pub struct PatchBatch {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PptxShapeGeometry {
+    pub x_emu: u64,
+    pub y_emu: u64,
+    pub width_emu: u64,
+    pub height_emu: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PptxShapePrecondition {
+    pub node_hash: String,
+    pub geometry: PptxShapeGeometry,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum PatchOperation {
@@ -266,6 +282,13 @@ pub enum PatchOperation {
         font_size_pt: f32,
         text: String,
     },
+    /// Move or resize one positioned slide text shape without changing its node ID.
+    #[serde(rename = "pptx.shape.geometry", rename_all = "camelCase")]
+    PptxShapeGeometry {
+        node_id: String,
+        geometry: PptxShapeGeometry,
+        precondition: PptxShapePrecondition,
+    },
     /// Merge a rectangle of existing XLSX cells. Covered cells must be empty.
     /// Coordinates are 1-based worksheet row and column numbers.
     #[serde(rename = "xlsx.merge", rename_all = "camelCase")]
@@ -278,7 +301,7 @@ pub enum PatchOperation {
         end_column: u32,
         precondition: NodePrecondition,
     },
-    /// Split an HCD-created merge while retaining its anchor cell and text.
+    /// Split a merge while retaining its anchor cell and text.
     #[serde(rename = "xlsx.unmerge", rename_all = "camelCase")]
     XlsxUnmerge {
         node_id: String,
@@ -364,6 +387,7 @@ impl PatchOperation {
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
+            | Self::PptxShapeGeometry { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
             | Self::XlsxUnmerge { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
@@ -387,6 +411,7 @@ impl PatchOperation {
             Self::TextSplice { .. }
                 | Self::PdfTextInsert { .. }
                 | Self::PptxTextInsert { .. }
+                | Self::PptxShapeGeometry { .. }
                 | Self::XlsxMerge { .. }
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }

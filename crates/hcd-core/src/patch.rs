@@ -9,13 +9,14 @@ use crate::{
     ApplyResult, AssetDescriptor, FidelityWarning, GridColumnDeletion, GridColumnInsertion,
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
-    NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
-    TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
-    HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
-    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
-    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
-    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
-    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    NodeStylePatch, PatchBatch, PatchOperation, PptxShapeGeometry, RevisionRecord, SourceAnchor,
+    TextExtractEntry, TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION,
+    HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
+    HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
+    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_2,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -73,6 +74,13 @@ struct PptxTextInsertion {
     height_emu: u64,
     font_size_hundredths: u32,
     text: String,
+}
+
+#[derive(Clone)]
+struct PptxGeometryChange {
+    geometry: PptxShapeGeometry,
+    expected: PptxShapeGeometry,
+    node_hash: String,
 }
 
 #[derive(Clone)]
@@ -169,6 +177,7 @@ pub fn apply_patch(
                 operation,
                 PatchOperation::PdfTextInsert { .. }
                     | PatchOperation::PptxTextInsert { .. }
+                    | PatchOperation::PptxShapeGeometry { .. }
                     | PatchOperation::XlsxCellSet { .. }
                     | PatchOperation::XlsxRowAppend { .. }
                     | PatchOperation::XlsxRowRemoveLast { .. }
@@ -211,6 +220,7 @@ pub fn apply_patch(
     let images = collect_image_changes(patch)?;
     let pdf_insertions = collect_pdf_insertions(patch);
     let pptx_insertions = collect_pptx_insertions(patch);
+    let pptx_geometry = collect_pptx_geometry(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch);
@@ -278,6 +288,7 @@ pub fn apply_patch(
         .chain(images.keys().cloned())
         .chain(xlsx_merges.keys().cloned())
         .chain(xlsx_unmerges.keys().cloned())
+        .chain(pptx_geometry.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
         .collect();
 
@@ -289,6 +300,7 @@ pub fn apply_patch(
         || !images.is_empty()
         || !pdf_insertions.is_empty()
         || !pptx_insertions.is_empty()
+        || !pptx_geometry.is_empty()
         || !xlsx_merges.is_empty()
         || !xlsx_unmerges.is_empty()
         || xlsx_cell_set.is_some()
@@ -567,6 +579,23 @@ pub fn apply_patch(
                 }
                 if let Some(change) = style_change {
                     apply_node_style(&mut html, &entry.node_id, &change.style)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = pptx_geometry.get(&entry.node_id) {
+                    if entry.source.node_kind != "slide-text" || !entry.source.editable {
+                        return Err(HcdError::Unsupported(
+                            "PPTX geometry requires an editable slide text shape".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PPTX text node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_pptx_shape_geometry(&mut html, entry, change)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1440,6 +1469,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_14
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_16
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_17
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1606,6 +1636,31 @@ fn validate_patch_identity(
                 inserted = inserted.checked_add(text.len()).ok_or_else(|| {
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
+            }
+            PatchOperation::PptxShapeGeometry {
+                node_id,
+                geometry,
+                precondition,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_17
+                    || manifest.source.format != "pptx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.shape.geometry requires one operation on a PPTX bundle with hcd-patch/17"
+                            .to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                if !valid_pptx_geometry(*geometry)
+                    || !valid_pptx_geometry(precondition.geometry)
+                    || *geometry == precondition.geometry
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "PPTX shape geometry is invalid or unchanged".to_string(),
+                    ));
+                }
             }
             PatchOperation::XlsxMerge {
                 node_id,
@@ -2243,6 +2298,38 @@ fn collect_pptx_insertions(patch: &PatchBatch) -> HashMap<String, Vec<PptxTextIn
             });
     }
     grouped
+}
+
+fn collect_pptx_geometry(patch: &PatchBatch) -> HashMap<String, PptxGeometryChange> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::PptxShapeGeometry {
+                node_id,
+                geometry,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                PptxGeometryChange {
+                    geometry: *geometry,
+                    expected: precondition.geometry,
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn valid_pptx_geometry(geometry: PptxShapeGeometry) -> bool {
+    geometry.x_emu <= 100_000_000
+        && geometry.y_emu <= 100_000_000
+        && (1..=100_000_000).contains(&geometry.width_emu)
+        && (1..=100_000_000).contains(&geometry.height_emu)
 }
 
 fn collect_xlsx_merges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
@@ -4157,6 +4244,175 @@ fn insert_pptx_text(
     Ok(())
 }
 
+fn update_pptx_shape_geometry(
+    html: &mut String,
+    entry: &mut NodeMapEntry,
+    change: &PptxGeometryChange,
+) -> Result<(), HcdError> {
+    let slide_end = html
+        .find('>')
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX slide section is not closed".to_string()))?;
+    let slide_tag = &html[..=slide_end];
+    if !slide_tag.starts_with("<section class=\"hcd-slide\"")
+        || xlsx_attribute(slide_tag, "data-hcd-source-part") != Some(entry.source.part.as_str())
+    {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide section does not match the source map".to_string(),
+        ));
+    }
+    let slide_dimension = |name: &str| -> Result<u64, HcdError> {
+        xlsx_attribute(slide_tag, name)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {name} is missing")))
+    };
+    let slide_width = slide_dimension("data-hcd-width-emu")?;
+    let slide_height = slide_dimension("data-hcd-height-emu")?;
+    if change
+        .geometry
+        .x_emu
+        .checked_add(change.geometry.width_emu)
+        .is_none_or(|end| end > slide_width)
+        || change
+            .geometry
+            .y_emu
+            .checked_add(change.geometry.height_emu)
+            .is_none_or(|end| end > slide_height)
+    {
+        return Err(HcdError::InvalidPatch(
+            "PPTX text shape must stay inside the slide".to_string(),
+        ));
+    }
+
+    let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
+    let node_offset = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle(format!("PPTX text node {} is missing", entry.node_id))
+    })?;
+    let mut open_divs = Vec::new();
+    let mut cursor = slide_end + 1;
+    while cursor < node_offset {
+        let opening = html[cursor..node_offset]
+            .find("<div")
+            .map(|offset| cursor + offset);
+        let closing = html[cursor..node_offset]
+            .find("</div>")
+            .map(|offset| cursor + offset);
+        if closing.is_some_and(|close| opening.is_none_or(|open| close < open)) {
+            cursor = closing.expect("checked above") + "</div>".len();
+            open_divs.pop().ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX slide has an unmatched closing div".to_string())
+            })?;
+            continue;
+        }
+        let Some(opening) = opening else { break };
+        let end = html[opening..]
+            .find('>')
+            .map(|offset| opening + offset)
+            .ok_or_else(|| HcdError::InvalidBundle("PPTX shape tag is not closed".to_string()))?;
+        open_divs.push((opening, end));
+        cursor = end + 1;
+    }
+    let (start, end) = open_divs
+        .into_iter()
+        .rev()
+        .find(|(start, end)| html[*start..=*end].starts_with("<div class=\"hcd-slide-shape\""))
+        .ok_or_else(|| {
+            HcdError::Unsupported("PPTX text is not inside a positioned shape".to_string())
+        })?;
+    let mut tag = html[start..=end].to_string();
+    let number = |name: &str| -> Result<u64, HcdError> {
+        xlsx_attribute(&tag, name)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| HcdError::Unsupported(format!("PPTX shape has no {name}")))
+    };
+    let current = PptxShapeGeometry {
+        x_emu: number("data-hcd-x-emu")?,
+        y_emu: number("data-hcd-y-emu")?,
+        width_emu: number("data-hcd-width-emu")?,
+        height_emu: number("data-hcd-height-emu")?,
+    };
+    if current != change.expected {
+        return Err(HcdError::PreconditionFailed(
+            "PPTX shape geometry changed since it was selected".to_string(),
+        ));
+    }
+    if entry.source.created_in_hcd {
+        if xlsx_attribute(&tag, "data-hcd-shape-id").is_some() {
+            return Err(HcdError::InvalidBundle(
+                "created PPTX text box has a source shape ID".to_string(),
+            ));
+        }
+        let locator = entry.source.text_id.as_deref().ok_or_else(|| {
+            HcdError::InvalidBundle("created PPTX text box locator is missing".to_string())
+        })?;
+        let values = locator
+            .strip_prefix("hcd-pptx-box:")
+            .and_then(|values| {
+                values
+                    .split(',')
+                    .map(str::parse::<u64>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX text box locator is invalid".to_string())
+            })?;
+        if values.len() != 5
+            || values[..4]
+                != [
+                    current.x_emu,
+                    current.y_emu,
+                    current.width_emu,
+                    current.height_emu,
+                ]
+            || !(100..=25_600).contains(&values[4])
+        {
+            return Err(HcdError::InvalidBundle(
+                "PPTX text box locator differs from its page geometry".to_string(),
+            ));
+        }
+        entry.source.text_id = Some(format!(
+            "hcd-pptx-box:{},{},{},{},{}",
+            change.geometry.x_emu,
+            change.geometry.y_emu,
+            change.geometry.width_emu,
+            change.geometry.height_emu,
+            values[4]
+        ));
+    } else {
+        let shape_id = xlsx_attribute(&tag, "data-hcd-shape-id")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| HcdError::Unsupported("PPTX source shape ID is missing".to_string()))?;
+        let shape_id = shape_id.to_string();
+        if entry.source.paragraph_id.as_deref() != Some(shape_id.as_str()) {
+            return Err(HcdError::InvalidBundle(
+                "PPTX text node does not belong to its shape".to_string(),
+            ));
+        }
+    }
+    let emu_px = |value: u64| format!("{:.2}px", value as f64 * 96.0 / 914_400.0);
+    let updates = BTreeMap::from([
+        ("left".to_string(), emu_px(change.geometry.x_emu)),
+        ("top".to_string(), emu_px(change.geometry.y_emu)),
+        ("width".to_string(), emu_px(change.geometry.width_emu)),
+        ("height".to_string(), emu_px(change.geometry.height_emu)),
+    ]);
+    update_start_tag_style(&mut tag, "data-hcd-x-emu=", &updates, false)?;
+    for (name, value) in [
+        ("data-hcd-x-emu", change.geometry.x_emu),
+        ("data-hcd-y-emu", change.geometry.y_emu),
+        ("data-hcd-width-emu", change.geometry.width_emu),
+        ("data-hcd-height-emu", change.geometry.height_emu),
+    ] {
+        let tag_end = tag.len() - 1;
+        set_attribute_in_range(&mut tag, 0, tag_end, name, &value.to_string())?;
+    }
+    let tag_end = tag.len() - 1;
+    set_attribute_in_range(&mut tag, 0, tag_end, "data-hcd-geometry-edited", "true")?;
+    html.replace_range(start..=end, &tag);
+    Ok(())
+}
+
 fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, HcdError> {
     let mut styles = BTreeMap::new();
     for operation in &patch.operations {
@@ -4692,6 +4948,7 @@ fn apply_annotations(
             PatchOperation::TextSplice { .. }
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::PptxTextInsert { .. }
+            | PatchOperation::PptxShapeGeometry { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
