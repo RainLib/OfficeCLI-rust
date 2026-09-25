@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:16",
+  "title": "HTML Canonical Document patch batch with PPTX text box insertion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/16"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 262144
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/textSplice"
+          },
+          {
+            "$ref": "#/$defs/pptxTextInsert"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^n_[0-9a-f]{32}$"
+    },
+    "precondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeHash"
+      ],
+      "properties": {
+        "nodeHash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "textSplice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "start",
+        "deleteCount",
+        "insertText",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "text.splice"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deleteCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "insertText": {
+          "type": "string",
+          "maxLength": 2097152
+        },
+        "precondition": {
+          "$ref": "#/$defs/precondition"
+        }
+      }
+    },
+    "pptxTextInsert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "chunkId",
+        "slidePart",
+        "xEmu",
+        "yEmu",
+        "widthEmu",
+        "heightEmu",
+        "fontSizePt",
+        "text"
+      ],
+      "properties": {
+        "op": {
+          "const": "pptx.text.insert"
+        },
+        "chunkId": {
+          "type": "string",
+          "pattern": "^c_[0-9a-f]{32}$"
+        },
+        "slidePart": {
+          "type": "string",
+          "pattern": "^ppt/slides/slide[1-9][0-9]*\\.xml$"
+        },
+        "xEmu": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000
+        },
+        "yEmu": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000
+        },
+        "widthEmu": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000000
+        },
+        "heightEmu": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000000
+        },
+        "fontSizePt": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # HCD reference editor and core service
 
-This example runs a self-hosted Tiptap/Yjs editor against the `hcd/2` core API. DOCX, HTML, Markdown, and TXT use the semantic editor. PDF and PPTX use the fixed-layout, window-loaded viewer. XLSX uses the Univer adapter for mapped cell values and bounded cell merging. HCD revisions are immutable; semantic editing creates `hcd-patch/4` checkpoints and does not write browser HTML into a bundle.
+This example runs a self-hosted Tiptap/Yjs editor against the `hcd/2` core API. DOCX, HTML, Markdown, and TXT use the semantic editor. PDF and PPTX use the fixed-layout, window-loaded viewer; both can place and edit positioned text boxes. XLSX uses the Univer adapter for mapped cell values and bounded cell merging. HCD revisions are immutable; semantic editing creates `hcd-patch/4` checkpoints and does not write browser HTML into a bundle.
 
 ## Local run
 
