@@ -457,6 +457,8 @@ mod tests {
 
     fn test_anchor(part: &str, ordinal: u64) -> SourceAnchor {
         SourceAnchor {
+            source_cell_ref: None,
+            created_in_hcd: false,
             part: part.to_string(),
             text_ordinal: ordinal,
             paragraph_id: None,

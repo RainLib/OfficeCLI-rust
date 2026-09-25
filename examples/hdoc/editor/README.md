@@ -94,7 +94,40 @@ unzip -p /tmp/hcd-unmerge-accept/history-r1.xlsx xl/worksheets/sheet3.xml | rg -
 
 An empty cell in a loaded row can now receive its first value directly in Univer, including up to 256 columns after that row's last materialized cell. `hcd-patch/7` creates a stable HCD node for that address; later edits use the normal text patch, and source-backed XLSX export inserts the new `<c>` element or fills an existing empty styled cell. Paste into multiple new cells remains separate work. To reproduce with `assets/showcase/budget-tracker.xlsx`, open the Settings sheet, type `HCD blank cell edit` into B3, press Enter, validate the bundle, then download XLSX. `xl/worksheets/sheet3.xml` must contain B3 as an inline string. Entering `Browser tail edit` in F3 checks the row-tail case. Browser screenshots are `docs/screenshots/hcd-xlsx-blank-cell-edit.png` and `docs/screenshots/hcd-xlsx-tail-cell-edit.png`.
 
-The **插入 → 在末尾新增行** action uses `hcd-patch/8` to append one empty row after the last materialized row of a nonempty worksheet. It commits an HCD revision, enables direct editing of the new row, and source-backed XLSX export adds a corresponding OOXML `<row>` with any subsequently edited cells. The action preserves existing cell addresses; insertion or deletion in the middle of a sheet requires formula, merge, chart, validation, and drawing reference updates and remains separate work.
+The **插入 → 在末尾新增行** action uses `hcd-patch/8` to append one empty row after the last materialized row of a nonempty worksheet. It commits an HCD revision, enables direct editing of the new row, and source-backed XLSX export adds a corresponding OOXML `<row>` with any subsequently edited cells. The action preserves existing cell addresses.
+
+The **插入 → 在选中行前插入** action uses `hcd-patch/12` to insert an empty row before an existing row. HCD keeps mapped node IDs stable, records the original source cell addresses, shifts later rows across chunk windows, and retains historical revisions. Source-backed XLSX export moves the original OOXML rows and cell references, then writes new HCD cells at their current addresses. This first middle-row operation accepts plain value workbooks; formula, merge, drawing, chart, validation, table, defined-name, and coordinate-dependent view references need separate reference rewriting. The browser screenshot is `docs/screenshots/hcd-xlsx-insert-middle-row.png`.
+
+Reproduce with `open-review-usage-2026-09.csv` converted to `/tmp/hcd-middle-row-real.xlsx` using `openpyxl` (three rows, twelve columns):
+
+```bash
+cargo test -p hcd-formats middle_row_insertion_preserves_node_ids_history_and_exported_addresses
+cargo test -p hcd-formats middle_row_insertion_shifts_across_chunk_windows
+cargo test -p hcd-formats xlsx::tests
+cargo build -p officecli
+python3 - <<'PY'
+import csv
+from openpyxl import Workbook
+w = Workbook(); s = w.active; s.title = 'Usage'
+with open('/Users/houshuai/Downloads/open-review-usage-2026-09.csv', encoding='utf-8-sig', newline='') as source:
+    for row in csv.reader(source): s.append(row)
+w.save('/tmp/hcd-middle-row-real.xlsx')
+PY
+mkdir -p /tmp/hcd-row-insert-accept/sources
+target/debug/officecli hdoc import /tmp/hcd-middle-row-real.xlsx \
+  --output /tmp/hcd-row-insert-accept/accept-usage-xlsx.hcd --document-id accept-usage-xlsx
+# Start hdoc serve and Vite with HCD_DEMO_ROOT=/tmp/hcd-row-insert-accept.
+# Open the Usage card, select A2, choose 插入 → 在选中行前插入, then 准备下载.
+target/debug/officecli hdoc validate /tmp/hcd-row-insert-accept/accept-usage-xlsx.hcd
+target/debug/officecli hdoc export /tmp/hcd-row-insert-accept/accept-usage-xlsx.hcd \
+  --source /tmp/hcd-middle-row-real.xlsx --output /tmp/hcd-middle-row-real-export.xlsx
+python3 - <<'PY'
+from openpyxl import load_workbook
+s = load_workbook('/tmp/hcd-middle-row-real-export.xlsx', read_only=True).active
+assert s.max_row == 4 and s.max_column == 12
+assert s['A2'].value is None and s['A3'].value == 'summary'
+PY
+```
 
 The **插入 → 撤销末尾空行** action uses `hcd-patch/10` to remove the final row only when HCD appended it after the original source range and it remains empty. It does not delete source rows or rows containing cells or formatting. The preceding revision remains readable and exportable; the new revision's source-backed XLSX export omits the removed row. To verify, append row 16 after editing A15 in the Settings sheet, leave row 16 empty, then undo it. Attempting to undo row 15 must fail because A15 contains text. The reference screenshot is `docs/screenshots/hcd-xlsx-remove-empty-tail.png`.
 

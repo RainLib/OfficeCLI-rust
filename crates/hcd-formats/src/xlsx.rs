@@ -2379,6 +2379,8 @@ where
                     node_id,
                     node_hash,
                     source: SourceAnchor {
+                        source_cell_ref: None,
+                        created_in_hcd: false,
                         part: picture.drawing_part.clone(),
                         text_ordinal: picture.ordinal,
                         paragraph_id: Some(source_path),
@@ -2555,6 +2557,8 @@ where
                 node_id,
                 node_hash,
                 source: SourceAnchor {
+                    source_cell_ref: None,
+                    created_in_hcd: false,
                     part: chart.chart_part.clone(),
                     text_ordinal: chart.ordinal,
                     paragraph_id: Some(chart.drawing_part.clone()),
@@ -4205,6 +4209,8 @@ fn append_cell(
         node_id,
         node_hash,
         source: SourceAnchor {
+            source_cell_ref: None,
+            created_in_hcd: false,
             part: sheet.part.clone(),
             text_ordinal: ordinal,
             paragraph_id: Some(cell.reference),
@@ -4321,8 +4327,17 @@ pub(crate) fn export_xlsx(
     let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut row_insertions: HashMap<String, Vec<u32>> = HashMap::new();
     for revision in 1..=manifest.revision {
-        for part in bundle.revision(revision)?.dirty_grid_parts {
+        let record = bundle.revision(revision)?;
+        for shift in record.grid_row_insertions {
+            row_insertions
+                .entry(shift.sheet_part)
+                .or_default()
+                .push(shift.before_row);
+        }
+        for part in record.dirty_grid_parts {
             replacements.entry(part).or_default();
         }
     }
@@ -4333,16 +4348,28 @@ pub(crate) fn export_xlsx(
         let cell = node.source.paragraph_id.ok_or_else(|| {
             HcdError::InvalidBundle(format!("XLSX node {} has no cell locator", node.node_id))
         })?;
-        replacements
-            .entry(node.source.part)
-            .or_default()
-            .insert(cell, node.text);
+        if node.source.created_in_hcd {
+            created_cells
+                .entry(node.source.part.clone())
+                .or_default()
+                .insert(cell, node.text);
+            replacements.entry(node.source.part).or_default();
+        } else {
+            let original_cell = node.source.source_cell_ref.unwrap_or(cell);
+            replacements
+                .entry(node.source.part)
+                .or_default()
+                .insert(original_cell, node.text);
+        }
     }
 
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
+    if !row_insertions.is_empty() {
+        verify_middle_row_source(&mut archive, &workbook, &row_insertions)?;
+    }
     let merge_ranges = collect_canonical_merge_ranges(bundle, &manifest, &workbook, &replacements)?;
     let canonical_rows = collect_canonical_sheet_rows(bundle, &manifest, &workbook, &replacements)?;
     let column_widths =
@@ -4361,10 +4388,21 @@ pub(crate) fn export_xlsx(
         let widths = column_widths.get(part).ok_or_else(|| {
             HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical column map"))
         })?;
+        let inserted = created_cells.get(part).cloned().unwrap_or_default();
+        let shifts = row_insertions.get(part).cloned().unwrap_or_default();
         archive
             .with_part(part, |input| {
-                rewrite_worksheet(input, BufWriter::new(output), values, merges, rows, widths)
-                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                rewrite_worksheet(
+                    input,
+                    BufWriter::new(output),
+                    values,
+                    &inserted,
+                    merges,
+                    rows,
+                    widths,
+                    &shifts,
+                )
+                .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
@@ -4381,12 +4419,22 @@ pub(crate) fn export_xlsx(
         },
         preserved: vec![
             "unmodified OOXML entries copied as raw compressed payloads".to_string(),
-            "cell style index, workbook structure, formulas and drawings".to_string(),
+            if row_insertions.is_empty() {
+                "cell style index, workbook structure, formulas and drawings".to_string()
+            } else {
+                "cell style index, workbook structure and original cell identities".to_string()
+            },
         ],
-        flattened: vec![
-            "edited cells are serialized as inline strings regardless of their original storage type"
-                .to_string(),
-        ],
+        flattened: {
+            let mut items = vec![
+                "edited cells are serialized as inline strings regardless of their original storage type"
+                    .to_string(),
+            ];
+            if !row_insertions.is_empty() {
+                items.push("inserted worksheet rows have no inherited row formatting".to_string());
+            }
+            items
+        },
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
         warnings: manifest.warnings,
     };
@@ -4602,22 +4650,26 @@ fn write_merge_cells(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_worksheet(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<String, String>,
+    created_cells: &BTreeMap<String, String>,
     merges: &BTreeSet<String>,
     canonical_rows: &BTreeSet<u32>,
     column_widths: &BTreeMap<u32, f64>,
+    row_insertions: &[u32],
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
     let mut writer = Writer::new(output);
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut skip_depth = 0usize;
-    let mut seen = BTreeSet::new();
+    let mut seen_original = BTreeSet::new();
+    let mut seen_created = BTreeSet::new();
     let mut replacement_rows: BTreeMap<u32, BTreeMap<u32, (String, String)>> = BTreeMap::new();
-    for (reference, text) in replacements {
+    for (reference, text) in created_cells {
         let (row, column) = cell_coordinates(reference).ok_or_else(|| {
             HcdError::InvalidBundle(format!("invalid XLSX cell locator {reference}"))
         })?;
@@ -4635,6 +4687,7 @@ fn rewrite_worksheet(
     let mut row_pending = BTreeMap::new();
     let mut active_row = None;
     let mut last_row = 0u32;
+    let mut last_source_row = 0u32;
     let mut row_cell_name = String::from("c");
     let mut row_name = String::from("row");
     let mut merge_written = false;
@@ -4647,6 +4700,11 @@ fn rewrite_worksheet(
     let canonical_last_column = replacements
         .keys()
         .filter_map(|reference| cell_coordinates(reference).map(|(_, column)| column))
+        .chain(
+            created_cells
+                .keys()
+                .filter_map(|reference| cell_coordinates(reference).map(|(_, column)| column)),
+        )
         .chain(column_widths.keys().copied())
         .max()
         .unwrap_or(0);
@@ -4799,81 +4857,143 @@ fn rewrite_worksheet(
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "row" => {
                 row_name = String::from_utf8_lossy(start.name().as_ref()).to_string();
-                let row = attribute(start, "r")
+                let source_row = attribute(start, "r")
                     .and_then(|value| value.parse::<u32>().ok())
-                    .or_else(|| last_row.checked_add(1))
+                    .or_else(|| last_source_row.checked_add(1))
                     .filter(|row| (1..=1_048_576).contains(row))
                     .ok_or_else(|| {
                         HcdError::InvalidBundle("invalid XLSX row number".to_string())
                     })?;
+                let row = shifted_xlsx_row(source_row, row_insertions)?;
+                row_cell_name = qualified_child_name(start.name().as_ref(), "c");
+                write_missing_xlsx_rows(
+                    &mut writer,
+                    canonical_rows,
+                    &mut replacement_rows,
+                    last_row,
+                    row,
+                    &row_name,
+                    &row_cell_name,
+                    &mut seen_created,
+                )?;
+                last_source_row = source_row;
                 last_row = row;
                 active_row = Some(row);
                 row_pending = replacement_rows.remove(&row).unwrap_or_default();
-                row_cell_name = qualified_child_name(start.name().as_ref(), "c");
-                writer.write_event(event.into_owned())?;
+                writer.write_event(Event::Start(rewrite_xlsx_address_attribute(
+                    start,
+                    &row.to_string(),
+                )?))?;
             }
             Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "row" => {
                 row_name = String::from_utf8_lossy(empty.name().as_ref()).to_string();
-                let row = attribute(empty, "r")
+                let source_row = attribute(empty, "r")
                     .and_then(|value| value.parse::<u32>().ok())
-                    .or_else(|| last_row.checked_add(1))
+                    .or_else(|| last_source_row.checked_add(1))
                     .filter(|row| (1..=1_048_576).contains(row))
                     .ok_or_else(|| {
                         HcdError::InvalidBundle("invalid XLSX row number".to_string())
                     })?;
+                let row = shifted_xlsx_row(source_row, row_insertions)?;
+                row_cell_name = qualified_child_name(empty.name().as_ref(), "c");
+                write_missing_xlsx_rows(
+                    &mut writer,
+                    canonical_rows,
+                    &mut replacement_rows,
+                    last_row,
+                    row,
+                    &row_name,
+                    &row_cell_name,
+                    &mut seen_created,
+                )?;
+                last_source_row = source_row;
                 last_row = row;
                 let mut pending = replacement_rows.remove(&row).unwrap_or_default();
                 if pending.is_empty() {
-                    writer.write_event(event.into_owned())?;
+                    writer.write_event(Event::Empty(rewrite_xlsx_address_attribute(
+                        empty,
+                        &row.to_string(),
+                    )?))?;
                 } else {
                     let name = String::from_utf8_lossy(empty.name().as_ref()).to_string();
-                    let cell_name = qualified_child_name(empty.name().as_ref(), "c");
-                    writer.write_event(Event::Start(empty.to_owned()))?;
-                    flush_new_xlsx_cells(&mut writer, &mut pending, None, &cell_name, &mut seen)?;
+                    writer.write_event(Event::Start(rewrite_xlsx_address_attribute(
+                        empty,
+                        &row.to_string(),
+                    )?))?;
+                    flush_new_xlsx_cells(
+                        &mut writer,
+                        &mut pending,
+                        None,
+                        &row_cell_name,
+                        &mut seen_created,
+                    )?;
                     writer.write_event(Event::End(BytesEnd::new(name)))?;
                 }
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "c" => {
                 let reference = attribute(start, "r").unwrap_or_default();
+                let shifted_reference = shifted_xlsx_cell_reference(&reference, row_insertions)?;
+                let mut created_here = None;
                 if let Some((row, column)) = cell_coordinates(&reference) {
-                    if active_row == Some(row) {
+                    if active_row == Some(shifted_xlsx_row(row, row_insertions)?) {
                         flush_new_xlsx_cells(
                             &mut writer,
                             &mut row_pending,
                             Some(column),
                             &row_cell_name,
-                            &mut seen,
+                            &mut seen_created,
                         )?;
-                        row_pending.remove(&column);
+                        created_here = row_pending.remove(&column);
                     }
                 }
-                if let Some(text) = replacements.get(&reference) {
-                    write_inline_cell(&mut writer, start, text)?;
-                    seen.insert(reference);
+                let shifted = rewrite_xlsx_address_attribute(start, &shifted_reference)?;
+                if let Some((created_ref, text)) = created_here {
+                    if replacements.contains_key(&reference) {
+                        return Err(HcdError::InvalidBundle(format!(
+                            "XLSX cell {reference} is both created and replaced"
+                        )));
+                    }
+                    write_inline_cell(&mut writer, &shifted, &text)?;
+                    seen_created.insert(created_ref);
+                    skip_depth = 1;
+                } else if let Some(text) = replacements.get(&reference) {
+                    write_inline_cell(&mut writer, &shifted, text)?;
+                    seen_original.insert(reference);
                     skip_depth = 1;
                 } else {
-                    writer.write_event(event.into_owned())?;
+                    writer.write_event(Event::Start(shifted))?;
                 }
             }
             Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "c" => {
                 let reference = attribute(empty, "r").unwrap_or_default();
+                let shifted_reference = shifted_xlsx_cell_reference(&reference, row_insertions)?;
+                let mut created_here = None;
                 if let Some((row, column)) = cell_coordinates(&reference) {
-                    if active_row == Some(row) {
+                    if active_row == Some(shifted_xlsx_row(row, row_insertions)?) {
                         flush_new_xlsx_cells(
                             &mut writer,
                             &mut row_pending,
                             Some(column),
                             &row_cell_name,
-                            &mut seen,
+                            &mut seen_created,
                         )?;
-                        row_pending.remove(&column);
+                        created_here = row_pending.remove(&column);
                     }
                 }
-                if let Some(text) = replacements.get(&reference) {
-                    write_inline_cell(&mut writer, empty, text)?;
-                    seen.insert(reference);
+                let shifted = rewrite_xlsx_address_attribute(empty, &shifted_reference)?;
+                if let Some((created_ref, text)) = created_here {
+                    if replacements.contains_key(&reference) {
+                        return Err(HcdError::InvalidBundle(format!(
+                            "XLSX cell {reference} is both created and replaced"
+                        )));
+                    }
+                    write_inline_cell(&mut writer, &shifted, &text)?;
+                    seen_created.insert(created_ref);
+                } else if let Some(text) = replacements.get(&reference) {
+                    write_inline_cell(&mut writer, &shifted, text)?;
+                    seen_original.insert(reference);
                 } else {
-                    writer.write_event(event.into_owned())?;
+                    writer.write_event(Event::Empty(shifted))?;
                 }
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "row" => {
@@ -4882,32 +5002,23 @@ fn rewrite_worksheet(
                     &mut row_pending,
                     None,
                     &row_cell_name,
-                    &mut seen,
+                    &mut seen_created,
                 )?;
                 active_row = None;
                 writer.write_event(event.into_owned())?;
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "sheetData" => {
                 sheet_data_seen = true;
-                for &row in canonical_rows.range((last_row + 1)..) {
-                    let mut pending = replacement_rows.remove(&row).unwrap_or_default();
-                    let mut start = BytesStart::new(row_name.as_str());
-                    let number = row.to_string();
-                    start.push_attribute(("r", number.as_str()));
-                    if pending.is_empty() {
-                        writer.write_event(Event::Empty(start))?;
-                    } else {
-                        writer.write_event(Event::Start(start))?;
-                        flush_new_xlsx_cells(
-                            &mut writer,
-                            &mut pending,
-                            None,
-                            &row_cell_name,
-                            &mut seen,
-                        )?;
-                        writer.write_event(Event::End(BytesEnd::new(row_name.as_str())))?;
-                    }
-                }
+                write_missing_xlsx_rows(
+                    &mut writer,
+                    canonical_rows,
+                    &mut replacement_rows,
+                    last_row,
+                    1_048_577,
+                    &row_name,
+                    &row_cell_name,
+                    &mut seen_created,
+                )?;
                 let name = end.name().as_ref().to_vec();
                 writer.write_event(event.into_owned())?;
                 if !merge_written {
@@ -4931,15 +5042,235 @@ fn rewrite_worksheet(
             "XLSX worksheet is missing sheetData".to_string(),
         ));
     }
-    if seen.len() != replacements.len() {
+    if seen_original.len() != replacements.len() || seen_created.len() != created_cells.len() {
         let missing: Vec<_> = replacements
             .keys()
-            .filter(|cell| !seen.contains(*cell))
+            .filter(|cell| !seen_original.contains(*cell))
+            .chain(
+                created_cells
+                    .keys()
+                    .filter(|cell| !seen_created.contains(*cell)),
+            )
             .cloned()
             .collect();
         return Err(HcdError::InvalidBundle(format!(
             "worksheet is missing mapped cells {missing:?}"
         )));
+    }
+    Ok(())
+}
+
+fn shifted_xlsx_row(mut row: u32, insertions: &[u32]) -> Result<u32, HcdError> {
+    for &before in insertions {
+        if row >= before {
+            row = row
+                .checked_add(1)
+                .filter(|row| *row <= 1_048_576)
+                .ok_or_else(|| {
+                    HcdError::Unsupported(
+                        "XLSX row insertion exceeds the worksheet limit".to_string(),
+                    )
+                })?;
+        }
+    }
+    Ok(row)
+}
+
+fn verify_middle_row_source(
+    archive: &mut StreamingOxmlArchive,
+    workbook: &WorkbookInfo,
+    insertions: &HashMap<String, Vec<u32>>,
+) -> Result<(), HcdError> {
+    for entry in archive.entries() {
+        let name = entry.name.as_str();
+        if name.starts_with("xl/charts/")
+            || name.starts_with("xl/drawings/")
+            || name.starts_with("xl/tables/")
+            || name.starts_with("xl/pivot")
+            || name.starts_with("xl/externalLinks/")
+            || name == "xl/calcChain.xml"
+        {
+            return Err(HcdError::Unsupported(format!(
+                "XLSX middle row insertion cannot update {name}"
+            )));
+        }
+    }
+    let workbook_xml = archive
+        .read_control_part("xl/workbook.xml", MAX_CONTROL_BYTES)
+        .map_err(package_error)?;
+    let mut workbook_reader = Reader::from_reader(workbook_xml.as_slice());
+    let mut workbook_buffer = Vec::new();
+    loop {
+        let event = workbook_reader
+            .read_event_into(&mut workbook_buffer)
+            .map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid XLSX workbook XML: {error}"))
+            })?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "definedName" =>
+            {
+                return Err(HcdError::Unsupported(
+                    "XLSX middle row insertion cannot update defined names".to_string(),
+                ));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        workbook_buffer.clear();
+    }
+    for sheet in &workbook.sheets {
+        let target = insertions.contains_key(&sheet.part);
+        archive
+            .with_part(&sheet.part, |source| {
+                let mut reader = Reader::from_reader(BufReader::new(source));
+                reader.config_mut().check_end_names = true;
+                let mut buffer = Vec::new();
+                loop {
+                    let event = reader.read_event_into(&mut buffer).map_err(|error| {
+                        PackageError::ReadPartError(format!("{}: {error}", sheet.part))
+                    })?;
+                    match event {
+                        Event::Start(ref element) | Event::Empty(ref element) => {
+                            let name = element.name();
+                            let tag = local_name(name.as_ref());
+                            if matches!(tag, "f" | "formula" | "conditionalFormatting"
+                                | "dataValidation" | "dataValidations" | "autoFilter"
+                                | "tableParts" | "hyperlinks" | "drawing" | "legacyDrawing"
+                                | "extLst") {
+                                return Err(PackageError::ReadPartError(
+                                    format!("middle row insertion cannot update worksheet element {tag}"),
+                                ));
+                            }
+                            if target
+                                && !matches!(
+                                    tag,
+                                    "worksheet"
+                                        | "sheetPr"
+                                        | "outlinePr"
+                                        | "pageSetUpPr"
+                                        | "dimension"
+                                        | "sheetViews"
+                                        | "sheetView"
+                                        | "selection"
+                                        | "sheetFormatPr"
+                                        | "cols"
+                                        | "col"
+                                        | "sheetData"
+                                        | "row"
+                                        | "c"
+                                        | "v"
+                                        | "is"
+                                        | "t"
+                                        | "pageMargins"
+                                        | "pageSetup"
+                                        | "printOptions"
+                                )
+                            {
+                                return Err(PackageError::ReadPartError(format!(
+                                    "middle row insertion cannot update worksheet element {tag}"
+                                )));
+                            }
+                            if target && matches!(tag, "sheetView" | "selection") {
+                                let first_shift = insertions[&sheet.part].iter().copied().min().unwrap_or(1);
+                                for field in ["topLeftCell", "activeCell", "sqref"] {
+                                    if let Some(value) = attribute(element, field) {
+                                        for reference in value.split_whitespace() {
+                                            let (row, _) = cell_coordinates(reference).ok_or_else(|| {
+                                                PackageError::ReadPartError(format!("unsupported XLSX view reference {reference}"))
+                                            })?;
+                                            if row >= first_shift {
+                                                return Err(PackageError::ReadPartError(format!(
+                                                    "middle row insertion cannot retain {field}={reference}"
+                                                )));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if target && tag == "c" && attribute(element, "r").is_none() {
+                                return Err(PackageError::ReadPartError(
+                                    "middle row insertion requires explicit cell references"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        Event::Eof => break,
+                        _ => {}
+                    }
+                    buffer.clear();
+                }
+                Ok(())
+            })
+            .map_err(|error| HcdError::Unsupported(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn shifted_xlsx_cell_reference(reference: &str, insertions: &[u32]) -> Result<String, HcdError> {
+    if insertions.is_empty() {
+        return Ok(reference.to_string());
+    }
+    let (row, column) = cell_coordinates(reference).ok_or_else(|| {
+        HcdError::Unsupported(format!(
+            "XLSX row insertion requires an explicit cell address: {reference}"
+        ))
+    })?;
+    Ok(format!(
+        "{}{}",
+        column_name(column),
+        shifted_xlsx_row(row, insertions)?
+    ))
+}
+
+fn rewrite_xlsx_address_attribute(
+    original: &BytesStart<'_>,
+    reference: &str,
+) -> Result<BytesStart<'static>, HcdError> {
+    let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
+    let mut rewritten = BytesStart::new(name);
+    let mut found = false;
+    for attr in original.attributes().with_checks(false) {
+        let attr = attr
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX attribute: {error}")))?;
+        let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+        if local_name(attr.key.as_ref()) == "r" {
+            rewritten.push_attribute((key.as_str(), reference));
+            found = true;
+        } else {
+            let value = String::from_utf8_lossy(attr.value.as_ref()).into_owned();
+            rewritten.push_attribute((key.as_str(), value.as_str()));
+        }
+    }
+    if !found {
+        rewritten.push_attribute(("r", reference));
+    }
+    Ok(rewritten)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_missing_xlsx_rows(
+    writer: &mut Writer<impl Write>,
+    canonical_rows: &BTreeSet<u32>,
+    replacement_rows: &mut BTreeMap<u32, BTreeMap<u32, (String, String)>>,
+    last_row: u32,
+    before_row: u32,
+    row_name: &str,
+    cell_name: &str,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), HcdError> {
+    for &row in canonical_rows.range((last_row.saturating_add(1))..before_row) {
+        let mut pending = replacement_rows.remove(&row).unwrap_or_default();
+        let mut element = BytesStart::new(row_name);
+        let value = row.to_string();
+        element.push_attribute(("r", value.as_str()));
+        if pending.is_empty() {
+            writer.write_event(Event::Empty(element))?;
+        } else {
+            writer.write_event(Event::Start(element))?;
+            flush_new_xlsx_cells(writer, &mut pending, None, cell_name, seen)?;
+            writer.write_event(Event::End(BytesEnd::new(row_name)))?;
+        }
     }
     Ok(())
 }
@@ -6031,6 +6362,173 @@ mod tests {
     }
 
     #[test]
+    fn middle_row_insertion_preserves_node_ids_history_and_exported_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("rows.hcd");
+        let exported = temp.path().join("edited.xlsx");
+        let original_export = temp.path().join("original.xlsx");
+        create_merge_edit_fixture(&source);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("middle-row-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let initial = &bundle.read_index_page(&imported, 0).unwrap().chunks[0];
+        let sheet_id = initial.grid.as_ref().unwrap().sheet_id.clone();
+        let original_d2 = bundle
+            .read_map(initial)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("D2"))
+            .unwrap();
+        let insert = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+            document_id: "middle-row-doc".to_string(),
+            patch_id: "insert-row-2".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id: sheet_id.clone(),
+                before_row: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &insert, 0).unwrap().revision,
+            1
+        );
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &insert, 1).unwrap().revision,
+            1
+        );
+        let mut stale = insert.clone();
+        stale.patch_id = "stale-insert".to_string();
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1).is_err());
+        let head = bundle.manifest().unwrap();
+        let shifted = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+        let shifted_map = bundle.read_map(shifted).unwrap();
+        let d3 = shifted_map
+            .entries
+            .iter()
+            .find(|entry| entry.node_id == original_d2.node_id)
+            .unwrap();
+        assert_eq!(d3.source.paragraph_id.as_deref(), Some("D3"));
+        assert_eq!(d3.source.source_cell_ref.as_deref(), Some("D2"));
+        let html = bundle.read_chunk(shifted).unwrap();
+        assert!(html.contains("<tr data-hcd-row=\"2\"></tr>"));
+        assert!(html.contains("data-hcd-cell=\"D3\""));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let fill = PatchBatch {
+            patch_id: "fill-inserted-row".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id: sheet_id.clone(),
+                row: 2,
+                column: 1,
+                text: "Inserted".to_string(),
+            }],
+            ..insert.clone()
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &fill, 1).unwrap().revision,
+            2
+        );
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains(
+                "<row r=\"2\"><c r=\"A2\" t=\"inlineStr\"><is><t>Inserted</t></is></c></row>"
+            ),
+            "{xml}"
+        );
+        assert!(xml.contains("<row r=\"3\"><c r=\"D3\""), "{xml}");
+        assert!(xml.contains("<dimension ref=\"A1:D3\"/>"), "{xml}");
+        export_xlsx(
+            &bundle,
+            &source,
+            &original_export,
+            &ExportOptions {
+                revision: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let historical = read_zip_entry(&original_export, "xl/worksheets/sheet1.xml");
+        assert!(historical.contains("<row r=\"2\"><c r=\"D2\""));
+        assert!(!historical.contains("Inserted"));
+
+        let second = PatchBatch {
+            patch_id: "insert-row-2-again".to_string(),
+            base_revision: 2,
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id,
+                before_row: 2,
+            }],
+            ..insert
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &second, 2).unwrap().revision,
+            3
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let twice = temp.path().join("twice.xlsx");
+        export_xlsx(&bundle, &source, &twice, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&twice, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("<row r=\"2\"/>"), "{xml}");
+        assert!(
+            xml.contains(
+                "<row r=\"3\"><c r=\"A3\" t=\"inlineStr\"><is><t>Inserted</t></is></c></row>"
+            ),
+            "{xml}"
+        );
+        assert!(xml.contains("<row r=\"4\"><c r=\"D4\""), "{xml}");
+    }
+
+    #[test]
+    fn middle_row_insertion_shifts_across_chunk_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("long.xlsx");
+        let bundle_path = temp.path().join("long.hcd");
+        let exported = temp.path().join("shifted.xlsx");
+        create_plain_rows_fixture(&source, 130);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("long-row-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        assert!(page.chunks.len() >= 2);
+        let sheet_id = page.chunks[0].grid.as_ref().unwrap().sheet_id.clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+            document_id: "long-row-doc".to_string(),
+            patch_id: "cross-window-insert".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id,
+                before_row: 128,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("<row r=\"128\"/>"));
+        assert!(xml.contains("<c r=\"A129\" t=\"inlineStr\"><is><t>Row 128</t>"));
+        assert!(xml.contains("<c r=\"A131\" t=\"inlineStr\"><is><t>Row 130</t>"));
+    }
+
+    #[test]
     fn xlsx_column_width_splits_source_span_and_preserves_history() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("widths.xlsx");
@@ -6264,7 +6762,8 @@ mod tests {
     #[test]
     fn worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows() {
         let source = br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Original</x:t></x:is></x:c><x:c r="B1" s="3"/><x:c r="D1" t="inlineStr"><x:is><x:t>Right</x:t></x:is></x:c></x:row><x:row r="2"/></x:sheetData></x:worksheet>"#;
-        let replacements = BTreeMap::from([
+        let replacements = BTreeMap::new();
+        let created = BTreeMap::from([
             ("B1".to_string(), "Styled".to_string()),
             ("C1".to_string(), "Inserted".to_string()),
             ("A2".to_string(), "New row value".to_string()),
@@ -6274,9 +6773,11 @@ mod tests {
             &mut source.as_slice(),
             &mut output,
             &replacements,
+            &created,
             &BTreeSet::new(),
-            &BTreeSet::new(),
+            &BTreeSet::from([1, 2]),
             &BTreeMap::from([(2, 24.0)]),
+            &[],
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();
@@ -6503,6 +7004,42 @@ mod tests {
             zip.start_file(name, options).unwrap();
             zip.write_all(contents.as_bytes()).unwrap();
         }
+        zip.finish().unwrap();
+    }
+
+    fn create_plain_rows_fixture(path: &Path, count: u32) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Long" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
+        zip.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#).unwrap();
+        for row in 1..=count {
+            write!(zip, "<row r=\"{row}\"><c r=\"A{row}\" t=\"inlineStr\"><is><t>Row {row}</t></is></c></row>").unwrap();
+        }
+        zip.write_all(b"</sheetData></worksheet>").unwrap();
         zip.finish().unwrap();
     }
 

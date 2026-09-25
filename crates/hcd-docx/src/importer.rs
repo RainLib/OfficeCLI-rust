@@ -4259,6 +4259,8 @@ fn append_text_node(
         node_id,
         node_hash,
         source: SourceAnchor {
+            source_cell_ref: None,
+            created_in_hcd: false,
             part: part.to_string(),
             text_ordinal,
             paragraph_id: paragraph.paragraph_id.clone(),
@@ -6242,6 +6244,8 @@ fn append_image(
             node_id,
             node_hash,
             source: SourceAnchor {
+                source_cell_ref: None,
+                created_in_hcd: false,
                 part: part.to_string(),
                 text_ordinal: image_ordinal,
                 paragraph_id: Some(format!("/drawing[{image_ordinal}]")),
