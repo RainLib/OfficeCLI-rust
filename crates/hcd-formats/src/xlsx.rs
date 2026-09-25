@@ -4555,6 +4555,11 @@ fn rewrite_worksheet(
     let mut merge_written = false;
     let mut sheet_data_seen = false;
     let canonical_last_row = canonical_rows.last().copied().unwrap_or(0);
+    let canonical_last_column = replacements
+        .keys()
+        .filter_map(|reference| cell_coordinates(reference).map(|(_, column)| column))
+        .max()
+        .unwrap_or(0);
     loop {
         let event = reader
             .read_event_into(&mut buffer)
@@ -4578,6 +4583,7 @@ fn rewrite_worksheet(
                 writer.write_event(Event::Empty(expand_worksheet_dimension(
                     empty,
                     canonical_last_row,
+                    canonical_last_column,
                 )?))?;
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "mergeCells" => {
@@ -4743,6 +4749,7 @@ fn rewrite_worksheet(
 fn expand_worksheet_dimension(
     original: &BytesStart<'_>,
     canonical_last_row: u32,
+    canonical_last_column: u32,
 ) -> Result<BytesStart<'static>, HcdError> {
     let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
     let mut expanded = BytesStart::new(name);
@@ -4759,19 +4766,20 @@ fn expand_worksheet_dimension(
                 HcdError::InvalidBundle(format!("invalid XLSX worksheet dimension: {error}"))
             })?
             .into_owned();
-        if local_name(attribute.key.as_ref()) == "ref" && canonical_last_row > 0 {
+        if local_name(attribute.key.as_ref()) == "ref"
+            && (canonical_last_row > 0 || canonical_last_column > 0)
+        {
             let (first, last) = value.split_once(':').unwrap_or((&value, &value));
-            if let (Some((_, first_column)), Some((last_row, last_column))) =
+            if let (Some((first_row, first_column)), Some((last_row, last_column))) =
                 (cell_coordinates(first), cell_coordinates(last))
             {
-                if canonical_last_row > last_row {
-                    let first_row = cell_coordinates(first).expect("checked above").0;
+                if canonical_last_row > last_row || canonical_last_column > last_column {
                     value = format!(
                         "{}{}:{}{}",
                         column_name(first_column),
                         first_row,
-                        column_name(last_column),
-                        canonical_last_row
+                        column_name(last_column.max(canonical_last_column)),
+                        last_row.max(canonical_last_row)
                     );
                 }
             }
@@ -5534,6 +5542,7 @@ mod tests {
             read_zip_entry(&empty_export, "xl/worksheets/sheet1.xml").contains("<row r=\"3\"/>")
         );
 
+        let fill_sheet_id = sheet_id.clone();
         let fill = PatchBatch {
             schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_8.to_string(),
             patch_id: "fill-new-row".to_string(),
@@ -5574,6 +5583,29 @@ mod tests {
         assert!(historical_sheet.contains("<row r=\"3\"/>"));
         assert!(historical_sheet.contains("<dimension ref=\"A1:D3\"/>"));
         assert!(!historical_sheet.contains("New row"));
+
+        let wide_cell = PatchBatch {
+            patch_id: "fill-new-row-wide-cell".to_string(),
+            base_revision: 2,
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id: fill_sheet_id,
+                row: 3,
+                column: 5,
+                text: "Wide cell".to_string(),
+            }],
+            ..fill
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &wide_cell, 2)
+                .unwrap()
+                .revision,
+            3
+        );
+        let wide_export = temp.path().join("wide-row.xlsx");
+        export_xlsx(&bundle, &source, &wide_export, &ExportOptions::default()).unwrap();
+        let wide_sheet = read_zip_entry(&wide_export, "xl/worksheets/sheet1.xml");
+        assert!(wide_sheet.contains("<dimension ref=\"A1:E3\"/>"));
+        assert!(wide_sheet.contains("<c r=\"E3\" t=\"inlineStr\"><is><t>Wide cell</t></is></c>"));
     }
 
     #[test]
