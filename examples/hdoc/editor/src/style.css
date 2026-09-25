@@ -103,6 +103,7 @@
 .hcd-surface .fixed-text-form button{border:1px solid #c5d7c8;border-radius:6px;padding:6px 12px;background:#fff;color:#225437;cursor:pointer}
 .hcd-surface .fixed-text-form button:first-child{background:#176849;color:white}
 .hcd-surface .fixed-workspace .fixed-pages{width:min(1050px,calc(100% - 36px));max-width:none;margin:22px auto}
+.hcd-surface .fixed-workspace .fixed-pages.pptx-pages{width:calc(100% - 36px);max-width:1600px}
 .hcd-surface .semantic-workspace.fixed-workspace>header.editor-header{grid-template-columns:minmax(180px,1fr) auto max-content;gap:8px;padding:7px 12px}
 .hcd-surface .fixed-workspace .document-title strong{max-width:180px}
 .hcd-surface .fixed-workspace .header-tabs button{padding:0 8px}
@@ -110,6 +111,8 @@
 .hcd-surface .fixed-workspace .export-control label{font-size:0}
 .hcd-surface .fixed-workspace .export-control select{font-size:12px;max-width:185px}
 .hcd-surface .fixed-workspace .fixed-page{position:relative;margin:0 auto 24px;overflow:visible}
+.hcd-surface .fixed-workspace .fixed-canvas-slot{position:relative}
+.hcd-surface .fixed-workspace .fixed-canvas-layer{position:absolute;top:0;left:0;transform-origin:top left}
 .hcd-surface .fixed-workspace .fixed-page-hitboxes{position:absolute;top:0;left:0;bottom:0;z-index:2;pointer-events:none}
 .hcd-surface .fixed-workspace .fixed-page-hitboxes.centered{left:50%;transform:translateX(-50%)}
 .hcd-surface .fixed-workspace .fixed-page-hitbox{position:absolute;display:block;min-width:12px;min-height:14px;padding:0;background:transparent;border:1px dashed transparent;border-radius:2px;pointer-events:auto;cursor:text}
