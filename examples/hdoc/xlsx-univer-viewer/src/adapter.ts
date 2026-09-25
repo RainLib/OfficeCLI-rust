@@ -47,6 +47,7 @@ interface ChunkRuntime {
   sheetId: string;
   kind: 'cells' | 'picture' | 'chart';
   cells: Array<{ row: number; column: number; link?: NodeLink; blank: boolean }>;
+  rows: number[];
   visualIds: string[];
 }
 
@@ -86,6 +87,7 @@ export class HcdUniverAdapter {
   private readonly linksByCell = new Map<string, NodeLink>();
   private readonly linksByNode = new Map<string, NodeLink>();
   private readonly blankCells = new Set<string>();
+  private readonly loadedRowCeilings = new Map<string, number>();
   private readonly pending = new Map<string, PendingPatch>();
   private readonly runtimes = new Map<string, ChunkRuntime>();
   private readonly rangeGeneration = new Map<string, number>();
@@ -126,7 +128,7 @@ export class HcdUniverAdapter {
       }
       const key = cellKey(event.worksheet.getSheetId(), event.row, event.column);
       const link = this.linksByCell.get(key);
-      const blank = this.blankCells.has(key);
+      const blank = !link && this.canEditBlankCell(event.worksheet.getSheetId(), event.row, event.column);
       const pending = [...this.pending.values()].some(({ links, blank: pendingBlank }) =>
         (link && links.includes(link)) || (pendingBlank && cellKey(pendingBlank.sheetId, pendingBlank.row, pendingBlank.column) === key));
       if ((!link?.editable && !blank) || pending) {
@@ -250,8 +252,23 @@ export class HcdUniverAdapter {
         sheetId: descriptor.grid!.sheetId,
         kind: descriptor.grid!.kind,
         cells: parsed.cells.map(({ row, column, link, blank }) => ({ row, column, link, blank })),
+        rows: parsed.rowHeights.map(({ row }) => row),
         visualIds: parsed.visuals.map(({ nodeId }) => nodeId),
       });
+      if (descriptor.grid?.kind === 'cells') {
+        const lastColumns = new Map<number, number>();
+        for (const cell of parsed.cells) {
+          lastColumns.set(cell.row, Math.max(lastColumns.get(cell.row) ?? 0, cell.column + 1));
+        }
+        for (const merge of parsed.merges) {
+          lastColumns.set(merge.startRow,
+            Math.max(lastColumns.get(merge.startRow) ?? 0, merge.endColumn + 1));
+        }
+        for (const { row } of parsed.rowHeights) {
+          this.loadedRowCeilings.set(`${descriptor.grid.sheetId}:${row}`,
+            Math.min(16_384, (lastColumns.get(row) ?? 0) + 256));
+        }
+      }
       this.loaded.add(descriptor.chunkId);
       this.onStatus(`revision ${this.client.manifest.revision} · ${this.loaded.size}/${this.client.descriptors.length} 个分片已加载`);
     })().finally(() => this.loading.delete(descriptor.chunkId));
@@ -430,7 +447,7 @@ export class HcdUniverAdapter {
           const link = this.linksByCell.get(key);
           const next = String(values[rowOffset]?.[columnOffset] ?? '');
           if (!link?.editable || this.mode === 'readonly') {
-            if (this.mode === 'editable' && !link && this.blankCells.has(key)
+            if (this.mode === 'editable' && !link && this.canEditBlankCell(range.getSheetId(), row, column)
               && next !== '' && this.pending.size === 0) {
               blankChanges.push({ sheetId: range.getSheetId(), row, column, text: next });
               continue;
@@ -542,9 +559,15 @@ export class HcdUniverAdapter {
       for (const nodeId of runtime.visualIds) {
         this.appliedDimensions.delete(`${runtime.sheetId}:visual:${nodeId}`);
       }
+      for (const row of runtime.rows) this.loadedRowCeilings.delete(`${runtime.sheetId}:${row}`);
       this.runtimes.delete(chunkId);
       this.loaded.delete(chunkId);
     }
+  }
+
+  private canEditBlankCell(sheetId: string, row: number, column: number): boolean {
+    return this.blankCells.has(cellKey(sheetId, row, column))
+      || column < (this.loadedRowCeilings.get(`${sheetId}:${row}`) ?? 0);
   }
 
   private withApplying(operation: () => void): void {

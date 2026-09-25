@@ -5303,10 +5303,36 @@ mod tests {
             hcd_core::apply_patch(&bundle, &update, 1).unwrap().revision,
             2
         );
+        let tail = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_7.to_string(),
+            patch_id: "add-g1-tail".to_string(),
+            base_revision: 2,
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id,
+                row: 1,
+                column: 7,
+                text: "Tail".to_string(),
+            }],
+            ..patch
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &tail, 2).unwrap().revision,
+            3
+        );
+        let head = bundle.manifest().unwrap();
+        let html = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(html.contains("data-hcd-column=\"5\"></td>"));
+        assert!(html.contains("data-hcd-column=\"6\"></td>"));
+        assert!(html.contains("data-hcd-cell=\"G1\""));
+        assert!(validate_bundle(&bundle).unwrap().valid);
         export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
         let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
         assert!(worksheet.contains("r=\"B1\" t=\"inlineStr\""));
         assert!(worksheet.contains("<t>Updated</t>"));
+        assert!(worksheet.contains("r=\"G1\" t=\"inlineStr\""));
+        assert!(worksheet.contains("<t>Tail</t>"));
         assert!(worksheet.contains("Other"));
     }
 

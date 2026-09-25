@@ -222,10 +222,6 @@ pub fn apply_patch(
                         && grid
                             .row_end
                             .is_some_and(|end| u64::from(insertion.row) <= end)
-                        && grid
-                            .column_start
-                            .is_some_and(|start| insertion.column >= start)
-                        && grid.column_end.is_some_and(|end| insertion.column <= end)
                 })
             });
             let candidates: Vec<&String> = target_node_ids
@@ -457,6 +453,11 @@ pub fn apply_patch(
                 chunk_changed = true;
             }
             if let Some(insertion) = cell_insertion {
+                if inserted_xlsx_cell_node_id.is_some() {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX row occurs in more than one cell window".to_string(),
+                    ));
+                }
                 let (node_id, part) =
                     insert_xlsx_cell(&mut html, &mut source_map, &manifest.document_id, insertion)?;
                 html_nodes.insert(node_id.clone(), insertion.text.clone());
@@ -473,6 +474,16 @@ pub fn apply_patch(
                     .map(|entry| entry.node_id.clone());
                 descriptor.last_node_id =
                     source_map.entries.last().map(|entry| entry.node_id.clone());
+                if let Some(grid) = descriptor.grid.as_mut() {
+                    grid.column_start = Some(
+                        grid.column_start
+                            .map_or(insertion.column, |start| start.min(insertion.column)),
+                    );
+                    grid.column_end = Some(
+                        grid.column_end
+                            .map_or(insertion.column, |end| end.max(insertion.column)),
+                    );
+                }
                 dirty_nodes.insert(node_id.clone());
                 dirty_parts.insert(part);
                 inserted_xlsx_cell_node_id = Some(node_id);
@@ -1509,14 +1520,7 @@ fn insert_xlsx_cell(
     let cells = xlsx_cells(html)?;
     let cell = cells
         .iter()
-        .find(|cell| cell.row == insertion.row && cell.column == insertion.column)
-        .ok_or_else(|| {
-            HcdError::Unsupported(format!(
-                "XLSX cell {}{} is outside materialized empty cells",
-                xlsx_column_name(insertion.column),
-                insertion.row
-            ))
-        })?;
+        .find(|cell| cell.row == insertion.row && cell.column == insertion.column);
     if cells
         .iter()
         .filter_map(|cell| cell.merged_range)
@@ -1531,10 +1535,12 @@ fn insert_xlsx_cell(
             "XLSX cell is inside a merged range".to_string(),
         ));
     }
-    if cell.has_node || !html[cell.tag_end + 1..cell.end - 5].trim().is_empty() {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX cell is no longer empty".to_string(),
-        ));
+    if let Some(cell) = cell {
+        if cell.has_node || !html[cell.tag_end + 1..cell.end - 5].trim().is_empty() {
+            return Err(HcdError::PreconditionFailed(
+                "XLSX cell is no longer empty".to_string(),
+            ));
+        }
     }
     let reference = format!("{}{}", xlsx_column_name(insertion.column), insertion.row);
     if source_map
@@ -1571,7 +1577,57 @@ fn insert_xlsx_cell(
         insertion.column,
         escape_text(&insertion.text)
     );
-    html.replace_range(cell.start..cell.end, &replacement);
+    if let Some(cell) = cell {
+        html.replace_range(cell.start..cell.end, &replacement);
+    } else {
+        let row_marker = format!("data-hcd-row=\"{}\"", insertion.row);
+        let row_tag = html.find(&row_marker).ok_or_else(|| {
+            HcdError::Unsupported("XLSX cell requires an existing HCD row".to_string())
+        })?;
+        let row_start = html[..row_tag].rfind("<tr ").ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX row opening tag is missing".to_string())
+        })?;
+        let row_end = html[row_tag..]
+            .find("</tr>")
+            .map(|offset| row_tag + offset)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX row closing tag is missing".to_string())
+            })?;
+        let last_column = cells
+            .iter()
+            .filter(|cell| cell.row == insertion.row)
+            .map(|cell| {
+                let tag = &html[cell.start..=cell.tag_end];
+                let span = xlsx_attribute(tag, "colspan")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(1);
+                cell.column.saturating_add(span.saturating_sub(1))
+            })
+            .max()
+            .unwrap_or(0);
+        if insertion.column <= last_column || insertion.column - last_column > 256 {
+            return Err(HcdError::Unsupported(
+                "XLSX first edit outside the bounded row tail".to_string(),
+            ));
+        }
+        if row_start > row_tag
+            || cells
+                .iter()
+                .any(|cell| cell.row == insertion.row && cell.end > row_end)
+        {
+            return Err(HcdError::InvalidBundle(
+                "XLSX row has invalid cell bounds".to_string(),
+            ));
+        }
+        let mut appended = String::new();
+        for column in last_column + 1..insertion.column {
+            appended.push_str(&format!(
+                "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{column}\"></td>"
+            ));
+        }
+        appended.push_str(&replacement);
+        html.insert_str(row_end, &appended);
+    }
     let ordinal = source_map
         .entries
         .iter()
