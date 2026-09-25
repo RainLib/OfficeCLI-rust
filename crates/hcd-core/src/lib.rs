@@ -42,12 +42,14 @@ pub const HCD_PATCH_SCHEMA_VERSION: &str = "hcd-patch/1";
 pub const HCD_PATCH_SCHEMA_VERSION_2: &str = "hcd-patch/2";
 pub const HCD_PATCH_SCHEMA_VERSION_3: &str = "hcd-patch/3";
 pub const HCD_PATCH_SCHEMA_VERSION_4: &str = "hcd-patch/4";
+pub const HCD_PATCH_SCHEMA_VERSION_5: &str = "hcd-patch/5";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
 pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
 pub const HCD_PATCH_SCHEMA_V2_JSON: &str = include_str!("../schemas/hcd-patch-2.schema.json");
 pub const HCD_PATCH_SCHEMA_V3_JSON: &str = include_str!("../schemas/hcd-patch-3.schema.json");
 pub const HCD_PATCH_SCHEMA_V4_JSON: &str = include_str!("../schemas/hcd-patch-4.schema.json");
+pub const HCD_PATCH_SCHEMA_V5_JSON: &str = include_str!("../schemas/hcd-patch-5.schema.json");
 pub const DEFAULT_CHUNK_SOFT_BYTES: usize = 512 * 1024;
 pub const DEFAULT_CHUNK_BLOCKS: usize = 256;
 pub const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -68,11 +70,14 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V3_JSON).unwrap();
         let patch_v4: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V4_JSON).unwrap();
+        let patch_v5: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V5_JSON).unwrap();
         assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
         assert_eq!(patch_v3["$id"], "urn:officecli:hcd-patch:3");
         assert_eq!(patch_v4["$id"], "urn:officecli:hcd-patch:4");
+        assert_eq!(patch_v5["$id"], "urn:officecli:hcd-patch:5");
     }
 
     #[test]

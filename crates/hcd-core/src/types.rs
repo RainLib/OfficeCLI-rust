@@ -236,6 +236,18 @@ pub enum PatchOperation {
         insert_text: String,
         precondition: NodePrecondition,
     },
+    /// Add a positioned editable text box to a raster-backed PDF page.
+    /// The stable node ID is assigned from the patch ID and operation index.
+    #[serde(rename = "pdf.text.insert", rename_all = "camelCase")]
+    PdfTextInsert {
+        page: usize,
+        x_pt: f32,
+        y_pt: f32,
+        width_pt: f32,
+        height_pt: f32,
+        font_size_pt: f32,
+        text: String,
+    },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -275,7 +287,7 @@ impl PatchOperation {
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
-            Self::AnnotationRemove { .. } => None,
+            Self::AnnotationRemove { .. } | Self::PdfTextInsert { .. } => None,
         }
     }
 
@@ -283,6 +295,7 @@ impl PatchOperation {
         matches!(
             self,
             Self::TextSplice { .. }
+                | Self::PdfTextInsert { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }

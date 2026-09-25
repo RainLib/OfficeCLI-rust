@@ -881,6 +881,155 @@ fn edited_pdf_visual_export_uses_revised_text_without_source() {
 }
 
 #[test]
+fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("fixture.pdf");
+    std::fs::copy(
+        workspace_root().join("examples/hdoc/pdf-raster-quality.pdf"),
+        &source,
+    )
+    .unwrap();
+    let bundle = temp.path().join("bundle");
+    let output = temp.path().join("inserted.pdf");
+    import_and_extract(&source, &bundle, "pdf-insert-doc");
+    let invalid = temp.path().join("outside-page.json");
+    std::fs::write(
+        &invalid,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": "hcd-patch/5", "documentId": "pdf-insert-doc",
+            "patchId": "outside-page", "baseRevision": 0,
+            "operations": [{"op": "pdf.text.insert", "page": 1,
+                "xPt": 590, "yPt": 520, "widthPt": 180, "heightPt": 18,
+                "fontSizePt": 12, "text": "Outside"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "apply",
+            bundle.to_string_lossy().as_ref(),
+            "--patch",
+            invalid.to_string_lossy().as_ref(),
+            "--expected-revision",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("outside page"));
+    let insert = temp.path().join("insert.json");
+    std::fs::write(
+        &insert,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": "hcd-patch/5", "documentId": "pdf-insert-doc",
+            "patchId": "insert-note-1", "baseRevision": 0,
+            "operations": [{"op": "pdf.text.insert", "page": 1,
+                "xPt": 42, "yPt": 520, "widthPt": 180, "heightPt": 18,
+                "fontSizePt": 12, "text": "New PDF note"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let result = officecli()
+        .args([
+            "hdoc",
+            "apply",
+            bundle.to_string_lossy().as_ref(),
+            "--patch",
+            insert.to_string_lossy().as_ref(),
+            "--expected-revision",
+            "0",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let applied: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let node_id = applied["data"]["dirtyNodeIds"][0].as_str().unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "validate",
+            bundle.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""valid": true"#));
+    let extracted = officecli()
+        .args([
+            "hdoc",
+            "extract-text",
+            bundle.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(extracted.status.success());
+    let extracted: Value = serde_json::from_slice(&extracted.stdout).unwrap();
+    let entry = extracted["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["nodeId"] == node_id)
+        .unwrap();
+    assert_eq!(entry["text"], "New PDF note");
+
+    let edit = temp.path().join("edit.json");
+    std::fs::write(
+        &edit,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": "hcd-patch/1", "documentId": "pdf-insert-doc",
+            "patchId": "edit-note-1", "baseRevision": 1,
+            "operations": [{"op": "text.splice", "nodeId": node_id,
+                "start": 0, "deleteCount": 3, "insertText": "Updated",
+                "precondition": {"nodeHash": entry["nodeHash"]}}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "apply",
+            bundle.to_string_lossy().as_ref(),
+            "--patch",
+            edit.to_string_lossy().as_ref(),
+            "--expected-revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""revision": 2"#));
+    std::fs::remove_file(source).unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            output.to_string_lossy().as_ref(),
+            "--revision",
+            "2",
+            "--json",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", output.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated PDF note"));
+}
+
+#[test]
 fn html_hcd_patch_roundtrip_is_source_backed_and_rust_only() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.html");
