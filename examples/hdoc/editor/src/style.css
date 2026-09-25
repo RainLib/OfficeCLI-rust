@@ -15,6 +15,17 @@
 .hcd-surface .login-card input,.hcd-surface .login-card textarea{width:100%;margin-top:8px;padding:12px;border:1px solid #cfd9d1;border-radius:8px;outline:none}
 .hcd-surface .login-card input:focus,.hcd-surface .login-card textarea:focus{border-color:#318463;box-shadow:0 0 0 3px #31846325}
 .hcd-surface .login-card button{margin-top:22px;width:100%;padding:12px}
+.hcd-surface .login-card-with-samples{width:min(900px,100%)}
+.hcd-surface .acceptance-samples{margin:24px 0 28px}
+.hcd-surface .acceptance-samples>p{margin:0 0 14px}
+.hcd-surface .acceptance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.hcd-surface .acceptance-grid button{display:flex;flex-direction:column;align-items:flex-start;gap:8px;text-align:left;min-height:148px;margin:0;padding:16px;background:#f8faf8;color:#233128;border-color:#dde7df}
+.hcd-surface .acceptance-grid button:hover{background:#edf5ef;border-color:#83aa91}
+.hcd-surface .acceptance-grid strong{font-size:16px}
+.hcd-surface .acceptance-grid small{color:#6b7870}
+.hcd-surface .acceptance-grid .sample-format{font-size:11px;letter-spacing:.08em;color:#176849;font-weight:700}
+.hcd-surface .acceptance-grid .sample-open{margin-top:auto;font-size:12px;color:#176849;font-weight:600}
+.hcd-surface .login-card-with-samples .manual-access{max-width:520px;border-top:1px solid #e3eae4;padding-top:16px}
 .hcd-surface .workspace{min-height:100vh}
 .hcd-surface .workspace>header{min-height:94px;display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 34px;background:#fff;border-bottom:1px solid #e0e6e1}
 .hcd-surface .workspace h1{font-size:21px;margin:4px 0}

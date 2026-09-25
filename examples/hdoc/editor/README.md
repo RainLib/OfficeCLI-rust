@@ -36,6 +36,26 @@ HCD_TOKEN_SECRET='the-same-private-secret' target/debug/officecli hdoc issue-tok
 
 Use `--scope read` for a read-only session. The service rejects its checkpoint and patch requests with HTTP 403, and the sidecar marks its WebSocket connection read-only. Tokens expire after at most one hour. Keep the signing secret outside the repository.
 
+### Local acceptance gallery
+
+For browser acceptance, set `HCD_DEMO_ROOT` to the same private service root and pass the same signing secret to Vite. The development server lists only bundles whose IDs match the local gallery fixtures and issues one-hour, document-scoped tokens on click. This gallery is absent from the production build. Sample tokens are not retained in session storage.
+
+```bash
+HCD_DEMO_ROOT=/tmp/hcd-editor-demo HCD_TOKEN_SECRET='the-same-private-secret' \
+  npm run dev -- --host 127.0.0.1 --port 8767
+```
+
+For example, import a local PDF under a gallery ID and place its immutable source next to the bundles so the PDF's source-backed download works:
+
+```bash
+target/debug/officecli hdoc import "$PDF_SOURCE" \
+  --output /tmp/hcd-editor-demo/accept-physics-pdf-v2.hcd \
+  --document-id accept-physics-pdf-v2
+cp "$PDF_SOURCE" /tmp/hcd-editor-demo/sources/accept-physics-pdf-v2.pdf
+```
+
+The other fixture IDs are listed in `vite.config.ts`. DOCX/Markdown/TXT cards allow edits; PDF/PPTX/XLSX cards are read-only. The gallery screenshot is at `docs/screenshots/hcd-acceptance-gallery.jpg`.
+
 The built-in app uses the Vite proxy for `/v1`. Products can import `EmbeddedHcdEditor` from `@officecli/hcd-reference-editor/react` and pass an API base URL, collaboration WebSocket URL, document ID, and token. Each editor keeps one ProseMirror document and one Yjs document; offscreen blocks use CSS `content-visibility` and fixed-layout assets load by viewport.
 
 ## Storage and save flow
