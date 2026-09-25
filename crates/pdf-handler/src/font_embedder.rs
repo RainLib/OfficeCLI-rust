@@ -517,23 +517,54 @@ fn register_font_on_page(
     font_name: &str,
     font_obj_id: ObjectId,
 ) -> Result<(), HandlerError> {
-    let resources = doc.get_or_create_resources(page_id).map_err(|e| {
+    let resources_id = match doc.get_or_create_resources(page_id).map_err(|e| {
         HandlerError::OperationFailed(format!("failed to get/create page resources: {:?}", e))
-    })?;
-
-    // `resources` may be a direct dict or a reference to a shared resources object.
-    // We resolve to the actual mutable Dictionary.
-    let resources_id_opt: Option<ObjectId> = match resources {
+    })? {
         Object::Reference(id) => Some(*id),
         _ => None,
     };
 
-    if let Some(res_id) = resources_id_opt {
-        let res_obj = doc.get_object_mut(res_id).map_err(|e| {
+    // Some PDFs store /Resources and /Font as separate indirect dictionaries.
+    // Resolve /Font before taking a mutable borrow of either resource object.
+    let font_id = {
+        let resources = if let Some(id) = resources_id {
+            doc.get_object(id).map_err(|e| {
+                HandlerError::OperationFailed(format!("resources obj missing: {:?}", e))
+            })?
+        } else {
+            doc.get_or_create_resources(page_id).map_err(|e| {
+                HandlerError::OperationFailed(format!(
+                    "failed to get/create page resources: {:?}",
+                    e
+                ))
+            })?
+        };
+        resources
+            .as_dict()
+            .map_err(|e| HandlerError::OperationFailed(format!("resources not a dict: {:?}", e)))?
+            .get(b"Font")
+            .ok()
+            .and_then(|font| font.as_reference().ok())
+    };
+    if let Some(id) = font_id {
+        let font = doc.get_object_mut(id).map_err(|e| {
+            HandlerError::OperationFailed(format!("font resources obj missing: {:?}", e))
+        })?;
+        font.as_dict_mut()
+            .map_err(|e| HandlerError::OperationFailed(format!("/Font not a dict: {:?}", e)))?
+            .set(
+                font_name.as_bytes().to_vec(),
+                Object::Reference(font_obj_id),
+            );
+    } else if let Some(id) = resources_id {
+        let resources = doc.get_object_mut(id).map_err(|e| {
             HandlerError::OperationFailed(format!("resources obj missing: {:?}", e))
         })?;
-        ensure_font_in_resources(res_obj, font_name, font_obj_id)?;
+        ensure_font_in_resources(resources, font_name, font_obj_id)?;
     } else {
+        let resources = doc.get_or_create_resources(page_id).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to get/create page resources: {:?}", e))
+        })?;
         ensure_font_in_resources(resources, font_name, font_obj_id)?;
     }
 
@@ -565,6 +596,28 @@ fn ensure_font_in_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registering_font_resolves_indirect_font_dictionary() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let fonts = document.add_object(Dictionary::new());
+        let resources = document.add_object(lopdf::dictionary! { "Font" => fonts });
+        let page = document.add_object(lopdf::dictionary! {
+            "Type" => "Page", "Resources" => resources,
+        });
+        let embedded = document.add_object(lopdf::dictionary! { "Type" => "Font" });
+        register_font_on_page(&mut document, page, "HCDEdit", embedded).unwrap();
+        let registered = document
+            .get_object(fonts)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"HCDEdit")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        assert_eq!(registered, embedded);
+    }
 
     #[test]
     fn bundled_cjk_font_coverage_is_reported_exactly() {

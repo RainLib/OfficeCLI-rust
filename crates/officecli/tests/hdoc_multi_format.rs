@@ -891,7 +891,13 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
     .unwrap();
     let bundle = temp.path().join("bundle");
     let output = temp.path().join("inserted.pdf");
-    import_and_extract(&source, &bundle, "pdf-insert-doc");
+    let initial = import_and_extract(&source, &bundle, "pdf-insert-doc");
+    let original = initial["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "HCD PDF raster quality comparison")
+        .unwrap();
     let invalid = temp.path().join("outside-page.json");
     std::fs::write(
         &invalid,
@@ -927,7 +933,7 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
             "patchId": "insert-note-1", "baseRevision": 0,
             "operations": [{"op": "pdf.text.insert", "page": 1,
                 "xPt": 42, "yPt": 520, "widthPt": 180, "heightPt": 18,
-                "fontSizePt": 12, "text": "New PDF note"}]
+                "fontSizePt": 12, "text": "New PDF note 中文"}]
         }))
         .unwrap(),
     )
@@ -979,7 +985,28 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
         .iter()
         .find(|entry| entry["nodeId"] == node_id)
         .unwrap();
-    assert_eq!(entry["text"], "New PDF note");
+    assert_eq!(entry["text"], "New PDF note 中文");
+
+    let source_backed_r1 = temp.path().join("source-backed-r1.pdf");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--source",
+            source.to_string_lossy().as_ref(),
+            "--revision",
+            "1",
+            "--output",
+            source_backed_r1.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", source_backed_r1.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("New PDF note 中文"));
 
     let edit = temp.path().join("edit.json");
     std::fs::write(
@@ -987,9 +1014,14 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
         serde_json::to_vec(&serde_json::json!({
             "schemaVersion": "hcd-patch/1", "documentId": "pdf-insert-doc",
             "patchId": "edit-note-1", "baseRevision": 1,
-            "operations": [{"op": "text.splice", "nodeId": node_id,
-                "start": 0, "deleteCount": 3, "insertText": "Updated",
-                "precondition": {"nodeHash": entry["nodeHash"]}}]
+            "operations": [
+                {"op": "text.splice", "nodeId": node_id,
+                    "start": 0, "deleteCount": 3, "insertText": "Updated",
+                    "precondition": {"nodeHash": entry["nodeHash"]}},
+                {"op": "text.splice", "nodeId": original["nodeId"],
+                    "start": 0, "deleteCount": 33, "insertText": "HCD PDF revised title",
+                    "precondition": {"nodeHash": original["nodeHash"]}}
+            ]
         }))
         .unwrap(),
     )
@@ -1008,6 +1040,29 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""revision": 2"#));
+    let source_backed_r2 = temp.path().join("source-backed-r2.pdf");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--source",
+            source.to_string_lossy().as_ref(),
+            "--revision",
+            "2",
+            "--output",
+            source_backed_r2.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", source_backed_r2.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated PDF note"))
+        .stdout(predicate::str::contains("中文"))
+        .stdout(predicate::str::contains("HCD PDF revised title"))
+        .stdout(predicate::str::contains("New PDF note").not());
     std::fs::remove_file(source).unwrap();
     officecli()
         .args([
