@@ -227,6 +227,43 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
+  async function removeEmptyTailRow() {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || rowBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const sheet = current.adapter.workbook.getActiveSheet()
+      const sheetId = sheet.getSheetId()
+      const row = Math.max(0, ...current.client.descriptors
+        .filter(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)
+        .map(({ grid }) => grid?.rowEnd ?? 0))
+      if (row < 2) throw new Error('当前工作表没有可撤销的末尾行')
+      setRowBusy(true)
+      setStatus('正在撤销末尾空行…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/10', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.row.remove-last', sheetId, row }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setError('')
+      try {
+        await current.adapter.refreshFromServer()
+        await current.adapter.focusCell(sheetId, row - 2, 0)
+        setStatus(`revision ${saved.revision} · 已撤销第 ${row} 行`)
+      } catch (syncError) {
+        setError(`第 ${row} 行已保存为 r${saved.revision} 的删除修订，视图同步失败：${String(syncError)}`)
+      }
+    } catch (cause) {
+      setError(`撤销末尾空行失败：${String(cause)}`)
+    } finally {
+      setRowBusy(false)
+    }
+  }
+
   async function setSelectedColumnWidth() {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || columnWidthBusy) return
@@ -274,7 +311,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
-      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">新行不移动已有单元格；在中间插入和删除行列仍需调整引用。</span></>}
+      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">仅撤销 HCD 新增且仍为空的末行 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}

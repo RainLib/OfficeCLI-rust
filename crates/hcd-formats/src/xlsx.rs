@@ -5992,6 +5992,130 @@ mod tests {
     }
 
     #[test]
+    fn removes_only_empty_appended_xlsx_tail_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("tail.xlsx");
+        let bundle_path = temp.path().join("tail.hcd");
+        create_merge_edit_fixture(&source);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("tail-removal-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let remove = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_10.to_string(),
+            document_id: "tail-removal-doc".to_string(),
+            patch_id: "remove-source-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowRemoveLast {
+                sheet_id: sheet_id.clone(),
+                row: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert!(hcd_core::apply_patch(&bundle, &remove, 0).is_err());
+        let append = PatchBatch {
+            patch_id: "append-empty-tail".to_string(),
+            operations: vec![PatchOperation::XlsxRowAppend {
+                sheet_id: sheet_id.clone(),
+                after_row: 2,
+            }],
+            ..remove.clone()
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &append, 0).unwrap().revision,
+            1
+        );
+        let remove = PatchBatch {
+            patch_id: "remove-empty-tail".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxRowRemoveLast {
+                sheet_id: sheet_id.clone(),
+                row: 3,
+            }],
+            ..remove
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &remove, 1).unwrap().revision,
+            2
+        );
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &remove, 2).unwrap().revision,
+            2
+        );
+        let report = validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+        let head = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+        assert_eq!(descriptor.grid.as_ref().unwrap().row_end, Some(2));
+        assert!(!bundle
+            .read_chunk(descriptor)
+            .unwrap()
+            .contains("data-hcd-row=\"3\""));
+        let head_export = temp.path().join("without-tail.xlsx");
+        export_xlsx(&bundle, &source, &head_export, &ExportOptions::default()).unwrap();
+        assert!(!read_zip_entry(&head_export, "xl/worksheets/sheet1.xml").contains("<row r=\"3\""));
+        let old_export = temp.path().join("with-tail.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &old_export,
+            &ExportOptions {
+                revision: Some(1),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&old_export, "xl/worksheets/sheet1.xml").contains("<row r=\"3\"/>"));
+
+        let refill = PatchBatch {
+            patch_id: "append-for-filled-check".to_string(),
+            base_revision: 2,
+            ..append
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &refill, 2).unwrap().revision,
+            3
+        );
+        let fill_sheet_id = sheet_id.clone();
+        let fill = PatchBatch {
+            patch_id: "fill-tail".to_string(),
+            base_revision: 3,
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id,
+                row: 3,
+                column: 1,
+                text: "Keep me".to_string(),
+            }],
+            ..refill
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &fill, 3).unwrap().revision,
+            4
+        );
+        let reject_filled = PatchBatch {
+            patch_id: "reject-filled-tail".to_string(),
+            base_revision: 4,
+            operations: vec![PatchOperation::XlsxRowRemoveLast {
+                sheet_id: fill_sheet_id,
+                row: 3,
+            }],
+            ..fill
+        };
+        assert!(hcd_core::apply_patch(&bundle, &reject_filled, 4).is_err());
+    }
+
+    #[test]
     fn worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows() {
         let source = br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Original</x:t></x:is></x:c><x:c r="B1" s="3"/><x:c r="D1" t="inlineStr"><x:is><x:t>Right</x:t></x:is></x:c></x:row><x:row r="2"/></x:sheetData></x:worksheet>"#;
         let replacements = BTreeMap::from([
