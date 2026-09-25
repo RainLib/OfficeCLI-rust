@@ -272,6 +272,7 @@ fn revision_record(
         dirty_node_ids: Vec::new(),
         dirty_chunk_ids: Vec::new(),
         dirty_source_parts: Vec::new(),
+        dirty_grid_parts: Vec::new(),
         structural_change,
     })
 }

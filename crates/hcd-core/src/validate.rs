@@ -756,6 +756,7 @@ fn validate_revision_chain(
                 || !record.dirty_node_ids.is_empty()
                 || !record.dirty_chunk_ids.is_empty()
                 || !record.dirty_source_parts.is_empty()
+                || !record.dirty_grid_parts.is_empty()
                 || record.index_prefix != "indexes/rev-00000000000000000000"
             {
                 issues.push(issue(
@@ -880,15 +881,24 @@ fn validate_patch_revision(
         path,
         issues,
     );
+    validate_revision_dirty_set(
+        &record.dirty_grid_parts,
+        "grid part",
+        |part| {
+            valid_source_part(part) && part.starts_with("xl/worksheets/") && part.ends_with(".xml")
+        },
+        path,
+        issues,
+    );
 
     let restore = record
         .patch_id
         .as_deref()
         .is_some_and(|id| id.starts_with("restore-"));
-    let content_changed = !record.dirty_node_ids.is_empty();
+    let content_changed = !record.dirty_node_ids.is_empty() || !record.dirty_grid_parts.is_empty();
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
-            || content_changed == record.dirty_source_parts.is_empty())
+            || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())
     {
         issues.push(issue(
             "REVISION_DIRTY_SET_INCONSISTENT",
@@ -903,6 +913,7 @@ fn validate_patch_revision(
                 || content_changed
                 || !record.dirty_chunk_ids.is_empty()
                 || !record.dirty_source_parts.is_empty()
+                || !record.dirty_grid_parts.is_empty()
             {
                 issues.push(issue(
                     "REVISION_RESTORE_DIRTY_SET_INVALID",

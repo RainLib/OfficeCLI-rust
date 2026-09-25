@@ -269,6 +269,9 @@ pub enum PatchOperation {
         column: u32,
         text: String,
     },
+    /// Materialize the next empty worksheet row without shifting existing cells.
+    #[serde(rename = "xlsx.row.append", rename_all = "camelCase")]
+    XlsxRowAppend { sheet_id: String, after_row: u32 },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -311,7 +314,8 @@ impl PatchOperation {
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
             | Self::PdfTextInsert { .. }
-            | Self::XlsxCellSet { .. } => None,
+            | Self::XlsxCellSet { .. }
+            | Self::XlsxRowAppend { .. } => None,
         }
     }
 
@@ -322,6 +326,7 @@ impl PatchOperation {
                 | Self::PdfTextInsert { .. }
                 | Self::XlsxMerge { .. }
                 | Self::XlsxCellSet { .. }
+                | Self::XlsxRowAppend { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -454,6 +459,9 @@ pub struct RevisionRecord {
     pub dirty_chunk_ids: Vec<String>,
     #[serde(default)]
     pub dirty_source_parts: Vec<String>,
+    /// XLSX worksheets changed structurally without changing a mapped text node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirty_grid_parts: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
 }

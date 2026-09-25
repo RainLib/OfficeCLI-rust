@@ -4321,6 +4321,11 @@ pub(crate) fn export_xlsx(
     let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    for revision in 1..=manifest.revision {
+        for part in bundle.revision(revision)?.dirty_grid_parts {
+            replacements.entry(part).or_default();
+        }
+    }
     for node in nodes {
         if node.source.node_kind != "cell" {
             continue;
@@ -4339,6 +4344,7 @@ pub(crate) fn export_xlsx(
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
     let merge_ranges = collect_canonical_merge_ranges(bundle, &manifest, &workbook, &replacements)?;
+    let canonical_rows = collect_canonical_sheet_rows(bundle, &manifest, &workbook, &replacements)?;
     for (part, values) in &replacements {
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
@@ -4347,9 +4353,12 @@ pub(crate) fn export_xlsx(
                 "XLSX sheet {part} is missing from the source workbook"
             ))
         })?;
+        let rows = canonical_rows.get(part).ok_or_else(|| {
+            HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical row map"))
+        })?;
         archive
             .with_part(part, |input| {
-                rewrite_worksheet(input, BufWriter::new(output), values, merges)
+                rewrite_worksheet(input, BufWriter::new(output), values, merges, rows)
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
@@ -4378,6 +4387,53 @@ pub(crate) fn export_xlsx(
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
+}
+
+fn collect_canonical_sheet_rows(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    workbook: &WorkbookInfo,
+    replacements: &HashMap<String, BTreeMap<String, String>>,
+) -> Result<HashMap<String, BTreeSet<u32>>, HcdError> {
+    let mut rows: HashMap<String, BTreeSet<u32>> = replacements
+        .keys()
+        .map(|part| (part.clone(), BTreeSet::new()))
+        .collect();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let sheet = workbook.sheets.get(grid.sheet_index).ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX HCD sheet index is missing".to_string())
+            })?;
+            let Some(sheet_rows) = rows.get_mut(&sheet.part) else {
+                continue;
+            };
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut remaining = html.as_str();
+            const MARKER: &str = " data-hcd-row=\"";
+            while let Some(offset) = remaining.find(MARKER) {
+                remaining = &remaining[offset + MARKER.len()..];
+                let end = remaining.find('"').ok_or_else(|| {
+                    HcdError::InvalidBundle("XLSX HCD row number is unclosed".to_string())
+                })?;
+                let row: u32 = remaining[..end].parse().map_err(|_| {
+                    HcdError::InvalidBundle("XLSX HCD row number is invalid".to_string())
+                })?;
+                if !(1..=1_048_576).contains(&row) || !sheet_rows.insert(row) {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX HCD row is invalid or duplicated".to_string(),
+                    ));
+                }
+                remaining = &remaining[end + 1..];
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn collect_canonical_merge_ranges(
@@ -4467,6 +4523,7 @@ fn rewrite_worksheet(
     output: impl Write,
     replacements: &BTreeMap<String, String>,
     merges: &BTreeSet<String>,
+    canonical_rows: &BTreeSet<u32>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -4494,8 +4551,10 @@ fn rewrite_worksheet(
     let mut active_row = None;
     let mut last_row = 0u32;
     let mut row_cell_name = String::from("c");
+    let mut row_name = String::from("row");
     let mut merge_written = false;
     let mut sheet_data_seen = false;
+    let canonical_last_row = canonical_rows.last().copied().unwrap_or(0);
     loop {
         let event = reader
             .read_event_into(&mut buffer)
@@ -4515,6 +4574,12 @@ fn rewrite_worksheet(
             continue;
         }
         match event {
+            Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "dimension" => {
+                writer.write_event(Event::Empty(expand_worksheet_dimension(
+                    empty,
+                    canonical_last_row,
+                )?))?;
+            }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "mergeCells" => {
                 if !merge_written {
                     write_merge_cells(&mut writer, start.name().as_ref(), merges)?;
@@ -4529,6 +4594,7 @@ fn rewrite_worksheet(
                 }
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "row" => {
+                row_name = String::from_utf8_lossy(start.name().as_ref()).to_string();
                 let row = attribute(start, "r")
                     .and_then(|value| value.parse::<u32>().ok())
                     .or_else(|| last_row.checked_add(1))
@@ -4543,6 +4609,7 @@ fn rewrite_worksheet(
                 writer.write_event(event.into_owned())?;
             }
             Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "row" => {
+                row_name = String::from_utf8_lossy(empty.name().as_ref()).to_string();
                 let row = attribute(empty, "r")
                     .and_then(|value| value.parse::<u32>().ok())
                     .or_else(|| last_row.checked_add(1))
@@ -4618,6 +4685,25 @@ fn rewrite_worksheet(
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "sheetData" => {
                 sheet_data_seen = true;
+                for &row in canonical_rows.range((last_row + 1)..) {
+                    let mut pending = replacement_rows.remove(&row).unwrap_or_default();
+                    let mut start = BytesStart::new(row_name.as_str());
+                    let number = row.to_string();
+                    start.push_attribute(("r", number.as_str()));
+                    if pending.is_empty() {
+                        writer.write_event(Event::Empty(start))?;
+                    } else {
+                        writer.write_event(Event::Start(start))?;
+                        flush_new_xlsx_cells(
+                            &mut writer,
+                            &mut pending,
+                            None,
+                            &row_cell_name,
+                            &mut seen,
+                        )?;
+                        writer.write_event(Event::End(BytesEnd::new(row_name.as_str())))?;
+                    }
+                }
                 let name = end.name().as_ref().to_vec();
                 writer.write_event(event.into_owned())?;
                 if !merge_written {
@@ -4652,6 +4738,47 @@ fn rewrite_worksheet(
         )));
     }
     Ok(())
+}
+
+fn expand_worksheet_dimension(
+    original: &BytesStart<'_>,
+    canonical_last_row: u32,
+) -> Result<BytesStart<'static>, HcdError> {
+    let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
+    let mut expanded = BytesStart::new(name);
+    for attribute in original.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!(
+                "invalid XLSX worksheet dimension attribute: {error}"
+            ))
+        })?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        let mut value = attribute
+            .unescape_value()
+            .map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid XLSX worksheet dimension: {error}"))
+            })?
+            .into_owned();
+        if local_name(attribute.key.as_ref()) == "ref" && canonical_last_row > 0 {
+            let (first, last) = value.split_once(':').unwrap_or((&value, &value));
+            if let (Some((_, first_column)), Some((last_row, last_column))) =
+                (cell_coordinates(first), cell_coordinates(last))
+            {
+                if canonical_last_row > last_row {
+                    let first_row = cell_coordinates(first).expect("checked above").0;
+                    value = format!(
+                        "{}{}:{}{}",
+                        column_name(first_column),
+                        first_row,
+                        column_name(last_column),
+                        canonical_last_row
+                    );
+                }
+            }
+        }
+        expanded.push_attribute((key.as_str(), value.as_str()));
+    }
+    Ok(expanded.into_owned())
 }
 
 fn qualified_child_name(parent: &[u8], child: &str) -> String {
@@ -5203,7 +5330,8 @@ mod tests {
         assert!(html.contains("data-hcd-merge=\"A1:B2\""));
         assert!(html.contains("rowspan=\"2\" colspan=\"2\""));
         assert!(!html.contains("data-hcd-column=\"2\""));
-        assert!(validate_bundle(&bundle).unwrap().valid);
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
         export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
         let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
         assert!(worksheet.contains("mergeCell ref=\"A1:B2\""));
@@ -5337,6 +5465,118 @@ mod tests {
     }
 
     #[test]
+    fn appended_xlsx_row_is_editable_and_survives_source_backed_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("rows.xlsx");
+        let bundle_path = temp.path().join("rows.hcd");
+        let empty_export = temp.path().join("empty-row.xlsx");
+        let filled_export = temp.path().join("filled-row.xlsx");
+        create_merge_edit_fixture(&source);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("row-append-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let append = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_8.to_string(),
+            document_id: "row-append-doc".to_string(),
+            patch_id: "append-row-3".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowAppend {
+                sheet_id: sheet_id.clone(),
+                after_row: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &append, 0).unwrap().revision,
+            1
+        );
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &append, 1).unwrap().revision,
+            1
+        );
+        let mut stale = append.clone();
+        stale.patch_id = "stale-row".to_string();
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1).is_err());
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let revision = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&revision, 0).unwrap().chunks[0];
+        assert_eq!(descriptor.grid.as_ref().unwrap().row_end, Some(3));
+        assert!(bundle
+            .read_chunk(descriptor)
+            .unwrap()
+            .contains("<tr data-hcd-row=\"3\"></tr>"));
+        let historical = hcd_core::manifest_at_revision(&bundle, &revision, Some(0))
+            .unwrap()
+            .0;
+        assert_eq!(
+            bundle.read_index_page(&historical, 0).unwrap().chunks[0]
+                .grid
+                .as_ref()
+                .unwrap()
+                .row_end,
+            Some(2)
+        );
+        export_xlsx(&bundle, &source, &empty_export, &ExportOptions::default()).unwrap();
+        assert!(
+            read_zip_entry(&empty_export, "xl/worksheets/sheet1.xml").contains("<row r=\"3\"/>")
+        );
+
+        let fill = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_8.to_string(),
+            patch_id: "fill-new-row".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id,
+                row: 3,
+                column: 1,
+                text: "New row".to_string(),
+            }],
+            ..append
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &fill, 1).unwrap().revision,
+            2
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &filled_export, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&filled_export, "xl/worksheets/sheet1.xml");
+        assert!(worksheet.contains(
+            "<row r=\"3\"><c r=\"A3\" t=\"inlineStr\"><is><t>New row</t></is></c></row>"
+        ));
+        assert!(worksheet.contains("<dimension ref=\"A1:D3\"/>"));
+        assert!(worksheet.contains("<t>Below</t>"));
+
+        let historical_export = temp.path().join("historical-row.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical_export,
+            &ExportOptions {
+                revision: Some(1),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        let historical_sheet = read_zip_entry(&historical_export, "xl/worksheets/sheet1.xml");
+        assert!(historical_sheet.contains("<row r=\"3\"/>"));
+        assert!(historical_sheet.contains("<dimension ref=\"A1:D3\"/>"));
+        assert!(!historical_sheet.contains("New row"));
+    }
+
+    #[test]
     fn worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows() {
         let source = br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Original</x:t></x:is></x:c><x:c r="B1" s="3"/><x:c r="D1" t="inlineStr"><x:is><x:t>Right</x:t></x:is></x:c></x:row><x:row r="2"/></x:sheetData></x:worksheet>"#;
         let replacements = BTreeMap::from([
@@ -5349,6 +5589,7 @@ mod tests {
             &mut source.as_slice(),
             &mut output,
             &replacements,
+            &BTreeSet::new(),
             &BTreeSet::new(),
         )
         .unwrap();
@@ -5602,7 +5843,7 @@ mod tests {
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Anchor</t></is></c><c r="D1" t="inlineStr"><is><t>Other</t></is></c></row><row r="2"><c r="D2" t="inlineStr"><is><t>Below</t></is></c></row></sheetData></worksheet>"#,
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Anchor</t></is></c><c r="D1" t="inlineStr"><is><t>Other</t></is></c></row><row r="2"><c r="D2" t="inlineStr"><is><t>Below</t></is></c></row></sheetData></worksheet>"#,
             ),
         ];
         for (name, contents) in parts {
