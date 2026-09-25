@@ -710,6 +710,7 @@ impl BundleWriter {
             grid_row_insertions: Vec::new(),
             grid_row_deletions: Vec::new(),
             grid_column_insertions: Vec::new(),
+            grid_column_deletions: Vec::new(),
             structural_change: false,
         };
         atomic_write_json(

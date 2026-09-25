@@ -331,6 +331,40 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     } finally { setColumnBusy(false) }
   }
 
+  async function deleteSelectedColumn() {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || rowBusy || columnBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const sheet = current.adapter.workbook.getActiveSheet()
+      const range = sheet.getActiveRange()
+      const column = (range?.getColumn() ?? -1) + 1
+      if (!range || column < 1) throw new Error('请先选中要删除的列')
+      if (!window.confirm(`删除第 ${column} 列及其中所有内容？可从历史修订恢复。`)) return
+      setColumnBusy(true)
+      setStatus('正在删除列…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/15', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.column.delete', sheetId: sheet.getSheetId(), column }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setError('')
+      try {
+        await current.adapter.refreshFromServer()
+        await current.adapter.focusCell(sheet.getSheetId(), range.getRow(), Math.max(0, column - 2))
+        setStatus(`revision ${saved.revision} · 已删除第 ${column} 列`)
+      } catch (syncError) {
+        setError(`第 ${column} 列已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
+      }
+    } catch (cause) {
+      setError(`删除列失败：${String(cause)}`)
+    } finally { setColumnBusy(false) }
+  }
+
   async function deleteSelectedRow() {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || rowBusy || columnBusy) return
@@ -449,7 +483,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
-      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowBeforeSelection()}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">行列移动暂支持无公式、合并或绘图的普通工作簿 · {status}</span></>}
+      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowBeforeSelection()}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">行列移动暂支持无公式、合并或绘图的普通工作簿 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}

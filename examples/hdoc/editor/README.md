@@ -102,6 +102,56 @@ The **插入 → 在选中列前插入** action uses `hcd-patch/13` to insert an
 
 The **插入 → 删除选中行** action uses `hcd-patch/14` to delete a materialized row and move later rows up. It preserves the source workbook and all historical HCD revisions. Confirm the action in the browser, then use the revision view to recover the original row if needed. Source-backed XLSX export omits deleted source rows and their edited cells. This operation accepts plain value workbooks without formulas, merges, drawings, charts, tables, validation, defined names, or coordinate-dependent view references. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-delete-middle-row.png`.
 
+The **插入 → 删除选中列** action uses `hcd-patch/15` to remove one column and move later cells left across all HCD row windows. It keeps stable node IDs for surviving cells and retains the deleted values in historical revisions. Source-backed XLSX export rewrites cell addresses and omits deleted cells. As with column insertion, formula, merge, drawing, table, validation, defined-name, explicit column-width, and coordinate-dependent view references require separate reference rewriting. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-delete-middle-column.png`.
+
+The source-free semantic XLSX exporter preserves the visible values and column count, but can normalize a blank source cell to an empty string. Use source-backed export when XLSX cell types and exact blank-cell semantics matter.
+
+For the supplied `open-review-usage-2026-09.csv` workbook, select B1 and choose **插入 → 删除选中列**. The browser download has three rows and eleven columns; each value in original C:L appears in B:K, and the deleted B values are absent. Exporting revision 0 still yields all twelve original columns. Reproduce with CLI:
+
+```bash
+cargo test -p hcd-formats middle_column_deletion_shifts_all_windows_and_preserves_history
+cargo test -p hcd-formats deleting_implicit_blank_column_moves_source_cells_left
+cargo test -p hcd-formats deleting_filled_inserted_column_clears_dirty_node
+cargo test -p hcd-formats deleting_all_columns_keeps_empty_rows_and_valid_bundle
+python3 - <<'PY'
+import csv
+from openpyxl import Workbook
+workbook = Workbook(); sheet = workbook.active
+with open('/Users/houshuai/Downloads/open-review-usage-2026-09.csv', encoding='utf-8-sig', newline='') as source:
+    for row in csv.reader(source): sheet.append(row)
+workbook.save('/tmp/hcd-middle-row-real.xlsx')
+PY
+target/debug/officecli hdoc import /tmp/hcd-middle-row-real.xlsx \
+  --output /tmp/hcd-column-delete-check.hcd --document-id hcd-column-delete-check
+python3 - <<'PY'
+import gzip, json
+from pathlib import Path
+root = Path('/tmp/hcd-column-delete-check.hcd')
+manifest = json.loads((root / 'manifest.json').read_text())
+with gzip.open(root / manifest['indexRootHref'], 'rt') as source: tree = json.load(source)
+with gzip.open(root / tree['children'][0], 'rt') as source: page = json.load(source)
+patch = {'schemaVersion': 'hcd-patch/15', 'documentId': 'hcd-column-delete-check',
+         'patchId': 'delete-real-column-b', 'baseRevision': 0,
+         'operations': [{'op': 'xlsx.column.delete',
+                         'sheetId': page['chunks'][0]['grid']['sheetId'], 'column': 2}]}
+Path('/tmp/hcd-column-delete-check.patch.json').write_text(json.dumps(patch))
+PY
+target/debug/officecli hdoc apply /tmp/hcd-column-delete-check.hcd \
+  --patch /tmp/hcd-column-delete-check.patch.json --expected-revision 0
+target/debug/officecli hdoc validate /tmp/hcd-column-delete-check.hcd
+target/debug/officecli hdoc export /tmp/hcd-column-delete-check.hcd \
+  --source /tmp/hcd-middle-row-real.xlsx --revision 1 --output /tmp/hcd-column-delete-current.xlsx
+target/debug/officecli hdoc export /tmp/hcd-column-delete-check.hcd \
+  --source /tmp/hcd-middle-row-real.xlsx --revision 0 --output /tmp/hcd-column-delete-original.xlsx
+python3 - <<'PY'
+from openpyxl import load_workbook
+source = list(load_workbook('/tmp/hcd-column-delete-original.xlsx', read_only=True, data_only=True).active.values)
+current = list(load_workbook('/tmp/hcd-column-delete-current.xlsx', read_only=True, data_only=True).active.values)
+assert len(current) == 3 and len(current[0]) == 11
+assert current == [row[:1] + row[2:] for row in source]
+PY
+```
+
 Reproduce the deletion with the supplied CSV converted to XLSX:
 
 ```bash
