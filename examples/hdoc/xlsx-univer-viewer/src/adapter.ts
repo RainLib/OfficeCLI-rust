@@ -236,6 +236,17 @@ export class HcdUniverAdapter {
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;
     await this.client.open();
+    for (const key of this.appliedDimensions) {
+      const match = key.match(/^(s_[0-9a-f]{32}):merge:(\d+):(\d+):(\d+):(\d+)$/);
+      if (!match) continue;
+      const sheet = this.workbook.getSheetBySheetId(match[1]);
+      if (sheet) {
+        this.withApplying(() => sheet.getRange(Number(match[2]), Number(match[3]),
+          Number(match[4]) - Number(match[2]) + 1,
+          Number(match[5]) - Number(match[3]) + 1).breakApart());
+      }
+      this.appliedDimensions.delete(key);
+    }
     this.evictOutsideWindow('', new Set());
     await this.ensureVisible(this.workbook.getActiveSheet());
     this.onStatus(`revision ${this.client.manifest.revision} · 已同步其他协作者的修改`);

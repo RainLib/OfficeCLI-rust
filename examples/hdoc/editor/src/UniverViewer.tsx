@@ -188,6 +188,44 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
+  async function unmergeSelection() {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || mergeBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const sheet = current.adapter.workbook.getActiveSheet()
+      const selected = sheet.getActiveRange()
+      if (!selected) throw new Error('请先选中合并单元格')
+      const row = selected.getRow()
+      const column = selected.getColumn()
+      const merged = sheet.getMergeData().find(range => row >= range.getRow()
+        && row < range.getRow() + range.getHeight()
+        && column >= range.getColumn() && column < range.getColumn() + range.getWidth())
+      if (!merged) throw new Error('所选单元格没有合并')
+      const anchor = current.adapter.getNodeAt(sheet.getSheetId(), merged.getRow(), merged.getColumn())
+      if (!anchor?.editable) throw new Error('合并区域缺少可编辑的左上角单元格')
+      setMergeBusy(true)
+      setStatus('正在拆分单元格…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/11', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.unmerge', nodeId: anchor.nodeId, sheetId: sheet.getSheetId(),
+            startRow: merged.getRow() + 1, startColumn: merged.getColumn() + 1,
+            endRow: merged.getRow() + merged.getHeight(), endColumn: merged.getColumn() + merged.getWidth(),
+            precondition: { nodeHash: anchor.nodeHash } }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      collaboration.announceRevision(saved.revision)
+      await current.adapter.refreshFromServer()
+      setRevision(saved.revision)
+      setError('')
+      setStatus(`revision ${saved.revision} · 已拆分 ${merged.getA1Notation()}`)
+    } catch (cause) {
+      setError(`拆分失败：${String(cause)}`)
+    } finally { setMergeBusy(false) }
+  }
+
   async function appendRow() {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || rowBusy) return
@@ -310,7 +348,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
-      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
       {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">仅撤销 HCD 新增且仍为空的末行 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
