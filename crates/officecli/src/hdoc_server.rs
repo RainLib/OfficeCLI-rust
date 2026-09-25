@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
@@ -34,6 +34,15 @@ struct ServerState {
     secret: Arc<Vec<u8>>,
     remote: Option<RemoteStore>,
     collaboration_lock: Arc<Mutex<()>>,
+    downloads: Arc<Mutex<HashMap<String, DownloadTicket>>>,
+}
+
+#[derive(Clone)]
+struct DownloadTicket {
+    document_id: String,
+    format: String,
+    query: ExportQuery,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,6 +124,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         secret,
         remote,
         collaboration_lock: Arc::new(Mutex::new(())),
+        downloads: Arc::new(Mutex::new(HashMap::new())),
     };
     let router = Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true})) }))
@@ -133,6 +143,11 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
         .route("/v1/documents/{id}/export/{format}", get(export_document))
+        .route(
+            "/v1/documents/{id}/downloads/{format}",
+            post(prepare_download),
+        )
+        .route("/v1/downloads/{ticket}", get(download_ticket))
         .route("/v1/documents/{id}/auth", get(auth_check))
         .route(
             "/v1/documents/{id}/collaboration/state",
@@ -1135,10 +1150,77 @@ async fn styles(
         .into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 struct ExportQuery {
     revision: Option<u64>,
     source: Option<bool>,
+}
+
+async fn prepare_download(
+    State(state): State<ServerState>,
+    Path((id, format)): Path<(String, String)>,
+    Query(query): Query<ExportQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let revision = query.revision.unwrap_or(head.revision);
+    if revision > head.revision {
+        return Err(bad("revision ahead of head"));
+    }
+    if !matches!(
+        format.as_str(),
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+    ) {
+        return Err(bad("unsupported export format"));
+    }
+    let ticket = uuid::Uuid::new_v4().to_string();
+    let mut downloads = state.downloads.lock().await;
+    downloads.retain(|_, item| item.expires_at > Instant::now());
+    if downloads.len() >= 256 {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many pending downloads".to_string(),
+        ));
+    }
+    downloads.insert(
+        ticket.clone(),
+        DownloadTicket {
+            document_id: id.clone(),
+            format: format.clone(),
+            query: ExportQuery {
+                revision: Some(revision),
+                source: query.source,
+            },
+            expires_at: Instant::now() + Duration::from_secs(300),
+        },
+    );
+    Ok(Json(json!({
+        "url": format!("/v1/downloads/{ticket}"),
+        "filename": format!("{id}-r{revision}.{format}"),
+    })))
+}
+
+async fn download_ticket(
+    State(state): State<ServerState>,
+    Path(ticket): Path<String>,
+) -> Result<Response, ApiError> {
+    let download = state
+        .downloads
+        .lock()
+        .await
+        .get(&ticket)
+        .cloned()
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "download link not found".to_string()))?;
+    if download.expires_at <= Instant::now() {
+        state.downloads.lock().await.remove(&ticket);
+        return Err(ApiError(
+            StatusCode::GONE,
+            "download link expired".to_string(),
+        ));
+    }
+    export_document_inner(state, download.document_id, download.format, download.query).await
 }
 
 async fn export_document(
@@ -1148,6 +1230,15 @@ async fn export_document(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers, &id, false)?;
+    export_document_inner(state, id, format, query).await
+}
+
+async fn export_document_inner(
+    state: ServerState,
+    id: String,
+    format: String,
+    query: ExportQuery,
+) -> Result<Response, ApiError> {
     let bundle = open(&state, &id)?;
     let head = bundle.manifest().map_err(internal)?;
     let requested = query.revision.unwrap_or(head.revision);
@@ -1285,6 +1376,13 @@ async fn export_document(
         format!("attachment; filename=\"{id}-r{requested}.{format}\"")
             .parse()
             .map_err(internal)?,
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().map_err(internal)?);
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        "no-referrer".parse().map_err(internal)?,
     );
     Ok(response)
 }

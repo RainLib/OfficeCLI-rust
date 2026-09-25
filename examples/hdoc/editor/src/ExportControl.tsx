@@ -11,33 +11,31 @@ export function ExportControl({ session, revision, beforeExport }: {
   const [format, setFormat] = useState<string>(session.format === 'markdown' ? 'md' : session.format)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [ready, setReady] = useState<{ url: string; filename: string } | null>(null)
 
-  async function download() {
+  async function prepare() {
     setBusy(true)
     setError('')
+    setReady(null)
     try {
       const savedRevision = beforeExport ? await beforeExport() : revision
       if (savedRevision === null) throw new Error('文档修订尚未加载')
       const source = ['pdf', 'pptx', 'xlsx'].includes(session.format) && format === session.format
       const response = await api(session,
-        `/export/${format}?revision=${savedRevision}${source ? '&source=true' : ''}`)
-      const url = URL.createObjectURL(await response.blob())
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = `${session.documentId}-r${savedRevision}.${format}`
-      document.body.append(anchor)
-      anchor.click()
-      anchor.remove()
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+        `/downloads/${format}?revision=${savedRevision}${source ? '&source=true' : ''}`, { method: 'POST' })
+      const ticket = await response.json() as { url: string; filename: string }
+      const base = new URL(session.apiUrl || '/v1/documents', window.location.href)
+      setReady({ url: new URL(ticket.url, base.origin).href, filename: ticket.filename })
     } catch (cause) { setError(String(cause)) }
     finally { setBusy(false) }
   }
 
   return <div className="export-control">
-    <label>导出格式 <select aria-label="导出格式" value={format} onChange={event => setFormat(event.target.value)}>
+    <label>导出格式 <select aria-label="导出格式" value={format} onChange={event => { setFormat(event.target.value); setReady(null) }}>
       {formats.map(item => <option key={item} value={item}>{item.toUpperCase()}</option>)}
     </select></label>
-    <button onClick={() => void download()} disabled={busy}>{busy ? '导出中…' : '导出'}</button>
+    <button onClick={() => void prepare()} disabled={busy}>{busy ? '准备中…' : ready ? '重新准备' : '准备下载'}</button>
+    {ready && <a className="download-ready" href={ready.url} download={ready.filename} rel="noreferrer" aria-label={`下载 ${ready.filename}`}>下载文件</a>}
     {error && <span className="export-error" title={error}>{error}</span>}
   </div>
 }
