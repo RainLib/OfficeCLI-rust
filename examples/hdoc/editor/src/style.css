@@ -79,6 +79,11 @@
 .hcd-surface .revision-view>div:last-child{max-height:250px;overflow:auto;font-size:12px}
 .hcd-surface .fixed-pages{max-width:min(1200px,calc(100vw - 24px));margin:28px auto}
 .hcd-surface .hcd-univer-host{height:calc(100vh - 153px);min-height:480px;position:relative;background:#fff}
+.hcd-surface .univer-workspace .univer-editor-area{display:flex;flex:1;min-height:0;overflow:hidden}
+.hcd-surface .univer-workspace .hcd-univer-host{flex:1;min-width:0;min-height:0;height:auto}
+.hcd-surface .univer-workspace .workspace-sidebar{flex:0 0 280px;min-height:0;overflow-y:auto}
+.hcd-surface .univer-workspace .ribbon{min-height:54px}
+.hcd-surface .univer-workspace .ribbon-note+ .ribbon-note{margin-left:auto}
 .hcd-surface .hcd-univer-host .hcd-visual-layer{position:absolute;inset:0;z-index:10;pointer-events:none;overflow:hidden}
 .hcd-surface .hcd-univer-host .hcd-visual-layer img{position:absolute;display:block;object-fit:contain;pointer-events:auto}
 .hcd-surface .fixed-page{min-height:900px;background:#fff;margin:18px 0;box-shadow:0 3px 30px #1738221a;overflow:hidden}
