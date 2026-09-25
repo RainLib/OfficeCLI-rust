@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, type Session } from './api.ts'
 import { ExportControl } from './ExportControl.tsx'
+import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
 type Descriptor = { sequence: number; region: string }
@@ -126,7 +127,7 @@ function LazyChunk({ session, descriptor, stylesheet, readOnly, saving, refresh,
       : <div className="skeleton">第 {descriptor.sequence + 1} 个分片</div>}
     {!readOnly && nodes.length > 0 && <div className="fixed-text-panel"><strong>第 {descriptor.sequence + 1} 页文字</strong><span>{nodes.filter(node => node.editable).length} 个可编辑节点</span>
       <div className="fixed-text-list">{nodes.filter(node => node.editable).map(node => <button key={node.nodeId} onClick={() => { setSelected(node); setDraft(node.text) }} title={node.nodeId}>{node.text || '（空文字框）'}</button>)}</div>
-      {selected && <div className="fixed-text-form"><label>编辑文字<textarea aria-label="编辑文字" value={draft} maxLength={10000} onChange={event => setDraft(event.target.value)} /></label><div><button disabled={saving || draft === selected.text} onClick={() => void onSave(selected, draft)}>保存文字</button><button onClick={() => setSelected(null)}>取消</button></div></div>}
+      {selected && <div className="fixed-text-form"><strong>编辑文字框</strong><FixedTextBoxEditor key={selected.nodeId} text={selected.text} disabled={saving} onChange={setDraft} /><small>使用与 DOCX 相同的 Tiptap 编辑内核；此文字框当前只保存纯文本，最多 10,000 字。</small><div><button disabled={saving || draft === selected.text} onClick={() => void onSave(selected, draft)}>保存文字</button><button onClick={() => setSelected(null)}>取消</button></div></div>}
     </div>}
     {!readOnly && srcDoc && nodes.length === 0 && session.format === 'pdf' && <div className="fixed-text-panel">本页没有可映射的文字节点；扫描图像里的文字需要 OCR 后才能编辑。</div>}
   </div>
