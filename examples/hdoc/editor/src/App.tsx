@@ -5,7 +5,7 @@ import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { HocuspocusProvider } from '@hocuspocus/provider'
 import * as Y from 'yjs'
-import { jsonToSnapshot, schemaExtensions, type Projection } from './schema.ts'
+import { clearPastedBlockIds, jsonToSnapshot, schemaExtensions, type Projection } from './schema.ts'
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { api, type Session } from './api.ts'
 import { FixedViewer } from './FixedViewer.tsx'
@@ -123,7 +123,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         return cursor
       } })],
     editable: !readOnly,
-    editorProps: { attributes: { class: 'hcd-editor-body' } },
+    editorProps: { attributes: { class: 'hcd-editor-body' }, transformPasted: clearPastedBlockIds },
     onUpdate: ({ editor: changedEditor }) => {
       const semantic = JSON.stringify(jsonToSnapshot(changedEditor.getJSON()).map(block => block.content))
       if (lastSemantic.current !== null && semantic !== lastSemantic.current && !readOnly) setStatus('编辑中')
