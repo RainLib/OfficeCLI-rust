@@ -226,6 +226,12 @@ export class HcdUniverAdapter {
 
   hasPendingPatch(): boolean { return this.pending.size > 0; }
 
+  invalidateColumnWidths(sheetId: string): void {
+    for (const key of this.appliedDimensions) {
+      if (key.startsWith(`${sheetId}:column:`)) this.appliedDimensions.delete(key);
+    }
+  }
+
   /** Reload the visible HCD windows after another editor commits a revision. */
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;

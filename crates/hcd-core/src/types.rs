@@ -272,6 +272,13 @@ pub enum PatchOperation {
     /// Materialize the next empty worksheet row without shifting existing cells.
     #[serde(rename = "xlsx.row.append", rename_all = "camelCase")]
     XlsxRowAppend { sheet_id: String, after_row: u32 },
+    /// Set a worksheet column's visible width without moving cells.
+    #[serde(rename = "xlsx.column.width", rename_all = "camelCase")]
+    XlsxColumnWidth {
+        sheet_id: String,
+        column: u32,
+        width_chars: f64,
+    },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -315,7 +322,8 @@ impl PatchOperation {
             Self::AnnotationRemove { .. }
             | Self::PdfTextInsert { .. }
             | Self::XlsxCellSet { .. }
-            | Self::XlsxRowAppend { .. } => None,
+            | Self::XlsxRowAppend { .. }
+            | Self::XlsxColumnWidth { .. } => None,
         }
     }
 
@@ -327,6 +335,7 @@ impl PatchOperation {
                 | Self::XlsxMerge { .. }
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxRowAppend { .. }
+                | Self::XlsxColumnWidth { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }

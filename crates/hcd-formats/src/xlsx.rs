@@ -4345,6 +4345,8 @@ pub(crate) fn export_xlsx(
     let workbook = workbook_info(&mut archive)?;
     let merge_ranges = collect_canonical_merge_ranges(bundle, &manifest, &workbook, &replacements)?;
     let canonical_rows = collect_canonical_sheet_rows(bundle, &manifest, &workbook, &replacements)?;
+    let column_widths =
+        collect_canonical_column_widths(bundle, &manifest, &workbook, &replacements)?;
     for (part, values) in &replacements {
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
@@ -4356,9 +4358,12 @@ pub(crate) fn export_xlsx(
         let rows = canonical_rows.get(part).ok_or_else(|| {
             HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical row map"))
         })?;
+        let widths = column_widths.get(part).ok_or_else(|| {
+            HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical column map"))
+        })?;
         archive
             .with_part(part, |input| {
-                rewrite_worksheet(input, BufWriter::new(output), values, merges, rows)
+                rewrite_worksheet(input, BufWriter::new(output), values, merges, rows, widths)
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
@@ -4387,6 +4392,85 @@ pub(crate) fn export_xlsx(
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
+}
+
+fn collect_canonical_column_widths(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    workbook: &WorkbookInfo,
+    replacements: &HashMap<String, BTreeMap<String, String>>,
+) -> Result<HashMap<String, BTreeMap<u32, f64>>, HcdError> {
+    let mut widths: HashMap<String, BTreeMap<u32, f64>> = replacements
+        .keys()
+        .map(|part| (part.clone(), BTreeMap::new()))
+        .collect();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let sheet = workbook.sheets.get(grid.sheet_index).ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX HCD sheet index is missing".to_string())
+            })?;
+            let Some(sheet_widths) = widths.get_mut(&sheet.part) else {
+                continue;
+            };
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut cursor = 0usize;
+            while let Some(offset) = html[cursor..].find("<col ") {
+                let start = cursor + offset;
+                let end = html[start..]
+                    .find("/>")
+                    .map(|offset| start + offset + 2)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("XLSX HCD column tag is not closed".to_string())
+                    })?;
+                let tag = &html[start..end];
+                cursor = end;
+                if !tag.contains(" data-hcd-width-edited=\"true\"") {
+                    continue;
+                }
+                let first = hcd_column_attribute(tag, "data-hcd-column-start")
+                    .and_then(|value| value.parse::<u32>().ok());
+                let last = hcd_column_attribute(tag, "data-hcd-column-end")
+                    .and_then(|value| value.parse::<u32>().ok());
+                let width = hcd_column_attribute(tag, "data-hcd-width")
+                    .and_then(|value| value.parse::<f64>().ok());
+                let (Some(column), Some(end_column), Some(width)) = (first, last, width) else {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX HCD edited column width is incomplete".to_string(),
+                    ));
+                };
+                if column != end_column
+                    || !(1..=16_384).contains(&column)
+                    || !width.is_finite()
+                    || !(1.0..=255.0).contains(&width)
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX HCD edited column width is invalid".to_string(),
+                    ));
+                }
+                if let Some(previous) = sheet_widths.insert(column, width) {
+                    if previous != width {
+                        return Err(HcdError::InvalidBundle(
+                            "XLSX HCD column width differs between windows".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(widths)
+}
+
+fn hcd_column_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!(" {name}=\"");
+    let start = tag.find(&marker)? + marker.len();
+    let end = tag[start..].find('"')? + start;
+    Some(&tag[start..end])
 }
 
 fn collect_canonical_sheet_rows(
@@ -4524,6 +4608,7 @@ fn rewrite_worksheet(
     replacements: &BTreeMap<String, String>,
     merges: &BTreeSet<String>,
     canonical_rows: &BTreeSet<u32>,
+    column_widths: &BTreeMap<u32, f64>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -4554,10 +4639,15 @@ fn rewrite_worksheet(
     let mut row_name = String::from("row");
     let mut merge_written = false;
     let mut sheet_data_seen = false;
+    let mut pending_widths = column_widths.clone();
+    let mut column_group_seen = false;
+    let mut column_group_open = false;
+    let mut last_source_column = 0u32;
     let canonical_last_row = canonical_rows.last().copied().unwrap_or(0);
     let canonical_last_column = replacements
         .keys()
         .filter_map(|reference| cell_coordinates(reference).map(|(_, column)| column))
+        .chain(column_widths.keys().copied())
         .max()
         .unwrap_or(0);
     loop {
@@ -4579,6 +4669,114 @@ fn rewrite_worksheet(
             continue;
         }
         match event {
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "cols" && !column_widths.is_empty() =>
+            {
+                column_group_seen = true;
+                column_group_open = true;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Empty(ref empty)
+                if local_name(empty.name().as_ref()) == "cols" && !column_widths.is_empty() =>
+            {
+                column_group_seen = true;
+                let name = String::from_utf8_lossy(empty.name().as_ref()).into_owned();
+                let col_name = qualified_child_name(empty.name().as_ref(), "col");
+                writer.write_event(Event::Start(empty.to_owned()))?;
+                write_new_worksheet_columns(&mut writer, &col_name, &mut pending_widths)?;
+                writer.write_event(Event::End(BytesEnd::new(name)))?;
+            }
+            Event::Empty(ref empty)
+                if local_name(empty.name().as_ref()) == "col" && column_group_open =>
+            {
+                let min = attribute(empty, "min")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|value| (1..=16_384).contains(value))
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("invalid XLSX source column min".to_string())
+                    })?;
+                let max = attribute(empty, "max")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|value| (min..=16_384).contains(value))
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("invalid XLSX source column max".to_string())
+                    })?;
+                if min <= last_source_column {
+                    return Err(HcdError::InvalidBundle(
+                        "overlapping XLSX source column ranges cannot be resized".to_string(),
+                    ));
+                }
+                last_source_column = max;
+                let name = String::from_utf8_lossy(empty.name().as_ref()).into_owned();
+                let before: Vec<u32> = pending_widths
+                    .range(..min)
+                    .map(|(&column, _)| column)
+                    .collect();
+                for column in before {
+                    let width = pending_widths.remove(&column).expect("pending column");
+                    write_new_worksheet_column(&mut writer, &name, column, width)?;
+                }
+                let edits: Vec<(u32, f64)> = pending_widths
+                    .range(min..=max)
+                    .map(|(&column, &width)| (column, width))
+                    .collect();
+                if edits.is_empty() {
+                    writer.write_event(event.into_owned())?;
+                } else {
+                    let mut cursor = min;
+                    for (column, width) in edits {
+                        if cursor < column {
+                            write_source_column_segment(
+                                &mut writer,
+                                empty,
+                                cursor,
+                                column - 1,
+                                None,
+                            )?;
+                        }
+                        write_source_column_segment(
+                            &mut writer,
+                            empty,
+                            column,
+                            column,
+                            Some(width),
+                        )?;
+                        pending_widths.remove(&column);
+                        cursor = column + 1;
+                    }
+                    if cursor <= max {
+                        write_source_column_segment(&mut writer, empty, cursor, max, None)?;
+                    }
+                }
+            }
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "col" && column_group_open =>
+            {
+                return Err(HcdError::InvalidBundle(
+                    "nonempty XLSX source column cannot be resized".to_string(),
+                ));
+            }
+            Event::End(ref end)
+                if local_name(end.name().as_ref()) == "cols" && column_group_open =>
+            {
+                let col_name = qualified_child_name(end.name().as_ref(), "col");
+                write_new_worksheet_columns(&mut writer, &col_name, &mut pending_widths)?;
+                column_group_open = false;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "sheetData"
+                    && !column_group_seen
+                    && !column_widths.is_empty() =>
+            {
+                let cols_name = qualified_child_name(start.name().as_ref(), "cols");
+                let col_name = qualified_child_name(start.name().as_ref(), "col");
+                writer.write_event(Event::Start(BytesStart::new(cols_name.as_str())))?;
+                write_new_worksheet_columns(&mut writer, &col_name, &mut pending_widths)?;
+                writer.write_event(Event::End(BytesEnd::new(cols_name.as_str())))?;
+                column_group_seen = true;
+                writer.write_event(event.into_owned())?;
+            }
             Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "dimension" => {
                 writer.write_event(Event::Empty(expand_worksheet_dimension(
                     empty,
@@ -4787,6 +4985,84 @@ fn expand_worksheet_dimension(
         expanded.push_attribute((key.as_str(), value.as_str()));
     }
     Ok(expanded.into_owned())
+}
+
+fn write_new_worksheet_column(
+    writer: &mut Writer<impl Write>,
+    name: &str,
+    column: u32,
+    width: f64,
+) -> Result<(), HcdError> {
+    let mut element = BytesStart::new(name);
+    let address = column.to_string();
+    let width = format!("{width:.2}");
+    element.push_attribute(("min", address.as_str()));
+    element.push_attribute(("max", address.as_str()));
+    element.push_attribute(("width", width.as_str()));
+    element.push_attribute(("customWidth", "1"));
+    writer.write_event(Event::Empty(element))?;
+    Ok(())
+}
+
+fn write_new_worksheet_columns(
+    writer: &mut Writer<impl Write>,
+    name: &str,
+    pending: &mut BTreeMap<u32, f64>,
+) -> Result<(), HcdError> {
+    for (column, width) in std::mem::take(pending) {
+        write_new_worksheet_column(writer, name, column, width)?;
+    }
+    Ok(())
+}
+
+fn write_source_column_segment(
+    writer: &mut Writer<impl Write>,
+    original: &BytesStart<'_>,
+    min: u32,
+    max: u32,
+    edited_width: Option<f64>,
+) -> Result<(), HcdError> {
+    let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
+    let mut element = BytesStart::new(name);
+    let mut saw_width = false;
+    let mut saw_custom_width = false;
+    for attribute in original.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX source column attribute: {error}"))
+        })?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        let value = attribute
+            .unescape_value()
+            .map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid XLSX source column value: {error}"))
+            })?
+            .into_owned();
+        let value = match local_name(attribute.key.as_ref()) {
+            "min" => min.to_string(),
+            "max" => max.to_string(),
+            "width" if edited_width.is_some() => {
+                saw_width = true;
+                format!("{:.2}", edited_width.expect("checked"))
+            }
+            "customWidth" if edited_width.is_some() => {
+                saw_custom_width = true;
+                "1".to_string()
+            }
+            "bestFit" if edited_width.is_some() => "0".to_string(),
+            _ => value,
+        };
+        element.push_attribute((key.as_str(), value.as_str()));
+    }
+    if let Some(width) = edited_width {
+        if !saw_width {
+            element.push_attribute(("width", format!("{width:.2}").as_str()));
+        }
+        if !saw_custom_width {
+            element.push_attribute(("customWidth", "1"));
+        }
+    }
+    writer.write_event(Event::Empty(element))?;
+    Ok(())
 }
 
 fn qualified_child_name(parent: &[u8], child: &str) -> String {
@@ -5609,6 +5885,113 @@ mod tests {
     }
 
     #[test]
+    fn xlsx_column_width_splits_source_span_and_preserves_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("widths.xlsx");
+        let bundle_path = temp.path().join("widths.hcd");
+        create_merge_edit_fixture(&source);
+        let mut options = ImportOptions::new("column-width-doc");
+        options.chunk_blocks = 1;
+        let imported = import_xlsx(&source, &bundle_path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let original_page = bundle.read_index_page(&imported, 0).unwrap();
+        assert_eq!(original_page.chunks.len(), 2);
+        let sheet_id = original_page.chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let width_patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_9.to_string(),
+            document_id: "column-width-doc".to_string(),
+            patch_id: "width-b".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxColumnWidth {
+                sheet_id: sheet_id.clone(),
+                column: 2,
+                width_chars: 30.5,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &width_patch, 0)
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &width_patch, 1)
+                .unwrap()
+                .revision,
+            1
+        );
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let descriptor = &bundle
+            .read_index_page(&bundle.manifest().unwrap(), 0)
+            .unwrap()
+            .chunks[0];
+        let html = bundle.read_chunk(descriptor).unwrap();
+        assert!(html.contains("data-hcd-column-start=\"2\" data-hcd-column-end=\"2\" data-hcd-width=\"30.50\" data-hcd-width-edited=\"true\""));
+        let second_descriptor = &bundle
+            .read_index_page(&bundle.manifest().unwrap(), 0)
+            .unwrap()
+            .chunks[1];
+        assert!(bundle
+            .read_chunk(second_descriptor)
+            .unwrap()
+            .contains("data-hcd-width-edited=\"true\""));
+        let first_export = temp.path().join("first-width.xlsx");
+        export_xlsx(&bundle, &source, &first_export, &ExportOptions::default()).unwrap();
+        let sheet = read_zip_entry(&first_export, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<col min=\"1\" max=\"1\" width=\"12\""));
+        assert!(sheet.contains("<col min=\"2\" max=\"2\" width=\"30.50\""));
+        assert!(sheet.contains("<col min=\"3\" max=\"4\" width=\"12\""));
+
+        let history = temp.path().join("original-width.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &history,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        let original = read_zip_entry(&history, "xl/worksheets/sheet1.xml");
+        assert!(original.contains("<col min=\"1\" max=\"4\" width=\"12\""));
+        assert!(!original.contains("width=\"30.50\""));
+
+        let second_patch = PatchBatch {
+            patch_id: "width-f".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxColumnWidth {
+                sheet_id,
+                column: 6,
+                width_chars: 17.0,
+            }],
+            ..width_patch
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &second_patch, 1)
+                .unwrap()
+                .revision,
+            2
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let second_export = temp.path().join("second-width.xlsx");
+        export_xlsx(&bundle, &source, &second_export, &ExportOptions::default()).unwrap();
+        let second_sheet = read_zip_entry(&second_export, "xl/worksheets/sheet1.xml");
+        assert!(
+            second_sheet.contains("<col min=\"6\" max=\"6\" width=\"17.00\" customWidth=\"1\"/>")
+        );
+        assert!(second_sheet.contains("<dimension ref=\"A1:F2\"/>"));
+    }
+
+    #[test]
     fn worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows() {
         let source = br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Original</x:t></x:is></x:c><x:c r="B1" s="3"/><x:c r="D1" t="inlineStr"><x:is><x:t>Right</x:t></x:is></x:c></x:row><x:row r="2"/></x:sheetData></x:worksheet>"#;
         let replacements = BTreeMap::from([
@@ -5623,9 +6006,11 @@ mod tests {
             &replacements,
             &BTreeSet::new(),
             &BTreeSet::new(),
+            &BTreeMap::from([(2, 24.0)]),
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();
+        assert!(xml.contains("<x:cols><x:col min=\"2\" max=\"2\" width=\"24.00\" customWidth=\"1\"/></x:cols><x:sheetData>"));
         assert!(xml.contains(
             "<x:c r=\"B1\" s=\"3\" t=\"inlineStr\"><x:is><x:t>Styled</x:t></x:is></x:c>"
         ));
@@ -5875,7 +6260,7 @@ mod tests {
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Anchor</t></is></c><c r="D1" t="inlineStr"><is><t>Other</t></is></c></row><row r="2"><c r="D2" t="inlineStr"><is><t>Below</t></is></c></row></sheetData></worksheet>"#,
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D2"/><cols><col min="1" max="4" width="12" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Anchor</t></is></c><c r="D1" t="inlineStr"><is><t>Other</t></is></c></row><row r="2"><c r="D2" t="inlineStr"><is><t>Below</t></is></c></row></sheetData></worksheet>"#,
             ),
         ];
         for (name, contents) in parts {
