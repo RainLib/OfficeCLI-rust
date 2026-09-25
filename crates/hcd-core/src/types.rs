@@ -292,6 +292,9 @@ pub enum PatchOperation {
     /// Insert a blank row before an existing row, shifting later rows down.
     #[serde(rename = "xlsx.row.insert", rename_all = "camelCase")]
     XlsxRowInsert { sheet_id: String, before_row: u32 },
+    /// Delete an existing worksheet row and shift later rows up.
+    #[serde(rename = "xlsx.row.delete", rename_all = "camelCase")]
+    XlsxRowDelete { sheet_id: String, row: u32 },
     /// Insert a blank column before an existing column, shifting later cells right.
     #[serde(rename = "xlsx.column.insert", rename_all = "camelCase")]
     XlsxColumnInsert {
@@ -354,6 +357,7 @@ impl PatchOperation {
             | Self::XlsxCellSet { .. }
             | Self::XlsxRowAppend { .. }
             | Self::XlsxRowInsert { .. }
+            | Self::XlsxRowDelete { .. }
             | Self::XlsxColumnInsert { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. } => None,
@@ -370,6 +374,7 @@ impl PatchOperation {
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxRowAppend { .. }
                 | Self::XlsxRowInsert { .. }
+                | Self::XlsxRowDelete { .. }
                 | Self::XlsxColumnInsert { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
@@ -511,6 +516,8 @@ pub struct RevisionRecord {
     /// Sequential row insertions, expressed in the worksheet coordinates at each revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_row_insertions: Vec<GridRowInsertion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grid_row_deletions: Vec<GridRowDeletion>,
     /// Sequential column insertions in worksheet coordinates at each revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_column_insertions: Vec<GridColumnInsertion>,
@@ -523,6 +530,14 @@ pub struct RevisionRecord {
 pub struct GridRowInsertion {
     pub sheet_part: String,
     pub before_row: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridRowDeletion {
+    pub sheet_part: String,
+    pub row: u32,
+    pub removed_node_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

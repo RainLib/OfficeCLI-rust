@@ -4325,10 +4325,22 @@ pub(crate) fn export_xlsx(
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
     let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
-    let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    let mut dirty_node_ids = dirty_node_ids;
+    let mut deleted_nodes = std::collections::HashSet::new();
+    for revision in 1..=manifest.revision {
+        for deletion in bundle.revision(revision)?.grid_row_deletions {
+            deleted_nodes.extend(deletion.removed_node_ids);
+        }
+    }
+    dirty_node_ids.retain(|id| !deleted_nodes.contains(id));
+    let nodes = if dirty_node_ids.is_empty() {
+        Vec::new()
+    } else {
+        collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?
+    };
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
-    let mut row_insertions: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
     let mut column_insertions: HashMap<String, Vec<u32>> = HashMap::new();
     for revision in 1..=manifest.revision {
         let record = bundle.revision(revision)?;
@@ -4336,7 +4348,13 @@ pub(crate) fn export_xlsx(
             row_insertions
                 .entry(shift.sheet_part)
                 .or_default()
-                .push(shift.before_row);
+                .push(RowShift::Insert(shift.before_row));
+        }
+        for shift in record.grid_row_deletions {
+            row_insertions
+                .entry(shift.sheet_part)
+                .or_default()
+                .push(RowShift::Delete(shift.row));
         }
         for shift in record.grid_column_insertions {
             column_insertions
@@ -4443,7 +4461,11 @@ pub(crate) fn export_xlsx(
                 "edited cells are serialized as inline strings regardless of their original storage type"
                     .to_string(),
             ];
-            if !row_insertions.is_empty() {
+            if row_insertions
+                .values()
+                .flatten()
+                .any(|shift| matches!(shift, RowShift::Insert(_)))
+            {
                 items.push("inserted worksheet rows have no inherited row formatting".to_string());
             }
             if !column_insertions.is_empty() {
@@ -4702,7 +4724,7 @@ fn rewrite_worksheet(
     merges: &BTreeSet<String>,
     canonical_rows: &BTreeSet<u32>,
     column_widths: &BTreeMap<u32, f64>,
-    row_insertions: &[u32],
+    row_insertions: &[RowShift],
     column_insertions: &[u32],
     hcd_last_column: u32,
 ) -> Result<(), HcdError> {
@@ -4886,6 +4908,9 @@ fn rewrite_worksheet(
                     empty,
                     canonical_last_row,
                     canonical_last_column,
+                    row_insertions
+                        .iter()
+                        .any(|shift| matches!(shift, RowShift::Delete(_))),
                 )?))?;
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "mergeCells" => {
@@ -4911,6 +4936,12 @@ fn rewrite_worksheet(
                         HcdError::InvalidBundle("invalid XLSX row number".to_string())
                     })?;
                 let row = shifted_xlsx_row(source_row, row_insertions)?;
+                if row == 0 {
+                    last_source_row = source_row;
+                    skip_depth = 1;
+                    buffer.clear();
+                    continue;
+                }
                 row_cell_name = qualified_child_name(start.name().as_ref(), "c");
                 write_missing_xlsx_rows(
                     &mut writer,
@@ -4941,6 +4972,11 @@ fn rewrite_worksheet(
                         HcdError::InvalidBundle("invalid XLSX row number".to_string())
                     })?;
                 let row = shifted_xlsx_row(source_row, row_insertions)?;
+                if row == 0 {
+                    last_source_row = source_row;
+                    buffer.clear();
+                    continue;
+                }
                 row_cell_name = qualified_child_name(empty.name().as_ref(), "c");
                 write_missing_xlsx_rows(
                     &mut writer,
@@ -5110,17 +5146,28 @@ fn rewrite_worksheet(
     Ok(())
 }
 
-fn shifted_xlsx_row(mut row: u32, insertions: &[u32]) -> Result<u32, HcdError> {
-    for &before in insertions {
-        if row >= before {
-            row = row
-                .checked_add(1)
-                .filter(|row| *row <= 1_048_576)
-                .ok_or_else(|| {
-                    HcdError::Unsupported(
-                        "XLSX row insertion exceeds the worksheet limit".to_string(),
-                    )
-                })?;
+#[derive(Clone, Copy)]
+enum RowShift {
+    Insert(u32),
+    Delete(u32),
+}
+
+fn shifted_xlsx_row(mut row: u32, shifts: &[RowShift]) -> Result<u32, HcdError> {
+    for shift in shifts {
+        match *shift {
+            RowShift::Insert(before) if row >= before => {
+                row = row
+                    .checked_add(1)
+                    .filter(|row| *row <= 1_048_576)
+                    .ok_or_else(|| {
+                        HcdError::Unsupported(
+                            "XLSX row insertion exceeds the worksheet limit".to_string(),
+                        )
+                    })?;
+            }
+            RowShift::Delete(at) if row == at => return Ok(0),
+            RowShift::Delete(at) if row > at => row -= 1,
+            _ => {}
         }
     }
     Ok(row)
@@ -5129,7 +5176,7 @@ fn shifted_xlsx_row(mut row: u32, insertions: &[u32]) -> Result<u32, HcdError> {
 fn verify_grid_shift_source(
     archive: &mut StreamingOxmlArchive,
     workbook: &WorkbookInfo,
-    row_insertions: &HashMap<String, Vec<u32>>,
+    row_insertions: &HashMap<String, Vec<RowShift>>,
     column_insertions: &HashMap<String, Vec<u32>>,
 ) -> Result<(), HcdError> {
     for entry in archive.entries() {
@@ -5227,7 +5274,7 @@ fn verify_grid_shift_source(
                                 return Err(PackageError::ReadPartError("column insertion cannot update explicit source column widths".to_string()));
                             }
                             if target && matches!(tag, "sheetView" | "selection") {
-                                let first_row = row_insertions.get(&sheet.part).and_then(|rows| rows.iter().copied().min());
+                                let first_row = row_insertions.get(&sheet.part).and_then(|rows| rows.iter().map(|shift| match shift { RowShift::Insert(row) | RowShift::Delete(row) => *row }).min());
                                 let first_column = column_insertions.get(&sheet.part).and_then(|columns| columns.iter().copied().min());
                                 for field in ["topLeftCell", "activeCell", "sqref"] {
                                     if let Some(value) = attribute(element, field) {
@@ -5281,7 +5328,7 @@ fn shifted_xlsx_column(mut column: u32, insertions: &[u32]) -> Result<u32, HcdEr
 
 fn shifted_xlsx_cell_reference(
     reference: &str,
-    row_insertions: &[u32],
+    row_insertions: &[RowShift],
     column_insertions: &[u32],
 ) -> Result<String, HcdError> {
     if row_insertions.is_empty() && column_insertions.is_empty() {
@@ -5355,6 +5402,7 @@ fn expand_worksheet_dimension(
     original: &BytesStart<'_>,
     canonical_last_row: u32,
     canonical_last_column: u32,
+    shrink_rows: bool,
 ) -> Result<BytesStart<'static>, HcdError> {
     let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
     let mut expanded = BytesStart::new(name);
@@ -5371,20 +5419,29 @@ fn expand_worksheet_dimension(
                 HcdError::InvalidBundle(format!("invalid XLSX worksheet dimension: {error}"))
             })?
             .into_owned();
-        if local_name(attribute.key.as_ref()) == "ref"
+        if local_name(attribute.key.as_ref()) == "ref" && shrink_rows && canonical_last_row == 0 {
+            value = "A1".to_string();
+        } else if local_name(attribute.key.as_ref()) == "ref"
             && (canonical_last_row > 0 || canonical_last_column > 0)
         {
             let (first, last) = value.split_once(':').unwrap_or((&value, &value));
             if let (Some((first_row, first_column)), Some((last_row, last_column))) =
                 (cell_coordinates(first), cell_coordinates(last))
             {
-                if canonical_last_row > last_row || canonical_last_column > last_column {
+                if shrink_rows
+                    || canonical_last_row > last_row
+                    || canonical_last_column > last_column
+                {
                     value = format!(
                         "{}{}:{}{}",
                         column_name(first_column),
                         first_row,
                         column_name(last_column.max(canonical_last_column)),
-                        last_row.max(canonical_last_row)
+                        if shrink_rows {
+                            canonical_last_row.max(1)
+                        } else {
+                            last_row.max(canonical_last_row)
+                        }
                     );
                 }
             }
@@ -6602,6 +6659,168 @@ mod tests {
         assert!(xml.contains("<row r=\"128\"/>"));
         assert!(xml.contains("<c r=\"A129\" t=\"inlineStr\"><is><t>Row 128</t>"));
         assert!(xml.contains("<c r=\"A131\" t=\"inlineStr\"><is><t>Row 130</t>"));
+    }
+
+    #[test]
+    fn middle_row_deletion_shifts_windows_and_preserves_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("long.xlsx");
+        let bundle_path = temp.path().join("long.hcd");
+        create_plain_rows_fixture(&source, 130);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("delete-row-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_14.to_string(),
+            document_id: "delete-row-doc".to_string(),
+            patch_id: "delete-middle-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowDelete { sheet_id, row: 128 }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(
+            hcd_core::apply_patch(&bundle, &patch, 1)
+                .unwrap()
+                .idempotent_replay
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("deleted.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("Row 128</t>"), "{xml}");
+        assert!(
+            xml.contains("<c r=\"A128\" t=\"inlineStr\"><is><t>Row 129</t>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<c r=\"A129\" t=\"inlineStr\"><is><t>Row 130</t>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<dimension ref=\"A1:D129\"/>"), "{xml}");
+        let historical = temp.path().join("original.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&historical, "xl/worksheets/sheet1.xml")
+            .contains("<c r=\"A128\" t=\"inlineStr\"><is><t>Row 128</t>"));
+    }
+
+    #[test]
+    fn deleting_only_worksheet_row_keeps_empty_grid_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("one.xlsx");
+        let bundle_path = temp.path().join("one.hcd");
+        create_plain_rows_fixture(&source, 1);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("one-row-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_14.to_string(),
+            document_id: "one-row-doc".to_string(),
+            patch_id: "delete-only-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowDelete { sheet_id, row: 1 }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("empty.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("<row "), "{xml}");
+    }
+
+    #[test]
+    fn deleting_previously_inserted_and_filled_row_clears_dirty_node() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("source.hcd");
+        create_plain_rows_fixture(&source, 2);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("insert-delete-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let mut patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_14.to_string(),
+            document_id: "insert-delete-doc".to_string(),
+            patch_id: "insert-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id: sheet_id.clone(),
+                before_row: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        patch.patch_id = "fill-row".to_string();
+        patch.base_revision = 1;
+        patch.operations = vec![PatchOperation::XlsxCellSet {
+            sheet_id: sheet_id.clone(),
+            row: 2,
+            column: 1,
+            text: "Temporary".to_string(),
+        }];
+        hcd_core::apply_patch(&bundle, &patch, 1).unwrap();
+        patch.patch_id = "delete-row".to_string();
+        patch.base_revision = 2;
+        patch.operations = vec![PatchOperation::XlsxRowDelete { sheet_id, row: 2 }];
+        hcd_core::apply_patch(&bundle, &patch, 2).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("result.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("Temporary"), "{xml}");
+        assert!(
+            xml.contains("<c r=\"A2\" t=\"inlineStr\"><is><t>Row 2</t>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("<row r=\"3\""), "{xml}");
     }
 
     #[test]
