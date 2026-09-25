@@ -22,6 +22,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
+  const [mergeBusy, setMergeBusy] = useState(false)
   const host = useRef<HTMLDivElement>(null)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
   const syncing = useRef(false)
@@ -129,14 +130,64 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     return () => { alive = false; runtime.current = null; removePatchListener?.(); disposeUniver?.(); client.dispose() }
   }, [session, editing, collaboration.announceRevision])
 
+  async function mergeSelection() {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || mergeBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const sheet = current.adapter.workbook.getActiveSheet()
+      const range = sheet.getActiveRange()
+      if (!range || range.getHeight() * range.getWidth() < 2) {
+        throw new Error('请先选中至少两个单元格')
+      }
+      const startRow = range.getRow()
+      const startColumn = range.getColumn()
+      const endRow = startRow + range.getHeight() - 1
+      const endColumn = startColumn + range.getWidth() - 1
+      const anchor = current.adapter.getNodeAt(sheet.getSheetId(), startRow, startColumn)
+      if (!anchor?.editable) throw new Error('合并区域左上角必须是可编辑的现有单元格')
+      for (let row = startRow; row <= endRow; row += 1) {
+        for (let column = startColumn; column <= endColumn; column += 1) {
+          if (row === startRow && column === startColumn) continue
+          const value = sheet.getRange(row, column).getValue()
+          if (current.adapter.getNodeAt(sheet.getSheetId(), row, column)
+            || (value !== null && value !== undefined && String(value) !== '')) {
+            throw new Error('为避免丢失内容，合并区域中除左上角外的单元格必须为空')
+          }
+        }
+      }
+      setMergeBusy(true)
+      setStatus('正在合并单元格…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/6', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.merge', nodeId: anchor.nodeId, sheetId: sheet.getSheetId(),
+            startRow: startRow + 1, startColumn: startColumn + 1,
+            endRow: endRow + 1, endColumn: endColumn + 1,
+            precondition: { nodeHash: anchor.nodeHash } }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      collaboration.announceRevision(saved.revision)
+      await current.adapter.refreshFromServer()
+      setRevision(saved.revision)
+      setError('')
+      setStatus(`revision ${saved.revision} · 已合并 ${range.getA1Notation()}`)
+    } catch (cause) {
+      setError(`合并失败：${String(cause)}`)
+    } finally {
+      setMergeBusy(false)
+    }
+  }
+
   const headerStatus = error ? '保存失败' : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
       onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
-      {activeTab === 'home' && <><span className="ribbon-note">双击单元格或按 F2 编辑 · 支持现有单元格内容</span><span className="ribbon-note">{status}</span></>}
-      {activeTab === 'insert' && <span className="ribbon-note">当前工作簿支持编辑已有单元格；插入行列与合并单元格尚未接入 HCD 修订。</span>}
+      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并单元格</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
+      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">当前仅合并左上角有内容、其余单元格为空的区域；行列操作另行接入修订。</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}
