@@ -11,7 +11,7 @@ use crate::{
     NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
     TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2,
     HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_7, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -69,6 +69,14 @@ struct XlsxMerge {
     node_hash: String,
 }
 
+#[derive(Clone)]
+struct XlsxCellInsertion {
+    sheet_id: String,
+    row: u32,
+    column: u32,
+    text: String,
+}
+
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
@@ -97,13 +105,15 @@ pub fn apply_patch(
     }
     validate_patch_header(&manifest, patch, expected_revision)?;
     if patch.base_revision < manifest.revision
-        && patch
-            .operations
-            .iter()
-            .any(|operation| matches!(operation, PatchOperation::PdfTextInsert { .. }))
+        && patch.operations.iter().any(|operation| {
+            matches!(
+                operation,
+                PatchOperation::PdfTextInsert { .. } | PatchOperation::XlsxCellSet { .. }
+            )
+        })
     {
         return Err(HcdError::RevisionConflict(
-            "PDF text insertion requires the current head revision".to_string(),
+            "node insertion requires the current head revision".to_string(),
         ));
     }
 
@@ -132,6 +142,7 @@ pub fn apply_patch(
     let images = collect_image_changes(patch)?;
     let pdf_insertions = collect_pdf_insertions(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
+    let xlsx_cell_set = collect_xlsx_cell_set(patch);
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -156,7 +167,8 @@ pub fn apply_patch(
         || !styles.is_empty()
         || !images.is_empty()
         || !pdf_insertions.is_empty()
-        || !xlsx_merges.is_empty();
+        || !xlsx_merges.is_empty()
+        || xlsx_cell_set.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -166,6 +178,7 @@ pub fn apply_patch(
     let mut dirty_nodes = BTreeSet::new();
     let mut dirty_chunks = BTreeSet::new();
     let mut dirty_parts = BTreeSet::new();
+    let mut inserted_xlsx_cell_node_id = None;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -199,11 +212,27 @@ pub fn apply_patch(
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
+            let cell_insertion = xlsx_cell_set.as_ref().filter(|insertion| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells
+                        && grid.sheet_id == insertion.sheet_id
+                        && grid
+                            .row_start
+                            .is_some_and(|start| u64::from(insertion.row) >= start)
+                        && grid
+                            .row_end
+                            .is_some_and(|end| u64::from(insertion.row) <= end)
+                        && grid
+                            .column_start
+                            .is_some_and(|start| insertion.column >= start)
+                        && grid.column_end.is_some_and(|end| insertion.column <= end)
+                })
+            });
             let candidates: Vec<&String> = target_node_ids
                 .iter()
                 .filter(|node_id| node_bloom_might_contain(&descriptor.node_bloom, node_id))
                 .collect();
-            if candidates.is_empty() && insertions.is_none() {
+            if candidates.is_empty() && insertions.is_none() && cell_insertion.is_none() {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
             }
@@ -427,6 +456,28 @@ pub fn apply_patch(
                     source_map.entries.last().map(|entry| entry.node_id.clone());
                 chunk_changed = true;
             }
+            if let Some(insertion) = cell_insertion {
+                let (node_id, part) =
+                    insert_xlsx_cell(&mut html, &mut source_map, &manifest.document_id, insertion)?;
+                html_nodes.insert(node_id.clone(), insertion.text.clone());
+                descriptor.node_count += 1;
+                descriptor.node_bloom = node_bloom(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.node_id.as_str()),
+                );
+                descriptor.first_node_id = source_map
+                    .entries
+                    .first()
+                    .map(|entry| entry.node_id.clone());
+                descriptor.last_node_id =
+                    source_map.entries.last().map(|entry| entry.node_id.clone());
+                dirty_nodes.insert(node_id.clone());
+                dirty_parts.insert(part);
+                inserted_xlsx_cell_node_id = Some(node_id);
+                chunk_changed = true;
+            }
 
             if chunk_changed {
                 page_changed = true;
@@ -467,6 +518,15 @@ pub fn apply_patch(
             return Err(HcdError::NodeNotFound(format!(
                 "PDF page {}",
                 insertion.page
+            )));
+        }
+    }
+    if let Some(insertion) = &xlsx_cell_set {
+        if inserted_xlsx_cell_node_id.is_none() {
+            return Err(HcdError::Unsupported(format!(
+                "XLSX cell {}{} is outside an existing HCD cell window",
+                xlsx_column_name(insertion.column),
+                insertion.row
             )));
         }
     }
@@ -827,6 +887,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_6
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_7
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -942,8 +1003,10 @@ fn validate_patch_identity(
                 end_column,
                 precondition,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_6
-                    || manifest.source.format != "xlsx"
+                if !matches!(
+                    patch.schema_version.as_str(),
+                    HCD_PATCH_SCHEMA_VERSION_6 | HCD_PATCH_SCHEMA_VERSION_7
+                ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -976,6 +1039,40 @@ fn validate_patch_identity(
                         "XLSX merge range must contain 2 to 10000 valid cells".to_string(),
                     ));
                 }
+            }
+            PatchOperation::XlsxCellSet {
+                sheet_id,
+                row,
+                column,
+                text,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_7
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.cell.set requires one operation on an XLSX bundle with hcd-patch/7"
+                            .to_string(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !(1..=1_048_576).contains(row)
+                    || !(1..=16_384).contains(column)
+                    || text.is_empty()
+                    || text.chars().count() > 32_767
+                    || text.chars().any(is_forbidden_xml_character)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX cell insertion has an invalid sheet, address, or text".to_string(),
+                    ));
+                }
+                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
+                })?;
             }
             PatchOperation::NodeStyle {
                 node_id,
@@ -1266,6 +1363,26 @@ fn collect_xlsx_merges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
         .collect()
 }
 
+fn collect_xlsx_cell_set(patch: &PatchBatch) -> Option<XlsxCellInsertion> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxCellSet {
+            sheet_id,
+            row,
+            column,
+            text,
+        } = operation
+        else {
+            return None;
+        };
+        Some(XlsxCellInsertion {
+            sheet_id: sheet_id.clone(),
+            row: *row,
+            column: *column,
+            text: text.clone(),
+        })
+    })
+}
+
 #[derive(Clone)]
 struct XlsxCellSpan {
     start: usize,
@@ -1381,6 +1498,112 @@ fn xlsx_cells(html: &str) -> Result<Vec<XlsxCellSpan>, HcdError> {
         cursor = row_end + "</tr>".len();
     }
     Ok(result)
+}
+
+fn insert_xlsx_cell(
+    html: &mut String,
+    source_map: &mut crate::ChunkSourceMap,
+    document_id: &str,
+    insertion: &XlsxCellInsertion,
+) -> Result<(String, String), HcdError> {
+    let cells = xlsx_cells(html)?;
+    let cell = cells
+        .iter()
+        .find(|cell| cell.row == insertion.row && cell.column == insertion.column)
+        .ok_or_else(|| {
+            HcdError::Unsupported(format!(
+                "XLSX cell {}{} is outside materialized empty cells",
+                xlsx_column_name(insertion.column),
+                insertion.row
+            ))
+        })?;
+    if cells
+        .iter()
+        .filter_map(|cell| cell.merged_range)
+        .any(|range| {
+            range.0 <= insertion.row
+                && range.2 >= insertion.row
+                && range.1 <= insertion.column
+                && range.3 >= insertion.column
+        })
+    {
+        return Err(HcdError::PreconditionFailed(
+            "XLSX cell is inside a merged range".to_string(),
+        ));
+    }
+    if cell.has_node || !html[cell.tag_end + 1..cell.end - 5].trim().is_empty() {
+        return Err(HcdError::PreconditionFailed(
+            "XLSX cell is no longer empty".to_string(),
+        ));
+    }
+    let reference = format!("{}{}", xlsx_column_name(insertion.column), insertion.row);
+    if source_map
+        .entries
+        .iter()
+        .any(|entry| entry.source.paragraph_id.as_deref() == Some(reference.as_str()))
+    {
+        return Err(HcdError::PreconditionFailed(format!(
+            "XLSX cell {reference} is already mapped"
+        )));
+    }
+    let part = source_map
+        .entries
+        .first()
+        .map(|entry| entry.source.part.clone())
+        .ok_or_else(|| {
+            HcdError::Unsupported(
+                "XLSX blank cell creation requires a window with mapped cells".to_string(),
+            )
+        })?;
+    let node_id = stable_node_id(&[document_id, &part, "cell", &reference]);
+    if source_map
+        .entries
+        .iter()
+        .any(|entry| entry.node_id == node_id)
+    {
+        return Err(HcdError::PreconditionFailed(format!(
+            "XLSX node {node_id} already exists"
+        )));
+    }
+    let node_hash = hash_bytes(insertion.text.as_bytes());
+    let replacement = format!(
+        "<td class=\"hcd-cell\" data-hcd-cell=\"{reference}\" data-hcd-column=\"{}\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></td>",
+        insertion.column,
+        escape_text(&insertion.text)
+    );
+    html.replace_range(cell.start..cell.end, &replacement);
+    let ordinal = source_map
+        .entries
+        .iter()
+        .map(|entry| entry.source.text_ordinal)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| HcdError::ResourceLimit("XLSX source ordinal overflow".to_string()))?;
+    let position = source_map.entries.iter().position(|entry| {
+        entry
+            .source
+            .paragraph_id
+            .as_deref()
+            .and_then(xlsx_cell_coordinates)
+            .is_some_and(|(row, column)| (row, column) > (insertion.row, insertion.column))
+    });
+    source_map.entries.insert(
+        position.unwrap_or(source_map.entries.len()),
+        NodeMapEntry {
+            node_id: node_id.clone(),
+            node_hash,
+            source: SourceAnchor {
+                part: part.clone(),
+                text_ordinal: ordinal,
+                paragraph_id: Some(reference),
+                text_id: None,
+                node_kind: "cell".to_string(),
+                editable: true,
+            },
+        },
+    );
+    Ok((node_id, part))
 }
 
 fn merge_xlsx_cells(html: &mut String, merge: &XlsxMerge) -> Result<(), HcdError> {
@@ -2088,6 +2311,7 @@ fn apply_annotations(
             PatchOperation::TextSplice { .. }
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::XlsxMerge { .. }
+            | PatchOperation::XlsxCellSet { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}

@@ -12,13 +12,21 @@ export interface HcdTextSplice {
   precondition: { nodeHash: string };
 }
 
+export interface HcdXlsxCellSet {
+  type: 'xlsx.cell.set';
+  sheetId: string;
+  row: number;
+  column: number;
+  text: string;
+}
+
 export interface HcdPatchBatch {
-  schemaVersion: 'hcd-patch/1';
+  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7';
   documentId: string;
   patchId: string;
   baseRevision: number;
   actor: Record<string, string>;
-  operations: HcdTextSplice[];
+  operations: Array<HcdTextSplice | HcdXlsxCellSet>;
   metadata: Record<string, string>;
 }
 
@@ -32,12 +40,13 @@ export type HcdViewerMode = 'readonly' | 'editable';
 interface PendingPatch {
   links: NodeLink[];
   previous: string[];
+  blank?: { sheetId: string; row: number; column: number };
 }
 
 interface ChunkRuntime {
   sheetId: string;
   kind: 'cells' | 'picture' | 'chart';
-  cells: Array<{ row: number; column: number; link?: NodeLink }>;
+  cells: Array<{ row: number; column: number; link?: NodeLink; blank: boolean }>;
   visualIds: string[];
 }
 
@@ -76,6 +85,7 @@ export class HcdUniverAdapter {
   private readonly appliedDimensions = new Set<string>();
   private readonly linksByCell = new Map<string, NodeLink>();
   private readonly linksByNode = new Map<string, NodeLink>();
+  private readonly blankCells = new Set<string>();
   private readonly pending = new Map<string, PendingPatch>();
   private readonly runtimes = new Map<string, ChunkRuntime>();
   private readonly rangeGeneration = new Map<string, number>();
@@ -116,7 +126,10 @@ export class HcdUniverAdapter {
       }
       const key = cellKey(event.worksheet.getSheetId(), event.row, event.column);
       const link = this.linksByCell.get(key);
-      if (!link?.editable || [...this.pending.values()].some(({ links }) => links.includes(link))) {
+      const blank = this.blankCells.has(key);
+      const pending = [...this.pending.values()].some(({ links, blank: pendingBlank }) =>
+        (link && links.includes(link)) || (pendingBlank && cellKey(pendingBlank.sheetId, pendingBlank.row, pendingBlank.column) === key));
+      if ((!link?.editable && !blank) || pending) {
         event.cancel = true;
       }
     });
@@ -191,6 +204,10 @@ export class HcdUniverAdapter {
       pending.links.forEach((link, index) => {
         this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column).setValue(pending.previous[index]);
       });
+      if (pending.blank) {
+        const { sheetId, row, column } = pending.blank;
+        this.workbook.getSheetBySheetId(sheetId)?.getRange(row, column).setValue('');
+      }
     });
     this.pending.delete(patchId);
     this.onStatus(reason);
@@ -232,7 +249,7 @@ export class HcdUniverAdapter {
       this.runtimes.set(descriptor.chunkId, {
         sheetId: descriptor.grid!.sheetId,
         kind: descriptor.grid!.kind,
-        cells: parsed.cells.map(({ row, column, link }) => ({ row, column, link })),
+        cells: parsed.cells.map(({ row, column, link, blank }) => ({ row, column, link, blank })),
         visualIds: parsed.visuals.map(({ nodeId }) => nodeId),
       });
       this.loaded.add(descriptor.chunkId);
@@ -265,6 +282,7 @@ export class HcdUniverAdapter {
             this.linksByCell.set(cellKey(cell.link.sheetId, cell.row, cell.column), cell.link);
             this.linksByNode.set(cell.link.nodeId, cell.link);
           }
+          if (cell.blank) this.blankCells.add(cellKey(sheet.getSheetId(), cell.row, cell.column));
         }
         sheet.getRange(minRow, minColumn, maxRow - minRow + 1, maxColumn - minColumn + 1).setValues(values);
       }
@@ -401,17 +419,24 @@ export class HcdUniverAdapter {
     const links: NodeLink[] = [];
     const previous: string[] = [];
     const rejected: Array<{ sheetId: string; row: number; column: number; value: string }> = [];
+    const blankChanges: Array<{ sheetId: string; row: number; column: number; text: string }> = [];
     for (const range of ranges) {
       const values = range.getValues();
       for (let rowOffset = 0; rowOffset < range.getHeight(); rowOffset += 1) {
         for (let columnOffset = 0; columnOffset < range.getWidth(); columnOffset += 1) {
           const row = range.getRow() + rowOffset;
           const column = range.getColumn() + columnOffset;
-          const link = this.linksByCell.get(cellKey(range.getSheetId(), row, column));
-          if (!link?.editable) {
-            // Editing can enter through paste/fill commands without first
-            // emitting BeforeSheetEditStart. Revert both read-only mapped
-            // cells and blank cells that have no HCD/source-map node.
+          const key = cellKey(range.getSheetId(), row, column);
+          const link = this.linksByCell.get(key);
+          const next = String(values[rowOffset]?.[columnOffset] ?? '');
+          if (!link?.editable || this.mode === 'readonly') {
+            if (this.mode === 'editable' && !link && this.blankCells.has(key)
+              && next !== '' && this.pending.size === 0) {
+              blankChanges.push({ sheetId: range.getSheetId(), row, column, text: next });
+              continue;
+            }
+            // Paste and fill can bypass BeforeSheetEditStart. Unsupported
+            // cells are restored rather than left as unsaved local changes.
             rejected.push({
               sheetId: range.getSheetId(),
               row,
@@ -420,7 +445,6 @@ export class HcdUniverAdapter {
             });
             continue;
           }
-          const next = String(values[rowOffset]?.[columnOffset] ?? '');
           if (next === link.text) continue;
           operations.push({
             type: 'text.splice',
@@ -433,6 +457,31 @@ export class HcdUniverAdapter {
           previous.push(link.text);
         }
       }
+    }
+    if (blankChanges.length === 1 && operations.length === 0 && rejected.length === 0) {
+      const blank = blankChanges[0];
+      const patchId = crypto.randomUUID();
+      const patch: HcdPatchBatch = {
+        schemaVersion: 'hcd-patch/7', documentId: this.client.manifest.documentId,
+        patchId, baseRevision: this.client.manifest.revision,
+        actor: { client: 'officecli-hcd-univer-viewer' },
+        operations: [{ type: 'xlsx.cell.set', sheetId: blank.sheetId,
+          row: blank.row + 1, column: blank.column + 1, text: blank.text }],
+        metadata: { rootHash: this.client.manifest.rootHash },
+      };
+      this.pending.set(patchId, { links: [], previous: [], blank });
+      window.dispatchEvent(new CustomEvent<HcdPatchEventDetail>('hcd-patch', {
+        detail: { patch, changes: [{ sheetId: blank.sheetId, row: blank.row,
+          column: blank.column, oldText: '', newText: blank.text }] },
+      }));
+      this.onStatus(`patch ${patchId.slice(0, 8)} 等待服务端确认`);
+      return;
+    }
+    if (blankChanges.length) {
+      rejected.push(...blankChanges.map(({ sheetId, row, column }) => ({ sheetId, row, column, value: '' })));
+      rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column, value: oldText })));
+      operations.length = 0;
+      this.onStatus('首次输入空白格请一次编辑一个单元格');
     }
     if (rejected.length) {
       this.withApplying(() => rejected.forEach((cell) => {
@@ -457,8 +506,10 @@ export class HcdUniverAdapter {
 
   private evictOutsideWindow(activeSheetId: string, keep: Set<string>): void {
     for (const [chunkId, runtime] of this.runtimes) {
-      const isPending = [...this.pending.values()].some(({ links }) =>
-        links.some((link) => link.chunkId === chunkId));
+      const isPending = [...this.pending.values()].some(({ links, blank }) =>
+        links.some((link) => link.chunkId === chunkId)
+          || (blank?.sheetId === runtime.sheetId && runtime.cells.some((cell) =>
+            cell.blank && cell.row === blank.row && cell.column === blank.column)));
       if (isPending || (runtime.sheetId === activeSheetId && keep.has(chunkId))) continue;
       const sheet = this.workbook.getSheetBySheetId(runtime.sheetId);
       if (!sheet) continue;
@@ -479,6 +530,7 @@ export class HcdUniverAdapter {
               this.linksByCell.delete(cellKey(cell.link.sheetId, cell.row, cell.column));
               this.linksByNode.delete(cell.link.nodeId);
             }
+            if (cell.blank) this.blankCells.delete(cellKey(runtime.sheetId, cell.row, cell.column));
           }
           sheet.getRange(minRow, minColumn, maxRow - minRow + 1, maxColumn - minColumn + 1).setValues(values);
         }

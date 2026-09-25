@@ -106,14 +106,19 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             const result = await response.json() as { revision: number }
             const hashes: Record<string, string> = {}
             for (let index = 0; index < patch.operations.length; index += 1) {
+              const operation = patch.operations[index]
+              if (operation.type !== 'text.splice') continue
               const bytes = new TextEncoder().encode(detail.changes[index].newText)
               const digest = await crypto.subtle.digest('SHA-256', bytes)
-              hashes[patch.operations[index].nodeId] = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+              hashes[operation.nodeId] = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
             }
             adapter.acknowledgePatch(patch.patchId, result.revision, hashes)
             collaboration.announceRevision(result.revision)
             if (alive) { setRevision(result.revision); setError('') }
-            try { await client.open() } catch (cause) { if (alive) setError(`修订已保存，但索引刷新失败：${String(cause)}`) }
+            try {
+              if (patch.schemaVersion === 'hcd-patch/7') await adapter.refreshFromServer()
+              else await client.open()
+            } catch (cause) { if (alive) setError(`修订已保存，但索引刷新失败：${String(cause)}`) }
           } catch (cause) {
             adapter.rejectPatch(patch.patchId, '保存失败，已恢复单元格原值')
             if (alive) setError(`${String(cause)}。如其他人已更新，请重新打开文档。`)

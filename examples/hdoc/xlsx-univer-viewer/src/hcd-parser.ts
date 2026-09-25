@@ -26,6 +26,7 @@ export interface ParsedCell {
   data: ICellData;
   link?: NodeLink;
   formula: boolean;
+  blank: boolean;
 }
 
 export interface ParsedVisual {
@@ -188,9 +189,14 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
   if (!section || !chunk.descriptor.grid) throw new Error(`无效的 XLSX HCD 分片 ${chunk.descriptor.chunkId}`);
   const entries = new Map<string, NodeMapEntry>(chunk.map.entries.map((entry) => [entry.nodeId, entry]));
   const cells: ParsedCell[] = [];
-  for (const cell of document.querySelectorAll<HTMLTableCellElement>('td[data-hcd-cell]')) {
-    const position = parseCellReference(cell.dataset.hcdCell ?? '');
-    if (!position) continue;
+  for (const cell of document.querySelectorAll<HTMLTableCellElement>('td[data-hcd-cell], td.hcd-empty[data-hcd-column]')) {
+    const blank = cell.classList.contains('hcd-empty');
+    const position = blank
+      ? { row: Number(cell.closest<HTMLTableRowElement>('tr[data-hcd-row]')?.dataset.hcdRow) - 1,
+        column: Number(cell.dataset.hcdColumn) - 1 }
+      : parseCellReference(cell.dataset.hcdCell ?? '');
+    if (!position || !Number.isInteger(position.row) || position.row < 0
+      || !Number.isInteger(position.column) || position.column < 0) continue;
     const node = cell.querySelector<HTMLElement>('[data-hcd-id]');
     const nodeId = node?.dataset.hcdId;
     const entry = nodeId ? entries.get(nodeId) : undefined;
@@ -211,6 +217,7 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       data: { v: text, ...(styleIndex ? { s: `hcd-xs-${styleIndex}` } : {}) },
       link,
       formula: cell.dataset.hcdFormula === 'true',
+      blank,
     });
   }
 

@@ -68,6 +68,8 @@ The XLSX canvas keeps its Univer cell editor and now uses the same fixed documen
 
 For XLSX, select a rectangular range and choose **开始 → 合并单元格**. `hcd-patch/6` saves the merge in one immutable revision, updates the visible Univer grid, and writes `mergeCells` during source-backed XLSX export. The upper-left cell must be mapped and editable; every covered cell must be empty, and the range must fit one HCD cell window. The service rejects overlap and content loss. Use the original immutable XLSX for download; source-free XLSX export now rejects merged cells explicitly instead of silently discarding them. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-merge-cells.png`.
 
+An empty cell between materialized cells can now receive its first value directly in Univer. `hcd-patch/7` creates a stable HCD node for that address; later edits use the normal text patch, and source-backed XLSX export inserts the new `<c>` element or fills an existing empty styled cell. This first step requires the blank cell to be present in a loaded HCD row window; a completely new row, an unmaterialized trailing cell, and paste into multiple new cells remain separate structural work. To reproduce with `assets/showcase/budget-tracker.xlsx`, open the Settings sheet, type `HCD blank cell edit` into B3, press Enter, validate the bundle, then download XLSX. `xl/worksheets/sheet3.xml` must contain B3 as an inline string. The browser screenshot is `docs/screenshots/hcd-xlsx-blank-cell-edit.png`.
+
 Reproduce the merge and download check with the repository workbook:
 
 ```bash
