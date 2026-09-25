@@ -25,19 +25,30 @@ const fixedTextExtensions = [
   }),
 ]
 
-export function FixedTextBoxEditor({ text, disabled, onChange, onReady }: {
+export function FixedTextBoxEditor({ text, disabled, onChange, onReady, autoFocus = false, onSave, onCancel }: {
   text: string
   disabled: boolean
   onChange: (value: string) => void
   onReady?: (editor: Editor | null) => void
+  autoFocus?: boolean
+  onSave?: (value: string) => void
+  onCancel?: () => void
 }) {
   const editor = useEditor({
     extensions: fixedTextExtensions,
     content: { type: 'doc', content: [{ type: 'paragraph', content: text ? [{ type: 'text', text }] : [] }] },
     editable: !disabled,
+    autofocus: autoFocus ? 'end' : false,
     editorProps: {
       attributes: { class: 'fixed-tiptap-text', role: 'textbox', 'aria-label': '编辑文字', 'aria-multiline': 'false' },
-      handleKeyDown: (_view, event) => event.key === 'Enter',
+      handleKeyDown: (view, event) => {
+        if (event.key === 'Escape') { onCancel?.(); return true }
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          onSave?.(view.state.doc.textContent)
+          return true
+        }
+        return event.key === 'Enter'
+      },
       transformPastedText: pasted => pasted.replace(/[\r\n]+/g, ' '),
     },
     onUpdate: ({ editor: changed }) => onChange(changed.state.doc.textContent),
