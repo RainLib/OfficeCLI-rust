@@ -104,7 +104,7 @@ The **插入 → 删除选中行** action uses `hcd-patch/14` to delete a materi
 
 The **插入 → 删除选中列** action uses `hcd-patch/15` to remove one column and move later cells left across all HCD row windows. It keeps stable node IDs for surviving cells and retains the deleted values in historical revisions. Source-backed XLSX export rewrites cell addresses and omits deleted cells. As with column insertion, formula, merge, drawing, table, validation, defined-name, explicit column-width, and coordinate-dependent view references require separate reference rewriting. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-delete-middle-column.png`.
 
-The source-free semantic XLSX exporter preserves the visible values and column count, but can normalize a blank source cell to an empty string. Use source-backed export when XLSX cell types and exact blank-cell semantics matter.
+The source-free semantic XLSX exporter now leaves blank HTML table cells absent from worksheet XML, preserving empty cell values and column positions. It still rebuilds workbook styles and opaque parts semantically; use source-backed export when those properties matter.
 
 For the supplied `open-review-usage-2026-09.csv` workbook, select B1 and choose **插入 → 删除选中列**. The browser download has three rows and eleven columns; each value in original C:L appears in B:K, and the deleted B values are absent. Exporting revision 0 still yields all twelve original columns. Reproduce with CLI:
 
@@ -143,12 +143,16 @@ target/debug/officecli hdoc export /tmp/hcd-column-delete-check.hcd \
   --source /tmp/hcd-middle-row-real.xlsx --revision 1 --output /tmp/hcd-column-delete-current.xlsx
 target/debug/officecli hdoc export /tmp/hcd-column-delete-check.hcd \
   --source /tmp/hcd-middle-row-real.xlsx --revision 0 --output /tmp/hcd-column-delete-original.xlsx
+target/debug/officecli hdoc export /tmp/hcd-column-delete-check.hcd \
+  --to xlsx --revision 1 --output /tmp/hcd-column-delete-semantic.xlsx
 python3 - <<'PY'
 from openpyxl import load_workbook
 source = list(load_workbook('/tmp/hcd-column-delete-original.xlsx', read_only=True, data_only=True).active.values)
 current = list(load_workbook('/tmp/hcd-column-delete-current.xlsx', read_only=True, data_only=True).active.values)
+semantic = list(load_workbook('/tmp/hcd-column-delete-semantic.xlsx', read_only=True, data_only=True).active.values)
 assert len(current) == 3 and len(current[0]) == 11
 assert current == [row[:1] + row[2:] for row in source]
+assert semantic == current
 PY
 ```
 
