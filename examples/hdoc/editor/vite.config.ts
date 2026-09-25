@@ -5,15 +5,15 @@ import { defineConfig, type Plugin } from 'vite'
 
 const samples = [
   { id: 'accept-docx', title: '项目提案', format: 'DOCX', mode: '可编辑' },
-  { id: 'accept-pptx', title: '产品发布演示', format: 'PPTX', mode: '固定版式预览' },
+  { id: 'accept-pptx', title: '产品发布演示', format: 'PPTX', mode: '可编辑文字框' },
   { id: 'accept-xlsx', title: '成绩册', format: 'XLSX', mode: '可编辑单元格' },
   { id: 'accept-usage-xlsx', title: '用量统计（CSV 转 XLSX）', format: 'XLSX', mode: '可编辑单元格' },
   { id: 'accept-md', title: 'Markdown 富文本', format: 'Markdown', mode: '可编辑' },
   { id: 'accept-txt', title: 'TXT 纯文本', format: 'TXT', mode: '可编辑' },
   { id: 'accept-download-txt', title: '下载测试文本', format: 'TXT', mode: '附件下载验收' },
-  { id: 'accept-physics-pdf-v2', title: '初三物理练习卷（1 页）', format: 'PDF', mode: '固定版式 · 原件验收' },
-  { id: 'accept-case-pdf-v2', title: '审查起诉卷（25 页）', format: 'PDF', mode: '固定版式 · 原件验收' },
-  { id: 'accept-evidence-pdf-v2', title: '证据目录及证据（235 页）', format: 'PDF', mode: '固定版式 · 大文件验收' },
+  { id: 'accept-physics-pdf-v2', title: '初三物理练习卷（1 页）', format: 'PDF', mode: '可编辑识别文字' },
+  { id: 'accept-case-pdf-v2', title: '审查起诉卷（25 页）', format: 'PDF', mode: '可编辑识别文字' },
+  { id: 'accept-evidence-pdf-v2', title: '证据目录及证据（235 页）', format: 'PDF', mode: '可编辑识别文字' },
 ] as const
 
 function localAcceptanceSamples(): Plugin {
