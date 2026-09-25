@@ -50,6 +50,19 @@ async function currentProjection(documentId: string): Promise<Projection> {
   return projection
 }
 
+const formatCache = new Map<string, string>()
+async function documentFormat(documentId: string): Promise<string> {
+  const cached = formatCache.get(documentId)
+  if (cached) return cached
+  const response = await request(documentId, '')
+  if (!response.ok) throw new Error(`HCD manifest failed: ${response.status}`)
+  const manifest = await response.json() as { source: { format: string } }
+  formatCache.set(documentId, manifest.source.format)
+  return manifest.source.format
+}
+
+function isFixed(format: string) { return format === 'pdf' || format === 'pptx' || format === 'xlsx' }
+
 type Pending = { document: Y.Doc; first: number; last: number; timer: ReturnType<typeof setTimeout> | null; saving: boolean }
 const pending = new Map<string, Pending>()
 
@@ -152,6 +165,7 @@ const server = new Server({
   },
   async onLoadDocument({ documentName }) {
     const selected = room(documentName)
+    if (isFixed(await documentFormat(selected.documentId))) return new Y.Doc()
     const response = await request(selected.documentId, '/collaboration/state', {}, selected.epoch)
     if (response.ok) return new Uint8Array(await response.arrayBuffer())
     if (response.status !== 404) throw new Error(`HCD collaboration load failed: ${await response.text()}`)
@@ -160,6 +174,7 @@ const server = new Server({
   },
   async onStoreDocument({ documentName, document }) {
     const selected = room(documentName)
+    if (isFixed(await documentFormat(selected.documentId))) return
     const response = await request(selected.documentId, '/collaboration/state', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -171,8 +186,22 @@ const server = new Server({
     }
   },
   async onChange({ documentName, document, transactionOrigin }) {
+    if (isFixed(await documentFormat(room(documentName).documentId))) return
     if (transactionOrigin === 'hcd-canonical-ids') return
     schedule(documentName, document)
+  },
+  async onStateless({ documentName, document, connection, payload }) {
+    if (connection.readOnly) return
+    const selected = room(documentName)
+    if (!isFixed(await documentFormat(selected.documentId))) return
+    let message: { type?: string; revision?: number }
+    try { message = JSON.parse(payload) } catch { return }
+    if (message.type !== 'hcd-fixed-revision' || !Number.isSafeInteger(message.revision)) return
+    const response = await request(selected.documentId, '')
+    if (!response.ok) return
+    const head = await response.json() as { revision: number }
+    if (head.revision < message.revision!) return
+    document.broadcastStateless(JSON.stringify({ type: 'hcd-fixed-revision', revision: head.revision }))
   },
 })
 

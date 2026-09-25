@@ -6,6 +6,7 @@ import { api, type Session } from './api.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
+import { useFixedCollaboration } from './fixedCollaboration.tsx'
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
 type Descriptor = { sequence: number; region: string }
@@ -36,11 +37,27 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>(null)
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [viewRevision, setViewRevision] = useState<number | null>(null)
+  const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const tail = useRef<HTMLDivElement>(null)
+  function showRemoteRevision(next: number) {
+    if (next <= (manifest?.revision ?? -1)) return
+    if (saving || selected || newBox || viewRevision !== null) {
+      setRemoteRevision(previous => Math.max(previous ?? 0, next))
+      return
+    }
+    setManifest(previous => previous && ({ ...previous, revision: next }))
+    setRefresh(previous => previous + 1)
+  }
+  const collaboration = useFixedCollaboration(session, manifest?.revision ?? null, showRemoteRevision)
+  useEffect(() => {
+    if (remoteRevision === null || saving || selected || newBox || viewRevision !== null) return
+    if (remoteRevision > (manifest?.revision ?? -1)) showRemoteRevision(remoteRevision)
+    setRemoteRevision(null)
+  }, [remoteRevision, saving, selected, newBox, viewRevision, manifest?.revision])
   useEffect(() => { saveLayout(layout, layoutScope) }, [layout, layoutScope])
   const displayedRevision = viewRevision ?? manifest?.revision ?? null
   const historical = viewRevision !== null && viewRevision !== manifest?.revision
-  const status = saving ? '保存中' : historical ? '历史只读' : readOnly ? '只读' : (selected && draft !== selected.node.text) || (newBox && newDraft) ? '编辑中' : '已保存'
+  const status = saving ? '保存中' : historical ? '历史只读' : remoteRevision ? '有新修订' : readOnly ? '只读' : (selected && draft !== selected.node.text) || (newBox && newDraft) ? '编辑中' : '已保存'
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
@@ -116,6 +133,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       })
       const result = await response.json() as { revision: number }
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
       setRefresh(previous => previous + 1)
       setSelected(null)
       return result.revision
@@ -146,6 +164,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       })
       const result = await response.json() as { revision: number }
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
       setRefresh(previous => previous + 1)
       setNewBox(null)
       setNewDraft('')
@@ -170,7 +189,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   return <div className={`workspace semantic-workspace fixed-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline ? '' : 'outline-hidden'} ${rightPanel ? '' : 'right-hidden'}`}>
     {layout.showHeader && <EditorHeader session={session} revision={displayedRevision} status={status} activeTab={activeTab}
       onTab={tab => { setActiveTab(tab); setPlacingText(false); if (tab === 'revisions') setRightPanel('revisions') }} onClose={() => void closeEditor()}
-      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} settingsOpen={rightPanel === 'settings'} beforeExport={saveBeforeExport} />}
+      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} settingsOpen={rightPanel === 'settings'} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setRightPanel('settings')}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><span className="ribbon-note">点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消</span></>}
@@ -184,7 +203,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {layout.showOutline && <aside className="outline-panel" aria-label={session.format === 'pptx' ? '幻灯片目录' : '页面目录'}><div className="panel-head"><h2>☷ {session.format === 'pptx' ? '幻灯片目录' : '页面目录'}</h2><button className="panel-close" aria-label="隐藏页面目录" onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`}</button>)}</nav><small>已索引 {descriptors.length} / {manifest?.chunkCount ?? '…'} 个分片</small></aside>}
       <div className="document-scroll"><main className="fixed-pages">{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>
-        {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
+        {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}<div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
       </aside>}
     </div>

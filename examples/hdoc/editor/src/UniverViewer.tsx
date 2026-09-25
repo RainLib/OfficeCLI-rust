@@ -8,6 +8,7 @@ import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
+import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { api, type Session } from './api.ts'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
@@ -20,11 +21,28 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout('xlsx'))
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const host = useRef<HTMLDivElement>(null)
+  const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
+  const syncing = useRef(false)
+  const collaboration = useFixedCollaboration(session, revision, next => setRemoteRevision(previous => Math.max(previous ?? 0, next)))
   useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
+  useEffect(() => {
+    const current = runtime.current
+    if (!current || remoteRevision === null || syncing.current) return
+    if (remoteRevision <= current.client.manifest.revision) { setRemoteRevision(null); return }
+    if (current.adapter.hasPendingPatch()) return
+    syncing.current = true
+    void current.adapter.refreshFromServer().then(refreshed => {
+      if (!refreshed || runtime.current !== current) return
+      setRevision(current.client.manifest.revision)
+      setRemoteRevision(null)
+      setError('')
+    }).catch(cause => setError(`协作修订同步失败：${String(cause)}`)).finally(() => { syncing.current = false })
+  }, [remoteRevision, revision, status])
 
   useEffect(() => {
     let alive = true
@@ -92,6 +110,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
               hashes[patch.operations[index].nodeId] = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
             }
             adapter.acknowledgePatch(patch.patchId, result.revision, hashes)
+            collaboration.announceRevision(result.revision)
             if (alive) { setRevision(result.revision); setError('') }
             try { await client.open() } catch (cause) { if (alive) setError(`修订已保存，但索引刷新失败：${String(cause)}`) }
           } catch (cause) {
@@ -103,16 +122,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       window.addEventListener('hcd-patch', onPatch)
       removePatchListener = () => window.removeEventListener('hcd-patch', onPatch)
       await adapter.start()
+      runtime.current = { client, adapter }
       if (alive) { setRevision(client.manifest.revision); setStatus(`revision ${client.manifest.revision} · Canvas 按视口加载`) }
     }
     void boot().catch(cause => { if (alive) setError(String(cause)) })
-    return () => { alive = false; removePatchListener?.(); disposeUniver?.(); client.dispose() }
-  }, [session, editing])
+    return () => { alive = false; runtime.current = null; removePatchListener?.(); disposeUniver?.(); client.dispose() }
+  }, [session, editing, collaboration.announceRevision])
 
   const headerStatus = error ? '保存失败' : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
-      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} settingsOpen={settingsOpen} />}
+      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
       {activeTab === 'home' && <><span className="ribbon-note">双击单元格或按 F2 编辑 · 支持现有单元格内容</span><span className="ribbon-note">{status}</span></>}
@@ -121,7 +141,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}
     <div className="univer-editor-area"><div ref={host} className="hcd-univer-host" />
-      {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
+      {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
     </div>
     <EditorStatusbar mode="工作簿视图" format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
     {error && <div className="toast error">{error}</div>}

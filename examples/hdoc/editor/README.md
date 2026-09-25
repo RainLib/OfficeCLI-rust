@@ -66,6 +66,8 @@ PPTX uses the same in-frame text editing, keeping the shape's font and color at 
 
 The XLSX canvas keeps its Univer cell editor and now uses the same fixed document header, view controls, appearance panel, export control, and status bar as the other formats. Double-click an existing cell or press F2 to edit its content. The reference screenshot is `docs/screenshots/hcd-xlsx-unified-chrome.jpg`.
 
+PDF, PPTX, and XLSX sessions now share the document's collaborator list and committed HCD revisions. Open the same document in two browser windows: saving a PDF/PPTX text box or an XLSX cell in one window updates the other window's revision and visible page or cell without a reload. Multiple windows with the same user ID appear as one person with a window count. Fixed-layout edits commit through the Rust patch API; Hocuspocus announces the committed revision, and each client re-reads its visible HCD objects. These formats do not merge unsaved keystrokes in Yjs: concurrent edits to the same old revision receive a patch conflict and must be retried. Read tokens can receive updates but cannot submit patches or revision announcements. The reference screenshot is `docs/screenshots/hcd-fixed-grid-collaboration.jpg`.
+
 For PDF, **插入 → 新增文字框** places a plain-text box on the original page. Type in place, save, then click the box again to edit it. The `hcd-patch/5` `pdf.text.insert` operation assigns a stable node ID and records page coordinates; PDF export draws the box at those coordinates. The rendered fixture export is at `docs/screenshots/hcd-pdf-text-insert-export.png`. This operation adds text to an existing page; it does not add a PDF page. Lines and tables in a raster-backed PDF remain page artwork rather than editable table cells, so PDF cell merging is not supported by this operation.
 
 ## Storage and save flow
@@ -108,6 +110,8 @@ cargo test -p officecli --test hdoc_multi_format pdf_inserted_text_box_can_be_re
 ```
 
 In the browser, insert, delete, and reorder paragraphs, save, view an older revision, restore it, and confirm the editor reconnects. Open two write sessions with different `--user-id` values to verify live sync and presence. Repeat with a read token to verify editing is disabled. Use a 100-page DOCX to check end-to-end input, scrolling, and memory; use a large PDF to check window loading and rotated pages.
+
+For fixed-format collaboration, open the same PDF, PPTX, or XLSX document in two windows. Save a mapped PDF/PPTX text node or XLSX cell in the second window and verify the first window advances its revision and displays the new value. Repeat with the same `--user-id` in both windows and verify the collaborator menu shows one person and two windows. Disconnect the sidecar briefly and verify the 15-second manifest poll still catches the committed revision.
 
 For rich-text acceptance, select paragraph text, apply an `https://` link from the toolbar, undo and redo it, and save. Export HTML and confirm the link and text survive. Right-click the same selection, choose **复制选中内容**, and verify the clipboard contains the complete selected text. The link dialog accepts `http://`, `https://`, and `mailto:` URLs, matching server validation.
 
