@@ -148,6 +148,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             post(prepare_download),
         )
         .route("/v1/downloads/{ticket}", get(download_ticket))
+        .route(
+            "/v1/downloads/{ticket}/preview",
+            get(preview_download_ticket),
+        )
         .route("/v1/documents/{id}/auth", get(auth_check))
         .route(
             "/v1/documents/{id}/collaboration/state",
@@ -1206,21 +1210,52 @@ async fn download_ticket(
     State(state): State<ServerState>,
     Path(ticket): Path<String>,
 ) -> Result<Response, ApiError> {
+    let download = resolve_download_ticket(&state, &ticket).await?;
+    export_document_inner(state, download.document_id, download.format, download.query).await
+}
+
+async fn preview_download_ticket(
+    State(state): State<ServerState>,
+    Path(ticket): Path<String>,
+) -> Result<Response, ApiError> {
+    let download = resolve_download_ticket(&state, &ticket).await?;
+    if download.format != "pdf" {
+        return Err(bad("inline preview supports only PDF downloads"));
+    }
+    let mut response =
+        export_document_inner(state, download.document_id, download.format, download.query).await?;
+    let disposition = response
+        .headers()
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| bad("PDF export has no content disposition"))?
+        .replacen("attachment;", "inline;", 1);
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        disposition.parse().map_err(internal)?,
+    );
+    Ok(response)
+}
+
+async fn resolve_download_ticket(
+    state: &ServerState,
+    ticket: &str,
+) -> Result<DownloadTicket, ApiError> {
     let download = state
         .downloads
         .lock()
         .await
-        .get(&ticket)
+        .get(ticket)
         .cloned()
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "download link not found".to_string()))?;
     if download.expires_at <= Instant::now() {
-        state.downloads.lock().await.remove(&ticket);
+        state.downloads.lock().await.remove(ticket);
         return Err(ApiError(
             StatusCode::GONE,
             "download link expired".to_string(),
         ));
     }
-    export_document_inner(state, download.document_id, download.format, download.query).await
+    Ok(download)
 }
 
 async fn export_document(
