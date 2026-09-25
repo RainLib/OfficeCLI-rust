@@ -53,6 +53,7 @@ export function PdfExportPreview({ sourcePath }: { sourcePath: string }) {
     <header>
       <div><small>OFFICECLI / HCD</small><h1>导出 PDF 预览</h1><span>显示实际导出的打印版式</span></div>
       <div className="pdf-export-preview-actions">
+        <button onClick={() => window.history.back()}>返回工作台</button>
         <button disabled={!document || pageNumber <= 1} onClick={() => setPageNumber(page => page - 1)}>上一页</button>
         <span>{document ? `${pageNumber} / ${document.numPages}` : '加载中…'}</span>
         <button disabled={!document || pageNumber >= document.numPages} onClick={() => setPageNumber(page => page + 1)}>下一页</button>

@@ -822,6 +822,65 @@ fn pdf_hcd_page_patch_roundtrip() {
 }
 
 #[test]
+fn edited_pdf_visual_export_uses_revised_text_without_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("fixture.pdf");
+    std::fs::copy(
+        workspace_root().join("examples/hdoc/pdf-raster-quality.pdf"),
+        &source,
+    )
+    .unwrap();
+    let bundle = temp.path().join("bundle");
+    let output = temp.path().join("edited.pdf");
+    let extracted = import_and_extract(&source, &bundle, "pdf-visual-edit");
+    let entry = extracted["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "HCD PDF raster quality comparison")
+        .unwrap();
+    apply_text_patch(
+        temp.path(),
+        &bundle,
+        "pdf-visual-edit",
+        entry,
+        0,
+        0,
+        "Edited: ",
+    );
+    std::fs::remove_file(&source).unwrap();
+    let result = officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            output.to_string_lossy().as_ref(),
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(report["data"]["level"], "VISUAL");
+    assert_eq!(
+        report["data"]["warnings"][0]["code"],
+        "HCD_PDF_EDITED_VISUAL_EXPORT"
+    );
+    officecli()
+        .args(["view", output.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Edited: HCD PDF raster quality comparison",
+        ));
+}
+
+#[test]
 fn html_hcd_patch_roundtrip_is_source_backed_and_rust_only() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.html");

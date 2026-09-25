@@ -54,7 +54,7 @@ target/debug/officecli hdoc import "$PDF_SOURCE" \
 cp "$PDF_SOURCE" /tmp/hcd-editor-demo/sources/accept-physics-pdf-v2.pdf
 ```
 
-The other fixture IDs are listed in `vite.config.ts`. DOCX/Markdown/TXT cards allow edits; PDF/PPTX/XLSX cards are read-only. The gallery screenshot is at `docs/screenshots/hcd-acceptance-gallery.jpg`.
+The other fixture IDs are listed in `vite.config.ts`. DOCX/Markdown/TXT cards edit semantic blocks; PDF/PPTX cards edit mapped text on fixed pages; XLSX cards edit mapped cell values. The gallery screenshot is at `docs/screenshots/hcd-acceptance-gallery.jpg`.
 
 The built-in app uses the Vite proxy for `/v1`. Products can import `EmbeddedHcdEditor` from `@officecli/hcd-reference-editor/react` and pass an API base URL, collaboration WebSocket URL, document ID, and token. Each editor keeps one ProseMirror document and one Yjs document; offscreen blocks use CSS `content-visibility` and fixed-layout assets load by viewport.
 
@@ -63,7 +63,7 @@ The built-in app uses the Vite proxy for `/v1`. Products can import `EmbeddedHcd
 - `hdoc import` defaults to `hcd/2`, gzip text objects, and PDF `auto` raster selection. `hdoc stats BUNDLE` reports compressed categories, revision growth, and unreferenced objects. `hdoc validate BUNDLE` verifies content and revision roots.
 - The first semantic edit creates an editor projection at revision 1. Browser edits sync through one Hocuspocus instance. Yjs state is persisted through the Rust API, and HCD checkpoints are created after 30 seconds idle or 60 seconds continuous activity, on manual save, and before export. Recently edited state can be lost if the sidecar and database fail before persistence finishes.
 - Restore and external structure patch operations advance a collaboration epoch. Stale rooms, state writes, and checkpoints are rejected; active editor clients reconnect to a new room. Historical HCD revisions remain readable.
-- Source-backed same-format export needs the immutable source in `ROOT/sources/<documentId>.<format>`. Semantic DOCX export after structure edits rebuilds layout and reports fidelity. Original PDF revision download defaults to a page-image PDF matching the HCD preview; select **保留源 PDF（可选文本）** to retain the original PDF structure. The image PDF does not recreate selectable text or vector objects. Later PDF revisions require source-backed export because the page image alone cannot carry edits; inspect its `SEMANTIC` fidelity report and verify the exported page visually.
+- Source-backed same-format export needs the immutable source in `ROOT/sources/<documentId>.<format>`. Semantic DOCX export after structure edits rebuilds layout and reports fidelity. PDF download defaults to a page-image PDF matching the current HCD revision: edited text boxes are drawn over bounded white masks on the original page image. The visual result keeps page dimensions but the mask, font metrics, and placement are approximate, so inspect the exported PDF before delivery. Select **保留源 PDF（修订位置近似）** to keep the original PDF structure; this requires the immutable source. The page-image PDF does not recreate the original selectable text or vector objects.
 - After preparing any PDF download, **预览导出 PDF** fetches the actual exported PDF and renders its pages with PDF.js. Use this print preview for DOCX/Markdown/TXT conversions, whose editor view does not promise physical page matching. The adjacent download link uses the same revision, format, source mode, and five-minute ticket.
 
 ## Optional PostgreSQL and S3 durability
@@ -79,6 +79,17 @@ cargo clippy --all-targets -- -D warnings
 (cd examples/hdoc/xlsx-univer-viewer && npm ci)
 (cd examples/hdoc/editor && npm run build)
 ```
+
+For the edited PDF page-image export, the repository fixture and patch are reproducible:
+
+```bash
+target/debug/officecli hdoc import examples/hdoc/pdf-raster-quality.pdf --output /tmp/hcd-pdf-visual.hcd
+target/debug/officecli hdoc apply /tmp/hcd-pdf-visual.hcd --patch examples/hdoc/pdf-text-patch.json --expected-revision 0
+target/debug/officecli hdoc export /tmp/hcd-pdf-visual.hcd --revision 1 --output /tmp/hcd-pdf-visual-r1.pdf
+pdftotext -layout /tmp/hcd-pdf-visual-r1.pdf - | head -1
+```
+
+The first extracted line should start with `Edited:`. The rendered page is shown in `docs/screenshots/hcd-edited-pdf-visual-export.jpg`.
 
 In the browser, insert, delete, and reorder paragraphs, save, view an older revision, restore it, and confirm the editor reconnects. Open two write sessions with different `--user-id` values to verify live sync and presence. Repeat with a read token to verify editing is disabled. Use a 100-page DOCX to check end-to-end input, scrolling, and memory; use a large PDF to check window loading and rotated pages.
 

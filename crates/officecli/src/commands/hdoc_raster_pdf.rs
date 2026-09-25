@@ -6,12 +6,75 @@ use hcd_core::{hash_file, Bundle, HcdManifest};
 use image::ImageDecoder;
 use lopdf::{dictionary, Document, Object, Stream};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
 
 fn error(message: impl std::fmt::Display) -> HandlerError {
     HandlerError::OperationFailed(message.to_string())
+}
+
+struct EditedText {
+    text: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    size: f32,
+}
+
+fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!(" {name}=\"");
+    let start = attributes.find(&needle)? + needle.len();
+    let end = attributes[start..].find('"')? + start;
+    Some(&attributes[start..end])
+}
+
+fn edited_text(html: &str, pattern: &Regex) -> Result<Vec<EditedText>, HandlerError> {
+    let mut result = Vec::new();
+    for capture in pattern.captures_iter(html) {
+        let paragraph = &capture[1];
+        if !capture[2].contains(" data-hcd-patched=\"true\"") {
+            continue;
+        }
+        let number = |name: &str| -> Result<f32, HandlerError> {
+            let value: f32 = attribute(paragraph, name)
+                .ok_or_else(|| error(format!("edited PDF node lacks {name}")))?
+                .parse()
+                .map_err(error)?;
+            if !value.is_finite() || value.abs() > 14_400.0 {
+                return Err(error("edited PDF text geometry exceeds safe limits"));
+            }
+            Ok(value)
+        };
+        let style =
+            attribute(paragraph, "style").ok_or_else(|| error("edited PDF text lacks style"))?;
+        let size: f32 = style
+            .split(';')
+            .find_map(|property| property.trim().strip_prefix("font-size:"))
+            .and_then(|value| value.strip_suffix("pt"))
+            .ok_or_else(|| error("edited PDF text lacks point font size"))?
+            .parse()
+            .map_err(error)?;
+        if !size.is_finite() || !(1.0..=256.0).contains(&size) {
+            return Err(error("edited PDF font size exceeds safe limits"));
+        }
+        let text = quick_xml::escape::unescape(&capture[3])
+            .map_err(error)?
+            .replace(['\r', '\n'], " ");
+        if text.chars().count() > 10_000 {
+            return Err(error("edited PDF text exceeds 10,000 characters"));
+        }
+        result.push(EditedText {
+            text,
+            x: number("data-hcd-x")?,
+            y: number("data-hcd-y")?,
+            width: number("data-hcd-width")?,
+            height: number("data-hcd-height")?,
+            size,
+        });
+    }
+    Ok(result)
 }
 
 pub(super) fn export(
@@ -20,11 +83,6 @@ pub(super) fn export(
     revision: u64,
     output: &Path,
 ) -> Result<usize, HandlerError> {
-    if revision != 0 {
-        return Err(error(
-            "source-free PDF export can match only the original fixed-layout revision; use the immutable source PDF for later revisions",
-        ));
-    }
     let assets: HashMap<String, _> = bundle
         .read_asset_index_for_revision(revision)
         .map_err(error)?
@@ -37,10 +95,14 @@ pub(super) fn export(
         r#"<img[^>]*class="hcd-pdf-page-raster"[^>]*src="asset://sha256/([0-9a-f]{64})""#,
     )
     .map_err(error)?;
+    let patched_text =
+        Regex::new(r#"(?s)<p class="hcd-pdf-text"([^>]*)><span ([^>]*)>(.*?)</span></p>"#)
+            .map_err(error)?;
     let mut document = Document::with_version("1.5");
     let pages_id = document.new_object_id();
     let mut kids = Vec::new();
     let mut count = 0usize;
+    let mut pending_text: Vec<(usize, Vec<EditedText>)> = Vec::new();
     for page_number in 0..manifest.index_page_count {
         let page = bundle
             .read_index_page(manifest, page_number)
@@ -114,7 +176,38 @@ pub(super) fn export(
                 return Err(error("unsupported page raster encoding"));
             };
             let image_id = document.add_object(Object::Stream(image_stream));
-            let content = format!("q {width} 0 0 {height} 0 0 cm /Im0 Do Q\n");
+            let edits = edited_text(&html, &patched_text)?;
+            let mut content = format!("q {width} 0 0 {height} 0 0 cm /Im0 Do Q\n");
+            for edit in &edits {
+                if edit.width <= 0.0
+                    || edit.height <= 0.0
+                    || edit.x < 0.0
+                    || edit.y < 0.0
+                    || edit.x >= width
+                    || edit.y >= height
+                {
+                    return Err(error("edited PDF text box has invalid dimensions"));
+                }
+                let estimated_width: f32 = edit
+                    .text
+                    .chars()
+                    .map(|character| {
+                        if character.is_ascii() {
+                            edit.size * 0.6
+                        } else {
+                            edit.size
+                        }
+                    })
+                    .sum();
+                let cover_width = edit.width.max(estimated_width).min(width - edit.x) + 2.0;
+                content.push_str(&format!(
+                    "q 1 1 1 rg {:.2} {:.2} {:.2} {:.2} re f Q\n",
+                    (edit.x - 1.0).max(0.0),
+                    (edit.y - 1.0).max(0.0),
+                    cover_width,
+                    edit.height + 2.0
+                ));
+            }
             let content_id = document.add_object(Object::Stream(Stream::new(
                 dictionary! {},
                 content.into_bytes(),
@@ -128,6 +221,12 @@ pub(super) fn export(
             }));
             kids.push(Object::Reference(page_id));
             count += 1;
+            // Add editable text after the source image and its white masks.
+            // The embedded subset makes CJK edits independent of system fonts.
+            if edits.iter().any(|edit| !edit.text.is_empty()) {
+                // Page tree is completed below, so defer font registration.
+                pending_text.push((count, edits));
+            }
         }
     }
     if count == 0 {
@@ -145,6 +244,31 @@ pub(super) fn export(
         Object::Dictionary(dictionary! { "Type" => "Catalog", "Pages" => pages_id }),
     );
     document.trailer.set("Root", Object::Reference(catalog_id));
+    for (page_number, edits) in pending_text {
+        let characters: HashSet<char> = edits.iter().flat_map(|edit| edit.text.chars()).collect();
+        let font = pdf_handler::font_embedder::ensure_cjk_font_for_chars(
+            &mut document,
+            page_number,
+            &characters,
+            Some("HCDEdit"),
+            None,
+            true,
+        )?
+        .ok_or_else(|| error("edited PDF text font was not embedded"))?;
+        for edit in edits {
+            if !edit.text.is_empty() {
+                pdf_handler::modifier::add_text_block_with_ready_font(
+                    &mut document,
+                    page_number,
+                    &edit.text,
+                    edit.x,
+                    edit.y + 1.0,
+                    &font,
+                    edit.size,
+                )?;
+            }
+        }
+    }
     let temporary = output.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     document.save(&temporary).map_err(error)?;
     std::fs::rename(&temporary, output).map_err(error)?;
