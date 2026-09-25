@@ -9,23 +9,14 @@ import { clearPastedBlockIds, jsonToSnapshot, schemaExtensions, type Projection 
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { api, type Session } from './api.ts'
 import { FixedViewer } from './FixedViewer.tsx'
-import { ExportControl } from './ExportControl.tsx'
+import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import './style.css'
 
 const UniverViewer = lazy(() => import('./UniverViewer.tsx').then(module => ({ default: module.UniverViewer })))
 
 const palette = ['#d84a54', '#3478c0', '#9a5abb', '#13866a', '#d17d20', '#7b65d8']
-type LayoutPreferences = { showHeader: boolean; showToolbar: boolean; showCollaborators: boolean; showOutline: boolean; compact: boolean }
 type RevisionItem = { revision: number; patchId?: string; authorId?: string; authorName?: string; createdAtEpochMs?: number }
-const defaultLayout: LayoutPreferences = { showHeader: true, showToolbar: true, showCollaborators: true, showOutline: true, compact: true }
-const layoutKey = 'hcd-editor-layout-v1'
-function readLayout(): LayoutPreferences {
-  try {
-    const saved = JSON.parse(localStorage.getItem(layoutKey) || '{}') as Partial<LayoutPreferences>
-    return Object.fromEntries(Object.entries(defaultLayout).map(([key, fallback]) =>
-      [key, typeof saved[key as keyof LayoutPreferences] === 'boolean' ? saved[key as keyof LayoutPreferences] : fallback])) as LayoutPreferences
-  } catch { return defaultLayout }
-}
 function presenceColor(id: string) {
   let value = 0
   for (const character of id) value = (value * 31 + character.charCodeAt(0)) >>> 0
@@ -123,11 +114,11 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [presence, setPresence] = useState<Array<{ id: string; name: string; color: string; connections: number }>>([])
   const [layout, setLayout] = useState<LayoutPreferences>(readLayout)
   const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>('settings')
-  const [activeTab, setActiveTab] = useState<'home' | 'insert' | 'view' | 'revisions'>('home')
+  const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [outline, setOutline] = useState<Array<{ pos: number; level: number; text: string }>>([])
   const lastOutline = useRef('')
   const lastSemantic = useRef<string | null>(null)
-  useEffect(() => { localStorage.setItem(layoutKey, JSON.stringify(layout)) }, [layout])
+  useEffect(() => { saveLayout(layout) }, [layout])
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
@@ -344,14 +335,10 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     { label: '重做', disabled: readOnly || !editor?.can().redo(), action: () => editor?.chain().focus().redo().run() },
   ]
   return <div className={`workspace semantic-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline ? '' : 'outline-hidden'} ${rightPanel ? '' : 'right-hidden'}`}>
-    {layout.showHeader && <header className="editor-header">
-      <div className="document-identity"><span className="brand">HCD</span><div className="document-title"><strong title={session.documentId}>{session.documentId}</strong><small>{session.format.toUpperCase()} · r{revision ?? '…'}</small></div><span className="status" role="status">{status}</span></div>
-      <nav className="header-tabs" aria-label="编辑功能"><button className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}>开始</button><button className={activeTab === 'insert' ? 'active' : ''} onClick={() => setActiveTab('insert')}>插入</button><button className={activeTab === 'view' ? 'active' : ''} onClick={() => setActiveTab('view')}>视图</button><button className={activeTab === 'revisions' ? 'active' : ''} onClick={() => { setActiveTab('revisions'); setRightPanel('revisions') }}>修订</button></nav>
-      <div className="header-actions">
-        {layout.showCollaborators && <details className="presence"><summary aria-label={`在线协作者，${presence.length} 人`}><span className="presence-avatars">{presence.slice(0, 3).map(user => <span key={user.id} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}</span><span>{presence.length} 人在线</span></summary><div className="presence-menu"><strong>在线协作者</strong>{presence.map(user => <div key={user.id} className="presence-person"><span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><span>{user.name}{user.id === localUser.id ? '（你）' : ''}</span>{user.connections > 1 && <small>{user.connections} 个窗口</small>}</div>)}</div></details>}
-        <ExportControl session={session} revision={revision} beforeExport={save} /><button className="settings-trigger" aria-label="界面设置" aria-expanded={rightPanel === 'settings'} onClick={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')}>⚙</button><button className="ghost" onClick={onClose}>关闭</button>
-      </div>
-    </header>}
+    {layout.showHeader && <EditorHeader session={session} revision={revision} status={status} activeTab={activeTab}
+      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} onClose={onClose}
+      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} settingsOpen={rightPanel === 'settings'} beforeExport={save}
+      presence={layout.showCollaborators && <details className="presence"><summary aria-label={`在线协作者，${presence.length} 人`}><span className="presence-avatars">{presence.slice(0, 3).map(user => <span key={user.id} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}</span><span>{presence.length} 人在线</span></summary><div className="presence-menu"><strong>在线协作者</strong>{presence.map(user => <div key={user.id} className="presence-person"><span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><span>{user.name}{user.id === localUser.id ? '（你）' : ''}</span>{user.connections > 1 && <small>{user.connections} 个窗口</small>}</div>)}</div></details>} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" aria-expanded={rightPanel === 'settings'} onClick={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().undo().run()} disabled={readOnly || !editor?.can().undo()}>↶ 撤销</button><button onClick={() => editor?.chain().focus().redo().run()} disabled={readOnly || !editor?.can().redo()}>↷ 重做</button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().setParagraph().run()} disabled={readOnly}>正文</button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}>标题</button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly}>𝐁 加粗</button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly}>𝑰 斜体</button><button onClick={openLink} disabled={readOnly}>链接</button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}>项目符号</button><button onClick={() => editor?.chain().focus().toggleOrderedList().run()} disabled={readOnly}>编号</button></div><div className="tool-group"><button onClick={() => moveBlock(-1)} disabled={readOnly}>段落上移</button><button onClick={() => moveBlock(1)} disabled={readOnly}>段落下移</button></div></>}
@@ -382,7 +369,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         {historical && <section className="revision-view"><div className="panel-head"><strong>r{historical.revision} 内容</strong><button onClick={() => setHistorical(null)}>关闭</button></div><div>{historical.blocks.filter(block => block.region === 'body').map(block => <p key={block.blockId}>{block.content.inlines.map(item => item.text).join('')}</p>)}</div><button disabled={readOnly || historical.revision >= (revision ?? 0)} onClick={() => void restoreHistorical()}>恢复为此版本</button></section>}
         </section>}</aside>}
     </div>
-    <footer className="editor-statusbar"><span>连续视图 · {session.format.toUpperCase()}</span><span>r{revision ?? '…'} · {readOnly ? '只读' : '可编辑'} · {status}</span></footer>
+    <EditorStatusbar mode="连续视图" format={session.format} revision={revision} readOnly={readOnly} status={status} />
     {menu && <ContextMenu x={menu.x} y={menu.y} actions={actions} onClose={() => setMenu(null)} />}
     {linkOpen && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setLinkOpen(false) }}><div className="hcd-dialog" role="dialog" aria-modal="true" aria-label="设置链接"><h2>设置链接</h2><label>链接地址<input autoFocus type="url" value={linkHref} onChange={event => setLinkHref(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyLink(); if (event.key === 'Escape') setLinkOpen(false) }} placeholder="https://example.com" /></label><div className="hcd-dialog-actions"><button onClick={() => setLinkOpen(false)}>取消</button><button className="primary" onClick={applyLink}>应用链接</button></div></div></div>}
     {error && <div className="toast error">{error}</div>}
