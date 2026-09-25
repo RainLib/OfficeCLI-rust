@@ -615,8 +615,7 @@ pub fn apply_patch(
                         ));
                     }
                     merge_xlsx_cells(&mut html, merge)?;
-                    dirty_nodes.insert(entry.node_id.clone());
-                    dirty_parts.insert(entry.source.part.clone());
+                    dirty_grid_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
                 if let Some(unmerge) = xlsx_unmerges.get(&entry.node_id) {
@@ -660,8 +659,9 @@ pub fn apply_patch(
                             "XLSX unmerge must stay within one loaded cell window".to_string(),
                         ));
                     }
-                    // Original source merges may hide covered cell values. Only split a merge
-                    // introduced after import, so source-backed export cannot reveal lost data.
+                    // The XLSX importer rejects values and formulas in covered cells. The
+                    // original window still supplies empty cell markup when splitting a merge;
+                    // source-backed export retains any source-only cell formatting.
                     let original = bundle.revision(0)?;
                     let mut initial = manifest.clone();
                     initial.index_prefix = original.index_prefix;
@@ -678,18 +678,8 @@ pub fn apply_patch(
                             HcdError::InvalidBundle("original XLSX chunk is missing".to_string())
                         })?;
                     let initial_html = bundle.read_chunk(initial_descriptor)?;
-                    if xlsx_cells(&initial_html)?.iter().any(|cell| {
-                        cell.row == unmerge.start_row
-                            && cell.column == unmerge.start_column
-                            && cell.merged_range.is_some()
-                    }) {
-                        return Err(HcdError::Unsupported(
-                            "splitting a source XLSX merge is not yet supported".to_string(),
-                        ));
-                    }
                     unmerge_xlsx_cells(&mut html, &initial_html, unmerge)?;
-                    dirty_nodes.insert(entry.node_id.clone());
-                    dirty_parts.insert(entry.source.part.clone());
+                    dirty_grid_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
             }

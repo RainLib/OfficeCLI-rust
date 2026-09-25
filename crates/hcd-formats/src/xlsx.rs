@@ -6398,10 +6398,11 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_split_source_merge_that_may_hide_cells() {
+    fn splits_source_merge_and_exports_preserving_other_merges_and_history() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("original-merge.xlsx");
         let bundle_path = temp.path().join("original-merge.hcd");
+        let exported = temp.path().join("split-source.xlsx");
         create_shared_string_fixture(&source);
         let manifest = import_xlsx(
             &source,
@@ -6442,11 +6443,28 @@ mod tests {
                 },
             }],
         };
-        assert!(hcd_core::apply_patch(&bundle, &split, 0)
-            .unwrap_err()
-            .to_string()
-            .contains("source XLSX merge"));
-        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let result = hcd_core::apply_patch(&bundle, &split, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result.dirty_node_ids.is_empty());
+        let old_html = bundle
+            .read_chunk(&bundle.read_index_page(&manifest, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(old_html.contains("data-hcd-merge=\"A1:B2\""));
+        let head = bundle.manifest().unwrap();
+        let new_html = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(!new_html.contains("data-hcd-merge=\"A1:B2\""));
+        assert!(new_html.contains("data-hcd-merge=\"D4:E5\""));
+        assert!(new_html.contains("data-hcd-column=\"2\""));
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!worksheet.contains("mergeCell ref=\"A1:B2\""));
+        assert!(worksheet.contains("mergeCell ref=\"D4:E5\""));
+        assert!(worksheet.contains("<c r=\"A1\" t=\"s\" s=\"1\"><v>0</v></c>"));
+        assert!(worksheet.contains("<c r=\"B1\" s=\"2\"/>"));
     }
 
     #[test]
@@ -8154,7 +8172,7 @@ mod tests {
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="7" zoomScale="75"><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView><sheetView workbookViewId="0" view="pageBreakPreview" topLeftCell="$B$2" rightToLeft="1" showGridLines="0" showRowColHeaders="0" showZeros="0" showFormulas="1" zoomScale="125"><pane xSplit="2" ySplit="3" topLeftCell="$C$4" activePane="bottomRight" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultColWidth="8.43" defaultRowHeight="15"/><cols><col min="1" max="2" width="20" customWidth="1"/></cols><sheetData><row r="1" ht="24" customHeight="1"><c r="A1" t="s" s="1"><v>0</v></c></row><row r="2"/><row r="3"><c r="C3" t="inlineStr"><is><t>After merge</t></is></c><c r="D3" s="2"><v>1234.5</v></c><c r="E3" s="3"><v>0.256</v></c><c r="F3" s="4"><v>1</v></c><c r="G3" s="5"><v>92.34</v></c></row><row r="4"/><row r="5"/></sheetData><mergeCells count="2"><mergeCell ref="A1:B2"/><mergeCell ref="D4:E5"/></mergeCells></worksheet>"#,
+                r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="7" zoomScale="75"><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView><sheetView workbookViewId="0" view="pageBreakPreview" topLeftCell="$B$2" rightToLeft="1" showGridLines="0" showRowColHeaders="0" showZeros="0" showFormulas="1" zoomScale="125"><pane xSplit="2" ySplit="3" topLeftCell="$C$4" activePane="bottomRight" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultColWidth="8.43" defaultRowHeight="15"/><cols><col min="1" max="2" width="20" customWidth="1"/></cols><sheetData><row r="1" ht="24" customHeight="1"><c r="A1" t="s" s="1"><v>0</v></c><c r="B1" s="2"/></row><row r="2"/><row r="3"><c r="C3" t="inlineStr"><is><t>After merge</t></is></c><c r="D3" s="2"><v>1234.5</v></c><c r="E3" s="3"><v>0.256</v></c><c r="F3" s="4"><v>1</v></c><c r="G3" s="5"><v>92.34</v></c></row><row r="4"/><row r="5"/></sheetData><mergeCells count="2"><mergeCell ref="A1:B2"/><mergeCell ref="D4:E5"/></mergeCells></worksheet>"#,
             ),
             ("xl/media/image1.png", "streamed-after-sheet-chunks"),
         ];
