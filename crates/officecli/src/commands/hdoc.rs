@@ -1283,11 +1283,7 @@ fn semantic_export(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
-    if target == "pdf"
-        && manifest.profile == "fixed-layout"
-        && manifest.source.format == "pdf"
-        && revision == 0
-    {
+    if target == "pdf" && manifest.profile == "fixed-layout" && manifest.source.format == "pdf" {
         let pages = super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path)?;
         let report = FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),

@@ -20,6 +20,11 @@ pub(super) fn export(
     revision: u64,
     output: &Path,
 ) -> Result<usize, HandlerError> {
+    if revision != 0 {
+        return Err(error(
+            "source-free PDF export can match only the original fixed-layout revision; use the immutable source PDF for later revisions",
+        ));
+    }
     let assets: HashMap<String, _> = bundle
         .read_asset_index_for_revision(revision)
         .map_err(error)?
