@@ -150,8 +150,18 @@ struct SemanticHtml {
     blocks: Vec<HtmlBlock>,
     links: Vec<SemanticLink>,
     table_links: Vec<SemanticTableLink>,
+    merges: Vec<SemanticMerge>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SemanticMerge {
+    block_index: usize,
+    start_row: usize,
+    start_column: usize,
+    end_row: usize,
+    end_column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +240,11 @@ struct TableBuilder {
     cell_count: usize,
     links: Vec<TablePendingLink>,
     fragment: Option<HcdTableFragment>,
+    hcd_grid: bool,
+    row_open: bool,
+    cell_column: Option<usize>,
+    merges: Vec<SemanticMerge>,
+    merge_area: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1047,6 +1062,11 @@ impl HtmlParser {
                 } else {
                     self.table = Some(TableBuilder {
                         fragment: hcd_table_fragment(&tag.attributes)?,
+                        hcd_grid: tag.attributes.get("class").is_some_and(|classes| {
+                            classes
+                                .split_ascii_whitespace()
+                                .any(|class| class == "hcd-grid")
+                        }),
                         ..TableBuilder::default()
                     });
                 }
@@ -1054,6 +1074,17 @@ impl HtmlParser {
             "tr" => {
                 if let Some(table) = &mut self.table {
                     finish_table_row(table)?;
+                    if table.hcd_grid {
+                        let source_row =
+                            hcd_table_usize(&tag.attributes, "data-hcd-row", MAX_EXCEL_ROWS)?;
+                        if source_row == 0 || source_row <= table.rows.len() {
+                            return Err(HandlerError::InvalidArgument(
+                                "HCD grid rows are not strictly increasing".to_string(),
+                            ));
+                        }
+                        table.rows.resize_with(source_row - 1, Vec::new);
+                    }
+                    table.row_open = true;
                 }
             }
             "td" | "th" => {
@@ -1065,6 +1096,52 @@ impl HtmlParser {
                         )));
                     }
                     table.cell_count += 1;
+                    table.row_open = true;
+                    if table.hcd_grid {
+                        let column =
+                            hcd_table_usize(&tag.attributes, "data-hcd-column", MAX_EXCEL_COLUMNS)?;
+                        if column == 0 || column <= table.row.len() {
+                            return Err(HandlerError::InvalidArgument(
+                                "HCD cell column is outside its table or overlaps another cell"
+                                    .to_string(),
+                            ));
+                        }
+                        table.cell_column = Some(column);
+                        if let Some(reference) = tag.attributes.get("data-hcd-merge") {
+                            let (start_row, start_column, end_row, end_column) =
+                                parse_xlsx_merge(reference)?;
+                            let area = (end_row - start_row + 1)
+                                .checked_mul(end_column - start_column + 1)
+                                .ok_or_else(|| {
+                                    HandlerError::InvalidArgument(
+                                        "HCD merge area overflowed".to_string(),
+                                    )
+                                })?;
+                            table.merge_area =
+                                table.merge_area.checked_add(area).ok_or_else(|| {
+                                    HandlerError::InvalidArgument(
+                                        "HCD merge area overflowed".to_string(),
+                                    )
+                                })?;
+                            if table.merge_area > MAX_SEMANTIC_TABLE_CELLS {
+                                return Err(HandlerError::InvalidArgument(format!(
+                                    "HCD merge areas exceed {MAX_SEMANTIC_TABLE_CELLS} cells"
+                                )));
+                            }
+                            if start_row != table.rows.len() + 1 || start_column != column {
+                                return Err(HandlerError::InvalidArgument(format!(
+                                    "HCD merge {reference} does not match its anchor cell"
+                                )));
+                            }
+                            table.merges.push(SemanticMerge {
+                                block_index: 0,
+                                start_row,
+                                start_column,
+                                end_row,
+                                end_column,
+                            });
+                        }
+                    }
                     table.cell = Some(String::new());
                 }
             }
@@ -1188,13 +1265,27 @@ impl HtmlParser {
 
     fn finish_table(&mut self, table: TableBuilder) -> Result<(), HandlerError> {
         let TableBuilder {
-            rows,
+            mut rows,
             cell_count,
             links,
             fragment,
+            merges,
             ..
         } = table;
         let Some(fragment) = fragment else {
+            if !merges.is_empty() {
+                let end_row = merges.iter().map(|merge| merge.end_row).max().unwrap_or(0);
+                if rows.len() < end_row {
+                    rows.resize_with(end_row, Vec::new);
+                }
+                for merge in &merges {
+                    for source_row in merge.start_row..=merge.end_row {
+                        if rows[source_row - 1].len() < merge.end_column {
+                            rows[source_row - 1].resize(merge.end_column, String::new());
+                        }
+                    }
+                }
+            }
             if let Some(active) = &self.logical_table {
                 return Err(HandlerError::InvalidArgument(format!(
                     "ordinary HTML table interrupted HCD table {} before its final fragment",
@@ -1213,6 +1304,12 @@ impl HtmlParser {
                         start: link.start,
                         end: link.end,
                         target: link.target,
+                    }));
+                self.document
+                    .merges
+                    .extend(merges.into_iter().map(|mut merge| {
+                        merge.block_index = block_index;
+                        merge
                     }));
             }
             return Ok(());
@@ -1610,9 +1707,60 @@ fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
     );
     let mut row = 1usize;
     let mut images = Vec::new();
-    for block in &document.blocks {
+    let mut merges = Vec::new();
+    let mut merged_addresses = HashSet::new();
+    for (block_index, block) in document.blocks.iter().enumerate() {
         match block {
             HtmlBlock::Table(rows) => {
+                let first_row = row;
+                for merge in document
+                    .merges
+                    .iter()
+                    .filter(|merge| merge.block_index == block_index)
+                {
+                    if merge.end_row > rows.len()
+                        || merge.end_column > rows[merge.start_row - 1].len()
+                    {
+                        return Err(HandlerError::InvalidArgument(format!(
+                            "HCD merge {}{}:{}{} is outside table block {block_index} ({} rows)",
+                            column_letters(merge.start_column),
+                            merge.start_row,
+                            column_letters(merge.end_column),
+                            merge.end_row,
+                            rows.len()
+                        )));
+                    }
+                    for source_row in merge.start_row..=merge.end_row {
+                        for source_column in merge.start_column..=merge.end_column {
+                            if !merged_addresses.insert((first_row + source_row - 1, source_column))
+                            {
+                                return Err(HandlerError::InvalidArgument(
+                                    "HCD merges overlap".to_string(),
+                                ));
+                            }
+                            if (source_row, source_column) != (merge.start_row, merge.start_column)
+                                && rows[source_row - 1]
+                                    .get(source_column - 1)
+                                    .is_some_and(|value| !value.is_empty())
+                            {
+                                return Err(HandlerError::InvalidArgument(
+                                    "HCD merge covers a nonempty cell".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    let start = format!(
+                        "{}{}",
+                        column_letters(merge.start_column),
+                        first_row + merge.start_row - 1
+                    );
+                    let end = format!(
+                        "{}{}",
+                        column_letters(merge.end_column),
+                        first_row + merge.end_row - 1
+                    );
+                    merges.push(format!("{start}:{end}"));
+                }
                 for cells in rows {
                     if cells.len() > MAX_EXCEL_COLUMNS {
                         return Err(HandlerError::InvalidArgument(format!(
@@ -1656,7 +1804,15 @@ fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
             )));
         }
     }
-    worksheet.push_str("</sheetData></worksheet>");
+    worksheet.push_str("</sheetData>");
+    if !merges.is_empty() {
+        worksheet.push_str(&format!("<mergeCells count=\"{}\">", merges.len()));
+        for reference in &merges {
+            worksheet.push_str(&format!("<mergeCell ref=\"{reference}\"/>"));
+        }
+        worksheet.push_str("</mergeCells>");
+    }
+    worksheet.push_str("</worksheet>");
     let mut package = oxml::OxmlPackage::open(&output, true)
         .map_err(|error| HandlerError::OpenError(error.to_string()))?;
     package
@@ -2852,21 +3008,67 @@ fn column_letters(mut column: usize) -> String {
 
 fn finish_table_cell(table: &mut TableBuilder) {
     if let Some(cell) = table.cell.take() {
+        if let Some(column) = table.cell_column.take() {
+            table.row.resize(column - 1, String::new());
+        }
         table.row.push(cell.trim().to_string());
     }
 }
 
 fn finish_table_row(table: &mut TableBuilder) -> Result<(), HandlerError> {
     finish_table_cell(table);
-    if !table.row.is_empty() {
+    if table.row_open && (!table.row.is_empty() || table.hcd_grid || table.fragment.is_some()) {
         if table.rows.len() >= MAX_EXCEL_ROWS {
             return Err(HandlerError::InvalidArgument(format!(
                 "HTML table exceeds {MAX_EXCEL_ROWS} rows"
             )));
         }
+        if let Some(fragment) = &table.fragment {
+            table.row.resize(fragment.column_count, String::new());
+        }
         table.rows.push(std::mem::take(&mut table.row));
     }
+    table.row_open = false;
     Ok(())
+}
+
+fn parse_xlsx_merge(reference: &str) -> Result<(usize, usize, usize, usize), HandlerError> {
+    fn cell(value: &str) -> Option<(usize, usize)> {
+        let split = value.find(|character: char| character.is_ascii_digit())?;
+        let (letters, digits) = value.split_at(split);
+        if letters.is_empty()
+            || letters.len() > 3
+            || digits.is_empty()
+            || !letters.bytes().all(|byte| byte.is_ascii_uppercase())
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            || digits.starts_with('0')
+        {
+            return None;
+        }
+        let column = letters.bytes().fold(0usize, |value, byte| {
+            value * 26 + usize::from(byte - b'A' + 1)
+        });
+        let row = digits.parse::<usize>().ok()?;
+        (row <= MAX_EXCEL_ROWS && column <= MAX_EXCEL_COLUMNS).then_some((row, column))
+    }
+    let (start, end) = reference.split_once(':').ok_or_else(|| {
+        HandlerError::InvalidArgument(format!("invalid HCD merge range {reference}"))
+    })?;
+    let (start_row, start_column) = cell(start).ok_or_else(|| {
+        HandlerError::InvalidArgument(format!("invalid HCD merge range {reference}"))
+    })?;
+    let (end_row, end_column) = cell(end).ok_or_else(|| {
+        HandlerError::InvalidArgument(format!("invalid HCD merge range {reference}"))
+    })?;
+    if end_row < start_row
+        || end_column < start_column
+        || (end_row == start_row && end_column == start_column)
+    {
+        return Err(HandlerError::InvalidArgument(format!(
+            "invalid HCD merge range {reference}"
+        )));
+    }
+    Ok((start_row, start_column, end_row, end_column))
 }
 
 fn ensure_text_limit(text: &str) -> Result<(), HandlerError> {
@@ -3189,6 +3391,33 @@ mod tests {
         }
         assert!(xml.contains("<row r=\"2\">"), "{xml}");
         assert!(xml.contains("<row r=\"3\"></row>"), "{xml}");
+    }
+
+    #[test]
+    fn semantic_xlsx_preserves_hcd_grid_merges_and_sparse_coordinates() {
+        let document = parse_html(
+            r#"<table class="hcd-grid"><tr data-hcd-row="1"><td data-hcd-column="1" data-hcd-merge="A1:C2" rowspan="2" colspan="3">Title</td></tr><tr data-hcd-row="2"></tr><tr data-hcd-row="4"><td data-hcd-column="3">Value</td></tr></table>"#,
+        ).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("merged.xlsx");
+        export_xlsx(&document, &output).unwrap();
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), true).unwrap();
+        let xml = package.read_part_xml("xl/worksheets/sheet1.xml").unwrap();
+        assert!(xml.contains("<mergeCell ref=\"A1:C2\"/>"), "{xml}");
+        assert!(xml.contains("<c r=\"A1\" t=\"inlineStr\""), "{xml}");
+        assert!(xml.contains("<c r=\"C4\" t=\"inlineStr\""), "{xml}");
+        assert!(!xml.contains("<c r=\"B1\""), "{xml}");
+        assert!(xml.contains("<row r=\"3\"></row>"), "{xml}");
+    }
+
+    #[test]
+    fn semantic_xlsx_rejects_oversized_or_misaligned_merge() {
+        for reference in ["A1:XFD1048576", "B1:C2"] {
+            let html = format!(
+                "<table class=\"hcd-grid\"><tr data-hcd-row=\"1\"><td data-hcd-column=\"1\" data-hcd-merge=\"{reference}\">Title</td></tr></table>"
+            );
+            assert!(parse_html(&html).is_err(), "{reference}");
+        }
     }
 
     #[test]

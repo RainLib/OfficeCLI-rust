@@ -66,7 +66,7 @@ PPTX uses the same in-frame text editing, keeping the shape's font and color at 
 
 The XLSX canvas keeps its Univer cell editor and now uses the same fixed document header, view controls, appearance panel, export control, and status bar as the other formats. Double-click an existing cell or press F2 to edit its content. The reference screenshot is `docs/screenshots/hcd-xlsx-unified-chrome.jpg`.
 
-For XLSX, select a rectangular range and choose **开始 → 合并单元格**. `hcd-patch/6` saves the merge in one immutable revision, updates the visible Univer grid, and writes `mergeCells` during source-backed XLSX export. The upper-left cell must be mapped and editable; every covered cell must be empty, and the range must fit one HCD cell window. The service rejects overlap and content loss. Use the original immutable XLSX for download; source-free XLSX export now rejects merged cells explicitly instead of silently discarding them. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-merge-cells.png`.
+For XLSX, select a rectangular range and choose **开始 → 合并单元格**. `hcd-patch/6` saves the merge in one immutable revision, updates the visible Univer grid, and writes `mergeCells` during source-backed and source-free semantic XLSX export. The upper-left cell must be mapped and editable; every covered cell must be empty, and the range must fit one HCD cell window. The service rejects overlap and content loss. Source-free export preserves merged ranges and cell coordinates but rebuilds workbook styles and flattens sheets into one semantic sheet. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-merge-cells.png`.
 
 Choose **开始 → 拆分单元格** on a merge created in HCD to restore individual cells. `hcd-patch/11` keeps the anchor text and node ID, restores the original styles of covered empty cells, and removes the merge from the next source-backed XLSX export. Original source merges remain protected because their covered cells may contain hidden values. The merged and split browser states are `docs/screenshots/hcd-xlsx-unmerge-merged.png` and `docs/screenshots/hcd-xlsx-unmerge-after.png`.
 
@@ -104,7 +104,20 @@ The **插入 → 删除选中行** action uses `hcd-patch/14` to delete a materi
 
 The **插入 → 删除选中列** action uses `hcd-patch/15` to remove one column and move later cells left across all HCD row windows. It keeps stable node IDs for surviving cells and retains the deleted values in historical revisions. Source-backed XLSX export rewrites cell addresses and omits deleted cells. As with column insertion, formula, merge, drawing, table, validation, defined-name, explicit column-width, and coordinate-dependent view references require separate reference rewriting. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-delete-middle-column.png`.
 
-The source-free semantic XLSX exporter now leaves blank HTML table cells absent from worksheet XML, preserving empty cell values and column positions. It still rebuilds workbook styles and opaque parts semantically; use source-backed export when those properties matter.
+The source-free semantic XLSX exporter leaves blank HTML table cells absent from worksheet XML and writes HCD merged ranges into `mergeCells`, preserving empty cell values, sparse row/column positions, and merges. It still rebuilds workbook styles and opaque parts semantically; use source-backed export when those properties matter.
+
+Verify existing merges with the real workbook and the screenshot above:
+
+```bash
+target/debug/officecli hdoc import assets/showcase/budget-tracker.xlsx --output /tmp/budget-merge.hcd --document-id budget-merge
+target/debug/officecli hdoc export /tmp/budget-merge.hcd --to xlsx --output /tmp/budget-merge-semantic.xlsx
+python3 - <<'PY'
+from openpyxl import load_workbook
+source = load_workbook('assets/showcase/budget-tracker.xlsx').active
+exported = load_workbook('/tmp/budget-merge-semantic.xlsx').active
+assert set(map(str, source.merged_cells.ranges)) == set(map(str, exported.merged_cells.ranges))
+PY
+```
 
 For the supplied `open-review-usage-2026-09.csv` workbook, select B1 and choose **插入 → 删除选中列**. The browser download has three rows and eleven columns; each value in original C:L appears in B:K, and the deleted B values are absent. Exporting revision 0 still yields all twelve original columns. Reproduce with CLI:
 
