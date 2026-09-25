@@ -2443,15 +2443,15 @@ fn find_xlsx_row_insert_target(
                 continue;
             }
             let html = bundle.read_chunk(&descriptor)?;
-            if html.contains("data-hcd-formula=\"true\"") || html.contains("data-hcd-merge=\"") {
+            if html.contains("data-hcd-formula=\"true\"") {
                 return Err(HcdError::Unsupported(
-                    "middle row insertion requires a workbook without formulas or merged cells"
-                        .to_string(),
+                    "middle row insertion requires a workbook without formulas".to_string(),
                 ));
             }
             if grid.sheet_id != insert.sheet_id {
                 continue;
             }
+            check_xlsx_merge_shift(&html, XlsxMergeShift::InsertRow(insert.before_row))?;
             if part.is_none() {
                 part = bundle
                     .read_map(&descriptor)?
@@ -2508,14 +2508,15 @@ fn find_xlsx_row_delete_target(
                 continue;
             }
             let html = bundle.read_chunk(&descriptor)?;
-            if html.contains("data-hcd-formula=\"true\"") || html.contains("data-hcd-merge=\"") {
+            if html.contains("data-hcd-formula=\"true\"") {
                 return Err(HcdError::Unsupported(
-                    "row deletion requires a workbook without formulas or merged cells".to_string(),
+                    "row deletion requires a workbook without formulas".to_string(),
                 ));
             }
             if grid.sheet_id != delete.sheet_id {
                 continue;
             }
+            check_xlsx_merge_shift(&html, XlsxMergeShift::DeleteRow(delete.row))?;
             if part.is_none() {
                 part = bundle
                     .read_map(&descriptor)?
@@ -2566,15 +2567,15 @@ fn find_xlsx_column_insert_part(
                 continue;
             }
             let html = bundle.read_chunk(&descriptor)?;
-            if html.contains("data-hcd-formula=\"true\"") || html.contains("data-hcd-merge=\"") {
+            if html.contains("data-hcd-formula=\"true\"") {
                 return Err(HcdError::Unsupported(
-                    "middle column insertion requires a workbook without formulas or merged cells"
-                        .to_string(),
+                    "middle column insertion requires a workbook without formulas".to_string(),
                 ));
             }
             if grid.sheet_id != insert.sheet_id {
                 continue;
             }
+            check_xlsx_merge_shift(&html, XlsxMergeShift::InsertColumn(insert.before_column))?;
             if html.contains("data-hcd-column-start=\"") {
                 return Err(HcdError::Unsupported(
                     "middle column insertion cannot yet shift explicit column widths".to_string(),
@@ -2630,15 +2631,15 @@ fn find_xlsx_column_delete_part(
                 continue;
             }
             let html = bundle.read_chunk(&descriptor)?;
-            if html.contains("data-hcd-formula=\"true\"") || html.contains("data-hcd-merge=\"") {
+            if html.contains("data-hcd-formula=\"true\"") {
                 return Err(HcdError::Unsupported(
-                    "column deletion requires a workbook without formulas or merged cells"
-                        .to_string(),
+                    "column deletion requires a workbook without formulas".to_string(),
                 ));
             }
             if grid.sheet_id != delete.sheet_id {
                 continue;
             }
+            check_xlsx_merge_shift(&html, XlsxMergeShift::DeleteColumn(delete.column))?;
             if html.contains("data-hcd-column-start=\"") {
                 return Err(HcdError::Unsupported(
                     "column deletion cannot yet shift explicit column widths".to_string(),
@@ -2783,6 +2784,7 @@ fn shift_xlsx_row_window(
     before_row: u32,
     insert_here: bool,
 ) -> Result<(), HcdError> {
+    rewrite_xlsx_merge_refs(html, XlsxMergeShift::InsertRow(before_row))?;
     let grid = descriptor.grid.as_mut().ok_or_else(|| {
         HcdError::InvalidBundle("XLSX row window has no grid address".to_string())
     })?;
@@ -2894,6 +2896,7 @@ fn delete_xlsx_row_window(
     descriptor: &mut crate::ChunkDescriptor,
     deleted_row: u32,
 ) -> Result<Vec<String>, HcdError> {
+    rewrite_xlsx_merge_refs(html, XlsxMergeShift::DeleteRow(deleted_row))?;
     let grid = descriptor.grid.as_mut().ok_or_else(|| {
         HcdError::InvalidBundle("XLSX row window has no grid address".to_string())
     })?;
@@ -3028,6 +3031,7 @@ fn shift_xlsx_column_window(
     descriptor: &mut crate::ChunkDescriptor,
     before_column: u32,
 ) -> Result<(), HcdError> {
+    rewrite_xlsx_merge_refs(html, XlsxMergeShift::InsertColumn(before_column))?;
     let grid = descriptor.grid.as_mut().ok_or_else(|| {
         HcdError::InvalidBundle("XLSX column window has no grid address".to_string())
     })?;
@@ -3119,6 +3123,7 @@ fn delete_xlsx_column_window(
     descriptor: &mut crate::ChunkDescriptor,
     deleted_column: u32,
 ) -> Result<Vec<String>, HcdError> {
+    rewrite_xlsx_merge_refs(html, XlsxMergeShift::DeleteColumn(deleted_column))?;
     let grid = descriptor.grid.as_mut().ok_or_else(|| {
         HcdError::InvalidBundle("XLSX column window has no grid address".to_string())
     })?;
@@ -3300,6 +3305,118 @@ fn xlsx_merge_coordinates(reference: &str) -> Option<(u32, u32, u32, u32)> {
         end_row,
         end_column,
     ))
+}
+
+#[derive(Clone, Copy)]
+enum XlsxMergeShift {
+    InsertRow(u32),
+    DeleteRow(u32),
+    InsertColumn(u32),
+    DeleteColumn(u32),
+}
+
+fn shifted_xlsx_merge(
+    (start_row, start_column, end_row, end_column): (u32, u32, u32, u32),
+    shift: XlsxMergeShift,
+) -> Result<(u32, u32, u32, u32), HcdError> {
+    let crossing = || {
+        HcdError::Unsupported(
+            "XLSX grid shift intersects a merged range; split that merge first".to_string(),
+        )
+    };
+    let overflow =
+        || HcdError::ResourceLimit("XLSX merged range exceeds the worksheet limit".to_string());
+    match shift {
+        XlsxMergeShift::InsertRow(before) if before > start_row && before <= end_row => {
+            Err(crossing())
+        }
+        XlsxMergeShift::InsertRow(before) if before <= start_row => Ok((
+            start_row
+                .checked_add(1)
+                .filter(|row| *row <= 1_048_576)
+                .ok_or_else(overflow)?,
+            start_column,
+            end_row
+                .checked_add(1)
+                .filter(|row| *row <= 1_048_576)
+                .ok_or_else(overflow)?,
+            end_column,
+        )),
+        XlsxMergeShift::DeleteRow(row) if (start_row..=end_row).contains(&row) => Err(crossing()),
+        XlsxMergeShift::DeleteRow(row) if row < start_row => {
+            Ok((start_row - 1, start_column, end_row - 1, end_column))
+        }
+        XlsxMergeShift::InsertColumn(before) if before > start_column && before <= end_column => {
+            Err(crossing())
+        }
+        XlsxMergeShift::InsertColumn(before) if before <= start_column => Ok((
+            start_row,
+            start_column
+                .checked_add(1)
+                .filter(|col| *col <= 16_384)
+                .ok_or_else(overflow)?,
+            end_row,
+            end_column
+                .checked_add(1)
+                .filter(|col| *col <= 16_384)
+                .ok_or_else(overflow)?,
+        )),
+        XlsxMergeShift::DeleteColumn(column) if (start_column..=end_column).contains(&column) => {
+            Err(crossing())
+        }
+        XlsxMergeShift::DeleteColumn(column) if column < start_column => {
+            Ok((start_row, start_column - 1, end_row, end_column - 1))
+        }
+        _ => Ok((start_row, start_column, end_row, end_column)),
+    }
+}
+
+fn check_xlsx_merge_shift(html: &str, shift: XlsxMergeShift) -> Result<(), HcdError> {
+    for range in xlsx_cells(html)?
+        .into_iter()
+        .filter_map(|cell| cell.merged_range)
+    {
+        shifted_xlsx_merge(range, shift)?;
+    }
+    Ok(())
+}
+
+fn rewrite_xlsx_merge_refs(html: &mut String, shift: XlsxMergeShift) -> Result<(), HcdError> {
+    for cell in xlsx_cells(html)?.into_iter().rev() {
+        let Some(range) = cell.merged_range else {
+            continue;
+        };
+        let shifted = shifted_xlsx_merge(range, shift)?;
+        if shifted == range {
+            continue;
+        }
+        let old = format!(
+            "{}{}:{}{}",
+            xlsx_column_name(range.1),
+            range.0,
+            xlsx_column_name(range.3),
+            range.2
+        );
+        let new = format!(
+            "{}{}:{}{}",
+            xlsx_column_name(shifted.1),
+            shifted.0,
+            xlsx_column_name(shifted.3),
+            shifted.2
+        );
+        let needle = format!("data-hcd-merge=\"{old}\"");
+        let offset = html[cell.start..=cell.tag_end]
+            .find(&needle)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX merged cell lost its range attribute".to_string())
+            })?;
+        let start = cell.start + offset;
+        html.replace_range(
+            start..start + needle.len(),
+            &format!("data-hcd-merge=\"{new}\""),
+        );
+    }
+    Ok(())
 }
 
 fn xlsx_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
