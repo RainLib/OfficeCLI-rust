@@ -10,6 +10,7 @@ import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { api, type Session } from './api.ts'
 import { FixedViewer } from './FixedViewer.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import './style.css'
 
@@ -116,6 +117,8 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>('settings')
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [outline, setOutline] = useState<Array<{ pos: number; level: number; text: string }>>([])
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchVersion, setSearchVersion] = useState(0)
   const lastOutline = useRef('')
   const lastSemantic = useRef<string | null>(null)
   useEffect(() => { saveLayout(layout) }, [layout])
@@ -153,6 +156,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     editable: !readOnly,
     editorProps: { attributes: { class: 'hcd-editor-body' }, transformPasted: clearPastedBlockIds },
     onUpdate: ({ editor: changedEditor }) => {
+      setSearchVersion(previous => previous + 1)
       const semantic = JSON.stringify(jsonToSnapshot(changedEditor.getJSON()).map(block => block.content))
       if (lastSemantic.current !== null && semantic !== lastSemantic.current && !readOnly) setStatus('编辑中')
       lastSemantic.current = semantic
@@ -318,6 +322,37 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       setError('')
     } catch (cause) { setError(cause instanceof TypeError ? '请输入完整的 http、https 或 mailto 链接' : String(cause)) }
   }
+  async function searchContent(query: string): Promise<SearchResult> {
+    const hits: SearchHit[] = []
+    if (!editor) return { revision: revision ?? 0, hits, truncated: false }
+    const needle = query.trim().toLocaleLowerCase()
+    if (!needle) return { revision: revision ?? 0, hits, truncated: false }
+    editor.state.doc.descendants((node, pos) => {
+      if (hits.length > 200) return false
+      if (node.type.name !== 'paragraph' && node.type.name !== 'heading') return true
+      const text = node.textContent
+      const lower = text.toLocaleLowerCase()
+      let start = 0
+      while (hits.length <= 200) {
+        const offset = lower.indexOf(needle, start)
+        if (offset < 0) break
+        const before = Math.max(0, offset - 32)
+        const after = Math.min(text.length, offset + query.length + 48)
+        hits.push({ chunkSequence: 0, region: 'body', nodeId: String(pos), offset,
+          position: pos + 1 + offset, matchLength: query.trim().length,
+          preview: `${before ? '…' : ''}${text.slice(before, after)}${after < text.length ? '…' : ''}` })
+        start = offset + Math.max(needle.length, 1)
+      }
+      return false
+    })
+    return { revision: revision ?? 0, hits: hits.slice(0, 200), truncated: hits.length > 200 }
+  }
+  function navigateSearch(hit: SearchHit) {
+    if (!editor || hit.position === undefined) return
+    const from = Math.min(hit.position, editor.state.doc.content.size)
+    editor.commands.setTextSelection({ from, to: Math.min(from + (hit.matchLength || 1), editor.state.doc.content.size) })
+    editor.view.domAtPos(from).node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
   const actions: MenuAction[] = [
     { label: '复制选中内容', action: () => { if (editor) void navigator.clipboard.writeText(menu?.selectedText || editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, '\n')).catch(cause => setError(String(cause))) } },
     { label: '粘贴文本', disabled: readOnly, action: () => { if (editor) void navigator.clipboard.readText().then(text => editor.chain().focus().insertContent(text).run()).catch(cause => setError(String(cause))) } },
@@ -337,9 +372,10 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   return <div className={`workspace semantic-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline ? '' : 'outline-hidden'} ${rightPanel ? '' : 'right-hidden'}`}>
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={status} activeTab={activeTab}
       onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} onClose={onClose}
-      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} settingsOpen={rightPanel === 'settings'} beforeExport={save}
+      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings'} beforeExport={save}
       presence={layout.showCollaborators && <details className="presence"><summary aria-label={`在线协作者，${presence.length} 人`}><span className="presence-avatars">{presence.slice(0, 3).map(user => <span key={user.id} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}</span><span>{presence.length} 人在线</span></summary><div className="presence-menu"><strong>在线协作者</strong>{presence.map(user => <div key={user.id} className="presence-person"><span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><span>{user.name}{user.id === localUser.id ? '（你）' : ''}</span>{user.connections > 1 && <small>{user.connections} 个窗口</small>}</div>)}</div></details>} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" aria-expanded={rightPanel === 'settings'} onClick={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')}>⚙ 界面设置</button>}
+    <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={searchVersion} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().undo().run()} disabled={readOnly || !editor?.can().undo()}>↶ 撤销</button><button onClick={() => editor?.chain().focus().redo().run()} disabled={readOnly || !editor?.can().redo()}>↷ 重做</button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().setParagraph().run()} disabled={readOnly}>正文</button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}>标题</button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly}>𝐁 加粗</button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly}>𝑰 斜体</button><button onClick={openLink} disabled={readOnly}>链接</button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}>项目符号</button><button onClick={() => editor?.chain().focus().toggleOrderedList().run()} disabled={readOnly}>编号</button></div><div className="tool-group"><button onClick={() => moveBlock(-1)} disabled={readOnly}>段落上移</button><button onClick={() => moveBlock(1)} disabled={readOnly}>段落下移</button></div></>}
       {activeTab === 'insert' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().insertContent({ type: 'paragraph', content: [{ type: 'text', text: '新段落' }] }).run()} disabled={readOnly}>＋ 新增段落</button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}>插入标题</button><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}>插入列表</button></div><div className="tool-group"><button onClick={openLink} disabled={readOnly}>插入链接</button><button onClick={deleteCurrentBlock} disabled={readOnly}>删除段落</button></div></>}
@@ -360,7 +396,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
           if (point && !selectedText) editor.commands.setTextSelection(point.pos)
         }
         setMenu({ x: event.clientX, y: event.clientY, selectedText })
-      }}><EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => !readOnly && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label="加粗">𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label="斜体">𝑰</button><button onClick={openLink} aria-label="设置链接">🔗</button></BubbleMenu>}</main></div>
+      }}><EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label="加粗">𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label="斜体">𝑰</button><button onClick={openLink} aria-label="设置链接">🔗</button></BubbleMenu>}</main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>{rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label>显示文档目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><p>结构编辑后导出 DOCX 将重建语义版式。</p>
         <div className="history">{history.slice().reverse().map(item => <button key={item.revision} onClick={() => void showRevision(item.revision)} title={item.patchId}><span className="revision-avatar" title={item.authorName || (item.revision === 0 ? '导入' : '作者未记录')} style={item.authorId ? { background: presenceColor(item.authorId) } : undefined}>{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs ? new Date(item.createdAtEpochMs).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</small></strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')} · {item.revision === 0 ? '导入' : item.patchId?.startsWith('restore-') ? '恢复版本' : item.patchId === 'editor-projection' ? '编辑投影' : '内容更新'}</small><span>查看版本</span></span></button>)}

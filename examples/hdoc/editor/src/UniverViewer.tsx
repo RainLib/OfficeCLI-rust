@@ -7,6 +7,7 @@ import { HcdUniverAdapter, type HcdPatchEventDetail } from '../../xlsx-univer-vi
 import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { api, type Session } from './api.ts'
@@ -22,6 +23,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
   const [mergeBusy, setMergeBusy] = useState(false)
   const [rowBusy, setRowBusy] = useState(false)
   const [columnBusy, setColumnBusy] = useState(false)
@@ -51,6 +53,22 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
     }).catch(cause => setError(`协作修订同步失败：${String(cause)}`)).finally(() => { syncing.current = false })
   }, [remoteRevision, revision, status])
+
+  async function searchContent(query: string): Promise<SearchResult> {
+    const params = new URLSearchParams({ q: query })
+    return (await api(session, `/search?${params}`)).json() as Promise<SearchResult>
+  }
+
+  async function navigateSearch(hit: SearchHit) {
+    const current = runtime.current
+    if (!current || !hit.sheetId) throw new Error('工作簿尚未加载完成')
+    const descriptor = current.client.descriptors.find(item => item.sequence === hit.chunkSequence)
+    if (!descriptor?.grid || descriptor.grid.sheetId !== hit.sheetId || descriptor.grid.rowStart === undefined || descriptor.grid.rowEnd === undefined) {
+      throw new Error('搜索结果缺少单元格位置')
+    }
+    await current.adapter.loadRange(hit.sheetId, descriptor.grid.rowStart - 1, descriptor.grid.rowEnd - 1)
+    if (!await current.adapter.focusNode(hit.nodeId)) throw new Error('单元格未能定位，请刷新工作簿')
+  }
 
   useEffect(() => {
     let alive = true
@@ -596,8 +614,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
-      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
+      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
+    <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
       {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowBeforeSelection()}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">支持一次选择 2–100 行或列并在单个修订中处理；合并区域可整体移动 · {status}</span></>}
