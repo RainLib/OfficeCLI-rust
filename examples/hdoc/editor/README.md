@@ -1,6 +1,6 @@
 # HCD reference editor and core service
 
-This example runs a self-hosted Tiptap/Yjs editor against the `hcd/2` core API. DOCX, HTML, Markdown, and TXT use the semantic editor. PDF and PPTX use the fixed-layout, window-loaded viewer. XLSX uses the existing Univer adapter for mapped cell values. HCD revisions are immutable; semantic editing creates `hcd-patch/4` checkpoints and does not write browser HTML into a bundle.
+This example runs a self-hosted Tiptap/Yjs editor against the `hcd/2` core API. DOCX, HTML, Markdown, and TXT use the semantic editor. PDF and PPTX use the fixed-layout, window-loaded viewer. XLSX uses the Univer adapter for mapped cell values and bounded cell merging. HCD revisions are immutable; semantic editing creates `hcd-patch/4` checkpoints and does not write browser HTML into a bundle.
 
 ## Local run
 
@@ -65,6 +65,24 @@ PDF editing mounts Tiptap inside the selected canonical page text element in the
 PPTX uses the same in-frame text editing, keeping the shape's font and color at its slide position. The slide outline opens by default with its own visibility preference, and unloaded slides reserve the measured slide height instead of a generic page height. The reference screenshot is `docs/screenshots/hcd-pptx-direct-slide-edit.jpg`.
 
 The XLSX canvas keeps its Univer cell editor and now uses the same fixed document header, view controls, appearance panel, export control, and status bar as the other formats. Double-click an existing cell or press F2 to edit its content. The reference screenshot is `docs/screenshots/hcd-xlsx-unified-chrome.jpg`.
+
+For XLSX, select a rectangular range and choose **开始 → 合并单元格**. `hcd-patch/6` saves the merge in one immutable revision, updates the visible Univer grid, and writes `mergeCells` during source-backed XLSX export. The upper-left cell must be mapped and editable; every covered cell must be empty, and the range must fit one HCD cell window. The service rejects overlap and content loss. Use the original immutable XLSX for download; source-free XLSX export now rejects merged cells explicitly instead of silently discarding them. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-merge-cells.png`.
+
+Reproduce the merge and download check with the repository workbook:
+
+```bash
+cargo test -p hcd-formats merges_empty_xlsx_cells_in_hcd_and_source_backed_export
+mkdir -p /tmp/hcd-xlsx-merge/sources
+target/debug/officecli hdoc import assets/showcase/budget-tracker.xlsx \
+  --output /tmp/hcd-xlsx-merge/accept-xlsx.hcd --document-id accept-xlsx
+cp assets/showcase/budget-tracker.xlsx /tmp/hcd-xlsx-merge/sources/accept-xlsx.xlsx
+# Start the core API, sidecar, and Vite gallery as described above with HCD_DEMO_ROOT=/tmp/hcd-xlsx-merge.
+# In the Settings sheet, select A1:B1, click 合并单元格, then prepare and download XLSX.
+target/debug/officecli hdoc validate /tmp/hcd-xlsx-merge/accept-xlsx.hcd
+target/debug/officecli hdoc export /tmp/hcd-xlsx-merge/accept-xlsx.hcd \
+  --source assets/showcase/budget-tracker.xlsx --output /tmp/hcd-xlsx-merge/exported.xlsx
+unzip -p /tmp/hcd-xlsx-merge/exported.xlsx xl/worksheets/sheet3.xml | rg 'mergeCell ref="A1:B1"'
+```
 
 PDF, PPTX, and XLSX sessions now share the document's collaborator list and committed HCD revisions. Open the same document in two browser windows: saving a PDF/PPTX text box or an XLSX cell in one window updates the other window's revision and visible page or cell without a reload. Multiple windows with the same user ID appear as one person with a window count. Fixed-layout edits commit through the Rust patch API; Hocuspocus announces the committed revision, and each client re-reads its visible HCD objects. These formats do not merge unsaved keystrokes in Yjs: concurrent edits to the same old revision receive a patch conflict and must be retried. Read tokens can receive updates but cannot submit patches or revision announcements. The reference screenshot is `docs/screenshots/hcd-fixed-grid-collaboration.jpg`.
 

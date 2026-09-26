@@ -4337,12 +4337,19 @@ pub(crate) fn export_xlsx(
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let workbook = workbook_info(&mut archive)?;
+    let merge_ranges = collect_canonical_merge_ranges(bundle, &manifest, &workbook, &replacements)?;
     for (part, values) in &replacements {
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
+        let merges = merge_ranges.get(part).ok_or_else(|| {
+            HcdError::InvalidBundle(format!(
+                "XLSX sheet {part} is missing from the source workbook"
+            ))
+        })?;
         archive
             .with_part(part, |input| {
-                rewrite_worksheet(input, BufWriter::new(output), values)
+                rewrite_worksheet(input, BufWriter::new(output), values, merges)
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
@@ -4373,10 +4380,93 @@ pub(crate) fn export_xlsx(
     Ok(report)
 }
 
+fn collect_canonical_merge_ranges(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    workbook: &WorkbookInfo,
+    replacements: &HashMap<String, BTreeMap<String, String>>,
+) -> Result<HashMap<String, BTreeSet<String>>, HcdError> {
+    let mut ranges: HashMap<String, BTreeSet<String>> = replacements
+        .keys()
+        .map(|part| (part.clone(), BTreeSet::new()))
+        .collect();
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in page.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let sheet = workbook.sheets.get(grid.sheet_index).ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "HCD worksheet index {} is missing from the source workbook",
+                    grid.sheet_index
+                ))
+            })?;
+            let Some(sheet_ranges) = ranges.get_mut(&sheet.part) else {
+                continue;
+            };
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut remaining = html.as_str();
+            const MARKER: &str = " data-hcd-merge=\"";
+            while let Some(offset) = remaining.find(MARKER) {
+                remaining = &remaining[offset + MARKER.len()..];
+                let end = remaining.find('"').ok_or_else(|| {
+                    HcdError::InvalidBundle("XLSX merge attribute is not closed".to_string())
+                })?;
+                let reference = &remaining[..end];
+                if parse_merge_reference(reference).is_none() {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "invalid HCD XLSX merge reference {reference}"
+                    )));
+                }
+                if !sheet_ranges.insert(reference.to_string()) {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "duplicate HCD XLSX merge reference {reference}"
+                    )));
+                }
+                if sheet_ranges.len() > MAX_MERGED_RANGES {
+                    return Err(HcdError::ResourceLimit(format!(
+                        "XLSX worksheet exceeds {MAX_MERGED_RANGES} merged ranges"
+                    )));
+                }
+                remaining = &remaining[end + 1..];
+            }
+        }
+    }
+    Ok(ranges)
+}
+
+fn write_merge_cells(
+    writer: &mut Writer<impl Write>,
+    qualified_name: &[u8],
+    merges: &BTreeSet<String>,
+) -> Result<(), HcdError> {
+    if merges.is_empty() {
+        return Ok(());
+    }
+    let name = String::from_utf8_lossy(qualified_name).to_string();
+    let child_name = name.replacen("mergeCells", "mergeCell", 1);
+    let mut start = BytesStart::new(name.as_str());
+    let count = merges.len().to_string();
+    start.push_attribute(("count", count.as_str()));
+    writer.write_event(Event::Start(start))?;
+    for reference in merges {
+        let mut cell = BytesStart::new(child_name.as_str());
+        cell.push_attribute(("ref", reference.as_str()));
+        writer.write_event(Event::Empty(cell))?;
+    }
+    writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+    Ok(())
+}
+
 fn rewrite_worksheet(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<String, String>,
+    merges: &BTreeSet<String>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -4384,6 +4474,8 @@ fn rewrite_worksheet(
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut skip_depth = 0usize;
     let mut seen = BTreeSet::new();
+    let mut merge_written = false;
+    let mut sheet_data_seen = false;
     loop {
         let event = reader
             .read_event_into(&mut buffer)
@@ -4403,6 +4495,19 @@ fn rewrite_worksheet(
             continue;
         }
         match event {
+            Event::Start(ref start) if local_name(start.name().as_ref()) == "mergeCells" => {
+                if !merge_written {
+                    write_merge_cells(&mut writer, start.name().as_ref(), merges)?;
+                    merge_written = true;
+                }
+                skip_depth = 1;
+            }
+            Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "mergeCells" => {
+                if !merge_written {
+                    write_merge_cells(&mut writer, empty.name().as_ref(), merges)?;
+                    merge_written = true;
+                }
+            }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "c" => {
                 let reference = attribute(start, "r").unwrap_or_default();
                 if let Some(text) = replacements.get(&reference) {
@@ -4422,10 +4527,30 @@ fn rewrite_worksheet(
                     writer.write_event(event.into_owned())?;
                 }
             }
+            Event::End(ref end) if local_name(end.name().as_ref()) == "sheetData" => {
+                sheet_data_seen = true;
+                let name = end.name().as_ref().to_vec();
+                writer.write_event(event.into_owned())?;
+                if !merge_written {
+                    let qualified = String::from_utf8_lossy(&name);
+                    let prefix = qualified.split_once(':').map(|(prefix, _)| prefix);
+                    let merge_name = prefix.map_or_else(
+                        || "mergeCells".to_string(),
+                        |prefix| format!("{prefix}:mergeCells"),
+                    );
+                    write_merge_cells(&mut writer, merge_name.as_bytes(), merges)?;
+                    merge_written = true;
+                }
+            }
             Event::Eof => break,
             _ => writer.write_event(event.into_owned())?,
         }
         buffer.clear();
+    }
+    if !sheet_data_seen {
+        return Err(HcdError::InvalidBundle(
+            "XLSX worksheet is missing sheetData".to_string(),
+        ));
     }
     if seen.len() != replacements.len() {
         let missing: Vec<_> = replacements
@@ -4557,7 +4682,7 @@ mod tests {
     use super::*;
     use hcd_core::{
         extract_text_page, validate_bundle, NodePrecondition, PatchBatch, PatchOperation,
-        HCD_PATCH_SCHEMA_VERSION,
+        HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -4869,6 +4994,105 @@ mod tests {
     }
 
     #[test]
+    fn merges_empty_xlsx_cells_in_hcd_and_source_backed_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("merge.xlsx");
+        let bundle_path = temp.path().join("merge.hcd");
+        let exported = temp.path().join("merged.xlsx");
+        create_merge_edit_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("merge-edit-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let anchor = extract_text_page(&bundle, None, 10)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_6.to_string(),
+            document_id: "merge-edit-doc".to_string(),
+            patch_id: "merge-a1-b2".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxMerge {
+                node_id: anchor.node_id,
+                sheet_id,
+                start_row: 1,
+                start_column: 1,
+                end_row: 2,
+                end_column: 2,
+                precondition: NodePrecondition {
+                    node_hash: anchor.node_hash,
+                },
+            }],
+            metadata: BTreeMap::new(),
+        };
+        let mut destructive = patch.clone();
+        destructive.patch_id = "merge-a1-d1".to_string();
+        if let PatchOperation::XlsxMerge {
+            end_row,
+            end_column,
+            ..
+        } = &mut destructive.operations[0]
+        {
+            *end_row = 1;
+            *end_column = 4;
+        }
+        assert!(hcd_core::apply_patch(&bundle, &destructive, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("would discard"));
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let result = hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 1).unwrap().revision,
+            1
+        );
+        assert_eq!(bundle.revision(0).unwrap().revision, 0);
+        let mut overlapping = patch.clone();
+        overlapping.patch_id = "merge-a1-c1".to_string();
+        overlapping.base_revision = 1;
+        if let PatchOperation::XlsxMerge {
+            end_row,
+            end_column,
+            ..
+        } = &mut overlapping.operations[0]
+        {
+            *end_row = 1;
+            *end_column = 3;
+        }
+        assert!(hcd_core::apply_patch(&bundle, &overlapping, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("overlaps"));
+        let head = bundle.manifest().unwrap();
+        let page = bundle.read_index_page(&head, 0).unwrap();
+        let html = bundle.read_chunk(&page.chunks[0]).unwrap();
+        assert!(html.contains("data-hcd-merge=\"A1:B2\""));
+        assert!(html.contains("rowspan=\"2\" colspan=\"2\""));
+        assert!(!html.contains("data-hcd-column=\"2\""));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(worksheet.contains("mergeCell ref=\"A1:B2\""));
+        assert!(worksheet.contains("Anchor"));
+        assert!(worksheet.contains("Other"));
+    }
+
+    #[test]
     fn sparse_rows_keep_cells_in_their_excel_columns() {
         let row = RenderedRow {
             number: 9,
@@ -5076,6 +5300,40 @@ mod tests {
                 r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="7" zoomScale="75"><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView><sheetView workbookViewId="0" view="pageBreakPreview" topLeftCell="$B$2" rightToLeft="1" showGridLines="0" showRowColHeaders="0" showZeros="0" showFormulas="1" zoomScale="125"><pane xSplit="2" ySplit="3" topLeftCell="$C$4" activePane="bottomRight" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultColWidth="8.43" defaultRowHeight="15"/><cols><col min="1" max="2" width="20" customWidth="1"/></cols><sheetData><row r="1" ht="24" customHeight="1"><c r="A1" t="s" s="1"><v>0</v></c></row><row r="2"/><row r="3"><c r="C3" t="inlineStr"><is><t>After merge</t></is></c><c r="D3" s="2"><v>1234.5</v></c><c r="E3" s="3"><v>0.256</v></c><c r="F3" s="4"><v>1</v></c><c r="G3" s="5"><v>92.34</v></c></row><row r="4"/><row r="5"/></sheetData><mergeCells count="2"><mergeCell ref="A1:B2"/><mergeCell ref="D4:E5"/></mergeCells></worksheet>"#,
             ),
             ("xl/media/image1.png", "streamed-after-sheet-chunks"),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn create_merge_edit_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Merge" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Anchor</t></is></c><c r="D1" t="inlineStr"><is><t>Other</t></is></c></row><row r="2"><c r="D2" t="inlineStr"><is><t>Below</t></is></c></row></sheetData></worksheet>"#,
+            ),
         ];
         for (name, contents) in parts {
             zip.start_file(name, options).unwrap();

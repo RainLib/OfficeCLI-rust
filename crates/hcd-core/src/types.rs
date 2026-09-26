@@ -248,6 +248,18 @@ pub enum PatchOperation {
         font_size_pt: f32,
         text: String,
     },
+    /// Merge a rectangle of existing XLSX cells. Covered cells must be empty.
+    /// Coordinates are 1-based worksheet row and column numbers.
+    #[serde(rename = "xlsx.merge", rename_all = "camelCase")]
+    XlsxMerge {
+        node_id: String,
+        sheet_id: String,
+        start_row: u32,
+        start_column: u32,
+        end_row: u32,
+        end_column: u32,
+        precondition: NodePrecondition,
+    },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -285,7 +297,8 @@ impl PatchOperation {
             Self::TextSplice { node_id, .. }
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
-            | Self::ImageGeometry { node_id, .. } => Some(node_id),
+            | Self::ImageGeometry { node_id, .. }
+            | Self::XlsxMerge { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. } | Self::PdfTextInsert { .. } => None,
         }
@@ -296,6 +309,7 @@ impl PatchOperation {
             self,
             Self::TextSplice { .. }
                 | Self::PdfTextInsert { .. }
+                | Self::XlsxMerge { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
