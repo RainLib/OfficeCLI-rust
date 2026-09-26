@@ -270,6 +270,7 @@ fn revision_record(
         asset_index_href: bundle.asset_index_href_for_revision(revision - 1)?,
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: Vec::new(),
+        removed_node_ids: Vec::new(),
         dirty_chunk_ids: Vec::new(),
         dirty_source_parts: Vec::new(),
         dirty_grid_parts: Vec::new(),

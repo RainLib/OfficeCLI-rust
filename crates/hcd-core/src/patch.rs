@@ -201,6 +201,7 @@ pub fn apply_patch(
                     operation,
                     PatchOperation::PdfTextInsert { .. }
                         | PatchOperation::PdfTextGeometry { .. }
+                        | PatchOperation::PdfTextDelete { .. }
                         | PatchOperation::PptxTextInsert { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::XlsxCellSet { .. }
@@ -248,6 +249,7 @@ pub fn apply_patch(
     let images = collect_image_changes(patch)?;
     let pdf_insertions = collect_pdf_insertions(patch);
     let pdf_geometry = collect_pdf_geometry(patch);
+    let pdf_deletions = collect_pdf_deletions(patch);
     let pptx_insertions = collect_pptx_insertions(patch);
     let pptx_geometry = collect_pptx_geometry(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
@@ -326,6 +328,7 @@ pub fn apply_patch(
         .chain(xlsx_formula.keys().cloned())
         .chain(pptx_geometry.keys().cloned())
         .chain(pdf_geometry.keys().cloned())
+        .chain(pdf_deletions.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
         .collect();
 
@@ -337,6 +340,7 @@ pub fn apply_patch(
         || !images.is_empty()
         || !pdf_insertions.is_empty()
         || !pdf_geometry.is_empty()
+        || !pdf_deletions.is_empty()
         || !pptx_insertions.is_empty()
         || !pptx_geometry.is_empty()
         || !xlsx_merges.is_empty()
@@ -358,6 +362,7 @@ pub fn apply_patch(
 
     let mut found_nodes: HashMap<String, usize> = HashMap::new();
     let mut dirty_nodes = BTreeSet::new();
+    let mut removed_nodes = BTreeSet::new();
     let mut dirty_chunks = BTreeSet::new();
     let mut dirty_parts = BTreeSet::new();
     let mut dirty_grid_parts = BTreeSet::new();
@@ -502,6 +507,7 @@ pub fn apply_patch(
             let mut html_nodes = extract_html_text_nodes(&html)?;
             let mut image_nodes = extract_html_image_nodes(&html)?;
             let mut chunk_changed = false;
+            let mut deleted_here = Vec::new();
             for entry in &mut source_map.entries {
                 if !target_node_ids.contains(&entry.node_id) {
                     continue;
@@ -715,6 +721,26 @@ pub fn apply_patch(
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
+                if let Some(expected_hash) = pdf_deletions.get(&entry.node_id) {
+                    if entry.source.node_kind != "pdf-text" || !entry.source.editable {
+                        return Err(HcdError::Unsupported(
+                            "PDF deletion requires an HCD-created text box".to_string(),
+                        ));
+                    }
+                    if expected_hash != &entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PDF text node {} expected hash {}, actual {}",
+                            entry.node_id, expected_hash, entry.node_hash
+                        )));
+                    }
+                    delete_pdf_text(&mut html, entry)?;
+                    html_nodes.remove(&entry.node_id);
+                    deleted_here.push(entry.node_id.clone());
+                    removed_nodes.insert(entry.node_id.clone());
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
                 if let Some(merge) = xlsx_merges.get(&entry.node_id) {
                     if entry.source.node_kind != "cell"
                         || !entry.source.editable
@@ -826,6 +852,31 @@ pub fn apply_patch(
                     dirty_grid_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
+            }
+
+            if !deleted_here.is_empty() {
+                source_map
+                    .entries
+                    .retain(|entry| !deleted_here.contains(&entry.node_id));
+                descriptor.node_count = source_map.entries.len();
+                descriptor.block_count = descriptor
+                    .block_count
+                    .checked_sub(deleted_here.len())
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PDF block count underflow".to_string())
+                    })?;
+                descriptor.node_bloom = node_bloom(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.node_id.as_str()),
+                );
+                descriptor.first_node_id = source_map
+                    .entries
+                    .first()
+                    .map(|entry| entry.node_id.clone());
+                descriptor.last_node_id =
+                    source_map.entries.last().map(|entry| entry.node_id.clone());
             }
 
             if let Some(insertions) = insertions {
@@ -1189,7 +1240,8 @@ pub fn apply_patch(
     }
 
     validate_annotation_ranges(patch, &found_nodes)?;
-    let (annotation_href, annotation_root_hash) = apply_annotations(bundle, &manifest, patch)?;
+    let (annotation_href, annotation_root_hash) =
+        apply_annotations(bundle, &manifest, patch, &removed_nodes)?;
     let root_hash = if content_changed {
         finalize_root_hash(bundle, root_hasher, &asset_index_href)?
     } else {
@@ -1278,6 +1330,7 @@ pub fn apply_patch(
         asset_index_href,
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: result.dirty_node_ids.clone(),
+        removed_node_ids: removed_nodes.into_iter().collect(),
         dirty_chunk_ids: result.dirty_chunk_ids.clone(),
         dirty_source_parts: result.dirty_source_parts.clone(),
         dirty_grid_parts: dirty_grid_parts.into_iter().collect(),
@@ -1622,6 +1675,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_23
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_24
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1732,6 +1786,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/23 accepts one PDF text-box geometry edit only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_24
+        && (manifest.source.format != "pdf"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PdfTextDelete { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/24 accepts one PDF text-box deletion only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -1925,6 +1991,21 @@ fn validate_patch_identity(
                         "PDF text-box geometry is invalid or unchanged".to_string(),
                     ));
                 }
+            }
+            PatchOperation::PdfTextDelete {
+                node_id,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_24
+                    || manifest.source.format != "pdf"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pdf.text.delete requires one PDF operation with hcd-patch/24".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
             }
             PatchOperation::XlsxMerge {
                 node_id,
@@ -2711,6 +2792,23 @@ fn collect_pdf_geometry(patch: &PatchBatch) -> HashMap<String, PdfGeometryChange
                     node_hash: precondition.node_hash.clone(),
                 },
             ))
+        })
+        .collect()
+}
+
+fn collect_pdf_deletions(patch: &PatchBatch) -> HashMap<String, String> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::PdfTextDelete {
+                node_id,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((node_id.clone(), precondition.node_hash.clone()))
         })
         .collect()
 }
@@ -4850,6 +4948,61 @@ fn update_pdf_text_geometry(
     Ok(())
 }
 
+fn delete_pdf_text(html: &mut String, entry: &NodeMapEntry) -> Result<(), HcdError> {
+    let page = entry
+        .source
+        .part
+        .strip_prefix("pdf/pages/")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|page| *page > 0)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("PDF text box page locator is invalid".to_string())
+        })?;
+    let source_path = format!("/page[{page}]/hcd-text[{}]", entry.node_id);
+    if entry.source.paragraph_id.as_deref() != Some(source_path.as_str()) {
+        return Err(HcdError::Unsupported(
+            "PDF deletion is available only for HCD-created text boxes".to_string(),
+        ));
+    }
+    let marker = format!("data-hcd-text-node=\"{}\"", entry.node_id);
+    let location = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle("PDF text box is missing from the page".to_string())
+    })?;
+    let start = html[..location]
+        .rfind("<p class=\"hcd-pdf-text\"")
+        .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is missing".to_string()))?;
+    let tag_end = html[location..]
+        .find('>')
+        .map(|offset| location + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is not closed".to_string()))?;
+    if html[start..location].contains('>') {
+        return Err(HcdError::InvalidBundle(
+            "PDF text box tag is invalid".to_string(),
+        ));
+    }
+    let tag = &html[start..=tag_end];
+    if xlsx_attribute(tag, "data-hcd-mapping") != Some("hcd-overlay")
+        || xlsx_attribute(tag, "data-hcd-source-path") != Some(source_path.as_str())
+    {
+        return Err(HcdError::Unsupported(
+            "PDF text is not an HCD overlay".to_string(),
+        ));
+    }
+    let close = html[tag_end + 1..]
+        .find("</p>")
+        .map(|offset| tag_end + 1 + offset + "</p>".len())
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("PDF text box closing tag is missing".to_string())
+        })?;
+    if !html[tag_end + 1..close].contains(&format!("data-hcd-id=\"{}\"", entry.node_id)) {
+        return Err(HcdError::InvalidBundle(
+            "PDF text box does not contain its mapped text node".to_string(),
+        ));
+    }
+    html.replace_range(start..close, "");
+    Ok(())
+}
+
 fn insert_pptx_text(
     html: &mut String,
     source_map: &mut crate::ChunkSourceMap,
@@ -5596,6 +5749,7 @@ fn apply_annotations(
     bundle: &Bundle,
     manifest: &crate::HcdManifest,
     patch: &PatchBatch,
+    removed_nodes: &BTreeSet<String>,
 ) -> Result<(Option<String>, String), HcdError> {
     let has_annotation_ops = patch.operations.iter().any(|operation| {
         matches!(
@@ -5603,7 +5757,7 @@ fn apply_annotations(
             PatchOperation::AnnotationUpsert { .. } | PatchOperation::AnnotationRemove { .. }
         )
     });
-    if !has_annotation_ops {
+    if !has_annotation_ops && (removed_nodes.is_empty() || manifest.annotation_href.is_none()) {
         return Ok((
             manifest.annotation_href.clone(),
             manifest.annotation_root_hash.clone(),
@@ -5622,6 +5776,15 @@ fn apply_annotations(
             annotations: Vec::new(),
         }
     };
+    let previous_count = set.annotations.len();
+    set.annotations
+        .retain(|annotation| !removed_nodes.contains(&annotation.node_id));
+    if !has_annotation_ops && set.annotations.len() == previous_count {
+        return Ok((
+            manifest.annotation_href.clone(),
+            manifest.annotation_root_hash.clone(),
+        ));
+    }
     for operation in &patch.operations {
         match operation {
             PatchOperation::AnnotationUpsert { annotation } => {
@@ -5644,6 +5807,7 @@ fn apply_annotations(
             | PatchOperation::PptxTextInsert { .. }
             | PatchOperation::PptxShapeGeometry { .. }
             | PatchOperation::PdfTextGeometry { .. }
+            | PatchOperation::PdfTextDelete { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
@@ -5828,6 +5992,40 @@ mod tests {
         assert!(matches!(
             update_pdf_text_geometry(&mut html, entry, &out_of_page),
             Err(HcdError::InvalidPatch(_))
+        ));
+    }
+
+    #[test]
+    fn pdf_overlay_delete_removes_only_the_created_text_box() {
+        let node_id = "n_00000000000000000000000000000001";
+        let mut html = "<section class=\"hcd-pdf-page\" data-hcd-page=\"1\" data-hcd-continuation=\"false\" data-hcd-source-raster=\"true\" style=\"width:612pt;height:792pt\"><p class=\"hcd-pdf-text\" data-hcd-mapping=\"source\"><span data-hcd-id=\"n_00000000000000000000000000000002\">source</span></p></section>".to_string();
+        let mut source_map = crate::ChunkSourceMap {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            chunk_id: "c_00000000000000000000000000000001".to_string(),
+            entries: vec![],
+        };
+        insert_pdf_text(
+            &mut html,
+            &mut source_map,
+            &PdfTextInsertion {
+                page: 1,
+                x_pt: 20.0,
+                y_pt: 700.0,
+                width_pt: 180.0,
+                height_pt: 18.0,
+                font_size_pt: 12.0,
+                text: "delete me".to_string(),
+                node_id: node_id.to_string(),
+            },
+        )
+        .unwrap();
+        delete_pdf_text(&mut html, &source_map.entries[0]).unwrap();
+        assert!(!html.contains(node_id));
+        assert!(html.contains("data-hcd-mapping=\"source\""));
+        assert!(html.contains(">source</span>"));
+        assert!(matches!(
+            delete_pdf_text(&mut html, &source_map.entries[0]),
+            Err(HcdError::InvalidBundle(_))
         ));
     }
 

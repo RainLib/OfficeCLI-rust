@@ -214,6 +214,28 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(`${String(cause)}。请重新选择文字框后重试。`); return null }
     finally { setSaving(false) }
   }
+  async function deletePdfText(node: TextNode): Promise<number | null> {
+    if (session.format !== 'pdf' || readOnly || historical || saving || !node.pdfGeometry || draft !== node.text) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/24', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pdf.text.delete', nodeId: node.nodeId,
+            precondition: { nodeHash: node.nodeHash } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setSelected(null)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字框后重试。`); return null }
+    finally { setSaving(false) }
+  }
   async function saveBeforeExport(): Promise<number | null> {
     if (selected && draft !== selected.node.text && !readOnly && !historical) return saveText(selected.node, draft)
     if (newBox && newDraft.trim() && !readOnly && !historical) return saveNewBox(newBox, newDraft)
@@ -274,11 +296,12 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} />显示页面目录</label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} />只读模式</label><button onClick={() => setRightPanel('settings')}>界面设置</button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}>查看修订历史</button><span className="ribbon-note">当前版本 r{manifest?.revision ?? '…'}</span></>}
       {selected && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}>保存修改</button>}
+      {selected?.node.pdfGeometry && !readOnly && !historical && <button disabled={saving || draft !== selected.node.text} onClick={() => void deletePdfText(selected.node)}>删除文字框</button>}
       {newBox && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || !newDraft.trim()} onClick={() => void saveNewBox(newBox, newDraft)}>保存新增文字</button>}
     </nav>}
     <div className="layout editor-layout">
       {layout.showOutline && <aside className="outline-panel" aria-label={session.format === 'pptx' ? '幻灯片目录' : '页面目录'}><div className="panel-head"><h2>☷ {session.format === 'pptx' ? '幻灯片目录' : '页面目录'}</h2><button className="panel-close" aria-label="隐藏页面目录" onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`}</button>)}</nav><small>已索引 {descriptors.length} / {manifest?.chunkCount ?? '…'} 个分片</small></aside>}
-      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPdfGeometry={savePdfGeometry} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
+      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}<div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
@@ -297,11 +320,12 @@ type LazyChunkProps = {
   onEditorReady: (editor: Editor | null) => void; onSave: (node: TextNode, value: string) => void
   onGeometry: (node: TextNode, geometry: PptxGeometry) => Promise<number | null>
   onPdfGeometry: (node: TextNode, geometry: PdfGeometry) => Promise<number | null>
+  onPdfDelete: (node: TextNode) => void
   onCancel: () => void; onPlace: (box: NewTextBox) => void; onNewDraft: (value: string) => void
   onSaveNew: (box: NewTextBox, value: string) => void; onCancelNew: () => void
 }
 
-function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPdfGeometry, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
+function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPdfGeometry, onPdfDelete, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
   const [active, setActive] = useState(false)
   const [srcDoc, setSrcDoc] = useState('')
   const [frameHeight, setFrameHeight] = useState(940)
@@ -606,6 +630,7 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
         return <div className="pdf-text-controls" style={{ left: `${geometry.xPt}pt`, top: `${pageHeightPt - geometry.yPt - geometry.heightPt}pt`, width: `${geometry.widthPt}pt`, height: `${geometry.heightPt}pt` }}>
           <button className="pdf-text-move" aria-label="移动 PDF 文字框" title={draft === selected.text ? '拖动文字框' : '请先保存文字修改'} disabled={saving || draft !== selected.text} onPointerDown={event => beginPdfDrag('move', event)} onPointerMove={movePdfDrag} onPointerUp={event => finishPdfDrag(event)} onPointerCancel={event => finishPdfDrag(event, true)}>✥</button>
           <button className="pdf-text-resize" aria-label="调整 PDF 文字框大小" title={draft === selected.text ? '拖动以调整尺寸' : '请先保存文字修改'} disabled={saving || draft !== selected.text} onPointerDown={event => beginPdfDrag('resize', event)} onPointerMove={movePdfDrag} onPointerUp={event => finishPdfDrag(event)} onPointerCancel={event => finishPdfDrag(event, true)} />
+          <button className="pdf-text-delete" aria-label="删除 PDF 文字框" title={draft === selected.text ? '删除文字框，可从修订历史查看旧版' : '请先保存文字修改'} disabled={saving || draft !== selected.text} onClick={event => { event.stopPropagation(); onPdfDelete(selected) }}>×</button>
         </div>
       })()}
       {placingText && primaryPage && <button className="fixed-placement-layer" aria-label={`在第 ${session.format === 'pdf' ? pageNumber : descriptor.sequence + 1} 页放置新文字框`} onClick={place} />}

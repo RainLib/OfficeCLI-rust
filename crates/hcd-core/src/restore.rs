@@ -52,6 +52,7 @@ pub fn restore_revision(
         asset_index_href: target_record.asset_index_href,
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: Vec::new(),
+        removed_node_ids: Vec::new(),
         dirty_chunk_ids: Vec::new(),
         dirty_source_parts: Vec::new(),
         dirty_grid_parts: Vec::new(),
