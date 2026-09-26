@@ -83,6 +83,7 @@ interface PendingPatch {
   blanks: Array<{ sheetId: string; row: number; column: number }>;
   convertedFormulaIds: Set<string>;
   convertedNumberValues: Map<string, string>;
+  formulaUpdates: Map<string, string>;
 }
 
 interface ChunkRuntime {
@@ -287,6 +288,13 @@ export class HcdUniverAdapter {
         const numberValue = pending.convertedNumberValues.get(link.nodeId);
         link.text = numberValue ?? String(sheet?.getRange(link.row, link.column).getValue() ?? '');
         link.rawValue = numberValue === undefined ? undefined : Number(numberValue);
+      } else if (pending.formulaUpdates.has(link.nodeId)) {
+        link.formulaEditable = true;
+        link.formulaEdited = true;
+        link.editable = false;
+        link.formula = pending.formulaUpdates.get(link.nodeId);
+        link.text = link.formula ?? '';
+        link.rawValue = undefined;
       } else if (link.formulaEditable) {
         link.formula = String(sheet?.getRange(link.row, link.column).getFormulas?.()[0]?.[0] ?? link.formula ?? '');
         link.text = link.formula;
@@ -765,7 +773,7 @@ export class HcdUniverAdapter {
           const formula = String(formulas?.[rowOffset]?.[columnOffset] ?? '');
           const entered = editInput ?? next;
           const enteredFormula = formula || (entered.startsWith('=') ? entered : '');
-          if (link?.formulaEditable && this.mode === 'editable' && enteredFormula) {
+          if (link && (link.formulaEditable || link.editable) && this.mode === 'editable' && enteredFormula) {
             if ([...this.pending.values()].some(({ links }) => links.includes(link))) continue;
             if (enteredFormula === link.formula) continue;
             formulaOperations.push({ type: 'xlsx.formula.set', nodeId: link.nodeId,
@@ -920,7 +928,8 @@ export class HcdUniverAdapter {
     this.pending.set(patchId, { links, previous, blanks: [...blankChanges,
       ...formulaCreations.map(({ sheetId, row, column }) => ({ sheetId, row: row - 1, column: column - 1, text: '' }))],
       convertedFormulaIds: new Set([...formulaConversions, ...numberConversions].map(operation => operation.nodeId)),
-      convertedNumberValues: new Map([...numberConversions, ...numberUpdates].map(operation => [operation.nodeId, operation.value])) });
+      convertedNumberValues: new Map([...numberConversions, ...numberUpdates].map(operation => [operation.nodeId, operation.value])),
+      formulaUpdates: new Map(formulaOperations.map(operation => [operation.nodeId, operation.formula])) });
     window.dispatchEvent(new CustomEvent<HcdPatchEventDetail>('hcd-patch', { detail: {
       patch, changes: [...changes, ...blankChanges.map(blank => ({
         sheetId: blank.sheetId, row: blank.row, column: blank.column, oldText: '', newText: blank.text,

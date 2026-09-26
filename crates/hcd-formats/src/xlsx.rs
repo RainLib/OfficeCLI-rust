@@ -7575,6 +7575,179 @@ mod tests {
     }
 
     #[test]
+    fn existing_numeric_cell_becomes_native_sum_formula_and_keeps_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("formulas.xlsx");
+        let bundle_path = temp.path().join("formulas.hcd");
+        let exported = temp.path().join("formula.xlsx");
+        let history = temp.path().join("history.xlsx");
+        create_formula_edit_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("literal-to-formula-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let node = bundle
+            .read_map(descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        assert!(node.source.editable);
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_20.to_string(),
+            document_id: "literal-to-formula-doc".to_string(),
+            patch_id: "replace-a1-with-sum".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaSet {
+                node_id: node.node_id.clone(),
+                sheet_id: descriptor.grid.as_ref().unwrap().sheet_id.clone(),
+                formula: "=SUM(B1:B1)".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+        let html = bundle.read_chunk(descriptor).unwrap();
+        let a1 = html
+            .split("data-hcd-cell=\"A1\"")
+            .nth(1)
+            .unwrap()
+            .split('>')
+            .next()
+            .unwrap();
+        assert!(a1.contains("data-hcd-formula=\"true\""));
+        assert!(a1.contains("data-hcd-formula-editable=\"true\""));
+        assert!(a1.contains("data-hcd-raw-value=\"\""));
+        assert!(html.contains("data-hcd-formula-expression=\"=SUM(B1:B1)\""));
+        let edited = bundle
+            .read_map(descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.node_id == node.node_id)
+            .unwrap();
+        assert!(!edited.source.editable);
+        assert_eq!(edited.node_id, node.node_id);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&exported, "xl/worksheets/sheet1.xml")
+            .contains("<c r=\"A1\"><f>SUM(B1:B1)</f><v/></c>"));
+        export_xlsx(
+            &bundle,
+            &source,
+            &history,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&history, "xl/worksheets/sheet1.xml")
+            .contains("<c r=\"A1\"><v>2</v></c>"));
+        let stale = PatchBatch {
+            patch_id: "stale-a1".to_string(),
+            base_revision: 1,
+            ..patch
+        };
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1).is_err());
+    }
+
+    #[test]
+    fn styled_budget_cell_becomes_formula_without_corrupting_html_attributes() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let exported = temp.path().join("formula.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("budget-formula-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = bundle
+            .read_index_page(&manifest, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Overview" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let node = bundle
+            .read_map(&descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("C8"))
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_20.to_string(),
+            document_id: "budget-formula-doc".to_string(),
+            patch_id: "budget-sum".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaSet {
+                node_id: node.node_id,
+                sheet_id: descriptor.grid.as_ref().unwrap().sheet_id.clone(),
+                formula: "=SUM(D8:E8)".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        let label = bundle
+            .read_map(&descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A8"))
+            .unwrap();
+        let text_patch = PatchBatch {
+            patch_id: "budget-label-to-formula".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxFormulaSet {
+                node_id: label.node_id,
+                sheet_id: descriptor.grid.as_ref().unwrap().sheet_id.clone(),
+                formula: "=SUM(B8:B8)".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: label.node_hash,
+                },
+            }],
+            ..patch
+        };
+        hcd_core::apply_patch(&bundle, &text_patch, 1).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(
+            read_zip_entry(&exported, "xl/worksheets/sheet1.xml").contains("<f>SUM(D8:E8)</f><v/>")
+        );
+        assert!(
+            read_zip_entry(&exported, "xl/worksheets/sheet1.xml").contains("<f>SUM(B8:B8)</f><v/>")
+        );
+    }
+
+    #[test]
     fn converts_real_formula_to_native_number_then_text_without_stale_numeric_metadata() {
         let source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");

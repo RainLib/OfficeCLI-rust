@@ -365,7 +365,7 @@ pub enum PatchOperation {
         column: u32,
         text: String,
     },
-    /// Replace an existing ordinary XLSX formula without converting the cell to text.
+    /// Set a native formula in an existing editable literal or ordinary formula cell.
     #[serde(rename = "xlsx.formula.set", rename_all = "camelCase")]
     XlsxFormulaSet {
         node_id: String,

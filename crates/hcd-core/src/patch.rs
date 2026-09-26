@@ -713,7 +713,13 @@ pub fn apply_patch(
                     }
                     let replacement = match &change.replacement {
                         XlsxFormulaReplacement::Formula(formula) => {
-                            set_xlsx_formula(&mut html, &entry.node_id, formula)?;
+                            set_xlsx_formula(
+                                &mut html,
+                                &entry.node_id,
+                                formula,
+                                entry.source.editable,
+                            )?;
+                            entry.source.editable = false;
                             formula
                         }
                         XlsxFormulaReplacement::Value(text) => {
@@ -5184,7 +5190,12 @@ fn xlsx_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tag[start..end])
 }
 
-fn set_xlsx_formula(html: &mut String, node_id: &str, formula: &str) -> Result<(), HcdError> {
+fn set_xlsx_formula(
+    html: &mut String,
+    node_id: &str,
+    formula: &str,
+    literal_editable: bool,
+) -> Result<(), HcdError> {
     let marker = format!("data-hcd-id=\"{node_id}\"");
     let node_start = html.find(&marker).ok_or_else(|| {
         HcdError::InvalidBundle(format!("XLSX formula node {node_id} is missing"))
@@ -5199,14 +5210,36 @@ fn set_xlsx_formula(html: &mut String, node_id: &str, formula: &str) -> Result<(
             HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
         })?;
     let tag = &html[cell_start..=cell_end];
+    let existing_formula = xlsx_attribute(tag, "data-hcd-formula") == Some("true");
     if cell_end > node_start
-        || xlsx_attribute(tag, "data-hcd-formula") != Some("true")
-        || xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true")
+        || (existing_formula && xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true"))
+        || (!existing_formula && !literal_editable)
     {
         return Err(HcdError::Unsupported(
-            "XLSX formula is shared, array based, or otherwise read-only".to_string(),
+            "XLSX cell is shared, array based, or otherwise read-only".to_string(),
         ));
     }
+    if !existing_formula {
+        for (name, value) in [
+            ("data-hcd-formula", "true"),
+            ("data-hcd-formula-editable", "true"),
+            ("data-hcd-raw-value", ""),
+        ] {
+            let cell_end = html[cell_start..]
+                .find('>')
+                .map(|offset| cell_start + offset)
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
+                })?;
+            set_attribute_in_range(html, cell_start, cell_end, name, value)?;
+        }
+    }
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
+        })?;
     set_attribute_in_range(
         html,
         cell_start,
