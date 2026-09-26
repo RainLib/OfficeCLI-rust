@@ -13,9 +13,9 @@ use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, editor_projection, hash_file, manifest_at_revision,
-    project_editor, restore_revision, BlockPrecondition, Bundle, EditorBlockContent, EditorInline,
-    HcdError, PatchBatch, StructureOperation, StructurePatchBatch, HCD_PATCH_SCHEMA_VERSION_4,
-    MAX_PATCH_JSON_BYTES,
+    project_editor, restore_revision, search_bundle, BlockPrecondition, Bundle, EditorBlockContent,
+    EditorInline, HcdError, PatchBatch, StructureOperation, StructurePatchBatch,
+    HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -142,6 +142,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/restore/{revision}", post(restore))
         .route("/v1/documents/{id}/index/{page}", get(index_page))
         .route("/v1/documents/{id}/chunks/{sequence}", get(chunk))
+        .route("/v1/documents/{id}/search", get(search))
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
         .route("/v1/documents/{id}/export/{format}", get(export_document))
@@ -687,6 +688,12 @@ struct RevisionQuery {
 }
 
 #[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExpectedRevision {
     expected_revision: u64,
@@ -712,6 +719,22 @@ async fn editor(
     authorize(&state, &headers, &id, false)?;
     let projection = editor_projection(&open(&state, &id)?, query.revision).map_err(bad)?;
     Ok(Json(serde_json::to_value(projection).map_err(internal)?))
+}
+
+async fn search(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<SearchQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let result =
+        tokio::task::spawn_blocking(move || search_bundle(&bundle, query.revision, &query.q))
+            .await
+            .map_err(internal)?
+            .map_err(hcd_error)?;
+    Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
 async fn project(

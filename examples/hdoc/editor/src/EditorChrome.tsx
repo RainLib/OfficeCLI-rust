@@ -4,7 +4,7 @@ import type { Session } from './api.ts'
 
 export type EditorTab = 'home' | 'insert' | 'view' | 'revisions'
 
-export function EditorHeader({ session, revision, status, activeTab, onTab, onClose, onSettings, settingsOpen, beforeExport, presence }: {
+export function EditorHeader({ session, revision, status, activeTab, onTab, onClose, onSettings, onSearch, settingsOpen, beforeExport, presence }: {
   session: Session
   revision: number | null
   status: string
@@ -12,6 +12,7 @@ export function EditorHeader({ session, revision, status, activeTab, onTab, onCl
   onTab: (tab: EditorTab) => void
   onClose: () => void
   onSettings: () => void
+  onSearch: () => void
   settingsOpen: boolean
   beforeExport?: () => Promise<number | null>
   presence?: ReactNode
@@ -21,7 +22,7 @@ export function EditorHeader({ session, revision, status, activeTab, onTab, onCl
     <nav className="header-tabs" aria-label="编辑功能">{([
       ['home', '开始'], ['insert', '插入'], ['view', '视图'], ['revisions', '修订'],
     ] as const).map(([tab, label]) => <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => onTab(tab)}>{label}</button>)}</nav>
-    <div className="header-actions">{presence}<ExportControl session={session} revision={revision} beforeExport={beforeExport} /><button className="settings-trigger" aria-label="界面设置" aria-expanded={settingsOpen} onClick={onSettings}>⚙</button><button className="ghost" onClick={onClose}>关闭</button></div>
+    <div className="header-actions">{presence}<button aria-label="搜索文档" title="查找全文 · ⌘/Ctrl+F" onClick={onSearch}>⌕ 搜索</button><ExportControl session={session} revision={revision} beforeExport={beforeExport} /><button className="settings-trigger" aria-label="界面设置" aria-expanded={settingsOpen} onClick={onSettings}>⚙</button><button className="ghost" onClick={onClose}>关闭</button></div>
   </header>
 }
 

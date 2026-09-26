@@ -5,6 +5,7 @@ mod html;
 mod patch;
 mod presentation;
 mod restore;
+mod search;
 mod stats;
 mod structure;
 mod types;
@@ -27,6 +28,7 @@ pub use presentation::{
     HtmlPresentationOptions, HtmlPresentationReport, DEFAULT_HTML_PRESENTATION_MAX_BYTES,
 };
 pub use restore::restore_revision;
+pub use search::{search_bundle, SearchHit, SearchResult};
 pub use stats::{bundle_stats, remove_orphan_objects, BundleStats, StorageCategory};
 pub use structure::{
     apply_structure_patch, editor_projection, project_editor, BlockPrecondition,

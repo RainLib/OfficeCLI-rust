@@ -36,6 +36,18 @@ HCD_TOKEN_SECRET='the-same-private-secret' target/debug/officecli hdoc issue-tok
 
 Use `--scope read` for a read-only session. The service rejects its checkpoint and patch requests with HTTP 403, and the sidecar marks its WebSocket connection read-only. Tokens expire after at most one hour. Keep the signing secret outside the repository.
 
+The header search button and `Cmd/Ctrl+F` search all text in the current document. DOCX, HTML, Markdown, and TXT search the live editor content, including edits that have not reached an HCD save point. PDF, PPTX, and XLSX search verified HCD text nodes through `GET /v1/documents/{id}/search?q=...&revision=...` with a document-scoped read token. Results can open an unloaded page or worksheet; PDF raster assets and scanned text without OCR remain outside the text search index. The API returns at most 200 matches and limits each search to 10,000 text chunks or 256 MiB of decoded HTML.
+The XLSX cross-sheet browser result is shown in `docs/screenshots/hcd-content-search-xlsx.jpg`.
+
+To verify the service with an imported bundle, start `hdoc serve` and run:
+
+```bash
+TOKEN=$(HCD_TOKEN_SECRET='the-same-private-secret' target/debug/officecli hdoc issue-token \
+  --document-id demo-docx --scope read --json | jq -r '.data.token')
+curl -fsSG -H "Authorization: Bearer $TOKEN" --data-urlencode 'q=Number' \
+  http://127.0.0.1:8766/v1/documents/demo-docx/search | jq '{revision, hits: (.hits | length)}'
+```
+
 ### Local acceptance gallery
 
 For browser acceptance, set `HCD_DEMO_ROOT` to the same private service root and pass the same signing secret to Vite. The development server lists only bundles whose IDs match the local gallery fixtures and issues one-hour, document-scoped tokens on click. This gallery is absent from the production build. Sample tokens are not retained in session storage.

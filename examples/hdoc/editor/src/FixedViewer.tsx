@@ -5,6 +5,7 @@ import { redo, undo } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
 
@@ -34,6 +35,11 @@ type NewTextBox = (
 ) & { left: string; top: string; width: string; height: string }
 type Revision = { revision: number; patchId?: string; authorName?: string; createdAtEpochMs?: number }
 
+function mergeDescriptors(previous: Descriptor[], incoming: Descriptor[]): Descriptor[] {
+  return Array.from(new Map([...previous, ...incoming].map(item => [item.sequence, item])).values())
+    .sort((left, right) => left.sequence - right.sequence)
+}
+
 export function FixedViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [descriptors, setDescriptors] = useState<Descriptor[]>([])
@@ -58,6 +64,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [viewRevision, setViewRevision] = useState<number | null>(null)
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchTarget, setSearchTarget] = useState<SearchHit | null>(null)
   const tail = useRef<HTMLDivElement>(null)
   const pagesRef = useRef<HTMLElement>(null)
   useEffect(() => {
@@ -124,6 +132,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   useEffect(() => {
     setDescriptors([])
     setLoadedPages(0)
+    setSearchTarget(null)
     setSelected(null)
     setNewBox(null)
     setPlacingText(false)
@@ -140,13 +149,38 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       void api(session, `/index/${page}${viewRevision === null ? '' : `?revision=${viewRevision}`}`).then(response => response.json())
         .then((index: { chunks: Descriptor[] }) => {
           if (!live) return
-          setDescriptors(previous => [...previous, ...index.chunks])
-          setLoadedPages(page + 1)
+          setDescriptors(previous => mergeDescriptors(previous, index.chunks))
+          setLoadedPages(previous => Math.max(previous, page + 1))
         }).catch(cause => { if (live) setError(String(cause)) })
     }, { rootMargin: '1600px' })
     observer.observe(marker)
     return () => { live = false; observer.disconnect() }
   }, [session, manifest, loadedPages, descriptors, viewRevision])
+  useEffect(() => {
+    if (!searchTarget || !descriptors.some(item => item.sequence === searchTarget.chunkSequence)) return
+    requestAnimationFrame(() => document.getElementById(`hcd-page-${searchTarget.chunkSequence}`)
+      ?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+  }, [searchTarget, descriptors])
+  async function searchContent(query: string): Promise<SearchResult> {
+    const params = new URLSearchParams({ q: query })
+    if (viewRevision !== null) params.set('revision', String(viewRevision))
+    return (await api(session, `/search?${params}`)).json() as Promise<SearchResult>
+  }
+  async function navigateSearch(hit: SearchHit) {
+    if (!manifest) return
+    if (await saveBeforeExport() === null) throw new Error('请先保存当前文字修改')
+    setSelected(null)
+    setSearchTarget(hit)
+    const targetPage = Math.floor(hit.chunkSequence / 128)
+    if (descriptors.some(item => item.sequence === hit.chunkSequence)) return
+    for (let start = loadedPages; start <= targetPage; start += 8) {
+      const pages = await Promise.all(Array.from({ length: Math.min(8, targetPage + 1 - start) }, (_, offset) =>
+        api(session, `/index/${start + offset}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
+          .then(response => response.json() as Promise<{ chunks: Descriptor[] }>)))
+      setDescriptors(previous => mergeDescriptors(previous, pages.flatMap(page => page.chunks)))
+      setLoadedPages(previous => Math.max(previous, start + pages.length))
+    }
+  }
   async function saveText(node: TextNode, value: string): Promise<number | null> {
     if (readOnly || historical || !node.editable || saving) return null
     setSaving(true)
@@ -310,8 +344,9 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   return <div className={`workspace semantic-workspace fixed-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline ? '' : 'outline-hidden'} ${rightPanel ? '' : 'right-hidden'}`}>
     {layout.showHeader && <EditorHeader session={session} revision={displayedRevision} status={status} activeTab={activeTab}
       onTab={tab => { setActiveTab(tab); setPlacingText(false); if (tab === 'revisions') setRightPanel('revisions') }} onClose={() => void closeEditor()}
-      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} settingsOpen={rightPanel === 'settings'} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />}
+      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings'} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setRightPanel('settings')}>⚙ 界面设置</button>}
+    <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={displayedRevision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><span className="ribbon-note">{session.format === 'pptx' ? '点击文字原位编辑 · 选中后拖动顶部把手移动、右下角调整尺寸' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消'}</span></>}
       {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
@@ -324,7 +359,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     </nav>}
     <div className="layout editor-layout">
       {layout.showOutline && <aside className="outline-panel" aria-label={session.format === 'pptx' ? '幻灯片目录' : '页面目录'}><div className="panel-head"><h2>☷ {session.format === 'pptx' ? '幻灯片目录' : '页面目录'}</h2><button className="panel-close" aria-label="隐藏页面目录" onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`}</button>)}</nav><small>已索引 {descriptors.length} / {manifest?.chunkCount ?? '…'} 个分片</small></aside>}
-      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
+      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}<div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
@@ -337,7 +372,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
 
 type LazyChunkProps = {
   session: Session; descriptor: Descriptor; revision: number | null; stylesheet: string; readOnly: boolean
-  selected: TextNode | null; draft: string; newBox: NewTextBox | null; newDraft: string; placingText: boolean
+  selected: TextNode | null; highlightNodeId: string | null; draft: string; newBox: NewTextBox | null; newDraft: string; placingText: boolean
   saving: boolean; refresh: number; placeholderHeight: number; availableWidth: number; onMeasureHeight: (height: number) => void
   onSelect: (node: TextNode) => void; onDraft: (value: string) => void
   onEditorReady: (editor: Editor | null) => void; onSave: (node: TextNode, value: string) => void
@@ -349,7 +384,7 @@ type LazyChunkProps = {
   onSaveNew: (box: NewTextBox, value: string) => void; onCancelNew: () => void
 }
 
-function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPptxDelete, onPdfGeometry, onPdfDelete, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
+function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, highlightNodeId, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPptxDelete, onPdfGeometry, onPdfDelete, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
   const [active, setActive] = useState(false)
   const [srcDoc, setSrcDoc] = useState('')
   const [frameHeight, setFrameHeight] = useState(940)
@@ -391,6 +426,16 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
     setDirectTarget(target || null)
   }
   useEffect(() => { findDirectTarget() }, [selected?.nodeId, session.format, srcDoc])
+  function highlightSearchTarget() {
+    const doc = frame.current?.contentDocument
+    if (!doc) return
+    for (const element of doc.querySelectorAll<HTMLElement>('[data-hcd-id]')) {
+      element.classList.toggle('hcd-search-hit', element.getAttribute('data-hcd-id') === highlightNodeId)
+    }
+    const target = doc.querySelector<HTMLElement>('.hcd-search-hit')
+    target?.scrollIntoView({ block: 'center', inline: 'center' })
+  }
+  useEffect(() => { highlightSearchTarget() }, [highlightNodeId, srcDoc])
   useEffect(() => {
     const matches = newBox?.format === 'pdf'
       ? session.format === 'pdf' && primaryPage && newBox.page === pageNumber
@@ -482,7 +527,10 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           setFrameHeight(height)
         }
         const directCss = session.format === 'pdf' ? `.hcd-pdf-page[data-hcd-source-raster="true"] .hcd-pdf-text:has(>.hcd-direct-editor),.hcd-draft-text{background:#fff!important;color:#111!important;z-index:4;outline:1px solid #1769e8;outline-offset:1px}.hcd-pdf-text:has(>.hcd-direct-editor)>span[data-hcd-id]{display:none}.hcd-direct-editor{display:block;width:100%;min-width:max-content;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text{outline:0;min-height:inherit;padding:0;margin:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text p{position:static!important;margin:0;padding:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}` : session.format === 'pptx' ? `.hcd-slide [data-hcd-id]:has(>.hcd-direct-editor){font-size:0!important;line-height:0!important;outline:1px solid #1769e8;outline-offset:2px}.hcd-slide .hcd-direct-editor{display:inline-block;vertical-align:baseline;font-size:var(--hcd-edit-font-size)!important;line-height:var(--hcd-edit-line-height)!important;color:var(--hcd-edit-color)!important;white-space:pre-wrap}.hcd-slide .hcd-direct-editor .fixed-tiptap-text,.hcd-slide .hcd-direct-editor .fixed-tiptap-text p{display:inline;margin:0;padding:0;min-height:0;outline:0;font:inherit;line-height:inherit;color:inherit;white-space:pre-wrap}.hcd-slide .hcd-draft-text .hcd-direct-editor,.hcd-slide .hcd-draft-text .fixed-tiptap-text,.hcd-slide .hcd-draft-text .fixed-tiptap-text p{display:block;min-width:100%;min-height:1.2em}.hcd-slide .hcd-draft-text .fixed-tiptap-text{width:100%}` : ''
-        setSrcDoc(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}${safeCss}${directCss}</style></head><body data-hcd-image-hitboxes="off" data-hcd-text-hitboxes="off">${html}</body></html>`)
+        const searchCss = session.format === 'pdf'
+          ? '.hcd-search-hit{outline:3px solid #f0a500!important;outline-offset:2px}'
+          : '.hcd-search-hit{outline:3px solid #f0a500!important;background:#ffdb6180!important;color:#111!important}'
+        setSrcDoc(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}${safeCss}${directCss}${searchCss}</style></head><body data-hcd-image-hitboxes="off" data-hcd-text-hitboxes="off">${html}</body></html>`)
       }
     }
     void render().catch(cause => { if (live) setSrcDoc(`<p style="padding:24px;color:#b33">${String(cause).replaceAll('<', '&lt;')}</p>`) })
@@ -637,7 +685,7 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? scaledHeight : placeholderHeight, width: session.format === 'pptx' && srcDoc ? scaledWidth : session.format === 'pdf' && srcDoc ? canvasWidth : undefined }}>
     <div className="fixed-canvas-slot" style={{ height: srcDoc ? scaledHeight : placeholderHeight }}>
     <div className="fixed-canvas-layer" style={{ width: session.format === 'pptx' && srcDoc ? canvasWidth : '100%', height: srcDoc ? frameHeight : placeholderHeight, transform: session.format === 'pptx' && srcDoc ? `scale(${zoom})` : undefined }}>
-    {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight, width: session.format === 'pptx' ? canvasWidth : undefined }} onLoad={findDirectTarget} />
+    {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight, width: session.format === 'pptx' ? canvasWidth : undefined }} onLoad={() => { findDirectTarget(); highlightSearchTarget() }} />
       : <div className="skeleton" style={{ minHeight: placeholderHeight }}>{session.format === 'pptx' ? `幻灯片 ${descriptor.sequence + 1}` : `第 ${descriptor.sequence + 1} 个分片`}</div>}
     {!readOnly && ['pdf', 'pptx'].includes(session.format) && selected && directTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus={session.format === 'pptx' ? 'start' : true} onSave={value => onSave(selected, value)} onCancel={onCancel} /></div>, directTarget)}
     {!readOnly && newBox && newTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /></div>, newTarget)}
