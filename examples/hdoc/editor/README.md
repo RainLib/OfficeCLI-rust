@@ -115,6 +115,8 @@ An existing ordinary XLSX formula can be edited directly in Univer. `hcd-patch/2
 
 An empty XLSX cell can receive one new formula with `hcd-patch/21`. The source-backed XLSX download preserves it as a native formula and requests recalculation. See the [product catalog commands and screenshot](../../../docs/acceptance/hcd-xlsx-formula-create.md).
 
+An XLSX range paste can mix editable text cells, empty cells, existing formulas, and new formulas in one `hcd-patch/22` revision. See the [real workbook commands and browser screenshots](../../../docs/acceptance/hcd-xlsx-formula-range-paste.md).
+
 Verify existing merges with the real workbook and the screenshot above:
 
 ```bash

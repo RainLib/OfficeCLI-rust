@@ -188,26 +188,27 @@ pub fn apply_patch(
     }
     validate_patch_header(&manifest, patch, expected_revision)?;
     if patch.base_revision < manifest.revision
-        && patch.operations.iter().any(|operation| {
-            matches!(
-                operation,
-                PatchOperation::PdfTextInsert { .. }
-                    | PatchOperation::PptxTextInsert { .. }
-                    | PatchOperation::PptxShapeGeometry { .. }
-                    | PatchOperation::XlsxCellSet { .. }
-                    | PatchOperation::XlsxFormulaSet { .. }
-                    | PatchOperation::XlsxFormulaCreate { .. }
-                    | PatchOperation::XlsxRowAppend { .. }
-                    | PatchOperation::XlsxRowRemoveLast { .. }
-                    | PatchOperation::XlsxColumnWidth { .. }
-                    | PatchOperation::XlsxRowHeight { .. }
-                    | PatchOperation::XlsxRowInsert { .. }
-                    | PatchOperation::XlsxRowDelete { .. }
-                    | PatchOperation::XlsxColumnInsert { .. }
-                    | PatchOperation::XlsxColumnDelete { .. }
-                    | PatchOperation::XlsxUnmerge { .. }
-            )
-        })
+        && (patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_22
+            || patch.operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    PatchOperation::PdfTextInsert { .. }
+                        | PatchOperation::PptxTextInsert { .. }
+                        | PatchOperation::PptxShapeGeometry { .. }
+                        | PatchOperation::XlsxCellSet { .. }
+                        | PatchOperation::XlsxFormulaSet { .. }
+                        | PatchOperation::XlsxFormulaCreate { .. }
+                        | PatchOperation::XlsxRowAppend { .. }
+                        | PatchOperation::XlsxRowRemoveLast { .. }
+                        | PatchOperation::XlsxColumnWidth { .. }
+                        | PatchOperation::XlsxRowHeight { .. }
+                        | PatchOperation::XlsxRowInsert { .. }
+                        | PatchOperation::XlsxRowDelete { .. }
+                        | PatchOperation::XlsxColumnInsert { .. }
+                        | PatchOperation::XlsxColumnDelete { .. }
+                        | PatchOperation::XlsxUnmerge { .. }
+                )
+            }))
     {
         return Err(HcdError::RevisionConflict(
             "node insertion requires the current head revision".to_string(),
@@ -243,7 +244,7 @@ pub fn apply_patch(
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch)?;
-    let xlsx_formula = collect_xlsx_formula_set(patch);
+    let xlsx_formula = collect_xlsx_formula_set(patch)?;
     let shifted_grid = if !xlsx_cell_set.is_empty() {
         (1..=manifest.revision).try_fold(false, |found, revision| {
             let record = bundle.revision(revision)?;
@@ -1584,6 +1585,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1649,6 +1651,40 @@ fn validate_patch_identity(
         return Err(HcdError::Unsupported(
             "hcd-patch/21 accepts one XLSX formula creation only".to_string(),
         ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_22 {
+        if manifest.source.format != "xlsx"
+            || !patch.operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    PatchOperation::XlsxFormulaSet { .. }
+                        | PatchOperation::XlsxFormulaCreate { .. }
+                )
+            })
+            || patch.operations.iter().any(|operation| {
+                !matches!(
+                    operation,
+                    PatchOperation::TextSplice { .. }
+                        | PatchOperation::XlsxCellSet { .. }
+                        | PatchOperation::XlsxFormulaSet { .. }
+                        | PatchOperation::XlsxFormulaCreate { .. }
+                )
+            })
+        {
+            return Err(HcdError::Unsupported(
+                "hcd-patch/22 accepts XLSX text, blank-cell, and formula changes only".to_string(),
+            ));
+        }
+        let mut targets = HashSet::new();
+        for operation in &patch.operations {
+            if let Some(node_id) = operation.node_id() {
+                if !targets.insert(node_id) {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX batch contains duplicate node targets".to_string(),
+                    ));
+                }
+            }
+        }
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
     validate_string_map(
@@ -1890,12 +1926,14 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
                         | HCD_PATCH_SCHEMA_VERSION_19
+                        | crate::HCD_PATCH_SCHEMA_VERSION_22
                 ) || manifest.source.format != "xlsx"
                     || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
+                        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
                         && patch.operations.len() != 1)
                 {
                     return Err(HcdError::Unsupported(
-                        "xlsx.cell.set requires one operation with hcd-patch/7-15 or an XLSX range batch with hcd-patch/19"
+                        "xlsx.cell.set requires one operation with hcd-patch/7-15 or an XLSX range batch with hcd-patch/19 or /22"
                             .to_string(),
                     ));
                 }
@@ -1924,12 +1962,14 @@ fn validate_patch_identity(
                 formula,
                 precondition,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
+                if (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22)
                     || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
+                    || (patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
+                        && patch.operations.len() != 1)
                 {
                     return Err(HcdError::Unsupported(
-                        "xlsx.formula.set requires one XLSX operation with hcd-patch/20"
+                        "xlsx.formula.set requires one XLSX operation with hcd-patch/20 or a batch with /22"
                             .to_string(),
                     ));
                 }
@@ -1960,7 +2000,8 @@ fn validate_patch_identity(
                 column,
                 formula,
             } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
+                if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22)
                     || manifest.source.format != "xlsx"
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
@@ -2689,30 +2730,36 @@ fn collect_xlsx_cell_set(
     Ok(insertions)
 }
 
-fn collect_xlsx_formula_set(patch: &PatchBatch) -> HashMap<String, XlsxFormulaChange> {
-    patch
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let PatchOperation::XlsxFormulaSet {
-                node_id,
-                sheet_id,
-                formula,
-                precondition,
-            } = operation
-            else {
-                return None;
-            };
-            Some((
-                node_id.clone(),
-                XlsxFormulaChange {
-                    sheet_id: sheet_id.clone(),
-                    formula: formula.clone(),
-                    node_hash: precondition.node_hash.clone(),
-                },
-            ))
-        })
-        .collect()
+fn collect_xlsx_formula_set(
+    patch: &PatchBatch,
+) -> Result<HashMap<String, XlsxFormulaChange>, HcdError> {
+    let mut changes = HashMap::new();
+    for operation in &patch.operations {
+        if let PatchOperation::XlsxFormulaSet {
+            node_id,
+            sheet_id,
+            formula,
+            precondition,
+        } = operation
+        {
+            if changes
+                .insert(
+                    node_id.clone(),
+                    XlsxFormulaChange {
+                        sheet_id: sheet_id.clone(),
+                        formula: formula.clone(),
+                        node_hash: precondition.node_hash.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(HcdError::InvalidPatch(
+                    "XLSX batch contains duplicate formula targets".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(changes)
 }
 
 fn collect_xlsx_row_append(patch: &PatchBatch) -> Option<XlsxRowAppend> {

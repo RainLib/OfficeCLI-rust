@@ -6928,6 +6928,158 @@ mod tests {
     }
 
     #[test]
+    fn pastes_mixed_formula_range_atomically_and_preserves_history() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/showcase/product-catalog.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("product.hcd");
+        let exported = temp.path().join("range.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("formula-range-product"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = bundle
+            .read_index_page(&manifest, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Laptops" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let map = bundle.read_map(&descriptor).unwrap();
+        let cell = |reference: &str| {
+            map.entries
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some(reference))
+                .unwrap()
+        };
+        let name = cell("B4");
+        let price = cell("E4");
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_22.to_string(),
+            document_id: "formula-range-product".to_string(),
+            patch_id: "paste-formulas".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![
+                PatchOperation::TextSplice {
+                    node_id: name.node_id.clone(),
+                    start: 0,
+                    delete_count: "Pro 14 Base".chars().count(),
+                    insert_text: "Pro 14 Edited".to_string(),
+                    precondition: NodePrecondition {
+                        node_hash: name.node_hash.clone(),
+                    },
+                },
+                PatchOperation::XlsxFormulaSet {
+                    node_id: price.node_id.clone(),
+                    sheet_id: sheet_id.clone(),
+                    formula: "=D4*0.8".to_string(),
+                    precondition: NodePrecondition {
+                        node_hash: price.node_hash.clone(),
+                    },
+                },
+                PatchOperation::XlsxFormulaCreate {
+                    sheet_id: sheet_id.clone(),
+                    row: 4,
+                    column: 8,
+                    formula: "=D4*2".to_string(),
+                },
+                PatchOperation::XlsxFormulaCreate {
+                    sheet_id: sheet_id.clone(),
+                    row: 4,
+                    column: 9,
+                    formula: "=H4+1".to_string(),
+                },
+            ],
+        };
+        let duplicate = PatchBatch {
+            patch_id: "duplicate-formula".to_string(),
+            operations: vec![patch.operations[1].clone(), patch.operations[1].clone()],
+            ..patch.clone()
+        };
+        assert!(hcd_core::apply_patch(&bundle, &duplicate, 0).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let bad_hash = PatchBatch {
+            patch_id: "wrong-hash".to_string(),
+            operations: vec![
+                PatchOperation::XlsxFormulaSet {
+                    node_id: price.node_id.clone(),
+                    sheet_id: sheet_id.clone(),
+                    formula: "=D4*0.7".to_string(),
+                    precondition: NodePrecondition {
+                        node_hash: "0".repeat(64),
+                    },
+                },
+                patch.operations[2].clone(),
+            ],
+            ..patch.clone()
+        };
+        assert!(hcd_core::apply_patch(&bundle, &bad_hash, 0).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let latest = bundle.manifest().unwrap();
+        let latest_descriptor = bundle
+            .read_index_page(&latest, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Laptops" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let html = bundle.read_chunk(&latest_descriptor).unwrap();
+        assert!(html.contains("data-hcd-formula-expression=\"=D4*0.8\""));
+        assert!(html.contains("data-hcd-formula-expression=\"=D4*2\""));
+        assert!(html.contains("data-hcd-formula-expression=\"=H4+1\""));
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("Pro 14 Edited"));
+        assert!(xml.contains("<x:f>D4*0.8</x:f><x:v/>"));
+        assert!(xml.contains("<x:f>D4*2</x:f><x:v/>"));
+        assert!(xml.contains("<x:f>H4+1</x:f><x:v/>"));
+        let history = temp.path().join("history.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &history,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        let old_xml = read_zip_entry(&history, "xl/worksheets/sheet1.xml");
+        assert!(old_xml.contains("Pro 14 Base"));
+        assert!(old_xml.contains("D4*0.85"));
+        assert!(!old_xml.contains("r=\"H4\""));
+        assert!(hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                patch_id: "stale-range".to_string(),
+                ..patch
+            },
+            1
+        )
+        .is_err());
+    }
+
+    #[test]
     fn shared_string_store_supports_disk_backed_random_reads() {
         let temp = tempfile::tempdir().unwrap();
         let mut store = SharedStringStore::empty(temp.path()).unwrap();

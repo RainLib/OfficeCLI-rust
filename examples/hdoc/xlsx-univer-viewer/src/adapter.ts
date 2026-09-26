@@ -37,7 +37,7 @@ export interface HcdXlsxFormulaCreate {
 }
 
 export interface HcdPatchBatch {
-  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7' | 'hcd-patch/19' | 'hcd-patch/20' | 'hcd-patch/21';
+  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7' | 'hcd-patch/19' | 'hcd-patch/20' | 'hcd-patch/21' | 'hcd-patch/22';
   documentId: string;
   patchId: string;
   baseRevision: number;
@@ -48,7 +48,7 @@ export interface HcdPatchBatch {
 
 export interface HcdPatchEventDetail {
   patch: HcdPatchBatch;
-  changes: Array<{ sheetId: string; row: number; column: number; oldText: string; newText: string }>;
+  changes: Array<{ sheetId: string; row: number; column: number; oldText: string; newText: string; nodeId?: string }>;
 }
 
 export type HcdViewerMode = 'readonly' | 'editable';
@@ -545,7 +545,7 @@ export class HcdUniverAdapter {
             if (enteredFormula === link.formula) continue;
             formulaOperations.push({ type: 'xlsx.formula.set', nodeId: link.nodeId,
               sheetId: link.sheetId, formula: enteredFormula, precondition: { nodeHash: link.nodeHash } });
-            changes.push({ sheetId: link.sheetId, row, column, oldText: link.formula ?? link.text, newText: enteredFormula });
+            changes.push({ sheetId: link.sheetId, row, column, oldText: link.formula ?? link.text, newText: enteredFormula, nodeId: link.nodeId });
             links.push(link);
             previous.push(link.formula ?? link.text);
             continue;
@@ -585,15 +585,14 @@ export class HcdUniverAdapter {
             ...diffText(link.text, next),
             precondition: { nodeHash: link.nodeHash },
           });
-          changes.push({ sheetId: link.sheetId, row, column, oldText: link.text, newText: next });
+          changes.push({ sheetId: link.sheetId, row, column, oldText: link.text, newText: next, nodeId: link.nodeId });
           links.push(link);
           previous.push(link.rawValue ?? link.text);
         }
       }
     }
-    if (rejected.length || operations.length + blankChanges.length > 10_000
-      || ((formulaOperations.length || formulaCreations.length)
-        && operations.length + blankChanges.length + formulaOperations.length + formulaCreations.length !== 1)) {
+    const operationCount = operations.length + blankChanges.length + formulaOperations.length + formulaCreations.length;
+    if (rejected.length || operationCount > 10_000) {
       rejected.push(...blankChanges.map(({ sheetId, row, column }) => ({ sheetId, row, column, value: '' })));
       rejected.push(...formulaCreations.map(({ sheetId, row, column }) => ({ sheetId, row: row - 1, column: column - 1, value: '' })));
       rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column,
@@ -603,7 +602,7 @@ export class HcdUniverAdapter {
       formulaOperations.length = 0;
       formulaCreations.length = 0;
       blankChanges.length = 0;
-      this.onStatus('粘贴包含不可编辑单元格、多个公式或超过 10000 个改动，已恢复原值');
+      this.onStatus('粘贴包含不可编辑单元格或超过 10000 个改动，已恢复原值');
     }
     if (rejected.length) {
       this.withApplying(() => rejected.forEach((cell) => {
@@ -619,7 +618,8 @@ export class HcdUniverAdapter {
       row: blank.row + 1, column: blank.column + 1, text: blank.text,
     }));
     const patch: HcdPatchBatch = {
-      schemaVersion: formulaCreations.length ? 'hcd-patch/21' : formulaOperations.length ? 'hcd-patch/20' : blankChanges.length
+      schemaVersion: (formulaCreations.length || formulaOperations.length) && operationCount > 1
+        ? 'hcd-patch/22' : formulaCreations.length ? 'hcd-patch/21' : formulaOperations.length ? 'hcd-patch/20' : blankChanges.length
         ? operations.length + blankChanges.length === 1 ? 'hcd-patch/7' : 'hcd-patch/19'
         : 'hcd-patch/1',
       documentId: this.client.manifest.documentId,
