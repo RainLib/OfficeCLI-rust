@@ -1,5 +1,6 @@
 import { Extension, Node, type JSONContent } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
+import { Fragment, Slice, type Node as PmNode } from '@tiptap/pm/model'
 
 export type Inline = { text: string; bold?: boolean; italic?: boolean; link?: string | null; nodeId?: string | null }
 export type BlockContent = { kind: 'paragraph' | 'heading' | 'list_item' | 'opaque'; level?: number | null; inlines: Inline[] }
@@ -35,6 +36,22 @@ export const HcdOpaque = Node.create({
 })
 
 export const schemaExtensions = [StarterKit.configure({ undoRedo: false, link: { openOnClick: false } }), HcdIdentity, HcdOpaque]
+
+// A pasted or split block must receive its own HCD identity at the next checkpoint.
+export function clearPastedBlockIds(slice: Slice): Slice {
+  const clear = (fragment: Fragment): Fragment => {
+    const nodes: PmNode[] = []
+    fragment.forEach(node => {
+      if (node.isText) { nodes.push(node); return }
+      const content = clear(node.content)
+      nodes.push(node.attrs.hcdBlockId
+        ? node.type.create({ ...node.attrs, hcdBlockId: null }, content, node.marks)
+        : node.copy(content))
+    })
+    return Fragment.fromArray(nodes)
+  }
+  return new Slice(clear(slice.content), slice.openStart, slice.openEnd)
+}
 
 function inlineJson(inline: Inline): JSONContent {
   const marks: Array<{ type: string; attrs?: Record<string, unknown> }> = []
@@ -112,6 +129,12 @@ export function jsonToSnapshot(json: JSONContent): Array<{ blockId: string | nul
         }
       }
     } else push(node)
+  }
+  const seen = new Set<string>()
+  for (const block of result) {
+    if (!block.blockId) continue
+    if (seen.has(block.blockId)) block.blockId = null
+    else seen.add(block.blockId)
   }
   return result
 }
