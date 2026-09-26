@@ -100,6 +100,54 @@ The **插入 → 在选中行前插入** action uses `hcd-patch/12` to insert an
 
 The **插入 → 在选中列前插入** action uses `hcd-patch/13` to insert an empty column before an existing column in the same plain value workbook scope. HCD shifts the visible cells and source anchors across all row windows; source-backed export moves original OOXML cell addresses and materializes newly edited cells in the inserted column. Explicit column widths and other coordinate-dependent features are rejected until they can be moved safely. The browser screenshot is `docs/screenshots/hcd-xlsx-insert-middle-column.png`.
 
+The **插入 → 删除选中行** action uses `hcd-patch/14` to delete a materialized row and move later rows up. It preserves the source workbook and all historical HCD revisions. Confirm the action in the browser, then use the revision view to recover the original row if needed. Source-backed XLSX export omits deleted source rows and their edited cells. This operation accepts plain value workbooks without formulas, merges, drawings, charts, tables, validation, defined names, or coordinate-dependent view references. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-delete-middle-row.png`.
+
+Reproduce the deletion with the supplied CSV converted to XLSX:
+
+```bash
+cargo test -p hcd-formats middle_row_deletion_shifts_windows_and_preserves_history
+cargo test -p hcd-formats deleting_only_worksheet_row_keeps_empty_grid_window
+cargo test -p hcd-formats deleting_previously_inserted_and_filled_row_clears_dirty_node
+python3 - <<'PY'
+import csv
+from openpyxl import Workbook
+w = Workbook(); sheet = w.active
+with open('/Users/houshuai/Downloads/open-review-usage-2026-09.csv', encoding='utf-8-sig', newline='') as source:
+    for row in csv.reader(source): sheet.append(row)
+w.save('/tmp/hcd-middle-row-real.xlsx')
+PY
+target/debug/officecli hdoc import /tmp/hcd-middle-row-real.xlsx \
+  --output /tmp/hcd-row-delete-check.hcd --document-id hcd-row-delete-check
+python3 - <<'PY'
+import gzip, json
+from pathlib import Path
+root = Path('/tmp/hcd-row-delete-check.hcd')
+manifest = json.loads((root / 'manifest.json').read_text())
+with gzip.open(root / manifest['indexRootHref'], 'rt') as source: tree = json.load(source)
+with gzip.open(root / tree['children'][0], 'rt') as source: page = json.load(source)
+patch = {'schemaVersion': 'hcd-patch/14', 'documentId': 'hcd-row-delete-check',
+         'patchId': 'delete-real-row-2', 'baseRevision': 0,
+         'operations': [{'op': 'xlsx.row.delete',
+                         'sheetId': page['chunks'][0]['grid']['sheetId'], 'row': 2}]}
+Path('/tmp/hcd-row-delete-check.patch.json').write_text(json.dumps(patch))
+PY
+target/debug/officecli hdoc apply /tmp/hcd-row-delete-check.hcd \
+  --patch /tmp/hcd-row-delete-check.patch.json --expected-revision 0
+target/debug/officecli hdoc validate /tmp/hcd-row-delete-check.hcd
+target/debug/officecli hdoc export /tmp/hcd-row-delete-check.hcd \
+  --source /tmp/hcd-middle-row-real.xlsx --revision 1 --output /tmp/hcd-row-delete-current.xlsx
+target/debug/officecli hdoc export /tmp/hcd-row-delete-check.hcd \
+  --source /tmp/hcd-middle-row-real.xlsx --revision 0 --output /tmp/hcd-row-delete-original.xlsx
+python3 - <<'PY'
+from openpyxl import load_workbook
+head = list(load_workbook('/tmp/hcd-row-delete-current.xlsx', read_only=True).active.values)
+history = list(load_workbook('/tmp/hcd-row-delete-original.xlsx', read_only=True).active.values)
+assert len(head) == 2 and len(head[0]) == 12
+assert [row[0] for row in head] == ['row_type', 'repository']
+assert [row[0] for row in history] == ['row_type', 'summary', 'repository']
+PY
+```
+
 To reproduce the column action with the same `/tmp/hcd-middle-row-real.xlsx` source from the commands below, import it with a fresh document ID, select B1, choose **插入 → 在选中列前插入**, validate, and download XLSX. `openpyxl` should report three rows and thirteen columns; B1:B3 should be empty, and every source value in B:L should appear in C:M. The browser download was reopened and all 36 source values matched their shifted addresses. The focused checks are:
 
 ```bash
