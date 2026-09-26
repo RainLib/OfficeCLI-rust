@@ -104,11 +104,18 @@
 .hcd-surface .semantic-workspace.fixed-workspace .header-actions{gap:5px}
 .hcd-surface .fixed-workspace .export-control label{font-size:0}
 .hcd-surface .fixed-workspace .export-control select{font-size:12px;max-width:185px}
-.hcd-surface .fixed-workspace .fixed-page{position:relative;margin:0 auto 24px}
+.hcd-surface .fixed-workspace .fixed-page{position:relative;margin:0 auto 24px;overflow:visible}
 .hcd-surface .fixed-workspace .fixed-page-hitboxes{position:absolute;top:0;left:0;bottom:0;z-index:2;pointer-events:none}
 .hcd-surface .fixed-workspace .fixed-page-hitboxes.centered{left:50%;transform:translateX(-50%)}
 .hcd-surface .fixed-workspace .fixed-page-hitbox{position:absolute;display:block;min-width:12px;min-height:14px;padding:0;background:transparent;border:1px dashed transparent;border-radius:2px;pointer-events:auto;cursor:text}
 .hcd-surface .fixed-workspace .fixed-page-hitbox:hover,.hcd-surface .fixed-workspace .fixed-page-hitbox.selected{border-color:#1769e8;background:#1769e81a}
+.hcd-surface .fixed-workspace .fixed-inline-editor{position:absolute;z-index:4;min-width:48px;max-width:100%;background:#fff;outline:2px solid #1769e8;box-shadow:0 2px 12px #21477a25;pointer-events:auto;white-space:nowrap}
+.hcd-surface .fixed-workspace .fixed-inline-editor .fixed-tiptap-text{min-height:inherit;outline:0;margin:0;padding:0 2px;font:inherit;line-height:inherit;color:inherit;white-space:nowrap;overflow:hidden}
+.hcd-surface .fixed-workspace .fixed-inline-editor .fixed-tiptap-text p{margin:0;white-space:nowrap}
+.hcd-surface .fixed-workspace .fixed-inline-actions{position:absolute;right:0;top:calc(100% + 4px);display:flex;gap:4px;padding:4px;background:#fff;border:1px solid #d6e1f0;border-radius:6px;box-shadow:0 4px 12px #20335325;white-space:nowrap;font:12px/1.2 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.hcd-surface .fixed-workspace .fixed-inline-actions button{padding:4px 9px;border:1px solid #c9d5e7;border-radius:4px;background:#fff;color:#263c63;cursor:pointer}
+.hcd-surface .fixed-workspace .fixed-inline-actions button.primary{border-color:#1769e8;background:#1769e8;color:#fff}
+.hcd-surface .fixed-workspace .fixed-inline-actions button:disabled{opacity:.5;cursor:default}
 .hcd-surface .fixed-workspace .fixed-text-list button.selected{border-color:#1769e8;background:#eaf2ff;color:#164d9c}
 .hcd-surface .fixed-workspace .workspace-sidebar .fixed-text-form{max-width:none;padding:0;border:0;background:transparent}
 .hcd-surface .fixed-workspace .workspace-sidebar .fixed-text-form h2{margin:0}

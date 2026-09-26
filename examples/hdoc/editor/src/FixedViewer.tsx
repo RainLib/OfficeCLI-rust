@@ -8,7 +8,7 @@ import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.t
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
 type Descriptor = { sequence: number; region: string }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; left?: string; top?: string; width?: string; height?: string }
+type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; left?: string; top?: string; width?: string; height?: string; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
 type Selection = { node: TextNode; page: number }
 type Revision = { revision: number; patchId?: string; authorName?: string; createdAtEpochMs?: number }
 
@@ -26,7 +26,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [activeEditor, setActiveEditor] = useState<Editor | null>(null)
   const [layout, setLayout] = useState<LayoutPreferences>(readLayout)
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
-  const [rightPanel, setRightPanel] = useState<'text' | 'settings' | 'revisions' | null>(null)
+  const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>(null)
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [viewRevision, setViewRevision] = useState<number | null>(null)
   const tail = useRef<HTMLDivElement>(null)
@@ -37,10 +37,15 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
-  function select(selection: Selection) {
+  async function select(selection: Selection) {
+    if (selected?.node.nodeId === selection.node.nodeId) return
+    if (selected && draft !== selected.node.text) {
+      const revision = await saveText(selected.node, draft)
+      if (revision === null) return
+    }
     setSelected(selection)
     setDraft(selection.node.text)
-    setRightPanel('text')
+    setRightPanel(null)
   }
   useEffect(() => {
     let live = true
@@ -106,13 +111,17 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     if (selected && draft !== selected.node.text && !readOnly && !historical) return saveText(selected.node, draft)
     return displayedRevision
   }
+  async function closeEditor() {
+    if (selected && draft !== selected.node.text && await saveBeforeExport() === null) return
+    onClose()
+  }
   return <div className={`workspace semantic-workspace fixed-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline ? '' : 'outline-hidden'} ${rightPanel ? '' : 'right-hidden'}`}>
     {layout.showHeader && <EditorHeader session={session} revision={displayedRevision} status={status} activeTab={activeTab}
-      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} onClose={onClose}
+      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} onClose={() => void closeEditor()}
       onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} settingsOpen={rightPanel === 'settings'} beforeExport={saveBeforeExport} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setRightPanel('settings')}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
-      {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><div className="tool-group"><button onClick={() => setRightPanel('text')} disabled={!selected || readOnly || historical}>编辑文字框</button></div><span className="ribbon-note">点击页面中的文字框进行编辑</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><span className="ribbon-note">点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消</span></>}
       {activeTab === 'insert' && <span className="ribbon-note">固定页保留原布局；选择现有文字框修改内容。新增文字框需要独立的版式 patch。</span>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} />显示页面目录</label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} />只读模式</label><button onClick={() => setRightPanel('settings')}>界面设置</button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}>查看修订历史</button><span className="ribbon-note">当前版本 r{manifest?.revision ?? '…'}</span></>}
@@ -120,9 +129,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     </nav>}
     <div className="layout editor-layout">
       {layout.showOutline && <aside className="outline-panel" aria-label="页面目录"><div className="panel-head"><h2>☷ 页面目录</h2><button className="panel-close" aria-label="隐藏页面目录" onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>第 {chunk.sequence + 1} 页</button>)}</nav><small>已索引 {descriptors.length} / {manifest?.chunkCount ?? '…'} 个分片</small></aside>}
-      <div className="document-scroll"><main className="fixed-pages">{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selectedId={selected?.node.nodeId} refresh={refresh} onSelect={node => select({ node, page: chunk.sequence })} />)}<div ref={tail} className="load-tail" /></main></div>
-      {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'text' ? '文字框编辑' : rightPanel === 'settings' ? '界面设置' : '修订历史'}>
-        {rightPanel === 'text' && <section className="fixed-text-form"><div className="panel-head"><h2>编辑文字框</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{selected ? <><small>第 {selected.page + 1} 页 · {selected.node.nodeId}</small><FixedTextBoxEditor key={selected.node.nodeId} text={selected.node.text} disabled={saving || readOnly || historical} onChange={setDraft} onReady={setActiveEditor} /><small>保留原页布局；此文字框保存纯文本，最多 10,000 字。</small><button className="primary" disabled={saving || readOnly || historical || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}>保存修改</button></> : <p>点击页面文字以编辑。</p>}</section>}
+      <div className="document-scroll"><main className="fixed-pages">{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} saving={saving} refresh={refresh} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onCancel={() => setSelected(null)} />)}<div ref={tail} className="load-tail" /></main></div>
+      {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}<div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
       </aside>}
@@ -132,7 +140,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   </div>
 }
 
-function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selectedId, refresh, onSelect }: { session: Session; descriptor: Descriptor; revision: number | null; stylesheet: string; readOnly: boolean; selectedId?: string; refresh: number; onSelect: (node: TextNode) => void }) {
+function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, saving, refresh, onSelect, onDraft, onEditorReady, onSave, onCancel }: { session: Session; descriptor: Descriptor; revision: number | null; stylesheet: string; readOnly: boolean; selected: TextNode | null; draft: string; saving: boolean; refresh: number; onSelect: (node: TextNode) => void; onDraft: (value: string) => void; onEditorReady: (editor: Editor | null) => void; onSave: (node: TextNode, value: string) => void; onCancel: () => void }) {
   const [active, setActive] = useState(false)
   const [srcDoc, setSrcDoc] = useState('')
   const [frameHeight, setFrameHeight] = useState(940)
@@ -170,6 +178,8 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           nodeId: entry.nodeId, nodeHash: entry.nodeHash,
           text: element?.textContent || '', editable: entry.source.editable,
           left: position?.left, top: position?.top, width, height: position?.height,
+          fontSize: position?.fontSize, fontFamily: position?.fontFamily, fontWeight: position?.fontWeight,
+          fontStyle: position?.fontStyle, color: position?.color, lineHeight: position?.lineHeight,
         }
       })
       const hashes = Array.from(new Set(Array.from(chunk.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1])))
@@ -199,11 +209,13 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
     void render().catch(cause => { if (live) setSrcDoc(`<p style="padding:24px;color:#b33">${String(cause).replaceAll('<', '&lt;')}</p>`) })
     return () => { live = false }
   }, [active, session, descriptor.sequence, revision, stylesheet, refresh])
-  return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? frameHeight : 900 }}>
+  return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? frameHeight : 900, width: session.format === 'pdf' && srcDoc ? canvasWidth : undefined }}>
     {srcDoc ? <iframe sandbox="" title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight }} />
       : <div className="skeleton">第 {descriptor.sequence + 1} 个分片</div>}
-    {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => <button key={node.nodeId} className={`fixed-page-hitbox ${selectedId === node.nodeId ? 'selected' : ''}`} style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`编辑文字：${node.text.slice(0, 48) || '空文字框'}`} title={node.text || '空文字框'} onClick={() => onSelect(node)} />)}</div>}
-    {!readOnly && nodes.some(node => node.editable && (!node.left || !node.top || !node.width || !node.height)) && <div className="fixed-text-panel"><strong>第 {descriptor.sequence + 1} 页未定位文字</strong><div className="fixed-text-list">{nodes.filter(node => node.editable && (!node.left || !node.top || !node.width || !node.height)).map(node => <button key={node.nodeId} className={selectedId === node.nodeId ? 'selected' : ''} onClick={() => onSelect(node)} title={node.nodeId}>{node.text || '（空文字框）'}</button>)}</div></div>}
+    {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => selected?.nodeId === node.nodeId ? null : <button key={node.nodeId} className="fixed-page-hitbox" style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`编辑文字：${node.text.slice(0, 48) || '空文字框'}`} title={node.text || '空文字框'} onClick={() => onSelect(node)} />)}
+      {selected?.left && selected.top && selected.width && selected.height && <div className="fixed-inline-editor" style={{ left: selected.left, top: selected.top, width: selected.width, maxWidth: `calc(100% - ${selected.left})`, minHeight: selected.height, fontSize: selected.fontSize, fontFamily: selected.fontFamily, fontWeight: selected.fontWeight, fontStyle: selected.fontStyle, color: selected.color, lineHeight: selected.lineHeight }}><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div className="fixed-inline-actions"><button onClick={onCancel} disabled={saving}>取消</button><button className="primary" onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}>{saving ? '保存中…' : '保存'}</button></div></div>}
+    </div>}
+    {!readOnly && nodes.some(node => node.editable && (!node.left || !node.top || !node.width || !node.height)) && <div className="fixed-text-panel"><strong>第 {descriptor.sequence + 1} 页未定位文字</strong><div className="fixed-text-list">{nodes.filter(node => node.editable && (!node.left || !node.top || !node.width || !node.height)).map(node => <button key={node.nodeId} className={selected?.nodeId === node.nodeId ? 'selected' : ''} onClick={() => onSelect(node)} title={node.nodeId}>{node.text || '（空文字框）'}</button>)}</div>{selected && (!selected.left || !selected.top || !selected.width || !selected.height) && <div className="fixed-text-form"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div><button onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}>保存</button><button onClick={onCancel}>取消</button></div></div>}</div>}
     {!readOnly && srcDoc && nodes.length === 0 && session.format === 'pdf' && <div className="fixed-text-panel">本页没有可映射的文字节点；扫描图像里的文字需要 OCR 后才能编辑。</div>}
   </div>
 }
