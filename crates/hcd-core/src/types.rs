@@ -240,6 +240,22 @@ pub struct PptxShapeGeometry {
     pub height_emu: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfTextGeometry {
+    pub x_pt: f32,
+    pub y_pt: f32,
+    pub width_pt: f32,
+    pub height_pt: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfTextGeometryPrecondition {
+    pub node_hash: String,
+    pub geometry: PdfTextGeometry,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PptxShapePrecondition {
@@ -269,6 +285,13 @@ pub enum PatchOperation {
         height_pt: f32,
         font_size_pt: f32,
         text: String,
+    },
+    /// Move or resize an HCD-created PDF text box on its original page.
+    #[serde(rename = "pdf.text.geometry", rename_all = "camelCase")]
+    PdfTextGeometry {
+        node_id: String,
+        geometry: PdfTextGeometry,
+        precondition: PdfTextGeometryPrecondition,
     },
     /// Add an editable text shape at slide coordinates measured in EMU.
     #[serde(rename = "pptx.text.insert", rename_all = "camelCase")]
@@ -411,6 +434,7 @@ impl PatchOperation {
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
             | Self::PptxShapeGeometry { node_id, .. }
+            | Self::PdfTextGeometry { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
             | Self::XlsxUnmerge { node_id, .. } => Some(node_id),
             Self::XlsxFormulaSet { node_id, .. } => Some(node_id),
@@ -438,6 +462,7 @@ impl PatchOperation {
                 | Self::PdfTextInsert { .. }
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
+                | Self::PdfTextGeometry { .. }
                 | Self::XlsxMerge { .. }
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
