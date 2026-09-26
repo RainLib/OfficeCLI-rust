@@ -2191,9 +2191,14 @@ where
 fn expand_shared_formula_replacements(
     archive: &mut StreamingOxmlArchive,
     replacements: &mut HashMap<String, BTreeMap<String, String>>,
+    converted_cells: &HashMap<String, BTreeSet<String>>,
 ) -> Result<usize, HcdError> {
     let mut expanded_groups = 0usize;
+    for part in converted_cells.keys() {
+        replacements.entry(part.clone()).or_default();
+    }
     for (part, formulas) in replacements {
+        let converted = converted_cells.get(part);
         let scan = archive
             .with_part(part, |source| {
                 scan_worksheet_metadata(source, part)
@@ -2201,12 +2206,16 @@ fn expand_shared_formula_replacements(
             })
             .map_err(package_error)?;
         for group in scan.shared_formulas.values().flatten() {
-            let edited_member = formulas.keys().any(|reference| {
-                cell_coordinates(reference).is_some_and(|(row, column)| {
-                    (group.range.start_row..=group.range.end_row).contains(&row)
-                        && (group.range.start_col..=group.range.end_col).contains(&column)
-                })
-            });
+            let edited_member =
+                formulas
+                    .keys()
+                    .chain(converted.into_iter().flatten())
+                    .any(|reference| {
+                        cell_coordinates(reference).is_some_and(|(row, column)| {
+                            (group.range.start_row..=group.range.end_row).contains(&row)
+                                && (group.range.start_col..=group.range.end_col).contains(&column)
+                        })
+                    });
             if !edited_member {
                 continue;
             }
@@ -2214,6 +2223,9 @@ fn expand_shared_formula_replacements(
             for row in group.range.start_row..=group.range.end_row {
                 for column in group.range.start_col..=group.range.end_col {
                     let reference = format!("{}{row}", column_name(column));
+                    if converted.is_some_and(|cells| cells.contains(&reference)) {
+                        continue;
+                    }
                     let expression = translate_shared_formula(
                         &group.formula,
                         i64::from(row - group.range.start_row),
@@ -4725,10 +4737,15 @@ pub(crate) fn export_xlsx(
     let mut formula_replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_formulas: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut formula_converted_to_value = false;
+    let mut converted_formula_node_ids = BTreeSet::new();
+    let mut converted_formula_cells: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
     let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
     for revision in 1..=manifest.revision {
         let record = bundle.revision(revision)?;
+        formula_converted_to_value |= !record.converted_formula_node_ids.is_empty();
+        converted_formula_node_ids.extend(record.converted_formula_node_ids);
         for shift in record.grid_row_insertions {
             row_insertions
                 .entry(shift.sheet_part)
@@ -4800,6 +4817,12 @@ pub(crate) fn export_xlsx(
             replacements.entry(node.source.part).or_default();
         } else {
             let original_cell = node.source.source_cell_ref.unwrap_or(cell);
+            if converted_formula_node_ids.contains(&node.node_id) {
+                converted_formula_cells
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(original_cell.clone());
+            }
             replacements
                 .entry(node.source.part)
                 .or_default()
@@ -4811,10 +4834,14 @@ pub(crate) fn export_xlsx(
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
-    let expanded_shared_groups =
-        expand_shared_formula_replacements(&mut archive, &mut formula_replacements)?;
+    let expanded_shared_groups = expand_shared_formula_replacements(
+        &mut archive,
+        &mut formula_replacements,
+        &converted_formula_cells,
+    )?;
     let chart_caches_may_be_stale = (!formula_replacements.is_empty()
-        || !created_formulas.is_empty())
+        || !created_formulas.is_empty()
+        || formula_converted_to_value)
         && archive
             .entries()
             .iter()
@@ -4874,7 +4901,10 @@ pub(crate) fn export_xlsx(
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
     }
-    if !formula_replacements.is_empty() || !created_formulas.is_empty() {
+    if !formula_replacements.is_empty()
+        || !created_formulas.is_empty()
+        || formula_converted_to_value
+    {
         let path = scratch.path().join("workbook-recalculate.xml");
         let source_workbook = archive
             .read_control_part("xl/workbook.xml", MAX_CONTROL_BYTES)
@@ -4931,6 +4961,14 @@ pub(crate) fn export_xlsx(
                 warnings.push(FidelityWarning {
                     code: "XLSX_FORMULA_RECALC_REQUIRED".to_string(),
                     message: "Edited formula caches were cleared; recalculate the workbook in Excel or another compatible spreadsheet application".to_string(),
+                    node_id: None,
+                    source_part: Some("xl/workbook.xml".to_string()),
+                });
+            }
+            if formula_converted_to_value {
+                warnings.push(FidelityWarning {
+                    code: "XLSX_FORMULA_TO_VALUE_RECALC_REQUIRED".to_string(),
+                    message: "Formula cells were replaced with literal values; dependent formula and chart caches may remain stale until the workbook is recalculated".to_string(),
                     node_id: None,
                     source_part: Some("xl/workbook.xml".to_string()),
                 });
@@ -6827,6 +6865,147 @@ mod tests {
     }
 
     #[test]
+    fn converts_real_shared_formulas_to_literal_values_and_keeps_history() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let exported = temp.path().join("literal.xlsx");
+        let historical = temp.path().join("original.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("formula-to-value-budget"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = bundle
+            .read_index_page(&manifest, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Overview" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let map = bundle.read_map(&descriptor).unwrap();
+        let cell = |address| {
+            map.entries
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some(address))
+                .unwrap()
+        };
+        let g8 = cell("G8");
+        let g9 = cell("G9");
+        let operation = |entry: &NodeMapEntry, value: &str| PatchOperation::XlsxFormulaToValue {
+            node_id: entry.node_id.clone(),
+            sheet_id: sheet_id.clone(),
+            text: value.to_string(),
+            precondition: NodePrecondition {
+                node_hash: entry.node_hash.clone(),
+            },
+        };
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_28.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "convert-two-formulas".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![operation(g8, "Manual total"), operation(g9, "")],
+        };
+        let duplicate = PatchBatch {
+            patch_id: "duplicate-target".to_string(),
+            operations: vec![operation(g8, "one"), operation(g8, "two")],
+            ..patch.clone()
+        };
+        assert!(hcd_core::apply_patch(&bundle, &duplicate, 0).is_err());
+        let wrong_hash = PatchBatch {
+            patch_id: "wrong-hash".to_string(),
+            operations: vec![PatchOperation::XlsxFormulaToValue {
+                node_id: g8.node_id.clone(),
+                sheet_id: sheet_id.clone(),
+                text: "wrong".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: "0".repeat(64),
+                },
+            }],
+            ..patch.clone()
+        };
+        assert!(hcd_core::apply_patch(&bundle, &wrong_hash, 0).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let updated = bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| chunk.chunk_id == descriptor.chunk_id)
+            .unwrap();
+        let new_map = bundle.read_map(&updated).unwrap();
+        for original in [g8, g9] {
+            let current = new_map
+                .entries
+                .iter()
+                .find(|entry| entry.node_id == original.node_id)
+                .unwrap();
+            assert!(current.source.editable);
+            assert_eq!(current.source.paragraph_id, original.source.paragraph_id);
+        }
+        let html = bundle.read_chunk(&updated).unwrap();
+        assert!(
+            html.contains("data-hcd-cell=\"G8\" data-hcd-column=\"7\" data-hcd-formula=\"false\"")
+        );
+        assert!(
+            html.contains("data-hcd-cell=\"G9\" data-hcd-column=\"7\" data-hcd-formula=\"false\"")
+        );
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_FORMULA_TO_VALUE_RECALC_REQUIRED"));
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("shared-formula groups")));
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        for (address, value) in [("G8", "Manual total"), ("G9", "")] {
+            let cell = xml
+                .split(&format!("<c r=\"{address}\""))
+                .nth(1)
+                .unwrap()
+                .split("</c>")
+                .next()
+                .unwrap();
+            assert!(!cell.contains("<f"));
+            assert!(cell.contains(&format!("<t>{value}</t>")));
+        }
+        assert!(!xml.contains("ref=\"G8:G14\""));
+        assert!(xml.contains("<f>SUM(C10:F10)</f><v/>"));
+        assert!(read_zip_entry(&exported, "xl/workbook.xml").contains("fullCalcOnLoad=\"1\""));
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&historical, "xl/worksheets/sheet1.xml").contains("ref=\"G8:G14\""));
+    }
+
+    #[test]
     fn creates_formula_in_blank_row_tail_and_exports_native_formula() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("formulas.xlsx");
@@ -6925,6 +7104,56 @@ mod tests {
         )
         .unwrap();
         assert!(!read_zip_entry(&original, "xl/worksheets/sheet1.xml").contains("r=\"E1\""));
+
+        let latest = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&latest, 0).unwrap().chunks[0];
+        let created = bundle
+            .read_map(descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("E1"))
+            .unwrap();
+        let convert = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_28.to_string(),
+            document_id: "formula-create-doc".to_string(),
+            patch_id: "convert-e1".to_string(),
+            base_revision: 2,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaToValue {
+                node_id: created.node_id,
+                sheet_id: descriptor.grid.as_ref().unwrap().sheet_id.clone(),
+                text: "Reviewed".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: created.node_hash,
+                },
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &convert, 2)
+                .unwrap()
+                .revision,
+            3
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let literal = temp.path().join("literal.xlsx");
+        export_xlsx(&bundle, &source, &literal, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&literal, "xl/worksheets/sheet1.xml")
+            .contains("<c r=\"E1\" t=\"inlineStr\"><is><t>Reviewed</t></is></c>"));
+        let prior = temp.path().join("prior-formula.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &prior,
+            &ExportOptions {
+                revision: Some(2),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&prior, "xl/worksheets/sheet1.xml")
+            .contains("<c r=\"E1\"><f>A1*B1</f><v/></c>"));
     }
 
     #[test]

@@ -114,8 +114,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             const hashes: Record<string, string> = {}
             for (let index = 0; index < patch.operations.length; index += 1) {
               const operation = patch.operations[index]
-              if (operation.type !== 'text.splice' && operation.type !== 'xlsx.formula.set') continue
+              if (operation.type !== 'text.splice' && operation.type !== 'xlsx.formula.set'
+                && operation.type !== 'xlsx.formula.to-value') continue
               const newText = operation.type === 'xlsx.formula.set' ? operation.formula
+                : operation.type === 'xlsx.formula.to-value' ? operation.text
                 : detail.changes.find(change => change.nodeId === operation.nodeId)?.newText
               if (newText === undefined) continue
               const bytes = new TextEncoder().encode(newText)
@@ -126,7 +128,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             collaboration.announceRevision(result.revision)
             if (alive) { setRevision(result.revision); setError('') }
             try {
-              if (patch.schemaVersion === 'hcd-patch/7' || patch.schemaVersion === 'hcd-patch/19' || patch.schemaVersion === 'hcd-patch/20' || patch.schemaVersion === 'hcd-patch/21' || patch.schemaVersion === 'hcd-patch/22') await adapter.refreshFromServer()
+              if (patch.schemaVersion === 'hcd-patch/7' || patch.schemaVersion === 'hcd-patch/19' || patch.schemaVersion === 'hcd-patch/20' || patch.schemaVersion === 'hcd-patch/21' || patch.schemaVersion === 'hcd-patch/22' || patch.schemaVersion === 'hcd-patch/28') await adapter.refreshFromServer()
               else await client.open()
               if (alive) setStatus(`revision ${result.revision} · 已保存`)
             } catch (cause) { if (alive) setError(`修订已保存，但索引刷新失败：${String(cause)}`) }

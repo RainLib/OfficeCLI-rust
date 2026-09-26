@@ -373,6 +373,14 @@ pub enum PatchOperation {
         formula: String,
         precondition: NodePrecondition,
     },
+    /// Replace an editable formula with a literal value (including an empty value).
+    #[serde(rename = "xlsx.formula.to-value", rename_all = "camelCase")]
+    XlsxFormulaToValue {
+        node_id: String,
+        sheet_id: String,
+        text: String,
+        precondition: NodePrecondition,
+    },
     /// Create a native formula in an empty worksheet cell.
     #[serde(rename = "xlsx.formula.create", rename_all = "camelCase")]
     XlsxFormulaCreate {
@@ -469,7 +477,9 @@ impl PatchOperation {
             | Self::PdfTextDelete { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
             | Self::XlsxUnmerge { node_id, .. } => Some(node_id),
-            Self::XlsxFormulaSet { node_id, .. } => Some(node_id),
+            Self::XlsxFormulaSet { node_id, .. } | Self::XlsxFormulaToValue { node_id, .. } => {
+                Some(node_id)
+            }
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
             | Self::PdfTextInsert { .. }
@@ -503,6 +513,7 @@ impl PatchOperation {
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxFormulaSet { .. }
+                | Self::XlsxFormulaToValue { .. }
                 | Self::XlsxFormulaCreate { .. }
                 | Self::XlsxRowAppend { .. }
                 | Self::XlsxRowInsert { .. }
@@ -666,6 +677,9 @@ pub struct RevisionRecord {
     /// XLSX worksheets changed structurally without changing a mapped text node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dirty_grid_parts: Vec<String>,
+    /// Formula cells converted to literal values in this revision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub converted_formula_node_ids: Vec<String>,
     /// Sequential row insertions, expressed in the worksheet coordinates at each revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_row_insertions: Vec<GridRowInsertion>,
