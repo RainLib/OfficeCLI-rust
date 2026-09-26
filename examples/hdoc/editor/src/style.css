@@ -84,6 +84,13 @@
 .hcd-surface .univer-workspace .workspace-sidebar{flex:0 0 280px;min-height:0;overflow-y:auto}
 .hcd-surface .univer-workspace .ribbon{min-height:54px}
 .hcd-surface .univer-workspace .ribbon-note+ .ribbon-note{margin-left:auto}
+.hcd-surface .xlsx-formula-bar{display:flex;align-items:center;gap:8px;min-height:40px;padding:5px 12px;border-bottom:1px solid #dbe3e7;background:#fff;color:#46586b}
+.hcd-surface .xlsx-formula-address{width:65px;flex:none;font-size:12px;font-weight:600;text-align:center;border-right:1px solid #dbe3e7}
+.hcd-surface .xlsx-formula-bar label{font-family:Georgia,serif;font-style:italic;font-size:17px;color:#607891}
+.hcd-surface .xlsx-formula-bar input{flex:1;min-width:0;height:28px;padding:3px 8px;border:1px solid #d5dee5;border-radius:4px;font:13px/1.3 monospace}
+.hcd-surface .xlsx-formula-bar select,.hcd-surface .xlsx-formula-bar button{height:28px;border:1px solid #d5dee5;border-radius:4px;background:#f8fafc;color:#23456a;font-size:12px}
+.hcd-surface .xlsx-formula-bar button{padding:0 10px;cursor:pointer}
+.hcd-surface .xlsx-formula-bar button:disabled{opacity:.5;cursor:default}
 .hcd-surface .hcd-univer-host .hcd-visual-layer{position:absolute;inset:0;z-index:10;pointer-events:none;overflow:hidden}
 .hcd-surface .hcd-univer-host .hcd-visual-layer img{position:absolute;display:block;object-fit:contain;pointer-events:auto}
 .hcd-surface .fixed-page{min-height:900px;background:#fff;margin:18px 0;box-shadow:0 3px 30px #1738221a;overflow:hidden}
