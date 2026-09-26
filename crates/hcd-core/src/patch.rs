@@ -9,8 +9,8 @@ use crate::{
     ApplyResult, AssetDescriptor, FidelityWarning, GridColumnDeletion, GridColumnInsertion,
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
-    NodeStylePatch, PatchBatch, PatchOperation, PptxShapeGeometry, RevisionRecord, SourceAnchor,
-    TextExtractEntry, TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION,
+    NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxShapeGeometry, RevisionRecord,
+    SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION,
     HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
     HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
     HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
@@ -81,6 +81,13 @@ struct PptxTextInsertion {
 struct PptxGeometryChange {
     geometry: PptxShapeGeometry,
     expected: PptxShapeGeometry,
+    node_hash: String,
+}
+
+#[derive(Clone)]
+struct PdfGeometryChange {
+    geometry: PdfTextGeometry,
+    expected: PdfTextGeometry,
     node_hash: String,
 }
 
@@ -193,6 +200,7 @@ pub fn apply_patch(
                 matches!(
                     operation,
                     PatchOperation::PdfTextInsert { .. }
+                        | PatchOperation::PdfTextGeometry { .. }
                         | PatchOperation::PptxTextInsert { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::XlsxCellSet { .. }
@@ -239,6 +247,7 @@ pub fn apply_patch(
     let styles = collect_styles(patch)?;
     let images = collect_image_changes(patch)?;
     let pdf_insertions = collect_pdf_insertions(patch);
+    let pdf_geometry = collect_pdf_geometry(patch);
     let pptx_insertions = collect_pptx_insertions(patch);
     let pptx_geometry = collect_pptx_geometry(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
@@ -316,6 +325,7 @@ pub fn apply_patch(
         .chain(xlsx_unmerges.keys().cloned())
         .chain(xlsx_formula.keys().cloned())
         .chain(pptx_geometry.keys().cloned())
+        .chain(pdf_geometry.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
         .collect();
 
@@ -326,6 +336,7 @@ pub fn apply_patch(
         || !styles.is_empty()
         || !images.is_empty()
         || !pdf_insertions.is_empty()
+        || !pdf_geometry.is_empty()
         || !pptx_insertions.is_empty()
         || !pptx_geometry.is_empty()
         || !xlsx_merges.is_empty()
@@ -676,6 +687,30 @@ pub fn apply_patch(
                         )));
                     }
                     update_pptx_shape_geometry(&mut html, entry, change)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = pdf_geometry.get(&entry.node_id) {
+                    if entry.source.node_kind != "pdf-text"
+                        || !entry.source.editable
+                        || !entry
+                            .source
+                            .paragraph_id
+                            .as_deref()
+                            .is_some_and(|path| path.contains("/hcd-text["))
+                    {
+                        return Err(HcdError::Unsupported(
+                            "PDF geometry requires an HCD-created text box".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PDF text node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_pdf_text_geometry(&mut html, entry, change)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1586,6 +1621,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_23
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1685,6 +1721,18 @@ fn validate_patch_identity(
                 }
             }
         }
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_23
+        && (manifest.source.format != "pdf"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PdfTextGeometry { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/23 accepts one PDF text-box geometry edit only".to_string(),
+        ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
     validate_string_map(
@@ -1850,6 +1898,31 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "PPTX shape geometry is invalid or unchanged".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::PdfTextGeometry {
+                node_id,
+                geometry,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_23
+                    || manifest.source.format != "pdf"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pdf.text.geometry requires one PDF operation with hcd-patch/23"
+                            .to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                if !valid_pdf_text_geometry(*geometry)
+                    || !valid_pdf_text_geometry(precondition.geometry)
+                    || *geometry == precondition.geometry
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "PDF text-box geometry is invalid or unchanged".to_string(),
                     ));
                 }
             }
@@ -2615,6 +2688,48 @@ fn collect_pptx_geometry(patch: &PatchBatch) -> HashMap<String, PptxGeometryChan
             ))
         })
         .collect()
+}
+
+fn collect_pdf_geometry(patch: &PatchBatch) -> HashMap<String, PdfGeometryChange> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::PdfTextGeometry {
+                node_id,
+                geometry,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                PdfGeometryChange {
+                    geometry: *geometry,
+                    expected: precondition.geometry,
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn valid_pdf_text_geometry(geometry: PdfTextGeometry) -> bool {
+    [
+        geometry.x_pt,
+        geometry.y_pt,
+        geometry.width_pt,
+        geometry.height_pt,
+    ]
+    .into_iter()
+    .all(f32::is_finite)
+        && geometry.x_pt >= 0.0
+        && geometry.y_pt >= 0.0
+        && geometry.width_pt >= 1.0
+        && geometry.height_pt >= 1.0
+        && geometry.x_pt + geometry.width_pt <= 14_400.0
+        && geometry.y_pt + geometry.height_pt <= 14_400.0
 }
 
 fn valid_pptx_geometry(geometry: PptxShapeGeometry) -> bool {
@@ -4609,6 +4724,132 @@ fn insert_pdf_text(
     Ok(())
 }
 
+fn update_pdf_text_geometry(
+    html: &mut String,
+    entry: &NodeMapEntry,
+    change: &PdfGeometryChange,
+) -> Result<(), HcdError> {
+    let page = entry
+        .source
+        .part
+        .strip_prefix("pdf/pages/")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|page| *page > 0)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("PDF text box page locator is invalid".to_string())
+        })?;
+    let source_path = format!("/page[{page}]/hcd-text[{}]", entry.node_id);
+    if entry.source.paragraph_id.as_deref() != Some(source_path.as_str()) {
+        return Err(HcdError::Unsupported(
+            "PDF geometry is available only for HCD-created text boxes".to_string(),
+        ));
+    }
+    let (page_width, page_height) = pdf_page_dimensions(html, page)?;
+    let geometry = change.geometry;
+    if geometry.x_pt + geometry.width_pt > page_width
+        || geometry.y_pt + geometry.height_pt > page_height
+    {
+        return Err(HcdError::InvalidPatch(
+            "PDF text box must stay inside its page".to_string(),
+        ));
+    }
+    let marker = format!("data-hcd-text-node=\"{}\"", entry.node_id);
+    let location = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle("PDF text box is missing from the page".to_string())
+    })?;
+    let start = html[..location]
+        .rfind("<p class=\"hcd-pdf-text\"")
+        .ok_or_else(|| {
+            HcdError::Unsupported("PDF text is not inside an editable text box".to_string())
+        })?;
+    let end = html[location..]
+        .find('>')
+        .map(|offset| location + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is not closed".to_string()))?;
+    if html[start..location].contains('>') {
+        return Err(HcdError::InvalidBundle(
+            "PDF text box tag is invalid".to_string(),
+        ));
+    }
+    let tag = &html[start..=end];
+    if xlsx_attribute(tag, "data-hcd-mapping") != Some("hcd-overlay")
+        || xlsx_attribute(tag, "data-hcd-source-path") != Some(source_path.as_str())
+    {
+        return Err(HcdError::Unsupported(
+            "PDF text is not an HCD overlay".to_string(),
+        ));
+    }
+    let number = |name: &str| -> Result<f32, HcdError> {
+        xlsx_attribute(tag, name)
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| HcdError::InvalidBundle(format!("PDF text box {name} is invalid")))
+    };
+    let current = PdfTextGeometry {
+        x_pt: number("data-hcd-x")?,
+        y_pt: number("data-hcd-y")?,
+        width_pt: number("data-hcd-width")?,
+        height_pt: number("data-hcd-height")?,
+    };
+    if current != change.expected {
+        return Err(HcdError::PreconditionFailed(
+            "PDF text box moved since it was selected".to_string(),
+        ));
+    }
+    let style = xlsx_attribute(tag, "style")
+        .ok_or_else(|| HcdError::InvalidBundle("PDF text box style is missing".to_string()))?;
+    let left = format!("{}pt", geometry.x_pt);
+    let top = format!("{}pt", page_height - geometry.y_pt - geometry.height_pt);
+    let width = format!("{}pt", geometry.width_pt);
+    let height = format!("{}pt", geometry.height_pt);
+    let mut found = HashSet::new();
+    let updated_style = style
+        .split(';')
+        .map(|property| {
+            let (name, _) = property.split_once(':').unwrap_or((property, ""));
+            let name = name.trim();
+            let replacement = match name {
+                "left" => Some(&left),
+                "top" => Some(&top),
+                "width" => Some(&width),
+                "height" => Some(&height),
+                _ => None,
+            };
+            if let Some(value) = replacement {
+                found.insert(name);
+                format!("{name}:{value}")
+            } else {
+                property.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    if found.len() != 4 {
+        return Err(HcdError::InvalidBundle(
+            "PDF text box lacks positioned style properties".to_string(),
+        ));
+    }
+    let bbox = format!(
+        "{},{},{},{}",
+        geometry.x_pt, geometry.y_pt, geometry.width_pt, geometry.height_pt
+    );
+    for (name, value) in [
+        ("data-hcd-x", geometry.x_pt.to_string()),
+        ("data-hcd-y", geometry.y_pt.to_string()),
+        ("data-hcd-width", geometry.width_pt.to_string()),
+        ("data-hcd-height", geometry.height_pt.to_string()),
+        ("data-hcd-bbox", bbox),
+        ("style", updated_style),
+    ] {
+        let tag_end = html[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is not closed".to_string()))?;
+        set_attribute_in_range(html, start, tag_end, name, &value)?;
+    }
+    Ok(())
+}
+
 fn insert_pptx_text(
     html: &mut String,
     source_map: &mut crate::ChunkSourceMap,
@@ -5402,6 +5643,7 @@ fn apply_annotations(
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::PptxTextInsert { .. }
             | PatchOperation::PptxShapeGeometry { .. }
+            | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
@@ -5521,6 +5763,73 @@ fn is_forbidden_xml_character(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdf_overlay_geometry_moves_and_resizes_without_changing_text_identity() {
+        let node_id = "n_00000000000000000000000000000001";
+        let mut html = "<section class=\"hcd-pdf-page\" data-hcd-page=\"1\" data-hcd-continuation=\"false\" data-hcd-source-raster=\"true\" style=\"width:612pt;height:792pt\"></section>".to_string();
+        let mut source_map = crate::ChunkSourceMap {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            chunk_id: "c_00000000000000000000000000000001".to_string(),
+            entries: vec![],
+        };
+        insert_pdf_text(
+            &mut html,
+            &mut source_map,
+            &PdfTextInsertion {
+                page: 1,
+                x_pt: 20.0,
+                y_pt: 700.0,
+                width_pt: 180.0,
+                height_pt: 18.0,
+                font_size_pt: 12.0,
+                text: "原文".to_string(),
+                node_id: node_id.to_string(),
+            },
+        )
+        .unwrap();
+        let entry = &source_map.entries[0];
+        let original_hash = entry.node_hash.clone();
+        let before = PdfTextGeometry {
+            x_pt: 20.0,
+            y_pt: 700.0,
+            width_pt: 180.0,
+            height_pt: 18.0,
+        };
+        let after = PdfTextGeometry {
+            x_pt: 44.25,
+            y_pt: 660.5,
+            width_pt: 220.5,
+            height_pt: 32.0,
+        };
+        let change = PdfGeometryChange {
+            geometry: after,
+            expected: before,
+            node_hash: original_hash.clone(),
+        };
+        update_pdf_text_geometry(&mut html, entry, &change).unwrap();
+        assert!(html.contains("data-hcd-bbox=\"44.25,660.5,220.5,32\""));
+        assert!(html.contains("left:44.25pt;top:99.5pt;width:220.5pt;height:32pt"));
+        assert_eq!(extract_html_text_nodes(&html).unwrap()[node_id], "原文");
+        assert_eq!(entry.node_hash, original_hash);
+        assert!(matches!(
+            update_pdf_text_geometry(&mut html, entry, &change),
+            Err(HcdError::PreconditionFailed(_))
+        ));
+
+        let out_of_page = PdfGeometryChange {
+            geometry: PdfTextGeometry {
+                x_pt: 600.0,
+                ..after
+            },
+            expected: after,
+            node_hash: original_hash,
+        };
+        assert!(matches!(
+            update_pdf_text_geometry(&mut html, entry, &out_of_page),
+            Err(HcdError::InvalidPatch(_))
+        ));
+    }
 
     #[test]
     fn splitting_merge_restores_empty_cell_style_and_column_order() {

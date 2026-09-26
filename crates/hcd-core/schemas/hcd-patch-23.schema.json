@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:23",
+  "title": "HTML Canonical Document PDF text-box geometry edit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/23"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 262144
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/pdfTextGeometry"
+      }
+    }
+  },
+  "$defs": {
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "xPt",
+        "yPt",
+        "widthPt",
+        "heightPt"
+      ],
+      "properties": {
+        "xPt": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 14400
+        },
+        "yPt": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 14400
+        },
+        "widthPt": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 14400
+        },
+        "heightPt": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 14400
+        }
+      }
+    },
+    "pdfTextGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "geometry",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "pdf.text.geometry"
+        },
+        "nodeId": {
+          "type": "string",
+          "pattern": "^n_[0-9a-f]{32}$"
+        },
+        "geometry": {
+          "$ref": "#/$defs/geometry"
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash",
+            "geometry"
+          ],
+          "properties": {
+            "nodeHash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "geometry": {
+              "$ref": "#/$defs/geometry"
+            }
+          }
+        }
+      }
+    }
+  }
+}
