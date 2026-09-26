@@ -321,6 +321,14 @@ pub enum PatchOperation {
         column: u32,
         text: String,
     },
+    /// Replace an existing ordinary XLSX formula without converting the cell to text.
+    #[serde(rename = "xlsx.formula.set", rename_all = "camelCase")]
+    XlsxFormulaSet {
+        node_id: String,
+        sheet_id: String,
+        formula: String,
+        precondition: NodePrecondition,
+    },
     /// Materialize the next empty worksheet row without shifting existing cells.
     #[serde(rename = "xlsx.row.append", rename_all = "camelCase")]
     XlsxRowAppend { sheet_id: String, after_row: u32 },
@@ -397,6 +405,7 @@ impl PatchOperation {
             | Self::PptxShapeGeometry { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
             | Self::XlsxUnmerge { node_id, .. } => Some(node_id),
+            Self::XlsxFormulaSet { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
             | Self::PdfTextInsert { .. }
@@ -423,6 +432,7 @@ impl PatchOperation {
                 | Self::XlsxMerge { .. }
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
+                | Self::XlsxFormulaSet { .. }
                 | Self::XlsxRowAppend { .. }
                 | Self::XlsxRowInsert { .. }
                 | Self::XlsxRowDelete { .. }
