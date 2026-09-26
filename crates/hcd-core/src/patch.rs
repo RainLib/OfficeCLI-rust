@@ -121,6 +121,8 @@ struct XlsxFormulaChange {
 enum XlsxFormulaReplacement {
     Formula(String),
     Value(String),
+    Number(String),
+    NumberUpdate(String),
 }
 
 #[derive(Clone)]
@@ -207,6 +209,7 @@ pub fn apply_patch(
     if patch.base_revision < manifest.revision
         && (patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_22
             || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28
+            || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_29
             || patch.operations.iter().any(|operation| {
                 matches!(
                     operation,
@@ -219,6 +222,8 @@ pub fn apply_patch(
                         | PatchOperation::XlsxCellSet { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaToValue { .. }
+                        | PatchOperation::XlsxFormulaToNumber { .. }
+                        | PatchOperation::XlsxNumberSet { .. }
                         | PatchOperation::XlsxFormulaCreate { .. }
                         | PatchOperation::XlsxRowAppend { .. }
                         | PatchOperation::XlsxRowRemoveLast { .. }
@@ -648,6 +653,9 @@ pub fn apply_patch(
                     let replacement = splice_text(current_text, node_splices)?;
                     let replacement_hash = hash_bytes(replacement.as_bytes());
                     replace_node_text(&mut html, &entry.node_id, &replacement, &replacement_hash)?;
+                    if manifest.source.format == "xlsx" && entry.source.node_kind == "cell" {
+                        set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
+                    }
                     if manifest.source.format == "pdf" {
                         set_element_attribute(
                             &mut html,
@@ -696,6 +704,21 @@ pub fn apply_patch(
                             set_xlsx_formula_value(&mut html, &entry.node_id)?;
                             entry.source.editable = true;
                             text
+                        }
+                        XlsxFormulaReplacement::Number(value) => {
+                            set_xlsx_formula_value(&mut html, &entry.node_id)?;
+                            set_xlsx_raw_value(&mut html, &entry.node_id, value)?;
+                            entry.source.editable = true;
+                            value
+                        }
+                        XlsxFormulaReplacement::NumberUpdate(value) => {
+                            if !entry.source.editable {
+                                return Err(HcdError::Unsupported(
+                                    "XLSX numeric target is not editable".to_string(),
+                                ));
+                            }
+                            set_xlsx_raw_value(&mut html, &entry.node_id, value)?;
+                            value
                         }
                     };
                     let replacement_hash = hash_bytes(replacement.as_bytes());
@@ -1496,7 +1519,9 @@ pub fn apply_patch(
             .operations
             .iter()
             .filter_map(|operation| {
-                if let PatchOperation::XlsxFormulaToValue { node_id, .. } = operation {
+                if let PatchOperation::XlsxFormulaToValue { node_id, .. }
+                | PatchOperation::XlsxFormulaToNumber { node_id, .. } = operation
+                {
                     Some(node_id.clone())
                 } else {
                     None
@@ -1865,6 +1890,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1965,12 +1991,23 @@ fn validate_patch_identity(
             }
         }
     }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28 {
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28
+        || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_29
+    {
         if manifest.source.format != "xlsx"
             || !patch
                 .operations
                 .iter()
-                .any(|operation| matches!(operation, PatchOperation::XlsxFormulaToValue { .. }))
+                .any(|operation| match patch.schema_version.as_str() {
+                    crate::HCD_PATCH_SCHEMA_VERSION_28 => {
+                        matches!(operation, PatchOperation::XlsxFormulaToValue { .. })
+                    }
+                    _ => matches!(
+                        operation,
+                        PatchOperation::XlsxFormulaToNumber { .. }
+                            | PatchOperation::XlsxNumberSet { .. }
+                    ),
+                })
             || patch.operations.iter().any(|operation| {
                 !matches!(
                     operation,
@@ -1979,11 +2016,14 @@ fn validate_patch_identity(
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaCreate { .. }
                         | PatchOperation::XlsxFormulaToValue { .. }
+                        | PatchOperation::XlsxFormulaToNumber { .. }
+                        | PatchOperation::XlsxNumberSet { .. }
                 )
             })
         {
             return Err(HcdError::Unsupported(
-                "hcd-patch/28 accepts XLSX formula conversion with cell edits only".to_string(),
+                "XLSX formula conversion batches accept formula conversion and cell edits only"
+                    .to_string(),
             ));
         }
         let mut targets = HashSet::new();
@@ -2391,10 +2431,12 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_19
                         | crate::HCD_PATCH_SCHEMA_VERSION_22
                         | crate::HCD_PATCH_SCHEMA_VERSION_28
+                        | crate::HCD_PATCH_SCHEMA_VERSION_29
                 ) || manifest.source.format != "xlsx"
                     || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
+                        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                         && patch.operations.len() != 1)
                 {
                     return Err(HcdError::Unsupported(
@@ -2429,7 +2471,8 @@ fn validate_patch_identity(
             } => {
                 if (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28)
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
                     || manifest.source.format != "xlsx"
                     || (patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
                         && patch.operations.len() != 1)
@@ -2466,7 +2509,8 @@ fn validate_patch_identity(
                 text,
                 precondition,
             } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
+                if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
                     || manifest.source.format != "xlsx"
                 {
                     return Err(HcdError::Unsupported(
@@ -2491,6 +2535,42 @@ fn validate_patch_identity(
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
             }
+            PatchOperation::XlsxFormulaToNumber {
+                node_id,
+                sheet_id,
+                value,
+                precondition,
+            }
+            | PatchOperation::XlsxNumberSet {
+                node_id,
+                sheet_id,
+                value,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+                    || manifest.source.format != "xlsx"
+                {
+                    return Err(HcdError::Unsupported(
+                        "numeric XLSX cell edits require an XLSX hcd-patch/29 batch".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !valid_xlsx_number(value)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX numeric cell edit requires a finite numeric value".to_string(),
+                    ));
+                }
+                inserted = inserted.checked_add(value.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
+                })?;
+            }
             PatchOperation::XlsxFormulaCreate {
                 sheet_id,
                 row,
@@ -2499,7 +2579,8 @@ fn validate_patch_identity(
             } => {
                 if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28)
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
                     || manifest.source.format != "xlsx"
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
@@ -3391,6 +3472,28 @@ fn collect_xlsx_formula_set(
                 node_id,
                 sheet_id,
                 XlsxFormulaReplacement::Value(text.clone()),
+                precondition,
+            )),
+            PatchOperation::XlsxFormulaToNumber {
+                node_id,
+                sheet_id,
+                value,
+                precondition,
+            } => Some((
+                node_id,
+                sheet_id,
+                XlsxFormulaReplacement::Number(value.clone()),
+                precondition,
+            )),
+            PatchOperation::XlsxNumberSet {
+                node_id,
+                sheet_id,
+                value,
+                precondition,
+            } => Some((
+                node_id,
+                sheet_id,
+                XlsxFormulaReplacement::NumberUpdate(value.clone()),
                 precondition,
             )),
             _ => None,
@@ -4909,6 +5012,48 @@ fn set_xlsx_formula_value(html: &mut String, node_id: &str) -> Result<(), HcdErr
         set_attribute_in_range(html, cell_start, cell_end, name, value)?;
     }
     Ok(())
+}
+
+fn valid_xlsx_number(value: &str) -> bool {
+    let Some(number) = value
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+    else {
+        return false;
+    };
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().any(|byte| byte.is_ascii_digit())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'))
+        && (number.fract() != 0.0 || number.abs() <= 9_007_199_254_740_991.0)
+}
+
+fn set_xlsx_raw_value(html: &mut String, node_id: &str, value: &str) -> Result<(), HcdError> {
+    let marker = format!("data-hcd-id=\"{node_id}\"");
+    let node_start = html
+        .find(&marker)
+        .ok_or_else(|| HcdError::InvalidBundle(format!("XLSX cell node {node_id} is missing")))?;
+    let cell_start = html[..node_start].rfind("<td ").ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX cell node has no containing cell".to_string())
+    })?;
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX cell tag is not closed".to_string()))?;
+    if cell_end > node_start {
+        return Err(HcdError::InvalidBundle(
+            "XLSX cell tag overlaps node".to_string(),
+        ));
+    }
+    if xlsx_attribute(&html[cell_start..=cell_end], "data-hcd-formula") == Some("true") {
+        return Err(HcdError::Unsupported(
+            "XLSX formula must use a formula conversion operation".to_string(),
+        ));
+    }
+    set_attribute_in_range(html, cell_start, cell_end, "data-hcd-raw-value", value)
 }
 
 fn xlsx_cells(html: &str) -> Result<Vec<XlsxCellSpan>, HcdError> {
@@ -6485,6 +6630,8 @@ fn apply_annotations(
             | PatchOperation::XlsxCellSet { .. }
             | PatchOperation::XlsxFormulaSet { .. }
             | PatchOperation::XlsxFormulaToValue { .. }
+            | PatchOperation::XlsxFormulaToNumber { .. }
+            | PatchOperation::XlsxNumberSet { .. }
             | PatchOperation::XlsxFormulaCreate { .. }
             | PatchOperation::XlsxRowAppend { .. }
             | PatchOperation::XlsxRowInsert { .. }

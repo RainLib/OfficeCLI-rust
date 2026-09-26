@@ -381,6 +381,22 @@ pub enum PatchOperation {
         text: String,
         precondition: NodePrecondition,
     },
+    /// Replace an editable formula with a native finite numeric value.
+    #[serde(rename = "xlsx.formula.to-number", rename_all = "camelCase")]
+    XlsxFormulaToNumber {
+        node_id: String,
+        sheet_id: String,
+        value: String,
+        precondition: NodePrecondition,
+    },
+    /// Update an editable XLSX numeric cell while keeping its native numeric type.
+    #[serde(rename = "xlsx.number.set", rename_all = "camelCase")]
+    XlsxNumberSet {
+        node_id: String,
+        sheet_id: String,
+        value: String,
+        precondition: NodePrecondition,
+    },
     /// Create a native formula in an empty worksheet cell.
     #[serde(rename = "xlsx.formula.create", rename_all = "camelCase")]
     XlsxFormulaCreate {
@@ -477,9 +493,10 @@ impl PatchOperation {
             | Self::PdfTextDelete { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
             | Self::XlsxUnmerge { node_id, .. } => Some(node_id),
-            Self::XlsxFormulaSet { node_id, .. } | Self::XlsxFormulaToValue { node_id, .. } => {
-                Some(node_id)
-            }
+            Self::XlsxFormulaSet { node_id, .. }
+            | Self::XlsxFormulaToValue { node_id, .. }
+            | Self::XlsxFormulaToNumber { node_id, .. } => Some(node_id),
+            Self::XlsxNumberSet { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
             | Self::PdfTextInsert { .. }
@@ -514,6 +531,8 @@ impl PatchOperation {
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxFormulaSet { .. }
                 | Self::XlsxFormulaToValue { .. }
+                | Self::XlsxFormulaToNumber { .. }
+                | Self::XlsxNumberSet { .. }
                 | Self::XlsxFormulaCreate { .. }
                 | Self::XlsxRowAppend { .. }
                 | Self::XlsxRowInsert { .. }

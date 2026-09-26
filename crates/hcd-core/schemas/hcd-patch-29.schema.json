@@ -1,0 +1,387 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:29",
+  "title": "HTML Canonical Document atomic XLSX native numeric cell edit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/29"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 262144
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/textSplice"
+          },
+          {
+            "$ref": "#/$defs/xlsxCellSet"
+          },
+          {
+            "$ref": "#/$defs/xlsxFormulaSet"
+          },
+          {
+            "$ref": "#/$defs/xlsxFormulaCreate"
+          },
+          {
+            "$ref": "#/$defs/xlsxFormulaToValue"
+          },
+          {
+            "$ref": "#/$defs/xlsxFormulaToNumber"
+          },
+          {
+            "$ref": "#/$defs/xlsxNumberSet"
+          }
+        ]
+      },
+      "contains": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/xlsxFormulaToNumber"
+          },
+          {
+            "$ref": "#/$defs/xlsxNumberSet"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^n_[0-9a-f]{32}$"
+    },
+    "textSplice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "start",
+        "deleteCount",
+        "insertText",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "text.splice"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deleteCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "insertText": {
+          "type": "string",
+          "maxLength": 2097152
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "xlsxCellSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "sheetId",
+        "row",
+        "column",
+        "text"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.cell.set"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        }
+      }
+    },
+    "xlsxFormulaSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "sheetId",
+        "formula",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.formula.set"
+        },
+        "nodeId": {
+          "type": "string",
+          "pattern": "^n_[0-9a-f]{32}$"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "formula": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 8192,
+          "pattern": "^="
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "xlsxFormulaCreate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "sheetId",
+        "row",
+        "column",
+        "formula"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.formula.create"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "formula": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 8192,
+          "pattern": "^="
+        }
+      }
+    },
+    "xlsxFormulaToValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "sheetId",
+        "text",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.formula.to-value"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 32767
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "xlsxFormulaToNumber": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "sheetId",
+        "value",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.formula.to-number"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9+\\-.eE]+$"
+        }
+      }
+    },
+    "xlsxNumberSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "sheetId",
+        "value",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.number.set"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9+\\-.eE]+$"
+        }
+      }
+    }
+  }
+}

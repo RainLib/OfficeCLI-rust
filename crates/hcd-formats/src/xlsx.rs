@@ -4,16 +4,16 @@ use crate::common::{
     ExportOptions, ImportOptions, XmlBudget,
 };
 use hcd_core::{
-    hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
-    FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError, HcdManifest,
-    ImportEvent, NodeMapEntry, SourceAnchor, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    hash_bytes, node_bloom_might_contain, stable_node_id, Bundle, BundleWriter, ChunkSourceMap,
+    FidelityLevel, FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError,
+    HcdManifest, ImportEvent, NodeMapEntry, SourceAnchor, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -4733,7 +4733,10 @@ pub(crate) fn export_xlsx(
     } else {
         collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?
     };
+    let numeric_node_values = collect_numeric_node_values(bundle, &manifest, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut numeric_replacements: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut numeric_created: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut formula_replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_formulas: HashMap<String, BTreeMap<String, String>> = HashMap::new();
@@ -4809,14 +4812,28 @@ pub(crate) fn export_xlsx(
             replacements.entry(node.source.part).or_default();
             continue;
         }
+        let numeric_value = numeric_node_values.get(&node.node_id).cloned();
+        let export_text = numeric_value.clone().unwrap_or(node.text);
         if node.source.created_in_hcd {
+            if numeric_value.is_some() {
+                numeric_created
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(cell.clone());
+            }
             created_cells
                 .entry(node.source.part.clone())
                 .or_default()
-                .insert(cell, node.text);
+                .insert(cell, export_text);
             replacements.entry(node.source.part).or_default();
         } else {
             let original_cell = node.source.source_cell_ref.unwrap_or(cell);
+            if numeric_value.is_some() {
+                numeric_replacements
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(original_cell.clone());
+            }
             if converted_formula_node_ids.contains(&node.node_id) {
                 converted_formula_cells
                     .entry(node.source.part.clone())
@@ -4826,7 +4843,7 @@ pub(crate) fn export_xlsx(
             replacements
                 .entry(node.source.part)
                 .or_default()
-                .insert(original_cell, node.text);
+                .insert(original_cell, export_text);
         }
     }
 
@@ -4874,6 +4891,8 @@ pub(crate) fn export_xlsx(
             HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical row heights"))
         })?;
         let inserted = created_cells.get(part).cloned().unwrap_or_default();
+        let numeric_original = numeric_replacements.get(part).cloned().unwrap_or_default();
+        let numeric_new = numeric_created.get(part).cloned().unwrap_or_default();
         let inserted_formulas = created_formulas.get(part).cloned().unwrap_or_default();
         let formulas = formula_replacements.get(part).cloned().unwrap_or_default();
         let shifts = row_insertions.get(part).cloned().unwrap_or_default();
@@ -4885,8 +4904,10 @@ pub(crate) fn export_xlsx(
                     input,
                     BufWriter::new(output),
                     values,
+                    &numeric_original,
                     &formulas,
                     &inserted,
+                    &numeric_new,
                     &inserted_formulas,
                     merges,
                     rows,
@@ -4932,7 +4953,7 @@ pub(crate) fn export_xlsx(
         ],
         flattened: {
             let mut items = vec![
-                "edited nonformula cells are serialized as inline strings regardless of their original storage type"
+                "edited text cells are serialized as inline strings; numeric edits retain native number values"
                     .to_string(),
             ];
             if row_insertions
@@ -5203,6 +5224,84 @@ fn collect_canonical_sheet_last_columns(
     Ok(columns)
 }
 
+fn collect_numeric_node_values(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_node_ids: &HashSet<String>,
+) -> Result<HashMap<String, String>, HcdError> {
+    let mut numeric = HashMap::new();
+    if dirty_node_ids.is_empty() {
+        return Ok(numeric);
+    }
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in page.chunks {
+            if descriptor
+                .grid
+                .as_ref()
+                .is_none_or(|grid| grid.kind != GridChunkKind::Cells)
+            {
+                continue;
+            }
+            if !dirty_node_ids
+                .iter()
+                .any(|node_id| node_bloom_might_contain(&descriptor.node_bloom, node_id))
+            {
+                continue;
+            }
+            let map = bundle.read_map(&descriptor)?;
+            let relevant: Vec<_> = map
+                .entries
+                .iter()
+                .filter(|entry| dirty_node_ids.contains(&entry.node_id))
+                .collect();
+            if relevant.is_empty() {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            for entry in relevant {
+                let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
+                let node_start = html.find(&marker).ok_or_else(|| {
+                    HcdError::InvalidBundle(format!(
+                        "XLSX node {} is absent from its chunk",
+                        entry.node_id
+                    ))
+                })?;
+                let cell_start = html[..node_start].rfind("<td ").ok_or_else(|| {
+                    HcdError::InvalidBundle(format!("XLSX node {} has no cell", entry.node_id))
+                })?;
+                let cell_end = html[cell_start..]
+                    .find('>')
+                    .map(|offset| cell_start + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("XLSX cell tag is not closed".to_string())
+                    })?;
+                if cell_end > node_start {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX cell tag overlaps node".to_string(),
+                    ));
+                }
+                let tag = &html[cell_start..cell_end];
+                if let Some(value) = tag
+                    .split_once("data-hcd-raw-value=\"")
+                    .and_then(|(_, rest)| rest.split_once('"').map(|(value, _)| value))
+                {
+                    if !value.is_empty() {
+                        if !value.parse::<f64>().is_ok_and(f64::is_finite) {
+                            return Err(HcdError::InvalidBundle(format!(
+                                "XLSX node {} has an invalid numeric value",
+                                entry.node_id
+                            )));
+                        }
+                        numeric.insert(entry.node_id.clone(), value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(numeric)
+}
+
 fn collect_canonical_merge_ranges(
     bundle: &Bundle,
     manifest: &HcdManifest,
@@ -5290,8 +5389,10 @@ fn rewrite_worksheet(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<String, String>,
+    numeric_replacements: &BTreeSet<String>,
     formulas: &BTreeMap<String, String>,
     created_cells: &BTreeMap<String, String>,
+    numeric_created: &BTreeSet<String>,
     created_formulas: &BTreeMap<String, String>,
     merges: &BTreeSet<String>,
     canonical_rows: &BTreeSet<u32>,
@@ -5309,8 +5410,7 @@ fn rewrite_worksheet(
     let mut seen_original = BTreeSet::new();
     let mut seen_formulas = BTreeSet::new();
     let mut seen_created = BTreeSet::new();
-    let mut replacement_rows: BTreeMap<u32, BTreeMap<u32, (String, String, bool)>> =
-        BTreeMap::new();
+    let mut replacement_rows: BTreeMap<u32, BTreeMap<u32, (String, String, u8)>> = BTreeMap::new();
     for (reference, text) in created_cells {
         let (row, column) = cell_coordinates(reference).ok_or_else(|| {
             HcdError::InvalidBundle(format!("invalid XLSX cell locator {reference}"))
@@ -5318,7 +5418,14 @@ fn rewrite_worksheet(
         if replacement_rows
             .entry(row)
             .or_default()
-            .insert(column, (reference.clone(), text.clone(), false))
+            .insert(
+                column,
+                (
+                    reference.clone(),
+                    text.clone(),
+                    u8::from(numeric_created.contains(reference)) * 2,
+                ),
+            )
             .is_some()
         {
             return Err(HcdError::InvalidBundle(format!(
@@ -5333,7 +5440,7 @@ fn rewrite_worksheet(
         if replacement_rows
             .entry(row)
             .or_default()
-            .insert(column, (reference.clone(), formula.clone(), true))
+            .insert(column, (reference.clone(), formula.clone(), 1))
             .is_some()
         {
             return Err(HcdError::InvalidBundle(format!(
@@ -5661,16 +5768,16 @@ fn rewrite_worksheet(
                     }
                 }
                 let shifted = rewrite_xlsx_address_attribute(start, &shifted_reference)?;
-                if let Some((created_ref, text, is_formula)) = created_here {
+                if let Some((created_ref, text, kind)) = created_here {
                     if replacements.contains_key(&reference) {
                         return Err(HcdError::InvalidBundle(format!(
                             "XLSX cell {reference} is both created and replaced"
                         )));
                     }
-                    if is_formula {
+                    if kind == 1 {
                         write_formula_cell(&mut writer, &shifted, &text)?;
                     } else {
-                        write_inline_cell(&mut writer, &shifted, &text)?;
+                        write_literal_cell(&mut writer, &shifted, &text, kind == 2)?;
                     }
                     seen_created.insert(created_ref);
                     skip_depth = 1;
@@ -5679,7 +5786,12 @@ fn rewrite_worksheet(
                     seen_formulas.insert(reference);
                     skip_depth = 1;
                 } else if let Some(text) = replacements.get(&reference) {
-                    write_inline_cell(&mut writer, &shifted, text)?;
+                    write_literal_cell(
+                        &mut writer,
+                        &shifted,
+                        text,
+                        numeric_replacements.contains(&reference),
+                    )?;
                     seen_original.insert(reference);
                     skip_depth = 1;
                 } else {
@@ -5711,23 +5823,28 @@ fn rewrite_worksheet(
                     }
                 }
                 let shifted = rewrite_xlsx_address_attribute(empty, &shifted_reference)?;
-                if let Some((created_ref, text, is_formula)) = created_here {
+                if let Some((created_ref, text, kind)) = created_here {
                     if replacements.contains_key(&reference) {
                         return Err(HcdError::InvalidBundle(format!(
                             "XLSX cell {reference} is both created and replaced"
                         )));
                     }
-                    if is_formula {
+                    if kind == 1 {
                         write_formula_cell(&mut writer, &shifted, &text)?;
                     } else {
-                        write_inline_cell(&mut writer, &shifted, &text)?;
+                        write_literal_cell(&mut writer, &shifted, &text, kind == 2)?;
                     }
                     seen_created.insert(created_ref);
                 } else if let Some(formula) = formulas.get(&reference) {
                     write_formula_cell(&mut writer, &shifted, formula)?;
                     seen_formulas.insert(reference);
                 } else if let Some(text) = replacements.get(&reference) {
-                    write_inline_cell(&mut writer, &shifted, text)?;
+                    write_literal_cell(
+                        &mut writer,
+                        &shifted,
+                        text,
+                        numeric_replacements.contains(&reference),
+                    )?;
                     seen_original.insert(reference);
                 } else {
                     writer.write_event(Event::Empty(shifted))?;
@@ -6237,7 +6354,7 @@ fn rewrite_xlsx_row_attributes(
 fn write_missing_xlsx_rows(
     writer: &mut Writer<impl Write>,
     canonical_rows: &BTreeSet<u32>,
-    replacement_rows: &mut BTreeMap<u32, BTreeMap<u32, (String, String, bool)>>,
+    replacement_rows: &mut BTreeMap<u32, BTreeMap<u32, (String, String, u8)>>,
     last_row: u32,
     before_row: u32,
     row_name: &str,
@@ -6416,7 +6533,7 @@ fn qualified_child_name(parent: &[u8], child: &str) -> String {
 
 fn flush_new_xlsx_cells(
     writer: &mut Writer<impl Write>,
-    pending: &mut BTreeMap<u32, (String, String, bool)>,
+    pending: &mut BTreeMap<u32, (String, String, u8)>,
     before_column: Option<u32>,
     cell_name: &str,
     seen: &mut BTreeSet<String>,
@@ -6425,13 +6542,13 @@ fn flush_new_xlsx_cells(
         if before_column.is_some_and(|before| column >= before) {
             break;
         }
-        let (_, (reference, text, is_formula)) = pending.pop_first().expect("first key exists");
+        let (_, (reference, text, kind)) = pending.pop_first().expect("first key exists");
         let mut cell = BytesStart::new(cell_name);
         cell.push_attribute(("r", reference.as_str()));
-        if is_formula {
+        if kind == 1 {
             write_formula_cell(writer, &cell, &text)?;
         } else {
-            write_inline_cell(writer, &cell, &text)?;
+            write_literal_cell(writer, &cell, &text, kind == 2)?;
         }
         seen.insert(reference);
     }
@@ -6476,6 +6593,43 @@ fn write_inline_cell(
     writer.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
         original.name().as_ref(),
     ))))?;
+    Ok(())
+}
+
+fn write_literal_cell(
+    writer: &mut Writer<impl Write>,
+    original: &BytesStart<'_>,
+    value: &str,
+    numeric: bool,
+) -> Result<(), HcdError> {
+    if !numeric {
+        return write_inline_cell(writer, original, value);
+    }
+    if !value.parse::<f64>().is_ok_and(f64::is_finite) {
+        return Err(HcdError::InvalidBundle(
+            "XLSX numeric replacement is not finite".to_string(),
+        ));
+    }
+    let name = String::from_utf8_lossy(original.name().as_ref()).to_string();
+    let mut start = BytesStart::new(name.clone());
+    let mut attributes = Vec::new();
+    for attribute in original.attributes().with_checks(false).flatten() {
+        if local_name(attribute.key.as_ref()) != "t" {
+            attributes.push((
+                String::from_utf8_lossy(attribute.key.as_ref()).to_string(),
+                String::from_utf8_lossy(attribute.value.as_ref()).to_string(),
+            ));
+        }
+    }
+    for (key, value) in &attributes {
+        start.push_attribute((key.as_str(), value.as_str()));
+    }
+    writer.write_event(Event::Start(start))?;
+    let value_name = qualified_child_name(original.name().as_ref(), "v");
+    writer.write_event(Event::Start(BytesStart::new(value_name.as_str())))?;
+    writer.write_event(Event::Text(BytesText::new(value)))?;
+    writer.write_event(Event::End(BytesEnd::new(value_name.as_str())))?;
+    writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
     Ok(())
 }
 
@@ -6862,6 +7016,201 @@ mod tests {
             ..patch
         };
         assert!(hcd_core::apply_patch(&bundle, &stale, 1).is_err());
+    }
+
+    #[test]
+    fn converts_real_formula_to_native_number_then_text_without_stale_numeric_metadata() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let numeric_export = temp.path().join("numeric.xlsx");
+        let updated_export = temp.path().join("updated.xlsx");
+        let text_export = temp.path().join("text.xlsx");
+        let historical = temp.path().join("historical.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("numeric-formula"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = bundle
+            .read_index_page(&manifest, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Overview" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let entry = bundle
+            .read_map(&descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("G8"))
+            .unwrap();
+        let g9 = bundle
+            .read_map(&descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("G9"))
+            .unwrap();
+        let number = |value: &str, patch_id: &str| PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_29.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: patch_id.to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaToNumber {
+                node_id: entry.node_id.clone(),
+                sheet_id: sheet_id.clone(),
+                value: value.to_string(),
+                precondition: NodePrecondition {
+                    node_hash: entry.node_hash.clone(),
+                },
+            }],
+        };
+        for invalid in ["NaN", "Infinity", "1,000", "1e999"] {
+            assert!(hcd_core::apply_patch(&bundle, &number(invalid, invalid), 0).is_err());
+        }
+        let wrong_operation = PatchBatch {
+            patch_id: "number-set-on-formula".to_string(),
+            operations: vec![PatchOperation::XlsxNumberSet {
+                node_id: entry.node_id.clone(),
+                sheet_id: sheet_id.clone(),
+                value: "720000".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: entry.node_hash.clone(),
+                },
+            }],
+            ..number("720000", "unused")
+        };
+        assert!(hcd_core::apply_patch(&bundle, &wrong_operation, 0).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let mut mixed = number("720000", "numeric-g8-and-text-g9");
+        mixed.operations.push(PatchOperation::XlsxFormulaToValue {
+            node_id: g9.node_id,
+            sheet_id: sheet_id.clone(),
+            text: "Manual".to_string(),
+            precondition: NodePrecondition {
+                node_hash: g9.node_hash,
+            },
+        });
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &mixed, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let changed = bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Overview" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let html = bundle.read_chunk(&changed).unwrap();
+        assert!(html.contains("data-hcd-raw-value=\"720000\""));
+        assert!(html.contains("data-hcd-formula=\"false\""));
+        export_xlsx(&bundle, &source, &numeric_export, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&numeric_export, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("<c r=\"G8\""));
+        assert!(xml.contains("<v>720000</v>"));
+        assert!(xml.contains("<t>Manual</t>"));
+        assert!(!xml.contains("<c r=\"G8\" t=\"inlineStr\""));
+        assert!(!xml.contains("ref=\"G8:G14\""));
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&historical, "xl/worksheets/sheet1.xml").contains("ref=\"G8:G14\""));
+        let update = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_29.to_string(),
+            patch_id: "numeric-g8-update".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxNumberSet {
+                node_id: entry.node_id.clone(),
+                sheet_id: sheet_id.clone(),
+                value: "710000".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: hash_bytes(b"720000"),
+                },
+            }],
+            ..number("720000", "unused")
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &update, 1).unwrap().revision,
+            2
+        );
+        let stale = PatchBatch {
+            patch_id: "stale-number-update".to_string(),
+            ..update
+        };
+        assert!(hcd_core::apply_patch(&bundle, &stale, 2).is_err());
+        export_xlsx(&bundle, &source, &updated_export, &ExportOptions::default()).unwrap();
+        assert!(
+            read_zip_entry(&updated_export, "xl/worksheets/sheet1.xml").contains("<v>710000</v>")
+        );
+        let text = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.to_string(),
+            patch_id: "numeric-g8-to-text".to_string(),
+            base_revision: 2,
+            operations: vec![PatchOperation::TextSplice {
+                node_id: entry.node_id.clone(),
+                start: 0,
+                delete_count: 6,
+                insert_text: "Reviewed".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: hash_bytes(b"710000"),
+                },
+            }],
+            ..number("720000", "unused")
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &text, 2).unwrap().revision,
+            3
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let changed = bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Overview" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let html = bundle.read_chunk(&changed).unwrap();
+        assert!(!html.contains("data-hcd-raw-value=\"710000\""));
+        export_xlsx(&bundle, &source, &text_export, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&text_export, "xl/worksheets/sheet1.xml");
+        let g8 = &xml[xml.find("<c r=\"G8\"").unwrap()..];
+        let g8 = &g8[..g8.find("</c>").unwrap()];
+        assert!(
+            g8.contains("t=\"inlineStr\"") && g8.contains("<t>Reviewed</t>"),
+            "{g8}"
+        );
     }
 
     #[test]
@@ -10121,8 +10470,10 @@ mod tests {
             &mut source.as_slice(),
             &mut output,
             &replacements,
+            &BTreeSet::new(),
             &BTreeMap::new(),
             &created,
+            &BTreeSet::new(),
             &BTreeMap::from([("E1".to_string(), "A1+1".to_string())]),
             &BTreeSet::new(),
             &BTreeSet::from([1, 2]),
