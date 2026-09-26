@@ -5291,6 +5291,8 @@ fn verify_grid_shift_source(
                                         | "v"
                                         | "is"
                                         | "t"
+                                        | "mergeCells"
+                                        | "mergeCell"
                                         | "pageMargins"
                                         | "pageSetup"
                                         | "printOptions"
@@ -6673,6 +6675,174 @@ mod tests {
     }
 
     #[test]
+    fn grid_shifts_keep_untouched_merges_in_hcd_and_source_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("merged-source.xlsx");
+        create_grid_shift_merge_fixture(&source);
+        let bundle_path = temp.path().join("merged-grid.hcd");
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("merged-grid-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let initial = &bundle.read_index_page(&imported, 0).unwrap().chunks[0];
+        let sheet_id = initial.grid.as_ref().unwrap().sheet_id.clone();
+        let anchor_id = bundle
+            .read_map(initial)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A2"))
+            .unwrap()
+            .node_id;
+        let operations = [
+            (
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 2,
+                },
+                "A3:B4",
+                "A3",
+            ),
+            (
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 1,
+                },
+                "A2:B3",
+                "A2",
+            ),
+            (
+                PatchOperation::XlsxColumnInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_column: 1,
+                },
+                "B2:C3",
+                "B2",
+            ),
+            (
+                PatchOperation::XlsxColumnDelete {
+                    sheet_id: sheet_id.clone(),
+                    column: 1,
+                },
+                "A2:B3",
+                "A2",
+            ),
+        ];
+        let schemas = [
+            hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+            hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+            hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
+            hcd_core::HCD_PATCH_SCHEMA_VERSION_15,
+        ];
+        for (index, (operation, expected_merge, expected_anchor)) in
+            operations.into_iter().enumerate()
+        {
+            let revision = index as u64;
+            let patch = PatchBatch {
+                schema_version: schemas[index].to_string(),
+                document_id: "merged-grid-doc".to_string(),
+                patch_id: format!("merge-shift-{index}"),
+                base_revision: revision,
+                actor: BTreeMap::new(),
+                operations: vec![operation],
+                metadata: BTreeMap::new(),
+            };
+            assert_eq!(
+                hcd_core::apply_patch(&bundle, &patch, revision)
+                    .unwrap()
+                    .revision,
+                revision + 1
+            );
+            assert!(validate_bundle(&bundle).unwrap().valid);
+            let head = bundle.manifest().unwrap();
+            let descriptor = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+            assert!(bundle
+                .read_chunk(descriptor)
+                .unwrap()
+                .contains(&format!("data-hcd-merge=\"{expected_merge}\"")));
+            let anchor = bundle
+                .read_map(descriptor)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.node_id == anchor_id)
+                .unwrap();
+            assert_eq!(anchor.source.paragraph_id.as_deref(), Some(expected_anchor));
+            let exported = temp.path().join(format!("shift-{index}.xlsx"));
+            export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+            let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+            assert!(
+                xml.contains(&format!("mergeCell ref=\"{expected_merge}\"")),
+                "{xml}"
+            );
+        }
+        let historical = temp.path().join("history.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&historical, "xl/worksheets/sheet1.xml")
+            .contains("mergeCell ref=\"A2:B3\""));
+
+        let crossing = [
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 3,
+                },
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 2,
+                },
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
+                PatchOperation::XlsxColumnInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_column: 2,
+                },
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_15,
+                PatchOperation::XlsxColumnDelete {
+                    sheet_id,
+                    column: 1,
+                },
+            ),
+        ];
+        for (index, (schema, operation)) in crossing.into_iter().enumerate() {
+            let patch = PatchBatch {
+                schema_version: schema.to_string(),
+                document_id: "merged-grid-doc".to_string(),
+                patch_id: format!("split-merge-{index}"),
+                base_revision: 4,
+                actor: BTreeMap::new(),
+                operations: vec![operation],
+                metadata: BTreeMap::new(),
+            };
+            assert!(matches!(
+                hcd_core::apply_patch(&bundle, &patch, 4),
+                Err(hcd_core::HcdError::Unsupported(_))
+            ));
+        }
+        assert_eq!(bundle.manifest().unwrap().revision, 4);
+    }
+
+    #[test]
     fn middle_row_insertion_shifts_across_chunk_windows() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("long.xlsx");
@@ -7827,6 +7997,26 @@ mod tests {
         }
         zip.write_all(b"</sheetData></worksheet>").unwrap();
         zip.finish().unwrap();
+    }
+
+    fn create_grid_shift_merge_fixture(path: &Path) {
+        let plain = path.with_extension("plain.xlsx");
+        create_plain_rows_fixture(&plain, 4);
+        let mut source = zip::ZipArchive::new(File::open(&plain).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(path).unwrap());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..source.len() {
+            let mut entry = source.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            output.start_file(&name, options).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                output.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D4"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Title</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Anchor</t></is></c></row><row r="3"><c r="D3" t="inlineStr"><is><t>Other</t></is></c></row><row r="4"><c r="D4" t="inlineStr"><is><t>Tail</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B3"/></mergeCells></worksheet>"#).unwrap();
+            } else {
+                std::io::copy(&mut entry, &mut output).unwrap();
+            }
+        }
+        output.finish().unwrap();
     }
 
     fn create_merge_edit_fixture(path: &Path) {
