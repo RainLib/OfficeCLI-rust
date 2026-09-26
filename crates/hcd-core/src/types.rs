@@ -384,6 +384,15 @@ pub enum PatchOperation {
     /// Delete a worksheet column and shift later cells left.
     #[serde(rename = "xlsx.column.delete", rename_all = "camelCase")]
     XlsxColumnDelete { sheet_id: String, column: u32 },
+    /// Apply a bounded selection of adjacent row/column shifts in one revision.
+    #[serde(rename = "xlsx.grid.range", rename_all = "camelCase")]
+    XlsxGridRange {
+        sheet_id: String,
+        axis: XlsxGridAxis,
+        action: XlsxGridAction,
+        start: u32,
+        count: u32,
+    },
     /// Remove an empty row appended after the source worksheet's final row.
     #[serde(rename = "xlsx.row.remove-last", rename_all = "camelCase")]
     XlsxRowRemoveLast { sheet_id: String, row: u32 },
@@ -456,6 +465,7 @@ impl PatchOperation {
             | Self::XlsxRowDelete { .. }
             | Self::XlsxColumnInsert { .. }
             | Self::XlsxColumnDelete { .. }
+            | Self::XlsxGridRange { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. }
             | Self::XlsxRowHeight { .. } => None,
@@ -481,6 +491,7 @@ impl PatchOperation {
                 | Self::XlsxRowDelete { .. }
                 | Self::XlsxColumnInsert { .. }
                 | Self::XlsxColumnDelete { .. }
+                | Self::XlsxGridRange { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
                 | Self::XlsxRowHeight { .. }
@@ -489,6 +500,20 @@ impl PatchOperation {
                 | Self::ImageGeometry { .. }
         )
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum XlsxGridAxis {
+    Row,
+    Column,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum XlsxGridAction {
+    Insert,
+    Delete,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

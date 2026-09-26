@@ -32,6 +32,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const host = useRef<HTMLDivElement>(null)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
   const syncing = useRef(false)
+  const gridBusy = useRef(false)
   const collaboration = useFixedCollaboration(session, revision, next => setRemoteRevision(previous => Math.max(previous ?? 0, next)))
   useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
@@ -39,7 +40,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   }
   useEffect(() => {
     const current = runtime.current
-    if (!current || remoteRevision === null || syncing.current) return
+    if (!current || remoteRevision === null || syncing.current || gridBusy.current) return
     if (remoteRevision <= current.client.manifest.revision) { setRemoteRevision(null); return }
     if (current.adapter.hasPendingPatch()) return
     syncing.current = true
@@ -272,12 +273,61 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
+  async function applySelectedGridRange(axis: 'row' | 'column', action: 'insert' | 'delete') {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || gridBusy.current) return
+    const sheet = current.adapter.workbook.getActiveSheet()
+    const range = sheet.getActiveRange()
+    if (!range) { setError('请先选中行或列'); return }
+    const start = (axis === 'row' ? range.getRow() : range.getColumn()) + 1
+    const count = axis === 'row' ? range.getHeight() : range.getWidth()
+    if (count < 2 || count > 100) { setError('一次请选择 2 到 100 行或列'); return }
+    const label = axis === 'row' ? '行' : '列'
+    if (action === 'delete' && !window.confirm(`删除选中的 ${count} ${label}及其内容？可从历史修订恢复。`)) return
+    gridBusy.current = true
+    if (axis === 'row') setRowBusy(true)
+    else setColumnBusy(true)
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      setStatus(`正在${action === 'insert' ? '插入' : '删除'} ${count} ${label}…`)
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/25', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.grid.range', sheetId: sheet.getSheetId(), axis, action, start, count }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setError('')
+      try {
+        await current.adapter.refreshFromServer()
+        await current.adapter.focusCell(sheet.getSheetId(),
+          axis === 'row' ? Math.max(0, start - 1) : range.getRow(),
+          axis === 'column' ? Math.max(0, start - 1) : range.getColumn())
+        setStatus(`revision ${saved.revision} · 已${action === 'insert' ? '插入' : '删除'} ${count} ${label}`)
+      } catch (syncError) {
+        setError(`${count} ${label}已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
+      }
+    } catch (cause) {
+      setError(`${action === 'insert' ? '插入' : '删除'} ${count} ${label}失败：${String(cause)}`)
+    } finally {
+      gridBusy.current = false
+      if (axis === 'row') setRowBusy(false)
+      else setColumnBusy(false)
+    }
+  }
+
   async function insertRowBeforeSelection() {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || rowBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
       const sheet = current.adapter.workbook.getActiveSheet()
+      if ((sheet.getActiveRange()?.getHeight() ?? 0) > 1) {
+        await applySelectedGridRange('row', 'insert')
+        return
+      }
       const beforeRow = (sheet.getActiveRange()?.getRow() ?? -1) + 1
       if (beforeRow < 1) throw new Error('请先选中目标行中的单元格')
       setRowBusy(true)
@@ -311,6 +361,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
+      if ((range?.getWidth() ?? 0) > 1) {
+        await applySelectedGridRange('column', 'insert')
+        return
+      }
       const beforeColumn = (range?.getColumn() ?? -1) + 1
       if (!range || beforeColumn < 1) throw new Error('请先选中目标列中的单元格')
       setColumnBusy(true)
@@ -344,6 +398,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
+      if ((range?.getWidth() ?? 0) > 1) {
+        await applySelectedGridRange('column', 'delete')
+        return
+      }
       const column = (range?.getColumn() ?? -1) + 1
       if (!range || column < 1) throw new Error('请先选中要删除的列')
       if (!window.confirm(`删除第 ${column} 列及其中所有内容？可从历史修订恢复。`)) return
@@ -378,6 +436,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
+      if ((range?.getHeight() ?? 0) > 1) {
+        await applySelectedGridRange('row', 'delete')
+        return
+      }
       const row = (range?.getRow() ?? -1) + 1
       if (!range || row < 1) throw new Error('请先选中要删除的行')
       if (!window.confirm(`删除第 ${row} 行及其中所有内容？可从历史修订恢复。`)) return
@@ -528,8 +590,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
-      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
-      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowBeforeSelection()}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">合并区域可整体移动；切入合并区域请先拆分 · {status}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
+      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowBeforeSelection()}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">支持一次选择 2–100 行或列并在单个修订中处理；合并区域可整体移动 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}
