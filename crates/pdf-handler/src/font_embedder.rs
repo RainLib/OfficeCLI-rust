@@ -377,9 +377,11 @@ fn collect_supported_chars(
                 }
             } else {
                 // 3. If not subsetted, check standard encoding
-                if let Ok(encoding) = font.get_font_encoding(doc) {
-                    if char_renders_via_encoding(&encoding, ch) {
-                        supported.insert(ch);
+                if font.type_is(b"Font") {
+                    if let Ok(encoding) = font.get_font_encoding(doc) {
+                        if char_renders_via_encoding(&encoding, ch) {
+                            supported.insert(ch);
+                        }
                     }
                 }
             }
