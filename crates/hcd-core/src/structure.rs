@@ -831,10 +831,7 @@ fn apply_operation(
         } => {
             validate_content(block)?;
             let insertion = insertion_index(blocks, after_block_id.as_deref())?;
-            if blocks
-                .get(insertion)
-                .is_some_and(|next| next.region != "body")
-            {
+            if !insertion_touches_region(blocks, insertion, "body") {
                 return Err(HcdError::Unsupported(
                     "cannot insert outside the body region".to_string(),
                 ));
@@ -893,10 +890,7 @@ fn apply_operation(
             }
             let moved = blocks.remove(index);
             let insertion = insertion_index(blocks, after_block_id.as_deref())?;
-            if blocks
-                .get(insertion)
-                .is_some_and(|next| next.region != moved.region)
-            {
+            if !insertion_touches_region(blocks, insertion, &moved.region) {
                 return Err(HcdError::Unsupported(
                     "cannot move between document regions".to_string(),
                 ));
@@ -979,6 +973,17 @@ fn insertion_index(blocks: &[Block], after: Option<&str>) -> Result<usize, HcdEr
                 }
             }),
     }
+}
+
+fn insertion_touches_region(blocks: &[Block], index: usize, region: &str) -> bool {
+    blocks.is_empty()
+        || blocks
+            .get(index)
+            .is_some_and(|block| block.region == region)
+        || index
+            .checked_sub(1)
+            .and_then(|previous| blocks.get(previous))
+            .is_some_and(|block| block.region == region)
 }
 
 fn validate_content(content: &EditorBlockContent) -> Result<(), HcdError> {
@@ -1355,6 +1360,32 @@ fn filter_annotations(
 mod tests {
     use super::*;
     use crate::{BundleWriter, HcdCapabilities, SourceDescriptor, StorageCodec};
+
+    #[test]
+    fn body_insert_can_use_the_boundary_before_a_footer() {
+        let block = |id: &str, region: &str| Block {
+            id: id.to_string(),
+            region: region.to_string(),
+            read_only: region != "body",
+            content: EditorBlockContent {
+                kind: EditorBlockKind::Paragraph,
+                level: None,
+                inlines: Vec::new(),
+            },
+            html: String::new(),
+            entries: Vec::new(),
+        };
+        let blocks = vec![
+            block("header", "header"),
+            block("body", "body"),
+            block("footer", "footer"),
+        ];
+        let insertion = insertion_index(&blocks, Some("body")).unwrap();
+        assert_eq!(insertion, 2);
+        assert!(insertion_touches_region(&blocks, insertion, "body"));
+        assert!(!insertion_touches_region(&blocks, 0, "body"));
+        assert!(!insertion_touches_region(&blocks, blocks.len(), "body"));
+    }
 
     #[test]
     fn markdown_complex_blocks_do_not_hide_editable_paragraphs() {
