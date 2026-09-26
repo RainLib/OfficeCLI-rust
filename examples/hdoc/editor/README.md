@@ -293,6 +293,8 @@ PDF, PPTX, and XLSX sessions now share the document's collaborator list and comm
 
 For PDF, **插入 → 新增文字框** places a plain-text box on the original page. Type in place, save, then click the box again to edit it. The `hcd-patch/5` `pdf.text.insert` operation assigns a stable node ID and records page coordinates; both source-backed and source-free PDF export draw the box at those coordinates. Source-backed export now adds the new PDF text object after rewriting mapped source text; older builds could report success while omitting the new box. The rendered fixture export is at `docs/screenshots/hcd-pdf-text-insert-export.png`. This operation adds text to an existing page; it does not add a PDF page. Lines and tables in a raster-backed PDF remain page artwork rather than editable table cells, so PDF cell merging is not supported by this operation.
 
+Source-backed export places the same white masks behind new text boxes that the HCD page preview and source-free PDF use. The masks cover underlying content visually; original source PDF text remains extractable, so this is not redaction. The fidelity report includes `HCD_PDF_VISUAL_MASK_NOT_REDACTION` when masks are written.
+
 ## Storage and save flow
 
 - `hdoc import` defaults to `hcd/2`, gzip text objects, and PDF `auto` raster selection. `hdoc stats BUNDLE` reports compressed categories, revision growth, and unreferenced objects. `hdoc validate BUNDLE` verifies content and revision roots.

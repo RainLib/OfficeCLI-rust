@@ -988,6 +988,7 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
     assert_eq!(entry["text"], "New PDF note 中文");
 
     let source_backed_r1 = temp.path().join("source-backed-r1.pdf");
+    let source_backed_report = temp.path().join("source-backed-r1-fidelity.json");
     officecli()
         .args([
             "hdoc",
@@ -999,6 +1000,8 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
             "1",
             "--output",
             source_backed_r1.to_string_lossy().as_ref(),
+            "--fidelity-report",
+            source_backed_report.to_string_lossy().as_ref(),
         ])
         .assert()
         .success();
@@ -1007,6 +1010,20 @@ fn pdf_inserted_text_box_can_be_reedited_and_exported_without_source() {
         .assert()
         .success()
         .stdout(predicate::str::contains("New PDF note 中文"));
+    let pdf = lopdf::Document::load(&source_backed_r1).unwrap();
+    let page = *pdf.get_pages().get(&1).unwrap();
+    let content = String::from_utf8_lossy(&pdf.get_page_content(page).unwrap()).into_owned();
+    assert!(
+        content.contains("q 1 1 1 rg 41.00 519.00 182.00 20.00 re f Q"),
+        "source-backed PDF is missing the preview text-box mask"
+    );
+    let fidelity: Value =
+        serde_json::from_slice(&std::fs::read(source_backed_report).unwrap()).unwrap();
+    assert!(fidelity["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| { warning["code"] == "HCD_PDF_VISUAL_MASK_NOT_REDACTION" }));
 
     let edit = temp.path().join("edit.json");
     std::fs::write(
