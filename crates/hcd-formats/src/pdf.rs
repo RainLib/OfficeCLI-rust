@@ -3,7 +3,7 @@ use crate::common::{
     escape_attribute, escape_text, finish_import, source_identity, write_fidelity_report,
     ExportOptions, ImportOptions, PdfRasterMode,
 };
-use handler_common::DocumentHandler;
+use handler_common::{DocumentHandler, InsertPosition};
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -11,7 +11,8 @@ use hayro::{render as render_pdf_page, RenderSettings};
 use hcd_core::{
     hash_bytes, stable_node_id, AssetDescriptor, Bundle, BundleWriter, ChunkSourceMap,
     FidelityLevel, FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent,
-    NodeMapEntry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    NodeMapEntry, SourceAnchor, TextExtractEntry, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION,
+    MAX_CHUNK_BYTES,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
@@ -868,6 +869,150 @@ fn pdf_parse_error(error: handler_common::HandlerError) -> HcdError {
     }
 }
 
+struct PdfOverlayPosition {
+    page: usize,
+    x: f32,
+    y: f32,
+    size: f32,
+}
+
+fn pdf_html_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!(" {name}=\"");
+    let start = tag.find(&needle)? + needle.len();
+    let end = tag[start..].find('"')? + start;
+    Some(&tag[start..end])
+}
+
+fn pdf_overlay_position(
+    html: &str,
+    node: &TextExtractEntry,
+) -> Result<PdfOverlayPosition, HcdError> {
+    let page = usize::try_from(page_number(&node.source.part)).map_err(|_| {
+        HcdError::InvalidBundle("PDF overlay page number exceeds usize".to_string())
+    })?;
+    let path = format!("/page[{page}]/hcd-text[{}]", node.node_id);
+    if page == 0 || node.source.paragraph_id.as_deref() != Some(path.as_str()) {
+        return Err(HcdError::InvalidBundle(format!(
+            "PDF overlay {} has an invalid source path",
+            node.node_id
+        )));
+    }
+    let marker = format!(" data-hcd-text-node=\"{}\"", node.node_id);
+    let location = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle(format!(
+            "PDF overlay {} is missing from its chunk",
+            node.node_id
+        ))
+    })?;
+    if html[location + marker.len()..].contains(&marker) {
+        return Err(HcdError::InvalidBundle(format!(
+            "PDF overlay {} appears more than once",
+            node.node_id
+        )));
+    }
+    let start = html[..location]
+        .rfind("<p class=\"hcd-pdf-text\"")
+        .ok_or_else(|| {
+            HcdError::InvalidBundle(format!("PDF overlay {} has no text box", node.node_id))
+        })?;
+    if html[start..location].contains('>') {
+        return Err(HcdError::InvalidBundle(format!(
+            "PDF overlay {} has an invalid text box",
+            node.node_id
+        )));
+    }
+    let end = html[location..]
+        .find('>')
+        .map(|offset| location + offset)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle(format!(
+                "PDF overlay {} has an unclosed text box",
+                node.node_id
+            ))
+        })?;
+    let tag = &html[start..=end];
+    if pdf_html_attribute(tag, "data-hcd-mapping") != Some("hcd-overlay") {
+        return Err(HcdError::InvalidBundle(format!(
+            "PDF text box {} is not an HCD overlay",
+            node.node_id
+        )));
+    }
+    let number = |name: &str| -> Result<f32, HcdError> {
+        let value = pdf_html_attribute(tag, name)
+            .ok_or_else(|| HcdError::InvalidBundle(format!("PDF overlay lacks {name}")))?
+            .parse::<f32>()
+            .map_err(|_| HcdError::InvalidBundle(format!("PDF overlay has invalid {name}")))?;
+        if !value.is_finite() || !(0.0..=14_400.0).contains(&value) {
+            return Err(HcdError::InvalidBundle(format!(
+                "PDF overlay {name} is outside bounds"
+            )));
+        }
+        Ok(value)
+    };
+    let x = number("data-hcd-x")?;
+    let y = number("data-hcd-y")?;
+    let width = number("data-hcd-width")?;
+    let height = number("data-hcd-height")?;
+    if width <= 0.0 || height <= 0.0 || x + width > 14_400.0 || y + height > 14_400.0 {
+        return Err(HcdError::InvalidBundle(
+            "PDF overlay has invalid dimensions".to_string(),
+        ));
+    }
+    let style = pdf_html_attribute(tag, "style")
+        .ok_or_else(|| HcdError::InvalidBundle("PDF overlay lacks style".to_string()))?;
+    let size = style
+        .split(';')
+        .find_map(|property| property.trim().strip_prefix("font-size:"))
+        .and_then(|value| value.strip_suffix("pt"))
+        .and_then(|value| value.parse::<f32>().ok())
+        .ok_or_else(|| HcdError::InvalidBundle("PDF overlay lacks point font size".to_string()))?;
+    if !size.is_finite() || !(1.0..=256.0).contains(&size) {
+        return Err(HcdError::InvalidBundle(
+            "PDF overlay font size is outside bounds".to_string(),
+        ));
+    }
+    Ok(PdfOverlayPosition { page, x, y, size })
+}
+
+fn pdf_overlay_positions(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    nodes: &[TextExtractEntry],
+) -> Result<HashMap<String, PdfOverlayPosition>, HcdError> {
+    let mut wanted: HashMap<&str, Vec<&TextExtractEntry>> = HashMap::new();
+    for node in nodes {
+        if node
+            .source
+            .paragraph_id
+            .as_deref()
+            .is_some_and(|path| path.contains("/hcd-text["))
+        {
+            wanted.entry(node.chunk_id.as_str()).or_default().push(node);
+        }
+    }
+    let mut positions = HashMap::new();
+    if wanted.is_empty() {
+        return Ok(positions);
+    }
+    for index in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, index)?;
+        for descriptor in page.chunks {
+            if let Some(chunk_nodes) = wanted.remove(descriptor.chunk_id.as_str()) {
+                let html = bundle.read_chunk_verified(&descriptor)?;
+                for node in chunk_nodes {
+                    positions.insert(node.node_id.clone(), pdf_overlay_position(&html, node)?);
+                }
+            }
+        }
+    }
+    if !wanted.is_empty() {
+        return Err(HcdError::InvalidBundle(
+            "PDF overlay chunks are missing".to_string(),
+        ));
+    }
+    Ok(positions)
+}
+
 pub(crate) fn export_pdf(
     bundle: &Bundle,
     source: &Path,
@@ -887,6 +1032,7 @@ pub(crate) fn export_pdf(
         let right_page = page_number(&right.source.part);
         (right_page, right.source.text_ordinal).cmp(&(left_page, left.source.text_ordinal))
     });
+    let overlay_positions = pdf_overlay_positions(bundle, &manifest, &nodes)?;
 
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -901,19 +1047,50 @@ pub(crate) fn export_pdf(
         })?;
         let handler = pdf_handler::PdfHandler::open(temp_path, true)
             .map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+        let mut added_text = Vec::new();
         for node in nodes {
-            let path = node.source.paragraph_id.ok_or_else(|| {
+            let path = node.source.paragraph_id.as_deref().ok_or_else(|| {
                 HcdError::InvalidBundle(format!("PDF node {} has no path", node.node_id))
             })?;
+            if path.contains("/hcd-text[") {
+                added_text.push(node);
+                continue;
+            }
             let properties = HashMap::from([("text".to_string(), node.text)]);
             let unsupported = handler
-                .set(&path, &properties)
+                .set(path, &properties)
                 .map_err(|error| HcdError::Unsupported(error.to_string()))?;
             if !unsupported.is_empty() {
                 return Err(HcdError::Unsupported(format!(
                     "PDF text replacement returned unsupported properties {unsupported:?}"
                 )));
             }
+        }
+        // Adding a text block changes the PDF content stream's text ordinals.
+        // Rewrite original mapped blocks first, then append HCD-only boxes.
+        for node in added_text {
+            let position = overlay_positions.get(&node.node_id).ok_or_else(|| {
+                HcdError::InvalidBundle(format!("PDF overlay {} is missing", node.node_id))
+            })?;
+            if node.text.is_empty() {
+                continue;
+            }
+            let properties = HashMap::from([
+                ("text".to_string(), node.text),
+                ("x".to_string(), position.x.to_string()),
+                ("y".to_string(), (position.y + 1.0).to_string()),
+                ("size".to_string(), position.size.to_string()),
+                ("forceEmbedFont".to_string(), "true".to_string()),
+            ]);
+            handler
+                .add(
+                    &format!("/page[{}]", position.page),
+                    "text",
+                    InsertPosition::Append,
+                    &properties,
+                    None,
+                )
+                .map_err(|error| HcdError::Unsupported(error.to_string()))?;
         }
         handler
             .save()

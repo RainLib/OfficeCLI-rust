@@ -291,7 +291,7 @@ unzip -p /tmp/hcd-xlsx-merge/exported.xlsx xl/worksheets/sheet3.xml | rg 'mergeC
 
 PDF, PPTX, and XLSX sessions now share the document's collaborator list and committed HCD revisions. Open the same document in two browser windows: saving a PDF/PPTX text box or an XLSX cell in one window updates the other window's revision and visible page or cell without a reload. Multiple windows with the same user ID appear as one person with a window count. Fixed-layout edits commit through the Rust patch API; Hocuspocus announces the committed revision, and each client re-reads its visible HCD objects. These formats do not merge unsaved keystrokes in Yjs: concurrent edits to the same old revision receive a patch conflict and must be retried. Read tokens can receive updates but cannot submit patches or revision announcements. The reference screenshot is `docs/screenshots/hcd-fixed-grid-collaboration.jpg`.
 
-For PDF, **插入 → 新增文字框** places a plain-text box on the original page. Type in place, save, then click the box again to edit it. The `hcd-patch/5` `pdf.text.insert` operation assigns a stable node ID and records page coordinates; PDF export draws the box at those coordinates. The rendered fixture export is at `docs/screenshots/hcd-pdf-text-insert-export.png`. This operation adds text to an existing page; it does not add a PDF page. Lines and tables in a raster-backed PDF remain page artwork rather than editable table cells, so PDF cell merging is not supported by this operation.
+For PDF, **插入 → 新增文字框** places a plain-text box on the original page. Type in place, save, then click the box again to edit it. The `hcd-patch/5` `pdf.text.insert` operation assigns a stable node ID and records page coordinates; both source-backed and source-free PDF export draw the box at those coordinates. Source-backed export now adds the new PDF text object after rewriting mapped source text; older builds could report success while omitting the new box. The rendered fixture export is at `docs/screenshots/hcd-pdf-text-insert-export.png`. This operation adds text to an existing page; it does not add a PDF page. Lines and tables in a raster-backed PDF remain page artwork rather than editable table cells, so PDF cell merging is not supported by this operation.
 
 ## Storage and save flow
 
@@ -326,7 +326,7 @@ pdftotext -layout /tmp/hcd-pdf-visual-r1.pdf - | head -1
 
 The first extracted line should start with `Edited:`. The rendered page is shown in `docs/screenshots/hcd-edited-pdf-visual-export.jpg`.
 
-To verify positioned PDF text insertion and later editing without the source PDF:
+To verify positioned PDF text insertion, later editing, and export with or without the source PDF:
 
 ```bash
 cargo test -p officecli --test hdoc_multi_format pdf_inserted_text_box_can_be_reedited_and_exported_without_source
