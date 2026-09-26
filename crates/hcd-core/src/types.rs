@@ -329,6 +329,14 @@ pub enum PatchOperation {
         formula: String,
         precondition: NodePrecondition,
     },
+    /// Create a native formula in an empty worksheet cell.
+    #[serde(rename = "xlsx.formula.create", rename_all = "camelCase")]
+    XlsxFormulaCreate {
+        sheet_id: String,
+        row: u32,
+        column: u32,
+        formula: String,
+    },
     /// Materialize the next empty worksheet row without shifting existing cells.
     #[serde(rename = "xlsx.row.append", rename_all = "camelCase")]
     XlsxRowAppend { sheet_id: String, after_row: u32 },
@@ -411,6 +419,7 @@ impl PatchOperation {
             | Self::PdfTextInsert { .. }
             | Self::PptxTextInsert { .. }
             | Self::XlsxCellSet { .. }
+            | Self::XlsxFormulaCreate { .. }
             | Self::XlsxRowAppend { .. }
             | Self::XlsxRowInsert { .. }
             | Self::XlsxRowDelete { .. }
@@ -433,6 +442,7 @@ impl PatchOperation {
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxFormulaSet { .. }
+                | Self::XlsxFormulaCreate { .. }
                 | Self::XlsxRowAppend { .. }
                 | Self::XlsxRowInsert { .. }
                 | Self::XlsxRowDelete { .. }

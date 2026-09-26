@@ -4724,6 +4724,7 @@ pub(crate) fn export_xlsx(
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut formula_replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut created_formulas: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
     let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
     for revision in 1..=manifest.revision {
@@ -4774,13 +4775,20 @@ pub(crate) fn export_xlsx(
                         node.node_id
                     ))
                 })?;
-            formula_replacements
-                .entry(node.source.part.clone())
-                .or_default()
-                .insert(
-                    node.source.source_cell_ref.unwrap_or(cell),
-                    formula.to_string(),
-                );
+            if node.source.created_in_hcd {
+                created_formulas
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(cell, formula.to_string());
+            } else {
+                formula_replacements
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(
+                        node.source.source_cell_ref.unwrap_or(cell),
+                        formula.to_string(),
+                    );
+            }
             replacements.entry(node.source.part).or_default();
             continue;
         }
@@ -4805,7 +4813,8 @@ pub(crate) fn export_xlsx(
     let workbook = workbook_info(&mut archive)?;
     let expanded_shared_groups =
         expand_shared_formula_replacements(&mut archive, &mut formula_replacements)?;
-    let chart_caches_may_be_stale = !formula_replacements.is_empty()
+    let chart_caches_may_be_stale = (!formula_replacements.is_empty()
+        || !created_formulas.is_empty())
         && archive
             .entries()
             .iter()
@@ -4838,6 +4847,7 @@ pub(crate) fn export_xlsx(
             HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical row heights"))
         })?;
         let inserted = created_cells.get(part).cloned().unwrap_or_default();
+        let inserted_formulas = created_formulas.get(part).cloned().unwrap_or_default();
         let formulas = formula_replacements.get(part).cloned().unwrap_or_default();
         let shifts = row_insertions.get(part).cloned().unwrap_or_default();
         let column_shifts = column_shifts.get(part).cloned().unwrap_or_default();
@@ -4850,6 +4860,7 @@ pub(crate) fn export_xlsx(
                     values,
                     &formulas,
                     &inserted,
+                    &inserted_formulas,
                     merges,
                     rows,
                     widths,
@@ -4863,7 +4874,7 @@ pub(crate) fn export_xlsx(
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
     }
-    if !formula_replacements.is_empty() {
+    if !formula_replacements.is_empty() || !created_formulas.is_empty() {
         let path = scratch.path().join("workbook-recalculate.xml");
         let source_workbook = archive
             .read_control_part("xl/workbook.xml", MAX_CONTROL_BYTES)
@@ -5243,6 +5254,7 @@ fn rewrite_worksheet(
     replacements: &BTreeMap<String, String>,
     formulas: &BTreeMap<String, String>,
     created_cells: &BTreeMap<String, String>,
+    created_formulas: &BTreeMap<String, String>,
     merges: &BTreeSet<String>,
     canonical_rows: &BTreeSet<u32>,
     column_widths: &BTreeMap<u32, f64>,
@@ -5259,7 +5271,8 @@ fn rewrite_worksheet(
     let mut seen_original = BTreeSet::new();
     let mut seen_formulas = BTreeSet::new();
     let mut seen_created = BTreeSet::new();
-    let mut replacement_rows: BTreeMap<u32, BTreeMap<u32, (String, String)>> = BTreeMap::new();
+    let mut replacement_rows: BTreeMap<u32, BTreeMap<u32, (String, String, bool)>> =
+        BTreeMap::new();
     for (reference, text) in created_cells {
         let (row, column) = cell_coordinates(reference).ok_or_else(|| {
             HcdError::InvalidBundle(format!("invalid XLSX cell locator {reference}"))
@@ -5267,7 +5280,22 @@ fn rewrite_worksheet(
         if replacement_rows
             .entry(row)
             .or_default()
-            .insert(column, (reference.clone(), text.clone()))
+            .insert(column, (reference.clone(), text.clone(), false))
+            .is_some()
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "duplicate XLSX cell locator {reference}"
+            )));
+        }
+    }
+    for (reference, formula) in created_formulas {
+        let (row, column) = cell_coordinates(reference).ok_or_else(|| {
+            HcdError::InvalidBundle(format!("invalid XLSX formula locator {reference}"))
+        })?;
+        if replacement_rows
+            .entry(row)
+            .or_default()
+            .insert(column, (reference.clone(), formula.clone(), true))
             .is_some()
         {
             return Err(HcdError::InvalidBundle(format!(
@@ -5293,6 +5321,11 @@ fn rewrite_worksheet(
         .filter_map(|reference| cell_coordinates(reference).map(|(_, column)| column))
         .chain(
             created_cells
+                .keys()
+                .filter_map(|reference| cell_coordinates(reference).map(|(_, column)| column)),
+        )
+        .chain(
+            created_formulas
                 .keys()
                 .filter_map(|reference| cell_coordinates(reference).map(|(_, column)| column)),
         )
@@ -5590,13 +5623,17 @@ fn rewrite_worksheet(
                     }
                 }
                 let shifted = rewrite_xlsx_address_attribute(start, &shifted_reference)?;
-                if let Some((created_ref, text)) = created_here {
+                if let Some((created_ref, text, is_formula)) = created_here {
                     if replacements.contains_key(&reference) {
                         return Err(HcdError::InvalidBundle(format!(
                             "XLSX cell {reference} is both created and replaced"
                         )));
                     }
-                    write_inline_cell(&mut writer, &shifted, &text)?;
+                    if is_formula {
+                        write_formula_cell(&mut writer, &shifted, &text)?;
+                    } else {
+                        write_inline_cell(&mut writer, &shifted, &text)?;
+                    }
                     seen_created.insert(created_ref);
                     skip_depth = 1;
                 } else if let Some(formula) = formulas.get(&reference) {
@@ -5636,13 +5673,17 @@ fn rewrite_worksheet(
                     }
                 }
                 let shifted = rewrite_xlsx_address_attribute(empty, &shifted_reference)?;
-                if let Some((created_ref, text)) = created_here {
+                if let Some((created_ref, text, is_formula)) = created_here {
                     if replacements.contains_key(&reference) {
                         return Err(HcdError::InvalidBundle(format!(
                             "XLSX cell {reference} is both created and replaced"
                         )));
                     }
-                    write_inline_cell(&mut writer, &shifted, &text)?;
+                    if is_formula {
+                        write_formula_cell(&mut writer, &shifted, &text)?;
+                    } else {
+                        write_inline_cell(&mut writer, &shifted, &text)?;
+                    }
                     seen_created.insert(created_ref);
                 } else if let Some(formula) = formulas.get(&reference) {
                     write_formula_cell(&mut writer, &shifted, formula)?;
@@ -5702,7 +5743,7 @@ fn rewrite_worksheet(
         ));
     }
     if seen_original.len() != replacements.len()
-        || seen_created.len() != created_cells.len()
+        || seen_created.len() != created_cells.len() + created_formulas.len()
         || seen_formulas.len() != formulas.len()
     {
         let missing: Vec<_> = replacements
@@ -5710,6 +5751,11 @@ fn rewrite_worksheet(
             .filter(|cell| !seen_original.contains(*cell))
             .chain(
                 created_cells
+                    .keys()
+                    .filter(|cell| !seen_created.contains(*cell)),
+            )
+            .chain(
+                created_formulas
                     .keys()
                     .filter(|cell| !seen_created.contains(*cell)),
             )
@@ -6153,7 +6199,7 @@ fn rewrite_xlsx_row_attributes(
 fn write_missing_xlsx_rows(
     writer: &mut Writer<impl Write>,
     canonical_rows: &BTreeSet<u32>,
-    replacement_rows: &mut BTreeMap<u32, BTreeMap<u32, (String, String)>>,
+    replacement_rows: &mut BTreeMap<u32, BTreeMap<u32, (String, String, bool)>>,
     last_row: u32,
     before_row: u32,
     row_name: &str,
@@ -6332,7 +6378,7 @@ fn qualified_child_name(parent: &[u8], child: &str) -> String {
 
 fn flush_new_xlsx_cells(
     writer: &mut Writer<impl Write>,
-    pending: &mut BTreeMap<u32, (String, String)>,
+    pending: &mut BTreeMap<u32, (String, String, bool)>,
     before_column: Option<u32>,
     cell_name: &str,
     seen: &mut BTreeSet<String>,
@@ -6341,10 +6387,14 @@ fn flush_new_xlsx_cells(
         if before_column.is_some_and(|before| column >= before) {
             break;
         }
-        let (_, (reference, text)) = pending.pop_first().expect("first key exists");
+        let (_, (reference, text, is_formula)) = pending.pop_first().expect("first key exists");
         let mut cell = BytesStart::new(cell_name);
         cell.push_attribute(("r", reference.as_str()));
-        write_inline_cell(writer, &cell, &text)?;
+        if is_formula {
+            write_formula_cell(writer, &cell, &text)?;
+        } else {
+            write_inline_cell(writer, &cell, &text)?;
+        }
         seen.insert(reference);
     }
     Ok(())
@@ -6774,6 +6824,107 @@ mod tests {
             ..patch
         };
         assert!(hcd_core::apply_patch(&bundle, &stale, 1).is_err());
+    }
+
+    #[test]
+    fn creates_formula_in_blank_row_tail_and_exports_native_formula() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("formulas.xlsx");
+        let bundle_path = temp.path().join("formulas.hcd");
+        let exported = temp.path().join("created.xlsx");
+        create_formula_edit_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("formula-create-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_21.to_string(),
+            document_id: "formula-create-doc".to_string(),
+            patch_id: "create-e1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaCreate {
+                sheet_id: sheet_id.clone(),
+                row: 1,
+                column: 5,
+                formula: "=IF(A1>0,\"yes\",\"no\")".to_string(),
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let latest = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&latest, 0).unwrap().chunks[0];
+        let html = bundle.read_chunk(descriptor).unwrap();
+        assert!(
+            html.contains("data-hcd-cell=\"E1\" data-hcd-column=\"5\" data-hcd-formula=\"true\"")
+        );
+        assert!(html.contains(
+            "data-hcd-formula-expression=\"=IF(A1&gt;0,&quot;yes&quot;,&quot;no&quot;)\""
+        ));
+        let node = bundle
+            .read_map(descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("E1"))
+            .unwrap();
+        assert!(node.source.created_in_hcd);
+        assert!(!node.source.editable);
+        assert!(hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                patch_id: "duplicate-e1".to_string(),
+                base_revision: 1,
+                ..patch.clone()
+            },
+            1
+        )
+        .is_err());
+        let edit = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_20.to_string(),
+            patch_id: "edit-e1".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxFormulaSet {
+                node_id: node.node_id,
+                sheet_id,
+                formula: "=A1*B1".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+            ..patch
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &edit, 1).unwrap().revision,
+            2
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("<c r=\"E1\"><f>A1*B1</f><v/></c>"));
+        assert!(read_zip_entry(&exported, "xl/workbook.xml").contains("fullCalcOnLoad=\"1\""));
+        let original = temp.path().join("history.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &original,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(!read_zip_entry(&original, "xl/worksheets/sheet1.xml").contains("r=\"E1\""));
     }
 
     #[test]
@@ -9023,7 +9174,7 @@ mod tests {
 
     #[test]
     fn worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows() {
-        let source = br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Original</x:t></x:is></x:c><x:c r="B1" s="3"/><x:c r="D1" t="inlineStr"><x:is><x:t>Right</x:t></x:is></x:c></x:row><x:row r="2"/></x:sheetData></x:worksheet>"#;
+        let source = br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Original</x:t></x:is></x:c><x:c r="B1" s="3"/><x:c r="D1" t="inlineStr"><x:is><x:t>Right</x:t></x:is></x:c><x:c r="E1" s="4"/></x:row><x:row r="2"/></x:sheetData></x:worksheet>"#;
         let replacements = BTreeMap::new();
         let created = BTreeMap::from([
             ("B1".to_string(), "Styled".to_string()),
@@ -9037,13 +9188,14 @@ mod tests {
             &replacements,
             &BTreeMap::new(),
             &created,
+            &BTreeMap::from([("E1".to_string(), "A1+1".to_string())]),
             &BTreeSet::new(),
             &BTreeSet::from([1, 2]),
             &BTreeMap::from([(2, 24.0)]),
             &BTreeMap::new(),
             &[],
             &[],
-            4,
+            5,
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();
@@ -9055,6 +9207,7 @@ mod tests {
             xml.contains("<x:c r=\"C1\" t=\"inlineStr\"><x:is><x:t>Inserted</x:t></x:is></x:c>")
         );
         assert!(xml.contains("<x:row r=\"2\"><x:c r=\"A2\" t=\"inlineStr\"><x:is><x:t>New row value</x:t></x:is></x:c></x:row>"));
+        assert!(xml.contains("<x:c r=\"E1\" s=\"4\"><x:f>A1+1</x:f><x:v/></x:c>"));
     }
 
     #[test]
