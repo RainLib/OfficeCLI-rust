@@ -395,6 +395,10 @@ pub struct RevisionRecord {
     pub index_prefix: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_root_href: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_page_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<usize>,
     /// Immutable asset index used by this revision. Older bundles omit this
     /// field and resolve to the original `assets/index.json`.
     #[serde(default = "default_asset_index_href")]
@@ -406,6 +410,12 @@ pub struct RevisionRecord {
     pub dirty_chunk_ids: Vec<String>,
     #[serde(default)]
     pub dirty_source_parts: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub structural_change: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn default_asset_index_href() -> String {

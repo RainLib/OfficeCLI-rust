@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:4",
+  "title": "HCD semantic block patch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/4" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 10000,
+      "items": { "oneOf": [
+        { "$ref": "#/$defs/insert" }, { "$ref": "#/$defs/delete" },
+        { "$ref": "#/$defs/move" }, { "$ref": "#/$defs/replace" }
+      ] }
+    }
+  },
+  "$defs": {
+    "nodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "precondition": {
+      "type": "object", "additionalProperties": false, "required": ["blockHash"],
+      "properties": { "blockHash": { "$ref": "#/$defs/hash" } }
+    },
+    "inline": {
+      "type": "object", "additionalProperties": false, "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 1048576 },
+        "bold": { "type": "boolean" }, "italic": { "type": "boolean" },
+        "link": { "type": "string", "maxLength": 2048, "pattern": "^(https?://|mailto:)" }
+      }
+    },
+    "block": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "inlines"],
+      "properties": {
+        "kind": { "enum": ["paragraph", "heading", "list_item"] },
+        "level": { "type": "integer", "minimum": 0, "maximum": 6 },
+        "inlines": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/inline" } }
+      }
+    },
+    "insert": {
+      "type": "object", "additionalProperties": false, "required": ["op", "block", "afterBlockId"],
+      "properties": { "op": { "const": "block.insert" }, "afterBlockId": { "oneOf": [ { "$ref": "#/$defs/nodeId" }, { "type": "null" } ] }, "block": { "$ref": "#/$defs/block" } }
+    },
+    "delete": {
+      "type": "object", "additionalProperties": false, "required": ["op", "blockId", "precondition"],
+      "properties": { "op": { "const": "block.delete" }, "blockId": { "$ref": "#/$defs/nodeId" }, "precondition": { "$ref": "#/$defs/precondition" } }
+    },
+    "move": {
+      "type": "object", "additionalProperties": false, "required": ["op", "blockId", "afterBlockId", "precondition"],
+      "properties": { "op": { "const": "block.move" }, "blockId": { "$ref": "#/$defs/nodeId" }, "afterBlockId": { "oneOf": [ { "$ref": "#/$defs/nodeId" }, { "type": "null" } ] }, "precondition": { "$ref": "#/$defs/precondition" } }
+    },
+    "replace": {
+      "type": "object", "additionalProperties": false, "required": ["op", "blockId", "block", "precondition"],
+      "properties": { "op": { "const": "block.replace" }, "blockId": { "$ref": "#/$defs/nodeId" }, "block": { "$ref": "#/$defs/block" }, "precondition": { "$ref": "#/$defs/precondition" } }
+    }
+  }
+}

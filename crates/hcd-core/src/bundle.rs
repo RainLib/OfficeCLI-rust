@@ -96,7 +96,7 @@ impl Bundle {
         Ok(serde_json::from_slice(&decoded)?)
     }
 
-    fn index_page_href(&self, root: &str, page: usize) -> Result<String, HcdError> {
+    pub(crate) fn index_page_href(&self, root: &str, page: usize) -> Result<String, HcdError> {
         let mut href = root.to_string();
         for _ in 0..12 {
             let node: IndexTreeNode = self.read_index_object(&href)?;
@@ -697,11 +697,14 @@ impl BundleWriter {
             annotation_root_hash: manifest.annotation_root_hash.clone(),
             index_prefix: manifest.index_prefix.clone(),
             index_root_href: manifest.index_root_href.clone(),
+            index_page_count: Some(manifest.index_page_count),
+            chunk_count: Some(manifest.chunk_count),
             asset_index_href: "assets/index.json".to_string(),
             created_at_epoch_ms: now_epoch_ms(),
             dirty_node_ids: Vec::new(),
             dirty_chunk_ids: Vec::new(),
             dirty_source_parts: Vec::new(),
+            structural_change: false,
         };
         atomic_write_json(
             &self.root.join("revisions/00000000000000000000.json"),

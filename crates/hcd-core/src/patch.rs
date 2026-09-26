@@ -413,11 +413,14 @@ pub fn apply_patch(
         annotation_root_hash,
         index_prefix: manifest.index_prefix.clone(),
         index_root_href: manifest.index_root_href.clone(),
+        index_page_count: Some(manifest.index_page_count),
+        chunk_count: Some(manifest.chunk_count),
         asset_index_href,
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: result.dirty_node_ids.clone(),
         dirty_chunk_ids: result.dirty_chunk_ids.clone(),
         dirty_source_parts: result.dirty_source_parts.clone(),
+        structural_change: false,
     };
     bundle.write_revision(&record)?;
     bundle.write_manifest(&manifest)?;
