@@ -292,6 +292,12 @@ pub enum PatchOperation {
     /// Insert a blank row before an existing row, shifting later rows down.
     #[serde(rename = "xlsx.row.insert", rename_all = "camelCase")]
     XlsxRowInsert { sheet_id: String, before_row: u32 },
+    /// Insert a blank column before an existing column, shifting later cells right.
+    #[serde(rename = "xlsx.column.insert", rename_all = "camelCase")]
+    XlsxColumnInsert {
+        sheet_id: String,
+        before_column: u32,
+    },
     /// Remove an empty row appended after the source worksheet's final row.
     #[serde(rename = "xlsx.row.remove-last", rename_all = "camelCase")]
     XlsxRowRemoveLast { sheet_id: String, row: u32 },
@@ -348,6 +354,7 @@ impl PatchOperation {
             | Self::XlsxCellSet { .. }
             | Self::XlsxRowAppend { .. }
             | Self::XlsxRowInsert { .. }
+            | Self::XlsxColumnInsert { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. } => None,
         }
@@ -363,6 +370,7 @@ impl PatchOperation {
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxRowAppend { .. }
                 | Self::XlsxRowInsert { .. }
+                | Self::XlsxColumnInsert { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
                 | Self::NodeStyle { .. }
@@ -503,6 +511,9 @@ pub struct RevisionRecord {
     /// Sequential row insertions, expressed in the worksheet coordinates at each revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_row_insertions: Vec<GridRowInsertion>,
+    /// Sequential column insertions in worksheet coordinates at each revision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grid_column_insertions: Vec<GridColumnInsertion>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
 }
@@ -512,6 +523,13 @@ pub struct RevisionRecord {
 pub struct GridRowInsertion {
     pub sheet_part: String,
     pub before_row: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridColumnInsertion {
+    pub sheet_part: String,
+    pub before_column: u32,
 }
 
 fn is_false(value: &bool) -> bool {

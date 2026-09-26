@@ -98,6 +98,16 @@ The **插入 → 在末尾新增行** action uses `hcd-patch/8` to append one em
 
 The **插入 → 在选中行前插入** action uses `hcd-patch/12` to insert an empty row before an existing row. HCD keeps mapped node IDs stable, records the original source cell addresses, shifts later rows across chunk windows, and retains historical revisions. Source-backed XLSX export moves the original OOXML rows and cell references, then writes new HCD cells at their current addresses. This first middle-row operation accepts plain value workbooks; formula, merge, drawing, chart, validation, table, defined-name, and coordinate-dependent view references need separate reference rewriting. The browser screenshot is `docs/screenshots/hcd-xlsx-insert-middle-row.png`.
 
+The **插入 → 在选中列前插入** action uses `hcd-patch/13` to insert an empty column before an existing column in the same plain value workbook scope. HCD shifts the visible cells and source anchors across all row windows; source-backed export moves original OOXML cell addresses and materializes newly edited cells in the inserted column. Explicit column widths and other coordinate-dependent features are rejected until they can be moved safely. The browser screenshot is `docs/screenshots/hcd-xlsx-insert-middle-column.png`.
+
+To reproduce the column action with the same `/tmp/hcd-middle-row-real.xlsx` source from the commands below, import it with a fresh document ID, select B1, choose **插入 → 在选中列前插入**, validate, and download XLSX. `openpyxl` should report three rows and thirteen columns; B1:B3 should be empty, and every source value in B:L should appear in C:M. The browser download was reopened and all 36 source values matched their shifted addresses. The focused checks are:
+
+```bash
+cargo test -p hcd-formats middle_column_insertion_preserves_ids_history_and_exported_addresses
+cargo test -p hcd-formats middle_column_insertion_shifts_all_row_windows
+cargo test -p hcd-formats middle_column_insertion_rejects_explicit_source_widths
+```
+
 Reproduce with `open-review-usage-2026-09.csv` converted to `/tmp/hcd-middle-row-real.xlsx` using `openpyxl` (three rows, twelve columns):
 
 ```bash

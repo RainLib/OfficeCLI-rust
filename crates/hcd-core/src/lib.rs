@@ -50,6 +50,7 @@ pub const HCD_PATCH_SCHEMA_VERSION_9: &str = "hcd-patch/9";
 pub const HCD_PATCH_SCHEMA_VERSION_10: &str = "hcd-patch/10";
 pub const HCD_PATCH_SCHEMA_VERSION_11: &str = "hcd-patch/11";
 pub const HCD_PATCH_SCHEMA_VERSION_12: &str = "hcd-patch/12";
+pub const HCD_PATCH_SCHEMA_VERSION_13: &str = "hcd-patch/13";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
 pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
@@ -64,6 +65,7 @@ pub const HCD_PATCH_SCHEMA_V9_JSON: &str = include_str!("../schemas/hcd-patch-9.
 pub const HCD_PATCH_SCHEMA_V10_JSON: &str = include_str!("../schemas/hcd-patch-10.schema.json");
 pub const HCD_PATCH_SCHEMA_V11_JSON: &str = include_str!("../schemas/hcd-patch-11.schema.json");
 pub const HCD_PATCH_SCHEMA_V12_JSON: &str = include_str!("../schemas/hcd-patch-12.schema.json");
+pub const HCD_PATCH_SCHEMA_V13_JSON: &str = include_str!("../schemas/hcd-patch-13.schema.json");
 pub const DEFAULT_CHUNK_SOFT_BYTES: usize = 512 * 1024;
 pub const DEFAULT_CHUNK_BLOCKS: usize = 256;
 pub const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -100,6 +102,8 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V11_JSON).unwrap();
         let patch_v12: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V12_JSON).unwrap();
+        let patch_v13: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V13_JSON).unwrap();
         assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
@@ -113,6 +117,7 @@ mod schema_tests {
         assert_eq!(patch_v10["$id"], "urn:officecli:hcd-patch:10");
         assert_eq!(patch_v11["$id"], "urn:officecli:hcd-patch:11");
         assert_eq!(patch_v12["$id"], "urn:officecli:hcd-patch:12");
+        assert_eq!(patch_v13["$id"], "urn:officecli:hcd-patch:13");
     }
 
     #[test]

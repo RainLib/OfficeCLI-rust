@@ -708,6 +708,7 @@ impl BundleWriter {
             dirty_source_parts: Vec::new(),
             dirty_grid_parts: Vec::new(),
             grid_row_insertions: Vec::new(),
+            grid_column_insertions: Vec::new(),
             structural_change: false,
         };
         atomic_write_json(
