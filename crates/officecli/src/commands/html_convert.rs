@@ -151,6 +151,7 @@ struct SemanticHtml {
     links: Vec<SemanticLink>,
     table_links: Vec<SemanticTableLink>,
     merges: Vec<SemanticMerge>,
+    table_row_heights: HashMap<usize, HashMap<usize, f64>>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
 }
@@ -235,6 +236,7 @@ struct ActiveLink {
 #[derive(Default)]
 struct TableBuilder {
     rows: Vec<Vec<String>>,
+    row_heights: HashMap<usize, f64>,
     row: Vec<String>,
     cell: Option<String>,
     cell_count: usize,
@@ -274,6 +276,7 @@ struct LogicalTableBuilder {
     next_row: usize,
     column_count: usize,
     rows: Vec<Vec<String>>,
+    row_heights: HashMap<usize, f64>,
     cell_count: usize,
     links: Vec<TablePendingLink>,
 }
@@ -1083,6 +1086,20 @@ impl HtmlParser {
                             ));
                         }
                         table.rows.resize_with(source_row - 1, Vec::new);
+                        if let Some(raw_height) = tag.attributes.get("data-hcd-height-points") {
+                            let height = raw_height.parse::<f64>().map_err(|_| {
+                                HandlerError::InvalidArgument(
+                                    "HCD grid row height is invalid".to_string(),
+                                )
+                            })?;
+                            if !height.is_finite() || !(0.0..=409.0).contains(&height) {
+                                return Err(HandlerError::InvalidArgument(
+                                    "HCD grid row height must be between 0 and 409 points"
+                                        .to_string(),
+                                ));
+                            }
+                            table.row_heights.insert(source_row, height);
+                        }
                     }
                     table.row_open = true;
                 }
@@ -1266,6 +1283,7 @@ impl HtmlParser {
     fn finish_table(&mut self, table: TableBuilder) -> Result<(), HandlerError> {
         let TableBuilder {
             mut rows,
+            row_heights,
             cell_count,
             links,
             fragment,
@@ -1295,6 +1313,11 @@ impl HtmlParser {
             if !rows.is_empty() {
                 let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(rows))?;
+                if !row_heights.is_empty() {
+                    self.document
+                        .table_row_heights
+                        .insert(block_index, row_heights);
+                }
                 self.document
                     .table_links
                     .extend(links.into_iter().map(|link| SemanticTableLink {
@@ -1349,6 +1372,7 @@ impl HtmlParser {
                 next_row: fragment.row_start,
                 column_count: fragment.column_count,
                 rows: Vec::new(),
+                row_heights: HashMap::new(),
                 cell_count: 0,
                 links: Vec::new(),
             });
@@ -1387,6 +1411,11 @@ impl HtmlParser {
         }
         let row_offset = logical.rows.len();
         logical.rows.extend(rows);
+        logical.row_heights.extend(
+            row_heights
+                .into_iter()
+                .map(|(row, height)| (row + row_offset, height)),
+        );
         logical.links.extend(links.into_iter().map(|mut link| {
             link.row = link.row.saturating_add(row_offset);
             link
@@ -1411,6 +1440,11 @@ impl HtmlParser {
             }
             if !logical.rows.is_empty() {
                 let block_index = self.document.blocks.len();
+                if !logical.row_heights.is_empty() {
+                    self.document
+                        .table_row_heights
+                        .insert(block_index, logical.row_heights.clone());
+                }
                 self.push_block(HtmlBlock::Table(logical.rows))?;
                 self.document
                     .table_links
@@ -1761,14 +1795,19 @@ fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
                     );
                     merges.push(format!("{start}:{end}"));
                 }
-                for cells in rows {
+                for (table_row, cells) in rows.iter().enumerate() {
                     if cells.len() > MAX_EXCEL_COLUMNS {
                         return Err(HandlerError::InvalidArgument(format!(
                             "HTML table has {} columns; XLSX maximum is {MAX_EXCEL_COLUMNS}",
                             cells.len()
                         )));
                     }
-                    append_xlsx_row(&mut worksheet, row, cells)?;
+                    let height = document
+                        .table_row_heights
+                        .get(&block_index)
+                        .and_then(|heights| heights.get(&(table_row + 1)))
+                        .copied();
+                    append_xlsx_row(&mut worksheet, row, cells, height)?;
                     row = row.saturating_add(1);
                 }
             }
@@ -1786,14 +1825,14 @@ fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
                     row = row.saturating_add(row_height);
                 } else {
                     for value in block_lines(block) {
-                        append_xlsx_row(&mut worksheet, row, &[value])?;
+                        append_xlsx_row(&mut worksheet, row, &[value], None)?;
                         row = row.saturating_add(1);
                     }
                 }
             }
             other => {
                 for value in block_lines(other) {
-                    append_xlsx_row(&mut worksheet, row, &[value])?;
+                    append_xlsx_row(&mut worksheet, row, &[value], None)?;
                     row = row.saturating_add(1);
                 }
             }
@@ -1850,8 +1889,14 @@ fn append_xlsx_row(
     worksheet: &mut String,
     row: usize,
     cells: &[String],
+    height: Option<f64>,
 ) -> Result<(), HandlerError> {
-    worksheet.push_str(&format!("<row r=\"{row}\">"));
+    match height {
+        Some(height) => worksheet.push_str(&format!(
+            "<row r=\"{row}\" ht=\"{height:.2}\" customHeight=\"1\">"
+        )),
+        None => worksheet.push_str(&format!("<row r=\"{row}\">")),
+    }
     for (index, value) in cells.iter().enumerate() {
         // A blank HTML table cell has no spreadsheet value. Keep its address
         // empty instead of creating an explicit zero-length inline string.
@@ -3408,6 +3453,35 @@ mod tests {
         assert!(xml.contains("<c r=\"C4\" t=\"inlineStr\""), "{xml}");
         assert!(!xml.contains("<c r=\"B1\""), "{xml}");
         assert!(xml.contains("<row r=\"3\"></row>"), "{xml}");
+    }
+
+    #[test]
+    fn semantic_xlsx_preserves_hcd_grid_row_heights_after_sparse_rows() {
+        let document = parse_html(
+            r#"<p>Report</p><table class="hcd-grid"><tr data-hcd-row="1"><td data-hcd-column="1">First</td></tr><tr data-hcd-row="3" data-hcd-height-points="60.00"><td data-hcd-column="1">Tall</td></tr></table>"#,
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("heights.xlsx");
+        export_xlsx(&document, &output).unwrap();
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), true).unwrap();
+        let xml = package.read_part_xml("xl/worksheets/sheet1.xml").unwrap();
+        assert!(
+            xml.contains("<row r=\"4\" ht=\"60.00\" customHeight=\"1\">"),
+            "{xml}"
+        );
+        assert!(xml.contains("<row r=\"3\"></row>"), "{xml}");
+        assert!(xml.contains("<c r=\"A4\" t=\"inlineStr\""), "{xml}");
+    }
+
+    #[test]
+    fn semantic_xlsx_rejects_invalid_hcd_grid_row_height() {
+        for height in ["NaN", "-1", "410", "text"] {
+            let html = format!(
+                "<table class=\"hcd-grid\"><tr data-hcd-row=\"1\" data-hcd-height-points=\"{height}\"><td>Cell</td></tr></table>"
+            );
+            assert!(parse_html(&html).is_err(), "{height}");
+        }
     }
 
     #[test]
