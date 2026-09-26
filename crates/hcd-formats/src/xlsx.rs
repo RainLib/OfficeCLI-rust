@@ -7385,6 +7385,234 @@ mod tests {
     }
 
     #[test]
+    fn merges_blank_anchor_and_unmerges_with_source_backed_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("blank-merge.hcd");
+        let merged_export = temp.path().join("merged.xlsx");
+        let edited_export = temp.path().join("edited.xlsx");
+        let split_export = temp.path().join("split.xlsx");
+        create_plain_rows_fixture(&source, 4);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("blank-merge-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let first = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = first.grid.as_ref().unwrap().sheet_id.clone();
+        let merge = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_26.to_string(),
+            document_id: "blank-merge-doc".to_string(),
+            patch_id: "merge-empty-b2-c3".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxMergeBlank {
+                sheet_id: sheet_id.clone(),
+                start_row: 2,
+                start_column: 2,
+                end_row: 3,
+                end_column: 3,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &merge, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let merged = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+        assert!(bundle
+            .read_chunk(merged)
+            .unwrap()
+            .contains("data-hcd-merge=\"B2:C3\""));
+        let anchor = bundle
+            .read_map(merged)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("B2"))
+            .unwrap();
+        assert!(anchor.source.created_in_hcd);
+        export_xlsx(&bundle, &source, &merged_export, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&merged_export, "xl/worksheets/sheet1.xml")
+            .contains("mergeCell ref=\"B2:C3\""));
+
+        let fill = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.to_string(),
+            patch_id: "fill-blank-anchor".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::TextSplice {
+                node_id: anchor.node_id.clone(),
+                start: 0,
+                delete_count: 0,
+                insert_text: "Merged note".to_string(),
+                precondition: hcd_core::NodePrecondition {
+                    node_hash: anchor.node_hash,
+                },
+            }],
+            ..merge.clone()
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &fill, 1).unwrap().revision,
+            2
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &edited_export, &ExportOptions::default()).unwrap();
+        let edited_xml = read_zip_entry(&edited_export, "xl/worksheets/sheet1.xml");
+        assert!(edited_xml.contains("<c r=\"B2\""));
+        assert!(edited_xml.contains("<t>Merged note</t>"));
+        let head = bundle.manifest().unwrap();
+        let edited = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+        let edited_anchor = bundle
+            .read_map(edited)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("B2"))
+            .unwrap();
+
+        let unmerge = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_11.to_string(),
+            patch_id: "split-empty-b2-c3".to_string(),
+            base_revision: 2,
+            operations: vec![PatchOperation::XlsxUnmerge {
+                node_id: edited_anchor.node_id,
+                sheet_id,
+                start_row: 2,
+                start_column: 2,
+                end_row: 3,
+                end_column: 3,
+                precondition: hcd_core::NodePrecondition {
+                    node_hash: edited_anchor.node_hash,
+                },
+            }],
+            ..merge
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &unmerge, 2)
+                .unwrap()
+                .revision,
+            3
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &split_export, &ExportOptions::default()).unwrap();
+        assert!(!read_zip_entry(&split_export, "xl/worksheets/sheet1.xml")
+            .contains("mergeCell ref=\"B2:C3\""));
+    }
+
+    #[test]
+    fn merges_sparse_blank_cells_beyond_the_rendered_row_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("sparse-merge.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        create_plain_rows_fixture(&source, 4);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sparse-merge-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let first = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = first.grid.as_ref().unwrap().sheet_id.clone();
+        assert!(!bundle
+            .read_chunk(first)
+            .unwrap()
+            .contains("data-hcd-column=\"5\""));
+        let merge = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_26.to_string(),
+            document_id: "sparse-merge-doc".to_string(),
+            patch_id: "merge-sparse-e2-f3".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxMergeBlank {
+                sheet_id,
+                start_row: 2,
+                start_column: 5,
+                end_row: 3,
+                end_column: 6,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &merge, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let chunk = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+        assert!(bundle
+            .read_chunk(chunk)
+            .unwrap()
+            .contains("data-hcd-merge=\"E2:F3\""));
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&exported, "xl/worksheets/sheet1.xml")
+            .contains("mergeCell ref=\"E2:F3\""));
+    }
+
+    #[test]
+    fn blank_merge_rejects_nonempty_and_overlapping_cells_without_advancing_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("blank-merge.hcd");
+        create_plain_rows_fixture(&source, 4);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("blank-merge-guard"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let merge = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_26.to_string(),
+            document_id: "blank-merge-guard".to_string(),
+            patch_id: "blank-merge-b2-c3".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxMergeBlank {
+                sheet_id,
+                start_row: 2,
+                start_column: 2,
+                end_row: 3,
+                end_column: 3,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        let mut destructive = merge.clone();
+        destructive.patch_id = "blank-merge-b2-d2".to_string();
+        if let PatchOperation::XlsxMergeBlank {
+            end_row,
+            end_column,
+            ..
+        } = &mut destructive.operations[0]
+        {
+            *end_row = 2;
+            *end_column = 4;
+        }
+        assert!(hcd_core::apply_patch(&bundle, &destructive, 0).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &merge, 0).unwrap().revision,
+            1
+        );
+        let mut overlapping = merge;
+        overlapping.patch_id = "blank-merge-overlap".to_string();
+        overlapping.base_revision = 1;
+        assert!(hcd_core::apply_patch(&bundle, &overlapping, 1).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
     fn merges_empty_xlsx_cells_in_hcd_and_source_backed_export() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("merge.xlsx");

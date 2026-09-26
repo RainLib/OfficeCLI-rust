@@ -63,6 +63,7 @@ pub const HCD_PATCH_SCHEMA_VERSION_22: &str = "hcd-patch/22";
 pub const HCD_PATCH_SCHEMA_VERSION_23: &str = "hcd-patch/23";
 pub const HCD_PATCH_SCHEMA_VERSION_24: &str = "hcd-patch/24";
 pub const HCD_PATCH_SCHEMA_VERSION_25: &str = "hcd-patch/25";
+pub const HCD_PATCH_SCHEMA_VERSION_26: &str = "hcd-patch/26";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
 pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
@@ -90,6 +91,7 @@ pub const HCD_PATCH_SCHEMA_V22_JSON: &str = include_str!("../schemas/hcd-patch-2
 pub const HCD_PATCH_SCHEMA_V23_JSON: &str = include_str!("../schemas/hcd-patch-23.schema.json");
 pub const HCD_PATCH_SCHEMA_V24_JSON: &str = include_str!("../schemas/hcd-patch-24.schema.json");
 pub const HCD_PATCH_SCHEMA_V25_JSON: &str = include_str!("../schemas/hcd-patch-25.schema.json");
+pub const HCD_PATCH_SCHEMA_V26_JSON: &str = include_str!("../schemas/hcd-patch-26.schema.json");
 pub const DEFAULT_CHUNK_SOFT_BYTES: usize = 512 * 1024;
 pub const DEFAULT_CHUNK_BLOCKS: usize = 256;
 pub const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -152,6 +154,8 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V24_JSON).unwrap();
         let patch_v25: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V25_JSON).unwrap();
+        let patch_v26: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V26_JSON).unwrap();
         assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
@@ -178,6 +182,7 @@ mod schema_tests {
         assert_eq!(patch_v23["$id"], "urn:officecli:hcd-patch:23");
         assert_eq!(patch_v24["$id"], "urn:officecli:hcd-patch:24");
         assert_eq!(patch_v25["$id"], "urn:officecli:hcd-patch:25");
+        assert_eq!(patch_v26["$id"], "urn:officecli:hcd-patch:26");
     }
 
     #[test]

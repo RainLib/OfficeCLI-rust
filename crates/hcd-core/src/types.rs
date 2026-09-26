@@ -330,6 +330,15 @@ pub enum PatchOperation {
         end_column: u32,
         precondition: NodePrecondition,
     },
+    /// Merge a rectangle whose anchor and covered cells are all empty.
+    #[serde(rename = "xlsx.merge.blank", rename_all = "camelCase")]
+    XlsxMergeBlank {
+        sheet_id: String,
+        start_row: u32,
+        start_column: u32,
+        end_row: u32,
+        end_column: u32,
+    },
     /// Split a merge while retaining its anchor cell and text.
     #[serde(rename = "xlsx.unmerge", rename_all = "camelCase")]
     XlsxUnmerge {
@@ -466,6 +475,7 @@ impl PatchOperation {
             | Self::XlsxColumnInsert { .. }
             | Self::XlsxColumnDelete { .. }
             | Self::XlsxGridRange { .. }
+            | Self::XlsxMergeBlank { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. }
             | Self::XlsxRowHeight { .. } => None,
@@ -492,6 +502,7 @@ impl PatchOperation {
                 | Self::XlsxColumnInsert { .. }
                 | Self::XlsxColumnDelete { .. }
                 | Self::XlsxGridRange { .. }
+                | Self::XlsxMergeBlank { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
                 | Self::XlsxRowHeight { .. }

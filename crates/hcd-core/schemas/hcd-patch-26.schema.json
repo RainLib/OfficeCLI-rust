@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:26",
+  "title": "HTML Canonical Document XLSX blank-cell merge",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/26" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["op", "sheetId", "startRow", "startColumn", "endRow", "endColumn"],
+        "properties": {
+          "op": { "const": "xlsx.merge.blank" },
+          "sheetId": { "type": "string", "pattern": "^s_[0-9a-f]{32}$" },
+          "startRow": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+          "startColumn": { "type": "integer", "minimum": 1, "maximum": 16384 },
+          "endRow": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+          "endColumn": { "type": "integer", "minimum": 1, "maximum": 16384 }
+        }
+      }
+    }
+  }
+}

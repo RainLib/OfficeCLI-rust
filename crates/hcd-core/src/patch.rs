@@ -220,6 +220,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxColumnInsert { .. }
                         | PatchOperation::XlsxColumnDelete { .. }
                         | PatchOperation::XlsxGridRange { .. }
+                        | PatchOperation::XlsxMergeBlank { .. }
                         | PatchOperation::XlsxUnmerge { .. }
                 )
             }))
@@ -258,10 +259,11 @@ pub fn apply_patch(
     let pptx_insertions = collect_pptx_insertions(patch);
     let pptx_geometry = collect_pptx_geometry(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
+    let xlsx_blank_merge = collect_xlsx_blank_merge(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch)?;
     let xlsx_formula = collect_xlsx_formula_set(patch)?;
-    let shifted_grid = if !xlsx_cell_set.is_empty() {
+    let shifted_grid = if !xlsx_cell_set.is_empty() || xlsx_blank_merge.is_some() {
         (1..=manifest.revision).try_fold(false, |found, revision| {
             let record = bundle.revision(revision)?;
             Ok::<_, HcdError>(
@@ -286,6 +288,10 @@ pub fn apply_patch(
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
+        .transpose()?;
+    let xlsx_blank_merge_target = xlsx_blank_merge
+        .as_ref()
+        .map(|merge| find_xlsx_blank_merge_target(bundle, &manifest, merge))
         .transpose()?;
     let xlsx_insert_target = xlsx_row_insert
         .as_ref()
@@ -349,6 +355,7 @@ pub fn apply_patch(
         || !pptx_insertions.is_empty()
         || !pptx_geometry.is_empty()
         || !xlsx_merges.is_empty()
+        || xlsx_blank_merge.is_some()
         || !xlsx_unmerges.is_empty()
         || !xlsx_cell_set.is_empty()
         || !xlsx_formula.is_empty()
@@ -372,6 +379,7 @@ pub fn apply_patch(
     let mut dirty_parts = BTreeSet::new();
     let mut dirty_grid_parts = BTreeSet::new();
     let mut inserted_xlsx_cells = HashSet::new();
+    let mut created_xlsx_blank_merge = false;
     let mut appended_xlsx_row = false;
     let mut inserted_xlsx_row = false;
     let mut deleted_xlsx_row = false;
@@ -417,6 +425,8 @@ pub fn apply_patch(
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
             let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
             let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
+            let blank_merge_here =
+                xlsx_blank_merge_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let row_insert_here = xlsx_insert_target
                 .as_ref()
                 .is_some_and(|(chunk_id, _)| chunk_id == &descriptor.chunk_id);
@@ -494,6 +504,7 @@ pub fn apply_patch(
                 && insertions.is_none()
                 && cell_insertions.is_empty()
                 && slide_insertions.is_none()
+                && !blank_merge_here
                 && !append_here
                 && !row_shift_here
                 && !row_delete_here
@@ -981,6 +992,53 @@ pub fn apply_patch(
                     source_map.entries.last().map(|entry| entry.node_id.clone());
                 chunk_changed = true;
             }
+            if blank_merge_here {
+                let merge = xlsx_blank_merge.as_ref().expect("resolved blank merge");
+                let insertion = XlsxCellInsertion {
+                    sheet_id: merge.sheet_id.clone(),
+                    row: merge.start_row,
+                    column: merge.start_column,
+                    text: String::new(),
+                    formula: false,
+                };
+                let (node_id, part) = insert_xlsx_cell(
+                    &mut html,
+                    &mut source_map,
+                    &manifest.document_id,
+                    &insertion,
+                    shifted_grid.then_some(manifest.revision),
+                )?;
+                merge_xlsx_cells(&mut html, merge)?;
+                html_nodes.insert(node_id.clone(), String::new());
+                descriptor.node_count += 1;
+                if let Some(grid) = descriptor.grid.as_mut() {
+                    grid.column_start = Some(
+                        grid.column_start
+                            .map_or(merge.start_column, |start| start.min(merge.start_column)),
+                    );
+                    grid.column_end = Some(
+                        grid.column_end
+                            .map_or(merge.end_column, |end| end.max(merge.end_column)),
+                    );
+                }
+                descriptor.node_bloom = node_bloom(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.node_id.as_str()),
+                );
+                descriptor.first_node_id = source_map
+                    .entries
+                    .first()
+                    .map(|entry| entry.node_id.clone());
+                descriptor.last_node_id =
+                    source_map.entries.last().map(|entry| entry.node_id.clone());
+                dirty_nodes.insert(node_id);
+                dirty_parts.insert(part.clone());
+                dirty_grid_parts.insert(part);
+                created_xlsx_blank_merge = true;
+                chunk_changed = true;
+            }
             if append_here {
                 let append = xlsx_row_append
                     .as_ref()
@@ -1256,6 +1314,11 @@ pub fn apply_patch(
     if xlsx_row_append.is_some() && !appended_xlsx_row {
         return Err(HcdError::InvalidBundle(
             "XLSX row append target disappeared".to_string(),
+        ));
+    }
+    if xlsx_blank_merge.is_some() && !created_xlsx_blank_merge {
+        return Err(HcdError::InvalidBundle(
+            "XLSX blank merge target disappeared".to_string(),
         ));
     }
     if xlsx_row_insert.is_some() && !inserted_xlsx_row {
@@ -1748,6 +1811,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_23
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_24
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_25
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1882,6 +1946,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/25 accepts one XLSX grid range operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_26
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxMergeBlank { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/26 accepts one XLSX blank merge only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2143,6 +2219,42 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "XLSX merge range must contain 2 to 10000 valid cells".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::XlsxMergeBlank {
+                sheet_id,
+                start_row,
+                start_column,
+                end_row,
+                end_column,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                    || sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX blank merge target".to_string(),
+                    ));
+                }
+                let rows = end_row.saturating_sub(*start_row).saturating_add(1);
+                let columns = end_column.saturating_sub(*start_column).saturating_add(1);
+                if *start_row == 0
+                    || *start_column == 0
+                    || *end_row > 1_048_576
+                    || *end_column > 16_384
+                    || *end_row < *start_row
+                    || *end_column < *start_column
+                    || rows.saturating_mul(columns) < 2
+                    || rows.saturating_mul(columns) > 10_000
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX blank merge range must contain 2 to 10000 valid cells".to_string(),
                     ));
                 }
             }
@@ -2991,6 +3103,29 @@ fn collect_xlsx_merges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
         .collect()
 }
 
+fn collect_xlsx_blank_merge(patch: &PatchBatch) -> Option<XlsxMerge> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxMergeBlank {
+            sheet_id,
+            start_row,
+            start_column,
+            end_row,
+            end_column,
+        } = operation
+        else {
+            return None;
+        };
+        Some(XlsxMerge {
+            sheet_id: sheet_id.clone(),
+            start_row: *start_row,
+            start_column: *start_column,
+            end_row: *end_row,
+            end_column: *end_column,
+            node_hash: hash_bytes(b""),
+        })
+    })
+}
+
 fn collect_xlsx_unmerges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
     patch
         .operations
@@ -3347,6 +3482,43 @@ fn find_xlsx_sheet_part(
     } else {
         "XLSX worksheet is not in the HCD grid".to_string()
     }))
+}
+
+fn find_xlsx_blank_merge_target(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    merge: &XlsxMerge,
+) -> Result<String, HcdError> {
+    let mut target = None;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != crate::GridChunkKind::Cells || grid.sheet_id != merge.sheet_id {
+                continue;
+            }
+            let contains_range = grid
+                .row_start
+                .is_some_and(|start| u64::from(merge.start_row) >= start)
+                && grid
+                    .row_end
+                    .is_some_and(|end| u64::from(merge.end_row) <= end);
+            if !contains_range {
+                continue;
+            }
+            if target.replace(descriptor.chunk_id.clone()).is_some() {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX merge is present in multiple windows".to_string(),
+                ));
+            }
+        }
+    }
+    target.ok_or_else(|| {
+        HcdError::Unsupported(
+            "XLSX blank merge must stay within one materialized cell window".to_string(),
+        )
+    })
 }
 
 fn hcd_column_tag(start: u32, end: u32, width: Option<f64>, hidden: bool, edited: bool) -> String {
@@ -4760,13 +4932,17 @@ fn merge_xlsx_cells(html: &mut String, merge: &XlsxMerge) -> Result<(), HcdError
         for column in merge.start_column..=merge.end_column {
             let cell = cells
                 .iter()
-                .find(|cell| cell.row == row && cell.column == column)
-                .ok_or_else(|| {
-                    HcdError::Unsupported(format!(
-                        "XLSX merge requires the existing cell {}{row} in one HCD window",
-                        xlsx_column_name(column)
-                    ))
-                })?;
+                .find(|cell| cell.row == row && cell.column == column);
+            // Sparse worksheets omit empty td elements. A covered coordinate
+            // without a cell is still empty and can be represented by the span.
+            let Some(cell) = cell else {
+                if row == merge.start_row && column == merge.start_column {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX merge anchor was not materialized".to_string(),
+                    ));
+                }
+                continue;
+            };
             if row == merge.start_row && column == merge.start_column {
                 if !cell.has_node {
                     return Err(HcdError::Unsupported(
@@ -6012,6 +6188,7 @@ fn apply_annotations(
             | PatchOperation::XlsxColumnInsert { .. }
             | PatchOperation::XlsxColumnDelete { .. }
             | PatchOperation::XlsxGridRange { .. }
+            | PatchOperation::XlsxMergeBlank { .. }
             | PatchOperation::XlsxRowRemoveLast { .. }
             | PatchOperation::XlsxColumnWidth { .. }
             | PatchOperation::XlsxRowHeight { .. }

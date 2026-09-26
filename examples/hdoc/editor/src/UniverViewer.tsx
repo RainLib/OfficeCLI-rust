@@ -161,7 +161,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       const endRow = startRow + range.getHeight() - 1
       const endColumn = startColumn + range.getWidth() - 1
       const anchor = current.adapter.getNodeAt(sheet.getSheetId(), startRow, startColumn)
-      if (!anchor?.editable) throw new Error('合并区域左上角必须是可编辑的现有单元格')
+      if (anchor && !anchor.editable) throw new Error('合并区域左上角不可编辑')
+      const anchorValue = sheet.getRange(startRow, startColumn).getValue()
+      if (!anchor && anchorValue !== null && anchorValue !== undefined && String(anchorValue) !== '') {
+        throw new Error('合并区域左上角仍有未保存的内容')
+      }
       for (let row = startRow; row <= endRow; row += 1) {
         for (let column = startColumn; column <= endColumn; column += 1) {
           if (row === startRow && column === startColumn) continue
@@ -174,14 +178,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       }
       setMergeBusy(true)
       setStatus('正在合并单元格…')
+      const coordinates = { sheetId: sheet.getSheetId(),
+        startRow: startRow + 1, startColumn: startColumn + 1,
+        endRow: endRow + 1, endColumn: endColumn + 1 }
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaVersion: 'hcd-patch/6', documentId: session.documentId,
+        body: JSON.stringify({ schemaVersion: anchor ? 'hcd-patch/6' : 'hcd-patch/26', documentId: session.documentId,
           patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
-          operations: [{ op: 'xlsx.merge', nodeId: anchor.nodeId, sheetId: sheet.getSheetId(),
-            startRow: startRow + 1, startColumn: startColumn + 1,
-            endRow: endRow + 1, endColumn: endColumn + 1,
-            precondition: { nodeHash: anchor.nodeHash } }] }),
+          operations: [anchor
+            ? { op: 'xlsx.merge', nodeId: anchor.nodeId, ...coordinates,
+              precondition: { nodeHash: anchor.nodeHash } }
+            : { op: 'xlsx.merge.blank', ...coordinates }] }),
       })
       const saved = await response.json() as { revision: number }
       collaboration.announceRevision(saved.revision)
