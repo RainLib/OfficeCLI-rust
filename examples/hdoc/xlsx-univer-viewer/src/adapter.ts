@@ -1006,8 +1006,16 @@ export class HcdUniverAdapter {
   }
 
   private canEditBlankCell(sheetId: string, row: number, column: number): boolean {
-    return this.blankCells.has(cellKey(sheetId, row, column))
-      || column < (this.loadedRowCeilings.get(`${sheetId}:${row}`) ?? 0);
+    if (this.blankCells.has(cellKey(sheetId, row, column))
+      || column < (this.loadedRowCeilings.get(`${sheetId}:${row}`) ?? 0)) return true;
+    // The first row after the imported grid has no HCD row markup yet. The
+    // server extends the final cell window when its first cell is created.
+    const tail = this.client.descriptors
+      .filter(({ grid }) => grid?.sheetId === sheetId && grid.kind === 'cells')
+      .reduce<ChunkDescriptor | undefined>((latest, descriptor) =>
+        (descriptor.grid?.rowEnd ?? 0) > (latest?.grid?.rowEnd ?? 0) ? descriptor : latest,
+      undefined);
+    return column < 256 && tail?.grid?.rowEnd === row && this.loaded.has(tail.chunkId);
   }
 
   private withApplying(operation: () => void): void {
