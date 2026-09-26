@@ -6,7 +6,7 @@ use crate::common::{
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    PptxShapeGeometry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesStart, BytesText, Event};
@@ -3038,21 +3038,24 @@ pub(crate) fn export_pptx(
     for shapes in insertions.values_mut() {
         shapes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     }
+    let native_geometry = collect_edited_shape_geometry(bundle, &manifest, &dirty_parts)?;
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     for part in replacements
         .keys()
         .chain(insertions.keys())
+        .chain(native_geometry.keys())
         .collect::<BTreeSet<_>>()
     {
         let values = replacements.get(part).cloned().unwrap_or_default();
         let shapes = insertions.get(part).cloned().unwrap_or_default();
+        let geometry = native_geometry.get(part).cloned().unwrap_or_default();
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
         archive
             .with_part(part, |input| {
-                rewrite_text_part(input, BufWriter::new(output), &values, &shapes)
+                rewrite_text_part(input, BufWriter::new(output), &values, &shapes, &geometry)
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
@@ -3136,11 +3139,124 @@ impl InsertedPptxShape {
     }
 }
 
+fn html_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!(" {name}=\"");
+    let value = tag.split_once(&marker)?.1;
+    Some(value.split_once('"')?.0)
+}
+
+fn collect_edited_shape_geometry(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_parts: &HashSet<String>,
+) -> Result<HashMap<String, BTreeMap<u32, PptxShapeGeometry>>, HcdError> {
+    let mut result: HashMap<String, BTreeMap<u32, PptxShapeGeometry>> = HashMap::new();
+    if dirty_parts.is_empty() {
+        return Ok(result);
+    }
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            let Some(part) = source_map
+                .entries
+                .iter()
+                .map(|entry| entry.source.part.as_str())
+                .find(|part| dirty_parts.contains(*part))
+            else {
+                continue;
+            };
+            let html = bundle.read_chunk(&descriptor)?;
+            if !html.starts_with("<section class=\"hcd-slide\"") {
+                continue;
+            }
+            let section_end = html.find('>').ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX slide section is not closed".to_string())
+            })?;
+            let section = &html[..=section_end];
+            if html_attribute(section, "data-hcd-source-part") != Some(part) {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX slide part differs from its source map".to_string(),
+                ));
+            }
+            let dimension = |name: &str| -> Result<u64, HcdError> {
+                html_attribute(section, name)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {name} is missing")))
+            };
+            let slide_width = dimension("data-hcd-width-emu")?;
+            let slide_height = dimension("data-hcd-height-emu")?;
+            let mut cursor = section_end + 1;
+            while let Some(relative) = html[cursor..].find("<div class=\"hcd-slide-shape\"") {
+                let start = cursor + relative;
+                let end = html[start..]
+                    .find('>')
+                    .map(|offset| start + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX shape tag is not closed".to_string())
+                    })?;
+                let tag = &html[start..=end];
+                cursor = end + 1;
+                if html_attribute(tag, "data-hcd-geometry-edited") != Some("true") {
+                    continue;
+                }
+                let Some(shape_id) = html_attribute(tag, "data-hcd-shape-id") else {
+                    continue;
+                };
+                let shape_id = shape_id
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle(
+                            "PPTX edited source shape ID is invalid".to_string(),
+                        )
+                    })?;
+                let number = |name: &str| -> Result<u64, HcdError> {
+                    html_attribute(tag, name)
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .ok_or_else(|| {
+                            HcdError::InvalidBundle(format!("PPTX shape {name} is invalid"))
+                        })
+                };
+                let geometry = PptxShapeGeometry {
+                    x_emu: number("data-hcd-x-emu")?,
+                    y_emu: number("data-hcd-y-emu")?,
+                    width_emu: number("data-hcd-width-emu")?,
+                    height_emu: number("data-hcd-height-emu")?,
+                };
+                if geometry.width_emu == 0
+                    || geometry.height_emu == 0
+                    || geometry
+                        .x_emu
+                        .checked_add(geometry.width_emu)
+                        .is_none_or(|end| end > slide_width)
+                    || geometry
+                        .y_emu
+                        .checked_add(geometry.height_emu)
+                        .is_none_or(|end| end > slide_height)
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX edited shape is outside the slide".to_string(),
+                    ));
+                }
+                let shapes = result.entry(part.to_string()).or_default();
+                if shapes.insert(shape_id, geometry).is_some() {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX edited shape ID is duplicated".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn rewrite_text_part(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<u64, String>,
     insertions: &[InsertedPptxShape],
+    native_geometry: &BTreeMap<u32, PptxShapeGeometry>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -3154,21 +3270,40 @@ fn rewrite_text_part(
     let mut depth = 0usize;
     let mut shape_tree_depth = None;
     let mut shape_tree_count = 0usize;
+    let mut shape_depth = None;
+    let mut shape_id = None;
+    let mut properties_depth = None;
+    let mut transform_depth = None;
+    let mut geometry_seen: HashMap<u32, (bool, bool)> = HashMap::new();
     loop {
         let event = reader
             .read_event_into(&mut buffer)
             .map_err(|error| HcdError::InvalidBundle(format!("slide export XML: {error}")))?;
         let opens = matches!(event, Event::Start(_));
         let closes = matches!(event, Event::End(_));
+        let closing_name = if let Event::End(ref end) = event {
+            Some(local_name(end.name().as_ref()).to_string())
+        } else {
+            None
+        };
         if let Event::Start(ref start) = event {
-            if local_name(start.name().as_ref()) == "spTree" {
-                shape_tree_count += 1;
-                if shape_tree_count > 1 && !insertions.is_empty() {
-                    return Err(HcdError::InvalidBundle(
-                        "PPTX slide has multiple shape trees".to_string(),
-                    ));
+            match local_name(start.name().as_ref()) {
+                "spTree" => {
+                    shape_tree_count += 1;
+                    if shape_tree_count > 1 && !insertions.is_empty() {
+                        return Err(HcdError::InvalidBundle(
+                            "PPTX slide has multiple shape trees".to_string(),
+                        ));
+                    }
+                    shape_tree_depth = Some(depth + 1);
                 }
-                shape_tree_depth = Some(depth + 1);
+                "sp" if shape_tree_depth.is_some() && shape_depth.is_none() => {
+                    shape_depth = Some(depth + 1);
+                    shape_id = None;
+                }
+                "spPr" if shape_depth == Some(depth) => properties_depth = Some(depth + 1),
+                "xfrm" if properties_depth == Some(depth) => transform_depth = Some(depth + 1),
+                _ => {}
             }
         }
         if let Event::Start(ref element) | Event::Empty(ref element) = event {
@@ -3187,8 +3322,34 @@ fn rewrite_text_part(
             {
                 if let Some(id) = attribute(start, "id").and_then(|id| id.parse::<u32>().ok()) {
                     max_shape_id = max_shape_id.max(id);
+                    if shape_depth.is_some() {
+                        shape_id = Some(id);
+                    }
                 }
                 writer.write_event(event.into_owned())?;
+            }
+            Event::Start(ref element) | Event::Empty(ref element)
+                if transform_depth == Some(depth)
+                    && matches!(local_name(element.name().as_ref()), "off" | "ext")
+                    && shape_id.is_some_and(|id| native_geometry.contains_key(&id)) =>
+            {
+                let id = shape_id.expect("checked above");
+                let geometry = native_geometry.get(&id).expect("checked above");
+                let offset = local_name(element.name().as_ref()) == "off";
+                let rewritten = rewrite_shape_transform(element, geometry, offset)?;
+                let seen = geometry_seen.entry(id).or_default();
+                let flag = if offset { &mut seen.0 } else { &mut seen.1 };
+                if *flag {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "PPTX shape {id} has duplicate transform coordinates"
+                    )));
+                }
+                *flag = true;
+                if opens {
+                    writer.write_event(Event::Start(rewritten))?;
+                } else {
+                    writer.write_event(Event::Empty(rewritten))?;
+                }
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "t" => {
                 ordinal += 1;
@@ -3238,6 +3399,17 @@ fn rewrite_text_part(
         if opens {
             depth += 1;
         } else if closes {
+            match closing_name.as_deref() {
+                Some("xfrm") if transform_depth == Some(depth) => transform_depth = None,
+                Some("spPr") if properties_depth == Some(depth) => properties_depth = None,
+                Some("sp") if shape_depth == Some(depth) => {
+                    shape_depth = None;
+                    shape_id = None;
+                    properties_depth = None;
+                    transform_depth = None;
+                }
+                _ => {}
+            }
             depth = depth.saturating_sub(1);
         }
         buffer.clear();
@@ -3252,7 +3424,50 @@ fn rewrite_text_part(
             "PPTX slide shape tree is missing".to_string(),
         ));
     }
+    for id in native_geometry.keys() {
+        if geometry_seen.get(id) != Some(&(true, true)) {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX source shape {id} has no editable position and extent"
+            )));
+        }
+    }
     Ok(())
+}
+
+fn rewrite_shape_transform(
+    element: &BytesStart<'_>,
+    geometry: &PptxShapeGeometry,
+    offset: bool,
+) -> Result<BytesStart<'static>, HcdError> {
+    let desired = if offset {
+        [("x", geometry.x_emu), ("y", geometry.y_emu)]
+    } else {
+        [("cx", geometry.width_emu), ("cy", geometry.height_emu)]
+    };
+    let mut rewritten = element.to_owned();
+    rewritten.clear_attributes();
+    let mut seen = [false, false];
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("PPTX shape transform attribute: {error}"))
+        })?;
+        if let Some(index) = desired
+            .iter()
+            .position(|(name, _)| attribute.key.as_ref() == name.as_bytes())
+        {
+            let value = desired[index].1.to_string();
+            rewritten.push_attribute((attribute.key.as_ref(), value.as_bytes()));
+            seen[index] = true;
+        } else {
+            rewritten.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+        }
+    }
+    if !seen.into_iter().all(|present| present) {
+        return Err(HcdError::InvalidBundle(
+            "PPTX source shape transform is incomplete".to_string(),
+        ));
+    }
+    Ok(rewritten)
 }
 
 fn write_inserted_shapes<W: Write>(
@@ -3386,7 +3601,8 @@ mod tests {
     use super::*;
     use hcd_core::{
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
-        PatchOperation, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_16,
+        PatchOperation, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
+        HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -3473,6 +3689,57 @@ mod tests {
         assert!(slide.contains("再次编辑"));
         assert!(!slide.contains("新文字 &lt;&amp;&gt;"));
 
+        let edited = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "再次编辑")
+            .unwrap();
+        let geometry = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_17.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "insert-shape-r3".to_string(),
+            base_revision: 2,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxShapeGeometry {
+                node_id: edited.node_id.clone(),
+                geometry: PptxShapeGeometry {
+                    x_emu: 1_200_000,
+                    y_emu: 4_800_000,
+                    width_emu: 2_400_000,
+                    height_emu: 550_000,
+                },
+                precondition: PptxShapePrecondition {
+                    node_hash: edited.node_hash,
+                    geometry: PptxShapeGeometry {
+                        x_emu: 914_400,
+                        y_emu: 5_000_000,
+                        width_emu: 2_000_000,
+                        height_emu: 457_200,
+                    },
+                },
+            }],
+        };
+        apply_patch(&bundle, &geometry, 2).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let moved = temp.path().join("moved-inserted.pptx");
+        export_pptx(&bundle, &source, &moved, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&moved, &slide_part);
+        assert!(slide
+            .contains("<a:off x=\"1200000\" y=\"4800000\"/><a:ext cx=\"2400000\" cy=\"550000\"/>"));
+        assert!(slide.contains("再次编辑"));
+        assert_eq!(
+            extract_text_page(&bundle, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.text == "再次编辑")
+                .unwrap()
+                .node_id,
+            edited.node_id
+        );
+
         let original = temp.path().join("original.pptx");
         let report = export_pptx(
             &bundle,
@@ -3486,6 +3753,116 @@ mod tests {
         .unwrap();
         assert_eq!(report.level, FidelityLevel::Exact);
         assert!(!read_zip_entry(&original, &slide_part).contains("HCD Text"));
+    }
+
+    #[test]
+    fn moves_native_slide_text_shape_and_preserves_history_and_formatting() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("moved.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("move-native-shape"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "样式 😀")
+            .unwrap();
+        let old = PptxShapeGeometry {
+            x_emu: 914_400,
+            y_emu: 457_200,
+            width_emu: 1_828_800,
+            height_emu: 914_400,
+        };
+        let moved = PptxShapeGeometry {
+            x_emu: 1_200_000,
+            y_emu: 600_000,
+            width_emu: 2_200_000,
+            height_emu: 1_100_000,
+        };
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_17.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "native-geometry-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxShapeGeometry {
+                node_id: node.node_id.clone(),
+                geometry: moved,
+                precondition: PptxShapePrecondition {
+                    node_hash: node.node_hash.clone(),
+                    geometry: old,
+                },
+            }],
+        };
+        let mut outside = patch.clone();
+        outside.patch_id = "native-geometry-outside".to_string();
+        if let PatchOperation::PptxShapeGeometry { geometry, .. } = &mut outside.operations[0] {
+            geometry.x_emu = 11_000_000;
+        }
+        assert!(apply_patch(&bundle, &outside, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("inside the slide"));
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let result = apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        let head = bundle.manifest().unwrap();
+        let moved_html = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(moved_html.contains("data-hcd-x-emu=\"1200000\""));
+        assert!(moved_html.contains("data-hcd-geometry-edited=\"true\""));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        assert_eq!(
+            extract_text_page(&bundle, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.text == "样式 😀")
+                .unwrap()
+                .node_id,
+            node.node_id
+        );
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, &node.source.part);
+        assert!(slide.contains("<a:xfrm rot=\"5400000\"><a:off x=\"1200000\" y=\"600000\"/><a:ext cx=\"2200000\" cy=\"1100000\"/>"));
+        assert!(slide.contains("<a:rPr lang=\"zh-CN\" sz=\"2400\""));
+        assert!(slide.contains("<a:off x=\"3657600\" y=\"914400\"/>"));
+        let stale = PatchBatch {
+            patch_id: "native-geometry-stale".to_string(),
+            base_revision: 1,
+            ..patch
+        };
+        assert!(apply_patch(&bundle, &stale, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("geometry changed"));
+        let original = temp.path().join("original.pptx");
+        let report = export_pptx(
+            &bundle,
+            &source,
+            &original,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert_eq!(
+            read_zip_entry(&original, &node.source.part),
+            read_zip_entry(&source, &node.source.part)
+        );
     }
 
     #[test]
@@ -3506,6 +3883,7 @@ mod tests {
             &mut output,
             &BTreeMap::new(),
             &[shape],
+            &BTreeMap::new(),
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();

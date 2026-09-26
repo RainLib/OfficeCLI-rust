@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { Editor } from '@tiptap/core'
 import { redo, undo } from '@tiptap/pm/history'
@@ -10,7 +10,15 @@ import { useFixedCollaboration } from './fixedCollaboration.tsx'
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; left?: string; top?: string; width?: string; height?: string; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
+type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
+type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
+type ShapeDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PptxGeometry; current: PptxGeometry; shape: HTMLElement }
+function pptxGeometry(element: Element | null): PptxGeometry | undefined {
+  if (!element?.classList.contains('hcd-slide-shape')) return undefined
+  const values = ['data-hcd-x-emu', 'data-hcd-y-emu', 'data-hcd-width-emu', 'data-hcd-height-emu'].map(name => Number(element.getAttribute(name)))
+  if (!values.every(Number.isSafeInteger) || values[0] < 0 || values[1] < 0 || values[2] <= 0 || values[3] <= 0) return undefined
+  return { xEmu: values[0], yEmu: values[1], widthEmu: values[2], heightEmu: values[3] }
+}
 type Selection = { node: TextNode; page: number }
 type NewTextBox = (
   | { format: 'pdf'; page: number; xPt: number; yPt: number; widthPt: number; heightPt: number; fontSizePt: number }
@@ -154,6 +162,28 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(`${String(cause)}。如文档已被其他人修改，请重新打开。`); return null }
     finally { setSaving(false) }
   }
+  async function saveGeometry(node: TextNode, geometry: PptxGeometry): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || !node.geometry || draft !== node.text) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/17', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.shape.geometry', nodeId: node.nodeId, geometry,
+            precondition: { nodeHash: node.nodeHash, geometry: node.geometry } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setSelected(null)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字框后重试。`); return null }
+    finally { setSaving(false) }
+  }
   async function saveBeforeExport(): Promise<number | null> {
     if (selected && draft !== selected.node.text && !readOnly && !historical) return saveText(selected.node, draft)
     if (newBox && newDraft.trim() && !readOnly && !historical) return saveNewBox(newBox, newDraft)
@@ -209,7 +239,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} settingsOpen={rightPanel === 'settings'} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setRightPanel('settings')}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
-      {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><span className="ribbon-note">点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><span className="ribbon-note">{session.format === 'pptx' ? '点击文字原位编辑 · 选中后拖动顶部把手移动、右下角调整尺寸' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消'}</span></>}
       {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} />显示页面目录</label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} />只读模式</label><button onClick={() => setRightPanel('settings')}>界面设置</button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}>查看修订历史</button><span className="ribbon-note">当前版本 r{manifest?.revision ?? '…'}</span></>}
@@ -218,7 +248,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     </nav>}
     <div className="layout editor-layout">
       {layout.showOutline && <aside className="outline-panel" aria-label={session.format === 'pptx' ? '幻灯片目录' : '页面目录'}><div className="panel-head"><h2>☷ {session.format === 'pptx' ? '幻灯片目录' : '页面目录'}</h2><button className="panel-close" aria-label="隐藏页面目录" onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`}</button>)}</nav><small>已索引 {descriptors.length} / {manifest?.chunkCount ?? '…'} 个分片</small></aside>}
-      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
+      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}<div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
@@ -235,11 +265,12 @@ type LazyChunkProps = {
   saving: boolean; refresh: number; placeholderHeight: number; availableWidth: number; onMeasureHeight: (height: number) => void
   onSelect: (node: TextNode) => void; onDraft: (value: string) => void
   onEditorReady: (editor: Editor | null) => void; onSave: (node: TextNode, value: string) => void
+  onGeometry: (node: TextNode, geometry: PptxGeometry) => Promise<number | null>
   onCancel: () => void; onPlace: (box: NewTextBox) => void; onNewDraft: (value: string) => void
   onSaveNew: (box: NewTextBox, value: string) => void; onCancelNew: () => void
 }
 
-function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
+function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
   const [active, setActive] = useState(false)
   const [srcDoc, setSrcDoc] = useState('')
   const [frameHeight, setFrameHeight] = useState(940)
@@ -253,14 +284,17 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   const [nodes, setNodes] = useState<TextNode[]>([])
   const [directTarget, setDirectTarget] = useState<HTMLElement | null>(null)
   const [newTarget, setNewTarget] = useState<HTMLElement | null>(null)
+  const [previewGeometry, setPreviewGeometry] = useState<PptxGeometry | null>(null)
   const marker = useRef<HTMLDivElement>(null)
   const frame = useRef<HTMLIFrameElement>(null)
+  const drag = useRef<ShapeDrag | null>(null)
   const sourceWidth = Number.parseFloat(canvasWidth)
   const zoom = session.format === 'pptx' && sourceWidth > 0 && availableWidth > 0
     ? Math.min(1, availableWidth / sourceWidth) : 1
   useEffect(() => {
     if (session.format === 'pptx' && srcDoc) onMeasureHeight(Math.ceil(frameHeight * zoom))
   }, [session.format, srcDoc, frameHeight, zoom, onMeasureHeight])
+  useEffect(() => { setPreviewGeometry(null); drag.current = null }, [selected?.nodeId, refresh])
   function findDirectTarget() {
     if (!['pdf', 'pptx'].includes(session.format) || !selected) { setDirectTarget(null); return }
     const selector = session.format === 'pdf' ? `.hcd-pdf-text[data-hcd-text-node="${selected.nodeId}"]` : `.hcd-slide [data-hcd-id="${selected.nodeId}"]`
@@ -329,6 +363,7 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           nodeId: entry.nodeId, nodeHash: entry.nodeHash,
           text: element?.textContent || '', editable: entry.source.editable,
           left: position?.left, top: position?.top, width, height: position?.height,
+          geometry: session.format === 'pptx' ? pptxGeometry(anchor) : undefined,
           fontSize: position?.fontSize, fontFamily: position?.fontFamily, fontWeight: position?.fontWeight,
           fontStyle: position?.fontStyle, color: position?.color, lineHeight: position?.lineHeight,
         }
@@ -371,6 +406,62 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
     void render().catch(cause => { if (live) setSrcDoc(`<p style="padding:24px;color:#b33">${String(cause).replaceAll('<', '&lt;')}</p>`) })
     return () => { live = false }
   }, [active, session, descriptor.sequence, descriptor.continuation, revision, stylesheet, refresh, onMeasureHeight])
+  const emuToPx = (value: number) => `${(value * 96 / 914_400).toFixed(2)}px`
+  function showShapeGeometry(shape: HTMLElement, geometry: PptxGeometry) {
+    shape.style.left = emuToPx(geometry.xEmu)
+    shape.style.top = emuToPx(geometry.yEmu)
+    shape.style.width = emuToPx(geometry.widthEmu)
+    shape.style.height = emuToPx(geometry.heightEmu)
+  }
+  function beginShapeDrag(mode: ShapeDrag['mode'], event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!selected?.geometry || draft !== selected.text || saving || !slideWidthEmu || !slideHeightEmu || !sourceWidth) return
+    if (selected.geometry.xEmu + selected.geometry.widthEmu > slideWidthEmu
+      || selected.geometry.yEmu + selected.geometry.heightEmu > slideHeightEmu) return
+    const shape = directTarget?.closest<HTMLElement>('.hcd-slide-shape')
+    if (!shape) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    drag.current = { pointerId: event.pointerId, mode, startX: event.clientX, startY: event.clientY,
+      initial: selected.geometry, current: selected.geometry, shape }
+  }
+  function moveShapeDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const current = drag.current
+    if (!current || current.pointerId !== event.pointerId || !sourceWidth || !zoom) return
+    event.preventDefault()
+    const scale = slideWidthEmu / sourceWidth / zoom
+    const dx = Math.round((event.clientX - current.startX) * scale)
+    const dy = Math.round((event.clientY - current.startY) * scale)
+    const initial = current.initial
+    const clamp = (value: number, low: number, high: number) => Math.min(Math.max(value, low), high)
+    const geometry = current.mode === 'move'
+      ? { ...initial, xEmu: clamp(initial.xEmu + dx, 0, slideWidthEmu - initial.widthEmu),
+        yEmu: clamp(initial.yEmu + dy, 0, slideHeightEmu - initial.heightEmu) }
+      : { ...initial, widthEmu: clamp(initial.widthEmu + dx, Math.min(190_500, slideWidthEmu - initial.xEmu), slideWidthEmu - initial.xEmu),
+        heightEmu: clamp(initial.heightEmu + dy, Math.min(190_500, slideHeightEmu - initial.yEmu), slideHeightEmu - initial.yEmu) }
+    current.current = geometry
+    showShapeGeometry(current.shape, geometry)
+    setPreviewGeometry(geometry)
+  }
+  function finishShapeDrag(event: ReactPointerEvent<HTMLButtonElement>, canceled = false) {
+    const current = drag.current
+    if (!current || current.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    drag.current = null
+    if (canceled || !selected || JSON.stringify(current.current) === JSON.stringify(current.initial)) {
+      showShapeGeometry(current.shape, current.initial)
+      setPreviewGeometry(null)
+      return
+    }
+    void onGeometry(selected, current.current).then(revision => {
+      if (revision === null) {
+        showShapeGeometry(current.shape, current.initial)
+        setPreviewGeometry(null)
+      }
+    })
+  }
   function place(event: MouseEvent<HTMLButtonElement>) {
     const pageWidthPt = Number.parseFloat(canvasWidth)
     if (session.format === 'pptx') {
@@ -409,6 +500,13 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
     {!readOnly && ['pdf', 'pptx'].includes(session.format) && selected && directTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus={session.format === 'pptx' ? 'start' : true} onSave={value => onSave(selected, value)} onCancel={onCancel} /></div>, directTarget)}
     {!readOnly && newBox && newTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /></div>, newTarget)}
     {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => selected?.nodeId === node.nodeId ? null : <button key={node.nodeId} className="fixed-page-hitbox" style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`编辑文字：${node.text.slice(0, 48) || '空文字框'}`} title={node.text || '空文字框'} onClick={() => onSelect(node)} />)}
+      {session.format === 'pptx' && selected?.geometry && directTarget && (() => {
+        const geometry = previewGeometry || selected.geometry
+        return <div className="pptx-shape-controls" style={{ left: emuToPx(geometry.xEmu), top: emuToPx(geometry.yEmu), width: emuToPx(geometry.widthEmu), height: emuToPx(geometry.heightEmu) }}>
+          <button className="pptx-shape-move" aria-label="移动文字框" title={draft === selected.text ? '拖动文字框' : '请先保存文字修改'} disabled={saving || draft !== selected.text} onPointerDown={event => beginShapeDrag('move', event)} onPointerMove={moveShapeDrag} onPointerUp={event => finishShapeDrag(event)} onPointerCancel={event => finishShapeDrag(event, true)}>✥</button>
+          <button className="pptx-shape-resize" aria-label="调整文字框大小" title={draft === selected.text ? '拖动以调整尺寸' : '请先保存文字修改'} disabled={saving || draft !== selected.text} onPointerDown={event => beginShapeDrag('resize', event)} onPointerMove={moveShapeDrag} onPointerUp={event => finishShapeDrag(event)} onPointerCancel={event => finishShapeDrag(event, true)} />
+        </div>
+      })()}
       {placingText && primaryPage && <button className="fixed-placement-layer" aria-label={`在第 ${session.format === 'pdf' ? pageNumber : descriptor.sequence + 1} 页放置新文字框`} onClick={place} />}
     </div>}
     </div>

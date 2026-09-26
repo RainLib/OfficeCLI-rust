@@ -117,6 +117,11 @@
 .hcd-surface .fixed-workspace .fixed-page-hitboxes.centered{left:50%;transform:translateX(-50%)}
 .hcd-surface .fixed-workspace .fixed-page-hitbox{position:absolute;display:block;min-width:12px;min-height:14px;padding:0;background:transparent;border:1px dashed transparent;border-radius:2px;pointer-events:auto;cursor:text}
 .hcd-surface .fixed-workspace .fixed-page-hitbox:hover,.hcd-surface .fixed-workspace .fixed-page-hitbox.selected{border-color:#1769e8;background:#1769e81a}
+.hcd-surface .fixed-workspace .pptx-shape-controls{position:absolute;box-sizing:border-box;border:1px solid #1769e8;pointer-events:none;z-index:5}
+.hcd-surface .fixed-workspace .pptx-shape-controls button{position:absolute;display:grid;place-items:center;width:19px;height:19px;padding:0;border:1px solid #1769e8;border-radius:3px;background:#fff;color:#1769e8;box-shadow:0 1px 4px #21477a40;pointer-events:auto;touch-action:none}
+.hcd-surface .fixed-workspace .pptx-shape-controls button:disabled{opacity:.45;cursor:not-allowed}
+.hcd-surface .fixed-workspace .pptx-shape-move{left:50%;top:-21px;transform:translateX(-50%);cursor:move;font-size:17px}
+.hcd-surface .fixed-workspace .pptx-shape-resize{right:-8px;bottom:-8px;width:14px!important;height:14px!important;cursor:nwse-resize}
 .hcd-surface .fixed-workspace .fixed-placement-layer{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;background:rgba(23,105,232,.04);pointer-events:auto;cursor:crosshair;z-index:3}
 .hcd-surface .fixed-workspace .fixed-placement-layer:hover{outline:2px dashed #1769e8;outline-offset:-2px}
 .hcd-surface .fixed-workspace .fixed-inline-editor{position:absolute;z-index:4;min-width:48px;max-width:100%;background:#fff;outline:2px solid #1769e8;box-shadow:0 2px 12px #21477a25;pointer-events:auto;white-space:nowrap}

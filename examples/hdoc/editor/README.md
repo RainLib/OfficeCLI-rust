@@ -63,6 +63,7 @@ PDF and PPTX text boxes use the same Tiptap/ProseMirror editing core as DOCX, sc
 PDF editing mounts Tiptap inside the selected canonical page text element in the sandboxed preview frame. The page raster is masked at that element while editing, so the text appears once at its page position; save from the top bar or use `Cmd/Ctrl+Enter`, and use `Esc` to cancel. The direct-node screenshot is `docs/screenshots/hcd-pdf-direct-node-edit.jpg`.
 
 PPTX uses the same in-frame text editing, keeping the shape's font and color at its slide position. The slide outline opens by default with its own visibility preference, and unloaded slides reserve the measured slide height instead of a generic page height. The reference screenshot is `docs/screenshots/hcd-pptx-direct-slide-edit.jpg`.
+Select a positioned PPTX text shape to reveal a move handle above it and a resize handle at its lower right. Releasing either handle saves a `hcd-patch/17` revision. Save any pending text first. The source-backed PPTX export retains the new coordinates; see `docs/acceptance/hcd-pptx-shape-geometry.md` for commands and screenshots.
 
 The XLSX canvas keeps its Univer cell editor and now uses the same fixed document header, view controls, appearance panel, export control, and status bar as the other formats. Double-click an existing cell or press F2 to edit its content. The reference screenshot is `docs/screenshots/hcd-xlsx-unified-chrome.jpg`.
 
