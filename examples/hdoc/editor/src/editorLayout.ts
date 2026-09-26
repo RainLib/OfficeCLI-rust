@@ -16,14 +16,14 @@ export const defaultLayout: LayoutPreferences = {
 
 const layoutKey = 'hcd-editor-layout-v1'
 
-export function readLayout(): LayoutPreferences {
+export function readLayout(scope = ''): LayoutPreferences {
   try {
-    const saved = JSON.parse(localStorage.getItem(layoutKey) || '{}') as Partial<LayoutPreferences>
+    const saved = JSON.parse(localStorage.getItem(scope ? `${layoutKey}-${scope}` : layoutKey) || '{}') as Partial<LayoutPreferences>
     return Object.fromEntries(Object.entries(defaultLayout).map(([key, fallback]) =>
       [key, typeof saved[key as keyof LayoutPreferences] === 'boolean' ? saved[key as keyof LayoutPreferences] : fallback])) as LayoutPreferences
   } catch { return defaultLayout }
 }
 
-export function saveLayout(layout: LayoutPreferences) {
-  localStorage.setItem(layoutKey, JSON.stringify(layout))
+export function saveLayout(layout: LayoutPreferences, scope = '') {
+  localStorage.setItem(scope ? `${layoutKey}-${scope}` : layoutKey, JSON.stringify(layout))
 }

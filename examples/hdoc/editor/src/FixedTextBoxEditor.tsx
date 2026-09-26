@@ -30,7 +30,7 @@ export function FixedTextBoxEditor({ text, disabled, onChange, onReady, autoFocu
   disabled: boolean
   onChange: (value: string) => void
   onReady?: (editor: Editor | null) => void
-  autoFocus?: boolean
+  autoFocus?: boolean | 'start' | 'end'
   onSave?: (value: string) => void
   onCancel?: () => void
 }) {
@@ -38,7 +38,7 @@ export function FixedTextBoxEditor({ text, disabled, onChange, onReady, autoFocu
     extensions: fixedTextExtensions,
     content: { type: 'doc', content: [{ type: 'paragraph', content: text ? [{ type: 'text', text }] : [] }] },
     editable: !disabled,
-    autofocus: autoFocus ? 'end' : false,
+    autofocus: autoFocus === true ? 'end' : autoFocus,
     editorProps: {
       attributes: { class: 'fixed-tiptap-text', role: 'textbox', 'aria-label': '编辑文字', 'aria-multiline': 'false' },
       handleKeyDown: (view, event) => {
