@@ -14,8 +14,9 @@ use hcd_core::{
     NodeMapEntry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use std::collections::{BTreeMap, HashMap};
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 const MAX_HCD_PDF_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
@@ -301,6 +302,7 @@ struct PageRaster {
 
 fn render_page_raster(
     pdf: &Pdf,
+    poppler_source: Option<&Path>,
     page_index: usize,
     page_width: f32,
     page_height: f32,
@@ -319,24 +321,36 @@ fn render_page_raster(
             "raster dimensions {width}x{height} exceed the {MAX_HCD_PDF_RASTER_PIXELS}-pixel page limit"
         ));
     }
-    let page = pdf
-        .pages()
-        .get(page_index)
-        .ok_or_else(|| format!("Hayro page {} does not exist", page_index + 1))?;
-    let settings = RenderSettings {
-        x_scale: HCD_PDF_RASTER_SCALE,
-        y_scale: HCD_PDF_RASTER_SCALE,
-        width: Some(width as u16),
-        height: Some(height as u16),
-        bg_color: WHITE,
-    };
-    let pixmap = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        render_pdf_page(page, &InterpreterSettings::default(), &settings)
-    }))
-    .map_err(|_| format!("Hayro panicked while rendering page {}", page_index + 1))?;
-    let rgb = if mode == PdfRasterMode::Lossless {
-        Vec::new()
+    let (png, rgb) = if let Some(source) = poppler_source {
+        let png = render_poppler_page(source, page_index + 1)?;
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .map_err(|error| format!("Poppler page {} is not a PNG: {error}", page_index + 1))?
+            .into_rgb8();
+        if image.width() != width || image.height() != height {
+            return Err(format!(
+                "Poppler page {} has unexpected dimensions {}x{} (expected {width}x{height})",
+                page_index + 1,
+                image.width(),
+                image.height()
+            ));
+        }
+        (png, image.into_raw())
     } else {
+        let page = pdf
+            .pages()
+            .get(page_index)
+            .ok_or_else(|| format!("Hayro page {} does not exist", page_index + 1))?;
+        let settings = RenderSettings {
+            x_scale: HCD_PDF_RASTER_SCALE,
+            y_scale: HCD_PDF_RASTER_SCALE,
+            width: Some(width as u16),
+            height: Some(height as u16),
+            bg_color: WHITE,
+        };
+        let pixmap = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_pdf_page(page, &InterpreterSettings::default(), &settings)
+        }))
+        .map_err(|_| format!("Hayro panicked while rendering page {}", page_index + 1))?;
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
         for pixel in pixmap.data_as_u8_slice().chunks_exact(4) {
             let alpha = u16::from(pixel[3]);
@@ -344,7 +358,10 @@ fn render_page_raster(
                 rgb.push((u16::from(*channel) + 255 - alpha).min(255) as u8);
             }
         }
-        rgb
+        let png = pixmap
+            .into_png()
+            .map_err(|error| format!("failed to encode page {} as PNG: {error}", page_index + 1))?;
+        (png, rgb)
     };
     let jpeg = if mode == PdfRasterMode::Lossless {
         None
@@ -371,9 +388,6 @@ fn render_page_raster(
             lossy: true,
         });
     }
-    let png = pixmap
-        .into_png()
-        .map_err(|error| format!("failed to encode page {} as PNG: {error}", page_index + 1))?;
     if png.len() > MAX_HCD_PDF_RASTER_PNG_BYTES {
         return Err(format!(
             "rendered page {} is {} bytes; maximum is {MAX_HCD_PDF_RASTER_PNG_BYTES}",
@@ -414,6 +428,60 @@ fn render_page_raster(
         extension: "png",
         lossy: false,
     })
+}
+
+fn poppler_available() -> bool {
+    Command::new("pdftoppm")
+        .arg("-v")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn render_poppler_page(source: &Path, page: usize) -> Result<Vec<u8>, String> {
+    let mut child = Command::new("pdftoppm")
+        .args([
+            "-f",
+            &page.to_string(),
+            "-l",
+            &page.to_string(),
+            "-r",
+            "96",
+            "-png",
+            "-singlefile",
+        ])
+        .arg(source)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not start Poppler for page {page}: {error}"))?;
+    let mut bytes = Vec::new();
+    let read_result = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Poppler page {page} has no output stream"))?
+        .take((MAX_HCD_PDF_RASTER_PNG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes);
+    if let Err(error) = read_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("could not read Poppler page {page}: {error}"));
+    }
+    if bytes.len() > MAX_HCD_PDF_RASTER_PNG_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "Poppler page {page} exceeds the 64 MiB raster limit"
+        ));
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("could not wait for Poppler page {page}: {error}"))?;
+    if !status.success() {
+        return Err(format!("Poppler could not render page {page}: {status}"));
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn import_pdf<F>(
@@ -487,6 +555,7 @@ where
         ),
     };
     let mut replaced_control_characters = 0usize;
+    let poppler_source = poppler_available().then_some(source);
     let mut rasterized_pages = 0usize;
     let mut lossy_pages = 0usize;
     let mut raster_fallbacks = Vec::new();
@@ -510,6 +579,7 @@ where
         let page_raster = raster_pdf.as_ref().and_then(|pdf| {
             match render_page_raster(
                 pdf,
+                poppler_source,
                 page - 1,
                 rendered_dimensions.map_or(raw_page_width, |size| size.0),
                 rendered_dimensions.map_or(raw_page_height, |size| size.1),
@@ -677,6 +747,16 @@ where
         });
     }
     manifest.warnings.push(FidelityWarning {
+        code: "PDF_RASTER_BACKEND".to_string(),
+        message: if poppler_source.is_some() {
+            "PDF page rasters were rendered with Poppler at 96 DPI; an installed pdftoppm is optional, but improves unembedded-font fidelity".to_string()
+        } else {
+            "PDF page rasters were rendered with the bundled Rust renderer at 96 DPI; unembedded fonts may be omitted, so compare the preview with the source PDF".to_string()
+        },
+        node_id: None,
+        source_part: None,
+    });
+    manifest.warnings.push(FidelityWarning {
         code: "PDF_SOURCE_VISUAL_LAYER_READ_ONLY".to_string(),
         message: format!("{rasterized_pages} of {} PDF pages were composited as a read-only 96-DPI visual layer; {lossy_pages} page(s) use lossy JPEG at quality {}; extractable nodeId text remains selectable/editable but is transparent in source-view mode, and scanned text requires OCR before text patching", reader.page_count(), options.pdf_raster_quality),
         node_id: None,
@@ -704,7 +784,7 @@ where
             "the immutable source PDF as the export boundary".to_string(),
         ],
         flattened: vec![
-            "PDF drawing operations, fonts, vector graphics, masks and shaping are flattened into read-only page PNG/JPEG assets; JPEG pages are visually lossy and the pure-Rust renderer remains best-effort for unsupported PDF features".to_string(),
+            "PDF drawing operations, fonts, vector graphics, masks and shaping are flattened into read-only page PNG/JPEG assets; JPEG pages are visually lossy, and rendering fidelity depends on the raster backend named in the warnings".to_string(),
         ],
         dropped: vec!["scanned text without an OCR layer".to_string()],
         warnings: manifest.warnings.clone(),
@@ -1067,9 +1147,13 @@ mod tests {
             ));
         }
         assert!(rasters[0].0.ends_with(".png"));
-        assert!(rasters[1].0.ends_with(".jpg"));
         assert!(rasters[2].0.ends_with(".jpg"));
-        assert!(rasters[1].1.len() * 100 <= rasters[0].1.len() * 85);
+        if rasters[1].0.ends_with(".jpg") {
+            assert!(rasters[1].1.len() * 100 <= rasters[0].1.len() * 85);
+        } else {
+            assert!(rasters[1].0.ends_with(".png"));
+            assert_eq!(rasters[1].1, rasters[0].1);
+        }
         let original = image::load_from_memory(&rasters[0].1).unwrap().into_rgb8();
         let selected = image::load_from_memory(&rasters[1].1).unwrap().into_rgb8();
         let squared_error: u64 = original
