@@ -4328,7 +4328,11 @@ pub(crate) fn export_xlsx(
     let mut dirty_node_ids = dirty_node_ids;
     let mut deleted_nodes = std::collections::HashSet::new();
     for revision in 1..=manifest.revision {
-        for deletion in bundle.revision(revision)?.grid_row_deletions {
+        let record = bundle.revision(revision)?;
+        for deletion in record.grid_row_deletions {
+            deleted_nodes.extend(deletion.removed_node_ids);
+        }
+        for deletion in record.grid_column_deletions {
             deleted_nodes.extend(deletion.removed_node_ids);
         }
     }
@@ -4341,7 +4345,7 @@ pub(crate) fn export_xlsx(
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
-    let mut column_insertions: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
     for revision in 1..=manifest.revision {
         let record = bundle.revision(revision)?;
         for shift in record.grid_row_insertions {
@@ -4357,10 +4361,16 @@ pub(crate) fn export_xlsx(
                 .push(RowShift::Delete(shift.row));
         }
         for shift in record.grid_column_insertions {
-            column_insertions
+            column_shifts
                 .entry(shift.sheet_part)
                 .or_default()
-                .push(shift.before_column);
+                .push(ColumnShift::Insert(shift.before_column));
+        }
+        for shift in record.grid_column_deletions {
+            column_shifts
+                .entry(shift.sheet_part)
+                .or_default()
+                .push(ColumnShift::Delete(shift.column));
         }
         for part in record.dirty_grid_parts {
             replacements.entry(part).or_default();
@@ -4392,8 +4402,8 @@ pub(crate) fn export_xlsx(
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
-    if !row_insertions.is_empty() || !column_insertions.is_empty() {
-        verify_grid_shift_source(&mut archive, &workbook, &row_insertions, &column_insertions)?;
+    if !row_insertions.is_empty() || !column_shifts.is_empty() {
+        verify_grid_shift_source(&mut archive, &workbook, &row_insertions, &column_shifts)?;
     }
     let merge_ranges = collect_canonical_merge_ranges(bundle, &manifest, &workbook, &replacements)?;
     let canonical_rows = collect_canonical_sheet_rows(bundle, &manifest, &workbook, &replacements)?;
@@ -4417,7 +4427,7 @@ pub(crate) fn export_xlsx(
         })?;
         let inserted = created_cells.get(part).cloned().unwrap_or_default();
         let shifts = row_insertions.get(part).cloned().unwrap_or_default();
-        let column_shifts = column_insertions.get(part).cloned().unwrap_or_default();
+        let column_shifts = column_shifts.get(part).cloned().unwrap_or_default();
         let last_column = canonical_last_columns.get(part).copied().unwrap_or(0);
         archive
             .with_part(part, |input| {
@@ -4450,7 +4460,7 @@ pub(crate) fn export_xlsx(
         },
         preserved: vec![
             "unmodified OOXML entries copied as raw compressed payloads".to_string(),
-            if row_insertions.is_empty() && column_insertions.is_empty() {
+            if row_insertions.is_empty() && column_shifts.is_empty() {
                 "cell style index, workbook structure, formulas and drawings".to_string()
             } else {
                 "cell style index, workbook structure and original cell identities".to_string()
@@ -4468,7 +4478,11 @@ pub(crate) fn export_xlsx(
             {
                 items.push("inserted worksheet rows have no inherited row formatting".to_string());
             }
-            if !column_insertions.is_empty() {
+            if column_shifts
+                .values()
+                .flatten()
+                .any(|shift| matches!(shift, ColumnShift::Insert(_)))
+            {
                 items.push("inserted worksheet columns use default column formatting".to_string());
             }
             items
@@ -4725,7 +4739,7 @@ fn rewrite_worksheet(
     canonical_rows: &BTreeSet<u32>,
     column_widths: &BTreeMap<u32, f64>,
     row_insertions: &[RowShift],
-    column_insertions: &[u32],
+    column_shifts: &[ColumnShift],
     hcd_last_column: u32,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
@@ -4911,6 +4925,9 @@ fn rewrite_worksheet(
                     row_insertions
                         .iter()
                         .any(|shift| matches!(shift, RowShift::Delete(_))),
+                    column_shifts
+                        .iter()
+                        .any(|shift| matches!(shift, ColumnShift::Delete(_))),
                 )?))?;
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "mergeCells" => {
@@ -5014,12 +5031,19 @@ fn rewrite_worksheet(
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "c" => {
                 let reference = attribute(start, "r").unwrap_or_default();
+                if let Some((_, column)) = cell_coordinates(&reference) {
+                    if shifted_xlsx_column(column, column_shifts)? == 0 {
+                        skip_depth = 1;
+                        buffer.clear();
+                        continue;
+                    }
+                }
                 let shifted_reference =
-                    shifted_xlsx_cell_reference(&reference, row_insertions, column_insertions)?;
+                    shifted_xlsx_cell_reference(&reference, row_insertions, column_shifts)?;
                 let mut created_here = None;
                 if let Some((row, column)) = cell_coordinates(&reference) {
                     if active_row == Some(shifted_xlsx_row(row, row_insertions)?) {
-                        let current_column = shifted_xlsx_column(column, column_insertions)?;
+                        let current_column = shifted_xlsx_column(column, column_shifts)?;
                         flush_new_xlsx_cells(
                             &mut writer,
                             &mut row_pending,
@@ -5050,12 +5074,18 @@ fn rewrite_worksheet(
             }
             Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "c" => {
                 let reference = attribute(empty, "r").unwrap_or_default();
+                if let Some((_, column)) = cell_coordinates(&reference) {
+                    if shifted_xlsx_column(column, column_shifts)? == 0 {
+                        buffer.clear();
+                        continue;
+                    }
+                }
                 let shifted_reference =
-                    shifted_xlsx_cell_reference(&reference, row_insertions, column_insertions)?;
+                    shifted_xlsx_cell_reference(&reference, row_insertions, column_shifts)?;
                 let mut created_here = None;
                 if let Some((row, column)) = cell_coordinates(&reference) {
                     if active_row == Some(shifted_xlsx_row(row, row_insertions)?) {
-                        let current_column = shifted_xlsx_column(column, column_insertions)?;
+                        let current_column = shifted_xlsx_column(column, column_shifts)?;
                         flush_new_xlsx_cells(
                             &mut writer,
                             &mut row_pending,
@@ -5177,7 +5207,7 @@ fn verify_grid_shift_source(
     archive: &mut StreamingOxmlArchive,
     workbook: &WorkbookInfo,
     row_insertions: &HashMap<String, Vec<RowShift>>,
-    column_insertions: &HashMap<String, Vec<u32>>,
+    column_shifts: &HashMap<String, Vec<ColumnShift>>,
 ) -> Result<(), HcdError> {
     for entry in archive.entries() {
         let name = entry.name.as_str();
@@ -5189,7 +5219,7 @@ fn verify_grid_shift_source(
             || name == "xl/calcChain.xml"
         {
             return Err(HcdError::Unsupported(format!(
-                "XLSX grid insertion cannot update {name}"
+                "XLSX grid shift cannot update {name}"
             )));
         }
     }
@@ -5209,7 +5239,7 @@ fn verify_grid_shift_source(
                 if local_name(element.name().as_ref()) == "definedName" =>
             {
                 return Err(HcdError::Unsupported(
-                    "XLSX grid insertion cannot update defined names".to_string(),
+                    "XLSX grid shift cannot update defined names".to_string(),
                 ));
             }
             Event::Eof => break,
@@ -5219,7 +5249,7 @@ fn verify_grid_shift_source(
     }
     for sheet in &workbook.sheets {
         let target =
-            row_insertions.contains_key(&sheet.part) || column_insertions.contains_key(&sheet.part);
+            row_insertions.contains_key(&sheet.part) || column_shifts.contains_key(&sheet.part);
         archive
             .with_part(&sheet.part, |source| {
                 let mut reader = Reader::from_reader(BufReader::new(source));
@@ -5238,7 +5268,7 @@ fn verify_grid_shift_source(
                                 | "tableParts" | "hyperlinks" | "drawing" | "legacyDrawing"
                                 | "extLst") {
                                 return Err(PackageError::ReadPartError(
-                                    format!("grid insertion cannot update worksheet element {tag}"),
+                                    format!("grid shift cannot update worksheet element {tag}"),
                                 ));
                             }
                             if target
@@ -5267,15 +5297,15 @@ fn verify_grid_shift_source(
                                 )
                             {
                                 return Err(PackageError::ReadPartError(format!(
-                                    "grid insertion cannot update worksheet element {tag}"
+                                    "grid shift cannot update worksheet element {tag}"
                                 )));
                             }
-                            if column_insertions.contains_key(&sheet.part) && matches!(tag, "cols" | "col") {
-                                return Err(PackageError::ReadPartError("column insertion cannot update explicit source column widths".to_string()));
+                            if column_shifts.contains_key(&sheet.part) && matches!(tag, "cols" | "col") {
+                                return Err(PackageError::ReadPartError("column shift cannot update explicit source column widths".to_string()));
                             }
                             if target && matches!(tag, "sheetView" | "selection") {
                                 let first_row = row_insertions.get(&sheet.part).and_then(|rows| rows.iter().map(|shift| match shift { RowShift::Insert(row) | RowShift::Delete(row) => *row }).min());
-                                let first_column = column_insertions.get(&sheet.part).and_then(|columns| columns.iter().copied().min());
+                                let first_column = column_shifts.get(&sheet.part).and_then(|columns| columns.iter().map(|shift| match shift { ColumnShift::Insert(column) | ColumnShift::Delete(column) => *column }).min());
                                 for field in ["topLeftCell", "activeCell", "sqref"] {
                                     if let Some(value) = attribute(element, field) {
                                         for reference in value.split_whitespace() {
@@ -5284,7 +5314,7 @@ fn verify_grid_shift_source(
                                             })?;
                                             if first_row.is_some_and(|before| row >= before) || first_column.is_some_and(|before| column >= before) {
                                                 return Err(PackageError::ReadPartError(format!(
-                                                    "grid insertion cannot retain {field}={reference}"
+                                                    "grid shift cannot retain {field}={reference}"
                                                 )));
                                             }
                                         }
@@ -5310,17 +5340,28 @@ fn verify_grid_shift_source(
     Ok(())
 }
 
-fn shifted_xlsx_column(mut column: u32, insertions: &[u32]) -> Result<u32, HcdError> {
-    for &before in insertions {
-        if column >= before {
-            column = column
-                .checked_add(1)
-                .filter(|column| *column <= 16_384)
-                .ok_or_else(|| {
-                    HcdError::Unsupported(
-                        "XLSX column insertion exceeds the worksheet limit".to_string(),
-                    )
-                })?;
+#[derive(Clone, Copy)]
+enum ColumnShift {
+    Insert(u32),
+    Delete(u32),
+}
+
+fn shifted_xlsx_column(mut column: u32, shifts: &[ColumnShift]) -> Result<u32, HcdError> {
+    for shift in shifts {
+        match *shift {
+            ColumnShift::Insert(before) if column >= before => {
+                column = column
+                    .checked_add(1)
+                    .filter(|column| *column <= 16_384)
+                    .ok_or_else(|| {
+                        HcdError::Unsupported(
+                            "XLSX column insertion exceeds the worksheet limit".to_string(),
+                        )
+                    })?;
+            }
+            ColumnShift::Delete(at) if column == at => return Ok(0),
+            ColumnShift::Delete(at) if column > at => column -= 1,
+            _ => {}
         }
     }
     Ok(column)
@@ -5329,19 +5370,19 @@ fn shifted_xlsx_column(mut column: u32, insertions: &[u32]) -> Result<u32, HcdEr
 fn shifted_xlsx_cell_reference(
     reference: &str,
     row_insertions: &[RowShift],
-    column_insertions: &[u32],
+    column_shifts: &[ColumnShift],
 ) -> Result<String, HcdError> {
-    if row_insertions.is_empty() && column_insertions.is_empty() {
+    if row_insertions.is_empty() && column_shifts.is_empty() {
         return Ok(reference.to_string());
     }
     let (row, column) = cell_coordinates(reference).ok_or_else(|| {
         HcdError::Unsupported(format!(
-            "XLSX grid insertion requires an explicit cell address: {reference}"
+            "XLSX grid shift requires an explicit cell address: {reference}"
         ))
     })?;
     Ok(format!(
         "{}{}",
-        column_name(shifted_xlsx_column(column, column_insertions)?),
+        column_name(shifted_xlsx_column(column, column_shifts)?),
         shifted_xlsx_row(row, row_insertions)?
     ))
 }
@@ -5403,6 +5444,7 @@ fn expand_worksheet_dimension(
     canonical_last_row: u32,
     canonical_last_column: u32,
     shrink_rows: bool,
+    shrink_columns: bool,
 ) -> Result<BytesStart<'static>, HcdError> {
     let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
     let mut expanded = BytesStart::new(name);
@@ -5419,8 +5461,16 @@ fn expand_worksheet_dimension(
                 HcdError::InvalidBundle(format!("invalid XLSX worksheet dimension: {error}"))
             })?
             .into_owned();
-        if local_name(attribute.key.as_ref()) == "ref" && shrink_rows && canonical_last_row == 0 {
-            value = "A1".to_string();
+        if local_name(attribute.key.as_ref()) == "ref" && (shrink_rows || shrink_columns) {
+            value = if canonical_last_row == 0 || canonical_last_column == 0 {
+                "A1".to_string()
+            } else {
+                format!(
+                    "A1:{}{}",
+                    column_name(canonical_last_column),
+                    canonical_last_row
+                )
+            };
         } else if local_name(attribute.key.as_ref()) == "ref"
             && (canonical_last_row > 0 || canonical_last_column > 0)
         {
@@ -7002,6 +7052,228 @@ mod tests {
         assert!(xml.contains("<c r=\"E1\" t=\"inlineStr\"><is><t>Right 1</t>"));
         assert!(xml.contains("<c r=\"E130\" t=\"inlineStr\"><is><t>Right 130</t>"));
         assert!(xml.contains("<dimension ref=\"A1:E130\"/>"));
+    }
+
+    #[test]
+    fn middle_column_deletion_shifts_all_windows_and_preserves_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("long.xlsx");
+        let bundle_path = temp.path().join("long.hcd");
+        create_plain_rows_fixture(&source, 130);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("delete-column-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_15.to_string(),
+            document_id: "delete-column-doc".to_string(),
+            patch_id: "delete-column-d".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxColumnDelete {
+                sheet_id,
+                column: 4,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(
+            hcd_core::apply_patch(&bundle, &patch, 1)
+                .unwrap()
+                .idempotent_replay
+        );
+        let mut stale = patch.clone();
+        stale.patch_id = "stale-delete-column".to_string();
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1).is_err());
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("deleted.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("Right 1</t>"), "{xml}");
+        assert!(!xml.contains("Right 130</t>"), "{xml}");
+        assert!(
+            xml.contains("<c r=\"A130\" t=\"inlineStr\"><is><t>Row 130</t>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<dimension ref=\"A1:C130\"/>"));
+        let historical = temp.path().join("history.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&historical, "xl/worksheets/sheet1.xml").contains("Right 130</t>"));
+    }
+
+    #[test]
+    fn deleting_implicit_blank_column_moves_source_cells_left() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("sparse.xlsx");
+        let bundle_path = temp.path().join("sparse.hcd");
+        create_plain_rows_fixture(&source, 2);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sparse-delete-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_15.to_string(),
+            document_id: "sparse-delete-doc".to_string(),
+            patch_id: "delete-empty-b".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxColumnDelete {
+                sheet_id,
+                column: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("shifted.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains("<c r=\"C1\" t=\"inlineStr\"><is><t>Right 1</t>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>Right 2</t>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<dimension ref=\"A1:C2\"/>"), "{xml}");
+    }
+
+    #[test]
+    fn deleting_filled_inserted_column_clears_dirty_node() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("source.hcd");
+        create_plain_rows_fixture(&source, 2);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("insert-delete-column-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let mut patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_15.to_string(),
+            document_id: "insert-delete-column-doc".to_string(),
+            patch_id: "insert-column-b".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxColumnInsert {
+                sheet_id: sheet_id.clone(),
+                before_column: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        patch.patch_id = "fill-column-b".to_string();
+        patch.base_revision = 1;
+        patch.operations = vec![PatchOperation::XlsxCellSet {
+            sheet_id: sheet_id.clone(),
+            row: 1,
+            column: 2,
+            text: "Temporary".to_string(),
+        }];
+        hcd_core::apply_patch(&bundle, &patch, 1).unwrap();
+        patch.patch_id = "delete-column-b".to_string();
+        patch.base_revision = 2;
+        patch.operations = vec![PatchOperation::XlsxColumnDelete {
+            sheet_id,
+            column: 2,
+        }];
+        hcd_core::apply_patch(&bundle, &patch, 2).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("result.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("Temporary"), "{xml}");
+        assert!(
+            xml.contains("<c r=\"D2\" t=\"inlineStr\"><is><t>Right 2</t>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<dimension ref=\"A1:D2\"/>"), "{xml}");
+    }
+
+    #[test]
+    fn deleting_all_columns_keeps_empty_rows_and_valid_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("source.hcd");
+        create_plain_rows_fixture(&source, 2);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("all-columns-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        for revision in 0..4 {
+            let patch = PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_15.to_string(),
+                document_id: "all-columns-doc".to_string(),
+                patch_id: format!("delete-first-column-{revision}"),
+                base_revision: revision,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::XlsxColumnDelete {
+                    sheet_id: sheet_id.clone(),
+                    column: 1,
+                }],
+                metadata: BTreeMap::new(),
+            };
+            hcd_core::apply_patch(&bundle, &patch, revision).unwrap();
+        }
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("empty.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("<c "), "{xml}");
+        assert!(xml.contains("<row r=\"2\""), "{xml}");
+        assert!(xml.contains("<dimension ref=\"A1\"/>"), "{xml}");
     }
 
     #[test]

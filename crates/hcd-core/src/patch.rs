@@ -6,16 +6,16 @@ use crate::hash::{hash_bytes, node_bloom, node_bloom_might_contain, stable_node_
 use crate::HCD_SCHEMA_VERSION;
 use crate::{
     extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, AnnotationSet,
-    ApplyResult, AssetDescriptor, FidelityWarning, GridColumnInsertion, GridRowDeletion,
-    GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage, ImageGeometry,
-    ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry, NodeStylePatch, PatchBatch,
-    PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry, TextExtractPage,
-    TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
+    ApplyResult, AssetDescriptor, FidelityWarning, GridColumnDeletion, GridColumnInsertion,
+    GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
+    ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
+    NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
+    TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
     HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
-    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
-    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
-    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
-    MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_2,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -106,6 +106,12 @@ struct XlsxColumnInsert {
 }
 
 #[derive(Clone)]
+struct XlsxColumnDelete {
+    sheet_id: String,
+    column: u32,
+}
+
+#[derive(Clone)]
 struct XlsxRowRemoval {
     sheet_id: String,
     row: u32,
@@ -157,6 +163,7 @@ pub fn apply_patch(
                     | PatchOperation::XlsxRowInsert { .. }
                     | PatchOperation::XlsxRowDelete { .. }
                     | PatchOperation::XlsxColumnInsert { .. }
+                    | PatchOperation::XlsxColumnDelete { .. }
                     | PatchOperation::XlsxUnmerge { .. }
             )
         })
@@ -200,7 +207,8 @@ pub fn apply_patch(
                 found
                     || !record.grid_row_insertions.is_empty()
                     || !record.grid_row_deletions.is_empty()
-                    || !record.grid_column_insertions.is_empty(),
+                    || !record.grid_column_insertions.is_empty()
+                    || !record.grid_column_deletions.is_empty(),
             )
         })?
     } else {
@@ -210,6 +218,7 @@ pub fn apply_patch(
     let xlsx_row_insert = collect_xlsx_row_insert(patch);
     let xlsx_row_delete = collect_xlsx_row_delete(patch);
     let xlsx_column_insert = collect_xlsx_column_insert(patch);
+    let xlsx_column_delete = collect_xlsx_column_delete(patch);
     let xlsx_row_removal = collect_xlsx_row_removal(patch);
     let xlsx_column_width = collect_xlsx_column_width(patch);
     let xlsx_row_target = xlsx_row_append
@@ -227,6 +236,10 @@ pub fn apply_patch(
     let xlsx_column_insert_part = xlsx_column_insert
         .as_ref()
         .map(|insert| find_xlsx_column_insert_part(bundle, &manifest, insert))
+        .transpose()?;
+    let xlsx_column_delete_part = xlsx_column_delete
+        .as_ref()
+        .map(|delete| find_xlsx_column_delete_part(bundle, &manifest, delete))
         .transpose()?;
     let xlsx_removal_target = xlsx_row_removal
         .as_ref()
@@ -268,6 +281,7 @@ pub fn apply_patch(
         || xlsx_row_insert.is_some()
         || xlsx_row_delete.is_some()
         || xlsx_column_insert.is_some()
+        || xlsx_column_delete.is_some()
         || xlsx_row_removal.is_some()
         || xlsx_column_width.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
@@ -286,6 +300,8 @@ pub fn apply_patch(
     let mut deleted_xlsx_row = false;
     let mut removed_xlsx_node_ids = Vec::new();
     let mut inserted_xlsx_column = false;
+    let mut deleted_xlsx_column = false;
+    let mut removed_xlsx_column_node_ids = Vec::new();
     let mut removed_xlsx_row = false;
     let mut changed_xlsx_column = false;
     let mut root_hasher = Sha256::new();
@@ -350,6 +366,13 @@ pub fn apply_patch(
                             .is_some_and(|end| end >= insert.before_column)
                 })
             });
+            let column_delete_here = xlsx_column_delete.as_ref().is_some_and(|delete| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells
+                        && grid.sheet_id == delete.sheet_id
+                        && grid.column_end.is_some_and(|end| end >= delete.column)
+                })
+            });
             let remove_here = xlsx_removal_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let width_here = xlsx_column_width.as_ref().filter(|width| {
                 descriptor.grid.as_ref().is_some_and(|grid| {
@@ -379,6 +402,7 @@ pub fn apply_patch(
                 && !row_shift_here
                 && !row_delete_here
                 && !column_shift_here
+                && !column_delete_here
                 && !remove_here
                 && width_here.is_none()
             {
@@ -805,6 +829,24 @@ pub fn apply_patch(
                 inserted_xlsx_column = true;
                 chunk_changed = true;
             }
+            if column_delete_here {
+                let delete = xlsx_column_delete.as_ref().expect("column deletion exists");
+                removed_xlsx_column_node_ids.extend(delete_xlsx_column_window(
+                    &mut html,
+                    &mut source_map,
+                    descriptor,
+                    delete.column,
+                )?);
+                html_nodes = extract_html_text_nodes(&html)?;
+                dirty_grid_parts.insert(
+                    xlsx_column_delete_part
+                        .as_ref()
+                        .expect("resolved sheet part")
+                        .clone(),
+                );
+                deleted_xlsx_column = true;
+                chunk_changed = true;
+            }
             if remove_here {
                 let removal = xlsx_row_removal
                     .as_ref()
@@ -919,6 +961,11 @@ pub fn apply_patch(
     if xlsx_column_insert.is_some() && !inserted_xlsx_column {
         return Err(HcdError::InvalidBundle(
             "XLSX middle column target disappeared".to_string(),
+        ));
+    }
+    if xlsx_column_delete.is_some() && !deleted_xlsx_column {
+        return Err(HcdError::InvalidBundle(
+            "XLSX column deletion target disappeared".to_string(),
         ));
     }
     if xlsx_row_removal.is_some() && !removed_xlsx_row {
@@ -1046,6 +1093,18 @@ pub fn apply_patch(
                     .expect("resolved sheet part")
                     .clone(),
                 before_column: insert.before_column,
+            })
+            .into_iter()
+            .collect(),
+        grid_column_deletions: xlsx_column_delete
+            .as_ref()
+            .map(|delete| GridColumnDeletion {
+                sheet_part: xlsx_column_delete_part
+                    .as_ref()
+                    .expect("resolved sheet part")
+                    .clone(),
+                column: delete.column,
+                removed_node_ids: removed_xlsx_column_node_ids,
             })
             .into_iter()
             .collect(),
@@ -1333,6 +1392,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_12
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_13
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_14
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1459,6 +1519,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_12
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1509,6 +1570,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_12
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1551,6 +1613,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_12
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1601,6 +1664,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_12
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1630,6 +1694,7 @@ fn validate_patch_identity(
                     HCD_PATCH_SCHEMA_VERSION_12
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1648,8 +1713,10 @@ fn validate_patch_identity(
                 }
             }
             PatchOperation::XlsxRowDelete { sheet_id, row } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_14
-                    || manifest.source.format != "xlsx"
+                if !matches!(
+                    patch.schema_version.as_str(),
+                    HCD_PATCH_SCHEMA_VERSION_14 | HCD_PATCH_SCHEMA_VERSION_15
+                ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.row.delete requires one operation on an XLSX bundle with hcd-patch/14".to_string()));
@@ -1672,7 +1739,9 @@ fn validate_patch_identity(
             } => {
                 if !matches!(
                     patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_13 | HCD_PATCH_SCHEMA_VERSION_14
+                    HCD_PATCH_SCHEMA_VERSION_13
+                        | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1690,6 +1759,25 @@ fn validate_patch_identity(
                     ));
                 }
             }
+            PatchOperation::XlsxColumnDelete { sheet_id, column } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported("xlsx.column.delete requires one operation on an XLSX bundle with hcd-patch/15".to_string()));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !(1..=16_384).contains(column)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX column deletion target".to_string(),
+                    ));
+                }
+            }
             PatchOperation::XlsxColumnWidth {
                 sheet_id,
                 column,
@@ -1703,6 +1791,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_12
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1733,6 +1822,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_12
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
+                        | HCD_PATCH_SCHEMA_VERSION_15
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -2153,6 +2243,18 @@ fn collect_xlsx_column_insert(patch: &PatchBatch) -> Option<XlsxColumnInsert> {
     })
 }
 
+fn collect_xlsx_column_delete(patch: &PatchBatch) -> Option<XlsxColumnDelete> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxColumnDelete { sheet_id, column } = operation else {
+            return None;
+        };
+        Some(XlsxColumnDelete {
+            sheet_id: sheet_id.clone(),
+            column: *column,
+        })
+    })
+}
+
 fn collect_xlsx_row_removal(patch: &PatchBatch) -> Option<XlsxRowRemoval> {
     patch.operations.iter().find_map(|operation| {
         let PatchOperation::XlsxRowRemoveLast { sheet_id, row } = operation else {
@@ -2498,6 +2600,85 @@ fn find_xlsx_column_insert_part(
         return Err(HcdError::Unsupported(
             "insert before an existing XLSX column".to_string(),
         ));
+    }
+    part.ok_or_else(|| {
+        HcdError::Unsupported("XLSX worksheet has no mapped source cells".to_string())
+    })
+}
+
+fn find_xlsx_column_delete_part(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    delete: &XlsxColumnDelete,
+) -> Result<String, HcdError> {
+    let mut part = None;
+    let mut last_column = 0u32;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if matches!(
+                grid.kind,
+                crate::GridChunkKind::Picture | crate::GridChunkKind::Chart
+            ) {
+                return Err(HcdError::Unsupported(
+                    "column deletion cannot update drawings or charts".to_string(),
+                ));
+            }
+            if grid.kind != crate::GridChunkKind::Cells {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            if html.contains("data-hcd-formula=\"true\"") || html.contains("data-hcd-merge=\"") {
+                return Err(HcdError::Unsupported(
+                    "column deletion requires a workbook without formulas or merged cells"
+                        .to_string(),
+                ));
+            }
+            if grid.sheet_id != delete.sheet_id {
+                continue;
+            }
+            if html.contains("data-hcd-column-start=\"") {
+                return Err(HcdError::Unsupported(
+                    "column deletion cannot yet shift explicit column widths".to_string(),
+                ));
+            }
+            last_column = last_column.max(grid.column_end.unwrap_or(0));
+            if part.is_none() {
+                part = bundle
+                    .read_map(&descriptor)?
+                    .entries
+                    .into_iter()
+                    .find(|entry| entry.source.node_kind == "cell")
+                    .map(|entry| entry.source.part);
+            }
+        }
+    }
+    if delete.column > last_column {
+        return Err(HcdError::Unsupported(
+            "delete an existing XLSX column".to_string(),
+        ));
+    }
+    if part.is_none() {
+        let (original, _) = crate::manifest_at_revision(bundle, manifest, Some(0))?;
+        for page_number in 0..original.index_page_count {
+            for descriptor in bundle.read_index_page(&original, page_number)?.chunks {
+                if descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == delete.sheet_id
+                }) {
+                    part = bundle
+                        .read_map(&descriptor)?
+                        .entries
+                        .into_iter()
+                        .find(|entry| entry.source.node_kind == "cell")
+                        .map(|entry| entry.source.part);
+                    if part.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
     }
     part.ok_or_else(|| {
         HcdError::Unsupported("XLSX worksheet has no mapped source cells".to_string())
@@ -2930,6 +3111,113 @@ fn shift_xlsx_column_window(
     });
     grid.column_end = Some(old_end + 1);
     Ok(())
+}
+
+fn delete_xlsx_column_window(
+    html: &mut String,
+    source_map: &mut crate::ChunkSourceMap,
+    descriptor: &mut crate::ChunkDescriptor,
+    deleted_column: u32,
+) -> Result<Vec<String>, HcdError> {
+    let grid = descriptor.grid.as_mut().ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX column window has no grid address".to_string())
+    })?;
+    let old_start = grid
+        .column_start
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX column window has no start".to_string()))?;
+    let old_end = grid
+        .column_end
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX column window has no end".to_string()))?;
+    if old_start > old_end || old_end < deleted_column {
+        return Err(HcdError::InvalidBundle(
+            "XLSX column window range is invalid".to_string(),
+        ));
+    }
+    let mut rewritten = String::with_capacity(html.len());
+    let mut cursor = 0usize;
+    for cell in xlsx_cells(html)? {
+        if cell.start < cursor {
+            return Err(HcdError::InvalidBundle(
+                "XLSX cell spans overlap".to_string(),
+            ));
+        }
+        rewritten.push_str(&html[cursor..cell.start]);
+        if cell.column < deleted_column {
+            rewritten.push_str(&html[cell.start..cell.end]);
+        } else if cell.column > deleted_column {
+            let original = &html[cell.start..cell.end];
+            let old_column = format!(" data-hcd-column=\"{}\"", cell.column);
+            if !original.contains(&old_column) {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX cell column differs from its address".to_string(),
+                ));
+            }
+            let mut updated = original.replacen(
+                &old_column,
+                &format!(" data-hcd-column=\"{}\"", cell.column - 1),
+                1,
+            );
+            let old_ref = format!(
+                " data-hcd-cell=\"{}{}\"",
+                xlsx_column_name(cell.column),
+                cell.row
+            );
+            if original.contains(&old_ref) {
+                updated = updated.replacen(
+                    &old_ref,
+                    &format!(
+                        " data-hcd-cell=\"{}{}\"",
+                        xlsx_column_name(cell.column - 1),
+                        cell.row
+                    ),
+                    1,
+                );
+            }
+            rewritten.push_str(&updated);
+        }
+        cursor = cell.end;
+    }
+    rewritten.push_str(&html[cursor..]);
+    *html = rewritten;
+    let mut removed = Vec::new();
+    source_map.entries.retain_mut(|entry| {
+        if entry.source.node_kind != "cell" {
+            return true;
+        }
+        let Some(reference) = entry.source.paragraph_id.clone() else {
+            return true;
+        };
+        let Some((row, column)) = xlsx_cell_coordinates(&reference) else {
+            return true;
+        };
+        if column == deleted_column {
+            removed.push(entry.node_id.clone());
+            return false;
+        }
+        if column > deleted_column {
+            if !entry.source.created_in_hcd && entry.source.source_cell_ref.is_none() {
+                entry.source.source_cell_ref = Some(reference);
+            }
+            entry.source.paragraph_id = Some(format!("{}{}", xlsx_column_name(column - 1), row));
+        }
+        true
+    });
+    let remaining = xlsx_cells(html)?;
+    grid.column_start = remaining.iter().map(|cell| cell.column).min();
+    grid.column_end = remaining.iter().map(|cell| cell.column).max();
+    descriptor.node_count = source_map.entries.len();
+    descriptor.first_node_id = source_map
+        .entries
+        .first()
+        .map(|entry| entry.node_id.clone());
+    descriptor.last_node_id = source_map.entries.last().map(|entry| entry.node_id.clone());
+    descriptor.node_bloom = node_bloom(
+        source_map
+            .entries
+            .iter()
+            .map(|entry| entry.node_id.as_str()),
+    );
+    Ok(removed)
 }
 
 fn remove_empty_xlsx_tail_row(html: &mut String, row: u32) -> Result<(), HcdError> {
@@ -4059,6 +4347,7 @@ fn apply_annotations(
             | PatchOperation::XlsxRowInsert { .. }
             | PatchOperation::XlsxRowDelete { .. }
             | PatchOperation::XlsxColumnInsert { .. }
+            | PatchOperation::XlsxColumnDelete { .. }
             | PatchOperation::XlsxRowRemoveLast { .. }
             | PatchOperation::XlsxColumnWidth { .. }
             | PatchOperation::NodeStyle { .. }
