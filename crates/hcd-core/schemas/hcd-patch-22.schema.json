@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:22",
+  "title": "HTML Canonical Document atomic XLSX formula range paste",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/22"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 262144
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/textSplice"
+          },
+          {
+            "$ref": "#/$defs/xlsxCellSet"
+          },
+          {
+            "$ref": "#/$defs/xlsxFormulaSet"
+          },
+          {
+            "$ref": "#/$defs/xlsxFormulaCreate"
+          }
+        ]
+      },
+      "contains": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/xlsxFormulaSet"
+          },
+          {
+            "$ref": "#/$defs/xlsxFormulaCreate"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^n_[0-9a-f]{32}$"
+    },
+    "textSplice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "start",
+        "deleteCount",
+        "insertText",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "text.splice"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deleteCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "insertText": {
+          "type": "string",
+          "maxLength": 2097152
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "xlsxCellSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "sheetId",
+        "row",
+        "column",
+        "text"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.cell.set"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        }
+      }
+    },
+    "xlsxFormulaSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "sheetId",
+        "formula",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.formula.set"
+        },
+        "nodeId": {
+          "type": "string",
+          "pattern": "^n_[0-9a-f]{32}$"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "formula": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 8192,
+          "pattern": "^="
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "xlsxFormulaCreate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "sheetId",
+        "row",
+        "column",
+        "formula"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.formula.create"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "formula": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 8192,
+          "pattern": "^="
+        }
+      }
+    }
+  }
+}
