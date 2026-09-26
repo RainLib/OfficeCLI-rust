@@ -318,6 +318,12 @@ pub enum PatchOperation {
         geometry: PptxShapeGeometry,
         precondition: PptxShapePrecondition,
     },
+    /// Remove one HCD-created slide text box from the current revision.
+    #[serde(rename = "pptx.text.delete", rename_all = "camelCase")]
+    PptxTextDelete {
+        node_id: String,
+        precondition: NodePrecondition,
+    },
     /// Merge a rectangle of existing XLSX cells. Covered cells must be empty.
     /// Coordinates are 1-based worksheet row and column numbers.
     #[serde(rename = "xlsx.merge", rename_all = "camelCase")]
@@ -458,6 +464,7 @@ impl PatchOperation {
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
             | Self::PptxShapeGeometry { node_id, .. }
+            | Self::PptxTextDelete { node_id, .. }
             | Self::PdfTextGeometry { node_id, .. }
             | Self::PdfTextDelete { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
@@ -489,6 +496,7 @@ impl PatchOperation {
                 | Self::PdfTextInsert { .. }
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
+                | Self::PptxTextDelete { .. }
                 | Self::PdfTextGeometry { .. }
                 | Self::PdfTextDelete { .. }
                 | Self::XlsxMerge { .. }

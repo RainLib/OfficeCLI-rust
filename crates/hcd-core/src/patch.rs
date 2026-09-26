@@ -208,6 +208,7 @@ pub fn apply_patch(
                         | PatchOperation::PdfTextDelete { .. }
                         | PatchOperation::PptxTextInsert { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
+                        | PatchOperation::PptxTextDelete { .. }
                         | PatchOperation::XlsxCellSet { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaCreate { .. }
@@ -258,6 +259,7 @@ pub fn apply_patch(
     let pdf_deletions = collect_pdf_deletions(patch);
     let pptx_insertions = collect_pptx_insertions(patch);
     let pptx_geometry = collect_pptx_geometry(patch);
+    let pptx_deletions = collect_pptx_deletions(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_blank_merge = collect_xlsx_blank_merge(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
@@ -338,6 +340,7 @@ pub fn apply_patch(
         .chain(xlsx_unmerges.keys().cloned())
         .chain(xlsx_formula.keys().cloned())
         .chain(pptx_geometry.keys().cloned())
+        .chain(pptx_deletions.keys().cloned())
         .chain(pdf_geometry.keys().cloned())
         .chain(pdf_deletions.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
@@ -354,6 +357,7 @@ pub fn apply_patch(
         || !pdf_deletions.is_empty()
         || !pptx_insertions.is_empty()
         || !pptx_geometry.is_empty()
+        || !pptx_deletions.is_empty()
         || !xlsx_merges.is_empty()
         || xlsx_blank_merge.is_some()
         || !xlsx_unmerges.is_empty()
@@ -713,6 +717,29 @@ pub fn apply_patch(
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
+                if let Some(expected_hash) = pptx_deletions.get(&entry.node_id) {
+                    if entry.source.node_kind != "slide-text"
+                        || !entry.source.editable
+                        || !entry.source.created_in_hcd
+                    {
+                        return Err(HcdError::Unsupported(
+                            "PPTX deletion requires an HCD-created text box".to_string(),
+                        ));
+                    }
+                    if expected_hash != &entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PPTX text node {} expected hash {}, actual {}",
+                            entry.node_id, expected_hash, entry.node_hash
+                        )));
+                    }
+                    delete_pptx_text(&mut html, entry)?;
+                    html_nodes.remove(&entry.node_id);
+                    deleted_here.push(entry.node_id.clone());
+                    removed_nodes.insert(entry.node_id.clone());
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
                 if let Some(change) = pdf_geometry.get(&entry.node_id) {
                     if entry.source.node_kind != "pdf-text"
                         || !entry.source.editable
@@ -879,7 +906,7 @@ pub fn apply_patch(
                     .block_count
                     .checked_sub(deleted_here.len())
                     .ok_or_else(|| {
-                        HcdError::InvalidBundle("PDF block count underflow".to_string())
+                        HcdError::InvalidBundle("fixed-page block count underflow".to_string())
                     })?;
                 descriptor.node_bloom = node_bloom(
                     source_map
@@ -1812,6 +1839,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_24
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_25
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1958,6 +1986,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/26 accepts one XLSX blank merge only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_27
+        && (manifest.source.format != "pptx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PptxTextDelete { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/27 accepts one PPTX text-box deletion only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2162,6 +2202,22 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::Unsupported(
                         "pdf.text.delete requires one PDF operation with hcd-patch/24".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+            }
+            PatchOperation::PptxTextDelete {
+                node_id,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
+                    || manifest.source.format != "pptx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.text.delete requires one PPTX operation with hcd-patch/27"
+                            .to_string(),
                     ));
                 }
                 validate_node_id(node_id)?;
@@ -3036,6 +3092,23 @@ fn collect_pdf_deletions(patch: &PatchBatch) -> HashMap<String, String> {
         .iter()
         .filter_map(|operation| {
             let PatchOperation::PdfTextDelete {
+                node_id,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((node_id.clone(), precondition.node_hash.clone()))
+        })
+        .collect()
+}
+
+fn collect_pptx_deletions(patch: &PatchBatch) -> HashMap<String, String> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::PptxTextDelete {
                 node_id,
                 precondition,
             } = operation
@@ -5372,6 +5445,83 @@ fn delete_pdf_text(html: &mut String, entry: &NodeMapEntry) -> Result<(), HcdErr
     Ok(())
 }
 
+fn delete_pptx_text(html: &mut String, entry: &NodeMapEntry) -> Result<(), HcdError> {
+    if !entry.source.created_in_hcd || entry.source.node_kind != "slide-text" {
+        return Err(HcdError::Unsupported(
+            "PPTX deletion is available only for HCD-created text boxes".to_string(),
+        ));
+    }
+    let locator = entry
+        .source
+        .text_id
+        .as_deref()
+        .and_then(|value| value.strip_prefix("hcd-pptx-box:"))
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX text box locator is missing".to_string()))?;
+    let values = locator
+        .split(',')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| HcdError::InvalidBundle("PPTX text box locator is invalid".to_string()))?;
+    if values.len() != 5 || !(100..=25_600).contains(&values[4]) {
+        return Err(HcdError::InvalidBundle(
+            "PPTX text box locator is invalid".to_string(),
+        ));
+    }
+    let slide_part = format!("data-hcd-source-part=\"{}\"", entry.source.part);
+    if !html.starts_with("<section class=\"hcd-slide\"") || !html.contains(&slide_part) {
+        return Err(HcdError::InvalidBundle(
+            "PPTX text box is not in its source slide".to_string(),
+        ));
+    }
+    let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
+    let location = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle("PPTX text box is missing from its slide".to_string())
+    })?;
+    let start = html[..location]
+        .rfind("<div class=\"hcd-slide-shape\"")
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX text box shape is missing".to_string()))?;
+    let tag_end = html[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX text box tag is not closed".to_string()))?;
+    let tag = &html[start..=tag_end];
+    if xlsx_attribute(tag, "data-hcd-shape-id").is_some()
+        || [
+            "data-hcd-x-emu",
+            "data-hcd-y-emu",
+            "data-hcd-width-emu",
+            "data-hcd-height-emu",
+        ]
+        .iter()
+        .enumerate()
+        .any(|(index, name)| {
+            xlsx_attribute(tag, name).and_then(|value| value.parse::<u64>().ok())
+                != Some(values[index])
+        })
+    {
+        return Err(HcdError::InvalidBundle(
+            "PPTX created text box differs from its source locator".to_string(),
+        ));
+    }
+    let close = html[tag_end + 1..]
+        .find("</div>")
+        .map(|offset| tag_end + 1 + offset + "</div>".len())
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("PPTX text box closing tag is missing".to_string())
+        })?;
+    let contents = &html[tag_end + 1..close];
+    if contents.contains("<div")
+        || contents.matches("data-hcd-id=\"").count() != 1
+        || !contents.contains(&marker)
+    {
+        return Err(HcdError::InvalidBundle(
+            "PPTX text box contains unexpected nested content".to_string(),
+        ));
+    }
+    html.replace_range(start..close, "");
+    Ok(())
+}
+
 fn insert_pptx_text(
     html: &mut String,
     source_map: &mut crate::ChunkSourceMap,
@@ -6175,6 +6325,7 @@ fn apply_annotations(
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::PptxTextInsert { .. }
             | PatchOperation::PptxShapeGeometry { .. }
+            | PatchOperation::PptxTextDelete { .. }
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
             | PatchOperation::XlsxMerge { .. }
