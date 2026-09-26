@@ -96,7 +96,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       const workbook = univerAPI.createWorkbook(workbookData)
       const adapter = new HcdUniverAdapter(client, univerAPI, workbook, editing ? 'editable' : 'readonly', message => {
         if (alive) setStatus(message)
-      })
+      }, styleCatalog)
       let saveQueue = Promise.resolve()
       const onPatch = (event: Event) => {
         const detail = (event as CustomEvent<HcdPatchEventDetail>).detail

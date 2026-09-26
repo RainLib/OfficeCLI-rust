@@ -104,7 +104,7 @@ async function boot(): Promise<void> {
     ],
   });
   const workbook = univerAPI.createWorkbook(workbookData);
-  const adapter = new HcdUniverAdapter(client, univerAPI, workbook, mode, setStatus);
+  const adapter = new HcdUniverAdapter(client, univerAPI, workbook, mode, setStatus, styleCatalog);
   await adapter.start();
 
   window.hcdUniver = adapter;

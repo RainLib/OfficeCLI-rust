@@ -1,4 +1,4 @@
-import type { FUniver, ICellData, IObjectMatrixPrimitiveType } from '@univerjs/presets';
+import type { FUniver, ICellData, IObjectMatrixPrimitiveType, IStyleData } from '@univerjs/presets';
 import type { FWorkbook, FWorksheet } from '@univerjs/preset-sheets-core';
 import { HcdBundleClient, type ChunkDescriptor } from './hcd.ts';
 import { parseGridChunk, type NodeLink, type ParsedGridChunk, type ParsedVisual } from './hcd-parser.ts';
@@ -47,7 +47,7 @@ export type HcdViewerMode = 'readonly' | 'editable';
 
 interface PendingPatch {
   links: NodeLink[];
-  previous: string[];
+  previous: Array<string | number>;
   blanks: Array<{ sheetId: string; row: number; column: number }>;
 }
 
@@ -100,6 +100,7 @@ export class HcdUniverAdapter {
   private readonly runtimes = new Map<string, ChunkRuntime>();
   private readonly rangeGeneration = new Map<string, number>();
   private readonly dimensions = new Map<string, SheetDimensions>();
+  private readonly recalculatedFormulas = new Set<string>();
   private applying = 0;
 
   constructor(
@@ -108,6 +109,7 @@ export class HcdUniverAdapter {
     readonly workbook: FWorkbook,
     readonly mode: HcdViewerMode,
     private readonly onStatus: (message: string) => void,
+    private readonly styleCatalog: Record<string, IStyleData> = {},
   ) {
     for (const sheet of client.sheets()) {
       const defaults = client.sheetDefaults(sheet.sheetId);
@@ -195,6 +197,7 @@ export class HcdUniverAdapter {
     // temporary default grid.
     await Promise.all(cellDescriptors.map((descriptor) => this.loadChunk(descriptor)));
     if (this.rangeGeneration.get(sheetId) !== generation) return;
+    this.recalculateEditedFormulas(sheetId, cellDescriptors);
     await Promise.all(visualDescriptors.map((descriptor) => this.loadChunk(descriptor)));
     if (this.rangeGeneration.get(sheetId) !== generation) return;
     const descriptors = [...cellDescriptors, ...visualDescriptors];
@@ -214,6 +217,7 @@ export class HcdUniverAdapter {
         link.text = link.formula;
       } else {
         link.text = String(sheet?.getRange(link.row, link.column).getValue() ?? '');
+        link.rawValue = undefined;
       }
     }
     this.client.manifest.revision = revision;
@@ -297,13 +301,28 @@ export class HcdUniverAdapter {
     await this.loadRange(sheet.getSheetId(), start, end);
   }
 
+  private recalculateEditedFormulas(sheetId: string, descriptors: ChunkDescriptor[]): void {
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    if (!sheet) return;
+    this.withApplying(() => {
+      for (const descriptor of descriptors) {
+        const runtime = this.runtimes.get(descriptor.chunkId);
+        for (const { link } of runtime?.cells ?? []) {
+          if (!link?.formulaEdited || !link.formula || this.recalculatedFormulas.has(link.nodeId)) continue;
+          sheet.getRange(link.row, link.column).setFormula(link.formula);
+          this.recalculatedFormulas.add(link.nodeId);
+        }
+      }
+    });
+  }
+
   private async loadChunk(descriptor: ChunkDescriptor): Promise<void> {
     if (this.loaded.has(descriptor.chunkId)) return;
     const existing = this.loading.get(descriptor.chunkId);
     if (existing) return existing;
     const operation = (async () => {
       const chunk = await this.client.readChunk(descriptor);
-      const parsed = parseGridChunk(chunk, (href) => this.client.resolve(href).toString());
+      const parsed = parseGridChunk(chunk, (href) => this.client.resolve(href).toString(), this.styleCatalog);
       const sheet = this.workbook.getSheetBySheetId(descriptor.grid!.sheetId);
       if (!sheet) throw new Error(`工作表不存在: ${descriptor.grid!.sheetName}`);
       await this.applyParsedChunk(sheet, descriptor, parsed);
@@ -494,9 +513,9 @@ export class HcdUniverAdapter {
     const formulaOperations: HcdXlsxFormulaSet[] = [];
     const changes: HcdPatchEventDetail['changes'] = [];
     const links: NodeLink[] = [];
-    const previous: string[] = [];
+    const previous: Array<string | number> = [];
     const seen = new Set<string>();
-    const rejected: Array<{ sheetId: string; row: number; column: number; value: string; formula?: string }> = [];
+    const rejected: Array<{ sheetId: string; row: number; column: number; value: string | number; formula?: string }> = [];
     const blankChanges: Array<{ sheetId: string; row: number; column: number; text: string }> = [];
     for (const range of ranges) {
       const values = range.getValues();
@@ -532,19 +551,19 @@ export class HcdUniverAdapter {
               blankChanges.push({ sheetId: range.getSheetId(), row, column, text: next });
               continue;
             }
-            if (next === (link?.text ?? '')) continue;
+            if (next === (link?.text ?? '') || (link?.rawValue !== undefined && next === String(link.rawValue))) continue;
             // Paste and fill can bypass BeforeSheetEditStart. Unsupported
             // cells are restored rather than left as unsaved local changes.
             rejected.push({
               sheetId: range.getSheetId(),
               row,
               column,
-              value: link?.text ?? '',
+              value: link?.rawValue ?? link?.text ?? '',
               formula: link?.formula,
             });
             continue;
           }
-          if (next === link.text) continue;
+          if (next === link.text || (link.rawValue !== undefined && next === String(link.rawValue))) continue;
           operations.push({
             type: 'text.splice',
             nodeId: link.nodeId,
@@ -553,14 +572,15 @@ export class HcdUniverAdapter {
           });
           changes.push({ sheetId: link.sheetId, row, column, oldText: link.text, newText: next });
           links.push(link);
-          previous.push(link.text);
+          previous.push(link.rawValue ?? link.text);
         }
       }
     }
     if (rejected.length || operations.length + blankChanges.length > 10_000
       || (formulaOperations.length && operations.length + blankChanges.length + formulaOperations.length !== 1)) {
       rejected.push(...blankChanges.map(({ sheetId, row, column }) => ({ sheetId, row, column, value: '' })));
-      rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column, value: oldText,
+      rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column,
+        value: this.linksByCell.get(cellKey(sheetId, row, column))?.rawValue ?? oldText,
         formula: this.linksByCell.get(cellKey(sheetId, row, column))?.formula })));
       operations.length = 0;
       formulaOperations.length = 0;
@@ -625,6 +645,7 @@ export class HcdUniverAdapter {
             if (cell.link) {
               this.linksByCell.delete(cellKey(cell.link.sheetId, cell.row, cell.column));
               this.linksByNode.delete(cell.link.nodeId);
+              this.recalculatedFormulas.delete(cell.link.nodeId);
             }
             if (cell.blank) this.blankCells.delete(cellKey(runtime.sheetId, cell.row, cell.column));
           }
