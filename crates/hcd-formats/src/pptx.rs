@@ -3602,7 +3602,7 @@ mod tests {
     use hcd_core::{
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
         PatchOperation, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
-        HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17,
+        HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -3623,6 +3623,31 @@ mod tests {
         )
         .unwrap();
         let bundle = Bundle::open(&bundle_path).unwrap();
+        let native = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "样式 😀")
+            .unwrap();
+        let native_delete = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_27.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "reject-source-shape-delete".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxTextDelete {
+                node_id: native.node_id,
+                precondition: NodePrecondition {
+                    node_hash: native.node_hash,
+                },
+            }],
+        };
+        assert!(apply_patch(&bundle, &native_delete, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("HCD-created text box"));
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
         let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
         let chunk_id = descriptor.chunk_id.clone();
         let slide_part = bundle.read_map(descriptor).unwrap().entries[0]
@@ -3711,7 +3736,7 @@ mod tests {
                     height_emu: 550_000,
                 },
                 precondition: PptxShapePrecondition {
-                    node_hash: edited.node_hash,
+                    node_hash: edited.node_hash.clone(),
                     geometry: PptxShapeGeometry {
                         x_emu: 914_400,
                         y_emu: 5_000_000,
@@ -3738,6 +3763,61 @@ mod tests {
                 .unwrap()
                 .node_id,
             edited.node_id
+        );
+
+        let deletion = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_27.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "insert-shape-r4-delete".to_string(),
+            base_revision: 3,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxTextDelete {
+                node_id: edited.node_id.clone(),
+                precondition: NodePrecondition {
+                    node_hash: edited.node_hash.clone(),
+                },
+            }],
+        };
+        let mut wrong_hash = deletion.clone();
+        wrong_hash.patch_id = "insert-shape-r4-wrong-hash".to_string();
+        if let PatchOperation::PptxTextDelete { precondition, .. } = &mut wrong_hash.operations[0] {
+            precondition.node_hash = "0".repeat(64);
+        }
+        assert!(apply_patch(&bundle, &wrong_hash, 3)
+            .unwrap_err()
+            .to_string()
+            .contains("expected hash"));
+        assert_eq!(bundle.manifest().unwrap().revision, 3);
+        assert_eq!(apply_patch(&bundle, &deletion, 3).unwrap().revision, 4);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let current = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&current, 0).unwrap().chunks[0];
+        assert!(!bundle.read_chunk(descriptor).unwrap().contains("再次编辑"));
+        assert!(bundle
+            .read_map(descriptor)
+            .unwrap()
+            .entries
+            .iter()
+            .all(|entry| entry.node_id != edited.node_id));
+        let old = temp.path().join("before-delete.pptx");
+        export_pptx(
+            &bundle,
+            &source,
+            &old,
+            &ExportOptions {
+                revision: Some(3),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&old, &slide_part).contains("再次编辑"));
+        let deleted = temp.path().join("deleted.pptx");
+        let report = export_pptx(&bundle, &source, &deleted, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&deleted).unwrap()
         );
 
         let original = temp.path().join("original.pptx");

@@ -66,6 +66,7 @@ An HCD-created PDF text box can also be removed with the upper-right × button o
 
 PPTX uses the same in-frame text editing, keeping the shape's font and color at its slide position. The slide outline opens by default with its own visibility preference, and unloaded slides reserve the measured slide height instead of a generic page height. The reference screenshot is `docs/screenshots/hcd-pptx-direct-slide-edit.jpg`.
 Select a positioned PPTX text shape to reveal a move handle above it and a resize handle at its lower right. Releasing either handle saves a `hcd-patch/17` revision. Save any pending text first. The source-backed PPTX export retains the new coordinates; see `docs/acceptance/hcd-pptx-shape-geometry.md` for commands and screenshots.
+An HCD-created PPTX text box also has a delete button. `hcd-patch/27` removes the box from the current slide and source map while keeping its historical revision. Original slide shapes remain protected. See `docs/acceptance/hcd-pptx-textbox-delete.md` for the command sequence and browser screenshots.
 
 The XLSX canvas keeps its Univer cell editor and now uses the same fixed document header, view controls, appearance panel, export control, and status bar as the other formats. Double-click an existing cell or press F2 to edit its content. The reference screenshot is `docs/screenshots/hcd-xlsx-unified-chrome.jpg`.
 
