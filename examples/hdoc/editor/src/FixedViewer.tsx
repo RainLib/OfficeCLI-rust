@@ -24,6 +24,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [style, setStyle] = useState('')
   const [loadedPages, setLoadedPages] = useState(0)
   const [slideHeight, setSlideHeight] = useState(720)
+  const [stageWidth, setStageWidth] = useState(0)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [readOnly, setReadOnly] = useState(session.scope === 'read')
@@ -42,6 +43,16 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [viewRevision, setViewRevision] = useState<number | null>(null)
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const tail = useRef<HTMLDivElement>(null)
+  const pagesRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const pages = pagesRef.current
+    if (!pages) return
+    const measure = () => setStageWidth(pages.clientWidth)
+    const observer = new ResizeObserver(measure)
+    observer.observe(pages)
+    measure()
+    return () => observer.disconnect()
+  }, [])
   function showRemoteRevision(next: number) {
     if (next <= (manifest?.revision ?? -1)) return
     if (saving || selected || newBox || viewRevision !== null) {
@@ -207,7 +218,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     </nav>}
     <div className="layout editor-layout">
       {layout.showOutline && <aside className="outline-panel" aria-label={session.format === 'pptx' ? '幻灯片目录' : '页面目录'}><div className="panel-head"><h2>☷ {session.format === 'pptx' ? '幻灯片目录' : '页面目录'}</h2><button className="panel-close" aria-label="隐藏页面目录" onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`}</button>)}</nav><small>已索引 {descriptors.length} / {manifest?.chunkCount ?? '…'} 个分片</small></aside>}
-      <div className="document-scroll"><main className="fixed-pages">{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
+      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}<div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
@@ -221,14 +232,14 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
 type LazyChunkProps = {
   session: Session; descriptor: Descriptor; revision: number | null; stylesheet: string; readOnly: boolean
   selected: TextNode | null; draft: string; newBox: NewTextBox | null; newDraft: string; placingText: boolean
-  saving: boolean; refresh: number; placeholderHeight: number; onMeasureHeight: (height: number) => void
+  saving: boolean; refresh: number; placeholderHeight: number; availableWidth: number; onMeasureHeight: (height: number) => void
   onSelect: (node: TextNode) => void; onDraft: (value: string) => void
   onEditorReady: (editor: Editor | null) => void; onSave: (node: TextNode, value: string) => void
   onCancel: () => void; onPlace: (box: NewTextBox) => void; onNewDraft: (value: string) => void
   onSaveNew: (box: NewTextBox, value: string) => void; onCancelNew: () => void
 }
 
-function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
+function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
   const [active, setActive] = useState(false)
   const [srcDoc, setSrcDoc] = useState('')
   const [frameHeight, setFrameHeight] = useState(940)
@@ -244,6 +255,12 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   const [newTarget, setNewTarget] = useState<HTMLElement | null>(null)
   const marker = useRef<HTMLDivElement>(null)
   const frame = useRef<HTMLIFrameElement>(null)
+  const sourceWidth = Number.parseFloat(canvasWidth)
+  const zoom = session.format === 'pptx' && sourceWidth > 0 && availableWidth > 0
+    ? Math.min(1, availableWidth / sourceWidth) : 1
+  useEffect(() => {
+    if (session.format === 'pptx' && srcDoc) onMeasureHeight(Math.ceil(frameHeight * zoom))
+  }, [session.format, srcDoc, frameHeight, zoom, onMeasureHeight])
   function findDirectTarget() {
     if (!['pdf', 'pptx'].includes(session.format) || !selected) { setDirectTarget(null); return }
     const selector = session.format === 'pdf' ? `.hcd-pdf-text[data-hcd-text-node="${selected.nodeId}"]` : `.hcd-slide [data-hcd-id="${selected.nodeId}"]`
@@ -346,7 +363,6 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
         if (canvasHeight.endsWith('px')) {
           const height = Math.max(200, Math.ceil(Number.parseFloat(canvasHeight)) + 4)
           setFrameHeight(height)
-          if (session.format === 'pptx') onMeasureHeight(height)
         }
         const directCss = session.format === 'pdf' ? `.hcd-pdf-page[data-hcd-source-raster="true"] .hcd-pdf-text:has(>.hcd-direct-editor),.hcd-draft-text{background:#fff!important;color:#111!important;z-index:4;outline:1px solid #1769e8;outline-offset:1px}.hcd-pdf-text:has(>.hcd-direct-editor)>span[data-hcd-id]{display:none}.hcd-direct-editor{display:block;width:100%;min-width:max-content;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text{outline:0;min-height:inherit;padding:0;margin:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text p{position:static!important;margin:0;padding:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}` : session.format === 'pptx' ? `.hcd-slide [data-hcd-id]:has(>.hcd-direct-editor){font-size:0!important;line-height:0!important;outline:1px solid #1769e8;outline-offset:2px}.hcd-slide .hcd-direct-editor{display:inline-block;vertical-align:baseline;font-size:var(--hcd-edit-font-size)!important;line-height:var(--hcd-edit-line-height)!important;color:var(--hcd-edit-color)!important;white-space:pre-wrap}.hcd-slide .hcd-direct-editor .fixed-tiptap-text,.hcd-slide .hcd-direct-editor .fixed-tiptap-text p{display:inline;margin:0;padding:0;min-height:0;outline:0;font:inherit;line-height:inherit;color:inherit;white-space:pre-wrap}.hcd-slide .hcd-draft-text .hcd-direct-editor,.hcd-slide .hcd-draft-text .fixed-tiptap-text,.hcd-slide .hcd-draft-text .fixed-tiptap-text p{display:block;min-width:100%;min-height:1.2em}.hcd-slide .hcd-draft-text .fixed-tiptap-text{width:100%}` : ''
         setSrcDoc(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}${safeCss}${directCss}</style></head><body data-hcd-image-hitboxes="off" data-hcd-text-hitboxes="off">${html}</body></html>`)
@@ -361,8 +377,9 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
       if (!slidePart || !slideWidthEmu || !slideHeightEmu || !pageWidthPt) return
       const rect = event.currentTarget.getBoundingClientRect()
       const scale = slideWidthEmu / pageWidthPt
-      const x = Math.min(Math.max(0, event.clientX - rect.left), pageWidthPt - 80)
-      const y = Math.min(Math.max(0, event.clientY - rect.top), slideHeightEmu / scale - 30)
+      const pointerScale = pageWidthPt / rect.width
+      const x = Math.min(Math.max(0, (event.clientX - rect.left) * pointerScale), pageWidthPt - 80)
+      const y = Math.min(Math.max(0, (event.clientY - rect.top) * pointerScale), slideHeightEmu / scale - 30)
       const width = Math.min(260, pageWidthPt - x)
       const height = Math.min(42, slideHeightEmu / scale - y)
       onPlace({ format: 'pptx', chunkId: descriptor.chunkId, slidePart,
@@ -382,14 +399,20 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   }
   // Fixed-page editors need same-origin DOM access for the portal; scripts stay disabled.
   const frameSandbox = ['pdf', 'pptx'].includes(session.format) ? 'allow-same-origin' : ''
-  return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? frameHeight : placeholderHeight, width: session.format === 'pdf' && srcDoc ? canvasWidth : undefined }}>
-    {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight }} onLoad={findDirectTarget} />
+  const scaledWidth = session.format === 'pptx' && sourceWidth > 0 ? Math.ceil(sourceWidth * zoom) : undefined
+  const scaledHeight = session.format === 'pptx' ? Math.ceil(frameHeight * zoom) : frameHeight
+  return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? scaledHeight : placeholderHeight, width: session.format === 'pptx' && srcDoc ? scaledWidth : session.format === 'pdf' && srcDoc ? canvasWidth : undefined }}>
+    <div className="fixed-canvas-slot" style={{ height: srcDoc ? scaledHeight : placeholderHeight }}>
+    <div className="fixed-canvas-layer" style={{ width: session.format === 'pptx' && srcDoc ? canvasWidth : '100%', height: srcDoc ? frameHeight : placeholderHeight, transform: session.format === 'pptx' && srcDoc ? `scale(${zoom})` : undefined }}>
+    {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight, width: session.format === 'pptx' ? canvasWidth : undefined }} onLoad={findDirectTarget} />
       : <div className="skeleton" style={{ minHeight: placeholderHeight }}>{session.format === 'pptx' ? `幻灯片 ${descriptor.sequence + 1}` : `第 ${descriptor.sequence + 1} 个分片`}</div>}
     {!readOnly && ['pdf', 'pptx'].includes(session.format) && selected && directTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus={session.format === 'pptx' ? 'start' : true} onSave={value => onSave(selected, value)} onCancel={onCancel} /></div>, directTarget)}
     {!readOnly && newBox && newTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /></div>, newTarget)}
     {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => selected?.nodeId === node.nodeId ? null : <button key={node.nodeId} className="fixed-page-hitbox" style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`编辑文字：${node.text.slice(0, 48) || '空文字框'}`} title={node.text || '空文字框'} onClick={() => onSelect(node)} />)}
       {placingText && primaryPage && <button className="fixed-placement-layer" aria-label={`在第 ${session.format === 'pdf' ? pageNumber : descriptor.sequence + 1} 页放置新文字框`} onClick={place} />}
     </div>}
+    </div>
+    </div>
     {!readOnly && nodes.some(node => node.editable && (!node.left || !node.top || !node.width || !node.height)) && <div className="fixed-text-panel"><strong>第 {descriptor.sequence + 1} 页未定位文字</strong><div className="fixed-text-list">{nodes.filter(node => node.editable && (!node.left || !node.top || !node.width || !node.height)).map(node => <button key={node.nodeId} className={selected?.nodeId === node.nodeId ? 'selected' : ''} onClick={() => onSelect(node)} title={node.nodeId}>{node.text || '（空文字框）'}</button>)}</div>{selected && (!selected.left || !selected.top || !selected.width || !selected.height) && <div className="fixed-text-form"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div><button onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}>保存</button><button onClick={onCancel}>取消</button></div></div>}</div>}
     {!readOnly && srcDoc && nodes.length === 0 && session.format === 'pdf' && <div className="fixed-text-panel">本页没有可映射的文字节点；扫描图像里的文字需要 OCR 后才能编辑。</div>}
   </div>
