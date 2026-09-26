@@ -365,6 +365,68 @@ export class HcdUniverAdapter {
     return true;
   }
 
+  /** Reconcile an acknowledged local cell patch without clearing the visible grid. */
+  async refreshChangedCells(changes: HcdPatchEventDetail['changes']): Promise<void> {
+    if (this.hasPendingPatch()) throw new Error('仍有未保存的单元格修改');
+    const previous = new Map(this.client.descriptors.map(descriptor => [descriptor.sequence, descriptor]));
+    await this.client.open();
+    const affected = new Map<number, ChunkDescriptor>();
+    for (const { sheetId, row, column } of changes) {
+      const descriptor = this.client.cellWindows(sheetId, row + 1, row + 1).find(({ grid }) =>
+        (grid?.columnStart === undefined || grid.columnStart <= column + 1)
+        && (grid?.columnEnd === undefined || grid.columnEnd >= column + 1));
+      if (!descriptor) throw new Error(`找不到已保存单元格 ${sheetId}:${row + 1}:${column + 1}`);
+      affected.set(descriptor.sequence, descriptor);
+    }
+    for (const descriptor of affected.values()) {
+      const oldId = previous.get(descriptor.sequence)?.chunkId;
+      if (oldId === descriptor.chunkId) continue;
+      const old = oldId && this.runtimes.get(oldId);
+      if (!old) {
+        await this.loadChunk(descriptor);
+        continue;
+      }
+      const chunk = await this.client.readChunk(descriptor);
+      const parsed = parseGridChunk(chunk, href => this.client.resolve(href).toString(), this.styleCatalog);
+      if (descriptor.grid?.kind !== 'cells') throw new Error('单元格分片无法局部同步');
+      // Univer already holds the user's optimistic value. Writing it again can
+      // emit SheetValueChanged later and create a second, reversing patch.
+      for (const cell of old.cells) {
+        if (cell.link) {
+          const key = cellKey(cell.link.sheetId, cell.row, cell.column);
+          if (this.linksByCell.get(key) === cell.link) this.linksByCell.delete(key);
+          if (this.linksByNode.get(cell.link.nodeId) === cell.link) this.linksByNode.delete(cell.link.nodeId);
+          this.recalculatedFormulas.delete(cell.link.nodeId);
+        }
+        if (cell.blank) this.blankCells.delete(cellKey(old.sheetId, cell.row, cell.column));
+      }
+      const lastColumns = new Map<number, number>();
+      for (const cell of parsed.cells) {
+        if (cell.link) {
+          this.linksByCell.set(cellKey(cell.link.sheetId, cell.row, cell.column), cell.link);
+          this.linksByNode.set(cell.link.nodeId, cell.link);
+        }
+        if (cell.blank) this.blankCells.add(cellKey(old.sheetId, cell.row, cell.column));
+        lastColumns.set(cell.row, Math.max(lastColumns.get(cell.row) ?? 0, cell.column + 1));
+      }
+      for (const merge of parsed.merges) {
+        lastColumns.set(merge.startRow, Math.max(lastColumns.get(merge.startRow) ?? 0, merge.endColumn + 1));
+      }
+      for (const { row } of parsed.rowHeights) {
+        this.loadedRowCeilings.set(`${old.sheetId}:${row}`,
+          Math.min(16_384, (lastColumns.get(row) ?? 0) + 256));
+      }
+      this.runtimes.delete(oldId);
+      this.loaded.delete(oldId);
+      this.runtimes.set(descriptor.chunkId, {
+        sheetId: old.sheetId, kind: old.kind,
+        cells: parsed.cells.map(({ row, column, link, blank }) => ({ row, column, link, blank })),
+        rows: parsed.rowHeights.map(({ row }) => row), visualIds: [],
+      });
+      this.loaded.add(descriptor.chunkId);
+    }
+  }
+
   private scheduleVisible(sheet: FWorksheet): void {
     window.requestAnimationFrame(() => void this.ensureVisible(sheet));
   }
@@ -608,6 +670,12 @@ export class HcdUniverAdapter {
           if (seen.has(key)) continue;
           seen.add(key);
           const link = this.linksByCell.get(key);
+          // Univer may emit a second value event while the first edit is
+          // awaiting HCD acknowledgement. Never submit that cell twice with
+          // the old node hash.
+          if ([...this.pending.values()].some(({ links, blanks }) =>
+            (link && links.includes(link)) || blanks.some(blank =>
+              cellKey(blank.sheetId, blank.row, blank.column) === key))) continue;
           const rawValue = values[rowOffset]?.[columnOffset];
           const editInput = this.editInputs.get(key);
           this.editInputs.delete(key);
