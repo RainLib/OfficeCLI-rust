@@ -8013,6 +8013,332 @@ mod tests {
     }
 
     #[test]
+    fn selected_grid_ranges_commit_once_and_export_all_four_shifts() {
+        use hcd_core::{XlsxGridAction, XlsxGridAxis};
+
+        let cases = [
+            (XlsxGridAxis::Row, XlsxGridAction::Insert, 2, "A4", "Row 2"),
+            (XlsxGridAxis::Row, XlsxGridAction::Delete, 2, "A2", "Row 4"),
+            (
+                XlsxGridAxis::Column,
+                XlsxGridAction::Insert,
+                2,
+                "F2",
+                "Right 2",
+            ),
+            (
+                XlsxGridAxis::Column,
+                XlsxGridAction::Delete,
+                2,
+                "B2",
+                "Right 2",
+            ),
+        ];
+        for (axis, action, start, expected_cell, expected_text) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source.xlsx");
+            let bundle_path = temp.path().join("range.hcd");
+            let exported = temp.path().join("export.xlsx");
+            let historical = temp.path().join("historical.xlsx");
+            create_plain_rows_fixture(&source, 6);
+            let manifest = import_xlsx(
+                &source,
+                &bundle_path,
+                &ImportOptions::new("range-doc"),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let bundle = Bundle::open(&bundle_path).unwrap();
+            let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+            let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+            let original_node = bundle
+                .read_map(descriptor)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some("A4"))
+                .unwrap()
+                .node_id;
+            let patch = PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
+                document_id: "range-doc".to_string(),
+                patch_id: format!("range-{axis:?}-{action:?}"),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::XlsxGridRange {
+                    sheet_id,
+                    axis,
+                    action,
+                    start,
+                    count: 2,
+                }],
+                metadata: BTreeMap::new(),
+            };
+            assert_eq!(
+                hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+                1
+            );
+            assert!(validate_bundle(&bundle).unwrap().valid);
+            let record = bundle.revision(1).unwrap();
+            let recorded = match (axis, action) {
+                (XlsxGridAxis::Row, XlsxGridAction::Insert) => record.grid_row_insertions.len(),
+                (XlsxGridAxis::Row, XlsxGridAction::Delete) => record.grid_row_deletions.len(),
+                (XlsxGridAxis::Column, XlsxGridAction::Insert) => {
+                    record.grid_column_insertions.len()
+                }
+                (XlsxGridAxis::Column, XlsxGridAction::Delete) => {
+                    record.grid_column_deletions.len()
+                }
+            };
+            assert_eq!(recorded, 2);
+            let head = bundle.manifest().unwrap();
+            let new_descriptor = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+            let current_ids: Vec<_> = bundle
+                .read_map(new_descriptor)
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|entry| entry.node_id)
+                .collect();
+            if action == XlsxGridAction::Insert || axis == XlsxGridAxis::Column {
+                assert!(current_ids.contains(&original_node));
+            }
+            export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+            let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+            assert!(xml.contains(&format!("<c r=\"{expected_cell}\"")), "{xml}");
+            assert!(xml.contains(&format!("<t>{expected_text}</t>")), "{xml}");
+            export_xlsx(
+                &bundle,
+                &source,
+                &historical,
+                &ExportOptions {
+                    revision: Some(0),
+                    ..ExportOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                read_zip_entry(&historical, "xl/worksheets/sheet1.xml"),
+                read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+            );
+        }
+    }
+
+    #[test]
+    fn selected_row_range_crosses_chunk_boundary() {
+        use hcd_core::{XlsxGridAction, XlsxGridAxis};
+
+        for action in [XlsxGridAction::Insert, XlsxGridAction::Delete] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source.xlsx");
+            let bundle_path = temp.path().join("range.hcd");
+            let exported = temp.path().join("export.xlsx");
+            create_plain_rows_fixture(&source, 130);
+            let manifest = import_xlsx(
+                &source,
+                &bundle_path,
+                &ImportOptions::new("range-boundary"),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let bundle = Bundle::open(&bundle_path).unwrap();
+            let page = bundle.read_index_page(&manifest, 0).unwrap();
+            assert!(page.chunks.len() > 1);
+            let first = &page.chunks[0];
+            let boundary = first.grid.as_ref().unwrap().row_end.unwrap() as u32;
+            let sheet_id = first.grid.as_ref().unwrap().sheet_id.clone();
+            let patch = PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
+                document_id: "range-boundary".to_string(),
+                patch_id: format!("boundary-{action:?}"),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::XlsxGridRange {
+                    sheet_id,
+                    axis: XlsxGridAxis::Row,
+                    action,
+                    start: boundary,
+                    count: 2,
+                }],
+                metadata: BTreeMap::new(),
+            };
+            assert_eq!(
+                hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+                1
+            );
+            assert!(validate_bundle(&bundle).unwrap().valid);
+            export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+            let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+            let expected = match action {
+                XlsxGridAction::Insert => {
+                    format!("<row r=\"{}\"><c r=\"A{}\"", boundary + 2, boundary + 2)
+                }
+                XlsxGridAction::Delete => format!("<row r=\"{boundary}\"><c r=\"A{boundary}\""),
+            };
+            assert!(xml.contains(&expected), "{xml}");
+        }
+    }
+
+    #[test]
+    fn selected_grid_range_rejection_preserves_head() {
+        use hcd_core::{XlsxGridAction, XlsxGridAxis};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("range.hcd");
+        create_grid_shift_merge_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("range-reject"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        for (start, count) in [(2, 101), (3, 2)] {
+            let patch = PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
+                document_id: "range-reject".to_string(),
+                patch_id: format!("range-reject-{start}-{count}"),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::XlsxGridRange {
+                    sheet_id: sheet_id.clone(),
+                    axis: XlsxGridAxis::Row,
+                    action: XlsxGridAction::Delete,
+                    start,
+                    count,
+                }],
+                metadata: BTreeMap::new(),
+            };
+            assert!(hcd_core::apply_patch(&bundle, &patch, 0).is_err());
+            assert_eq!(bundle.manifest().unwrap().revision, 0);
+            assert!(validate_bundle(&bundle).unwrap().valid);
+        }
+    }
+
+    #[test]
+    fn selected_row_delete_removes_annotations_for_deleted_cells() {
+        use hcd_core::{Annotation, XlsxGridAction, XlsxGridAxis};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("range.hcd");
+        create_plain_rows_fixture(&source, 5);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("range-annotation"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let node_id = bundle
+            .read_map(descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A2"))
+            .unwrap()
+            .node_id;
+        let annotate = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: "range-annotation".to_string(),
+            patch_id: "annotate-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::AnnotationUpsert {
+                annotation: Annotation {
+                    annotation_id: "row-note".to_string(),
+                    node_id: node_id.clone(),
+                    start: 0,
+                    end: 3,
+                    kind: "review".to_string(),
+                    rule_id: None,
+                    confidence: None,
+                    ignored: false,
+                },
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &annotate, 0)
+                .unwrap()
+                .revision,
+            1
+        );
+        let delete = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
+            patch_id: "delete-annotated-rows".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxGridRange {
+                sheet_id,
+                axis: XlsxGridAxis::Row,
+                action: XlsxGridAction::Delete,
+                start: 2,
+                count: 2,
+            }],
+            ..annotate
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &delete, 1).unwrap().revision,
+            2
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let record = bundle.revision(2).unwrap();
+        assert!(record.removed_node_ids.contains(&node_id));
+        assert!(record.dirty_node_ids.contains(&node_id));
+    }
+
+    #[test]
+    fn selected_grid_range_can_delete_every_materialized_row() {
+        use hcd_core::{XlsxGridAction, XlsxGridAxis};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("range.hcd");
+        let exported = temp.path().join("empty.xlsx");
+        create_plain_rows_fixture(&source, 2);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("range-empty"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
+            document_id: "range-empty".to_string(),
+            patch_id: "delete-both-rows".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxGridRange {
+                sheet_id,
+                axis: XlsxGridAxis::Row,
+                action: XlsxGridAction::Delete,
+                start: 1,
+                count: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("<row r="), "{xml}");
+    }
+
+    #[test]
     fn middle_row_insertion_preserves_node_ids_history_and_exported_addresses() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.xlsx");
