@@ -1697,6 +1697,11 @@ fn append_xlsx_row(
 ) -> Result<(), HandlerError> {
     worksheet.push_str(&format!("<row r=\"{row}\">"));
     for (index, value) in cells.iter().enumerate() {
+        // A blank HTML table cell has no spreadsheet value. Keep its address
+        // empty instead of creating an explicit zero-length inline string.
+        if value.is_empty() {
+            continue;
+        }
         let column = index + 1;
         if value.chars().count() > 32_767 {
             return Err(HandlerError::InvalidArgument(format!(
@@ -3165,6 +3170,26 @@ fn publish_output(temporary: &Path, output: &Path) -> Result<(), HandlerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_xlsx_preserves_blank_table_cell_addresses() {
+        let document = parse_html(
+            "<table><tr><td>Left</td><td class=\"hcd-cell hcd-empty\"></td><td>Right</td></tr><tr><td></td><td>Middle</td><td></td></tr><tr><td></td><td></td><td></td></tr></table>",
+        ).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("blanks.xlsx");
+        export_xlsx(&document, &output).unwrap();
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), true).unwrap();
+        let xml = package.read_part_xml("xl/worksheets/sheet1.xml").unwrap();
+        assert!(xml.contains("<c r=\"A1\" t=\"inlineStr\""), "{xml}");
+        assert!(xml.contains("<c r=\"C1\" t=\"inlineStr\""), "{xml}");
+        assert!(xml.contains("<c r=\"B2\" t=\"inlineStr\""), "{xml}");
+        for blank in ["B1", "A2", "C2"] {
+            assert!(!xml.contains(&format!("<c r=\"{blank}\"")), "{xml}");
+        }
+        assert!(xml.contains("<row r=\"2\">"), "{xml}");
+        assert!(xml.contains("<row r=\"3\"></row>"), "{xml}");
+    }
 
     #[test]
     fn semantic_pdf_wrap_counts_east_asian_characters_as_wide() {
