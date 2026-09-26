@@ -6,8 +6,8 @@ import { defineConfig, type Plugin } from 'vite'
 const samples = [
   { id: 'accept-docx', title: '项目提案', format: 'DOCX', mode: '可编辑' },
   { id: 'accept-pptx', title: '产品发布演示', format: 'PPTX', mode: '固定版式预览' },
-  { id: 'accept-xlsx', title: '成绩册', format: 'XLSX', mode: '工作簿预览' },
-  { id: 'accept-usage-xlsx', title: '用量统计（CSV 转 XLSX）', format: 'XLSX', mode: '附件数据验收' },
+  { id: 'accept-xlsx', title: '成绩册', format: 'XLSX', mode: '可编辑单元格' },
+  { id: 'accept-usage-xlsx', title: '用量统计（CSV 转 XLSX）', format: 'XLSX', mode: '可编辑单元格' },
   { id: 'accept-md', title: 'Markdown 富文本', format: 'Markdown', mode: '可编辑' },
   { id: 'accept-txt', title: 'TXT 纯文本', format: 'TXT', mode: '可编辑' },
   { id: 'accept-download-txt', title: '下载测试文本', format: 'TXT', mode: '附件下载验收' },
@@ -49,7 +49,7 @@ function localAcceptanceSamples(): Plugin {
         const encoded = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
         const payload = {
           doc: sample.id,
-          scope: sample.mode === '可编辑' ? 'write' : 'read',
+          scope: sample.mode.startsWith('可编辑') ? 'write' : 'read',
           sub: 'local-acceptance-user',
           name: '验收用户',
           aud: 'hcd-core',
