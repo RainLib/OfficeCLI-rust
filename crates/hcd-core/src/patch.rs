@@ -304,6 +304,16 @@ pub fn apply_patch(
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
         .transpose()?;
+    // A formula typed into the first empty row is still a cell creation. Extend
+    // the current tail window in the same revision so the edit does not require
+    // a separate row-append patch (and a second round trip from the editor).
+    let mut xlsx_cell_row_extensions = HashMap::new();
+    for insertion in xlsx_cell_set.values() {
+        let (last_row, tail) = last_xlsx_row(bundle, &manifest, &insertion.sheet_id)?;
+        if u64::from(insertion.row) == last_row + 1 {
+            xlsx_cell_row_extensions.insert(tail, insertion.row);
+        }
+    }
     let xlsx_blank_merge_target = xlsx_blank_merge
         .as_ref()
         .map(|merge| find_xlsx_blank_merge_target(bundle, &manifest, merge))
@@ -442,6 +452,7 @@ pub fn apply_patch(
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
             let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
             let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
+            let cell_row_extension = xlsx_cell_row_extensions.get(&descriptor.chunk_id).copied();
             let blank_merge_here =
                 xlsx_blank_merge_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let row_insert_here = xlsx_insert_target
@@ -517,7 +528,9 @@ pub fn apply_patch(
                     Some((
                         grid.sheet_id.clone(),
                         u32::try_from(grid.row_start?).ok()?,
-                        u32::try_from(grid.row_end?).ok()?,
+                        u32::try_from(grid.row_end?)
+                            .ok()?
+                            .max(cell_row_extension.unwrap_or(0)),
                     ))
                 })
                 .map(|(sheet_id, start, end)| {
@@ -1031,6 +1044,28 @@ pub fn apply_patch(
                 chunk_changed = true;
             }
             if !cell_insertions.is_empty() {
+                if let Some(new_row) = cell_row_extension {
+                    let old_row = new_row - 1;
+                    let part = source_map
+                        .entries
+                        .iter()
+                        .find(|entry| entry.source.node_kind == "cell")
+                        .map(|entry| entry.source.part.clone())
+                        .ok_or_else(|| {
+                            HcdError::Unsupported(
+                                "XLSX new row requires a mapped cell in the last window"
+                                    .to_string(),
+                            )
+                        })?;
+                    append_xlsx_row(&mut html, old_row)?;
+                    descriptor
+                        .grid
+                        .as_mut()
+                        .expect("validated cell window")
+                        .row_end = Some(u64::from(new_row));
+                    descriptor.block_count += 1;
+                    dirty_grid_parts.insert(part);
+                }
                 for insertion in cell_insertions {
                     if !inserted_xlsx_cells.insert((
                         insertion.sheet_id.clone(),

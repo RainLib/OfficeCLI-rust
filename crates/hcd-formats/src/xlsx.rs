@@ -8235,6 +8235,81 @@ mod tests {
     }
 
     #[test]
+    fn creates_formula_in_first_row_after_grid_and_keeps_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("source.hcd");
+        let exported = temp.path().join("edited.xlsx");
+        let historical = temp.path().join("original.xlsx");
+        create_formula_edit_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("formula-new-row"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_21.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "formula-b2".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaCreate {
+                sheet_id: sheet_id.clone(),
+                row: 2,
+                column: 2,
+                formula: "=SUM(A1:B1)".to_string(),
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let edited_descriptor = &bundle.read_index_page(&head, 0).unwrap().chunks[0];
+        assert_eq!(edited_descriptor.grid.as_ref().unwrap().row_end, Some(2));
+        let html = bundle.read_chunk(edited_descriptor).unwrap();
+        assert!(html.contains("data-hcd-row=\"2\""));
+        assert!(html.contains("data-hcd-cell=\"B2\""));
+        assert!(hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                patch_id: "skip-row".to_string(),
+                base_revision: 1,
+                operations: vec![PatchOperation::XlsxFormulaCreate {
+                    sheet_id,
+                    row: 4,
+                    column: 2,
+                    formula: "=SUM(A1:B1)".to_string(),
+                }],
+                ..patch.clone()
+            },
+            1
+        )
+        .is_err());
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&exported, "xl/worksheets/sheet1.xml")
+            .contains("<c r=\"B2\"><f>SUM(A1:B1)</f><v/></c>"));
+        assert!(!read_zip_entry(&historical, "xl/worksheets/sheet1.xml").contains("r=\"B2\""));
+    }
+
+    #[test]
     fn pastes_mixed_formula_range_atomically_and_preserves_history() {
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/showcase/product-catalog.xlsx");
