@@ -10,9 +10,10 @@ use crate::{
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
     TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
-    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
-    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
-    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
+    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
+    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
+    MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -133,6 +134,7 @@ pub fn apply_patch(
                     | PatchOperation::XlsxRowAppend { .. }
                     | PatchOperation::XlsxRowRemoveLast { .. }
                     | PatchOperation::XlsxColumnWidth { .. }
+                    | PatchOperation::XlsxUnmerge { .. }
             )
         })
     {
@@ -166,6 +168,7 @@ pub fn apply_patch(
     let images = collect_image_changes(patch)?;
     let pdf_insertions = collect_pdf_insertions(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
+    let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch);
     let xlsx_row_append = collect_xlsx_row_append(patch);
     let xlsx_row_removal = collect_xlsx_row_removal(patch);
@@ -196,6 +199,7 @@ pub fn apply_patch(
         .chain(styles.keys().cloned())
         .chain(images.keys().cloned())
         .chain(xlsx_merges.keys().cloned())
+        .chain(xlsx_unmerges.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
         .collect();
 
@@ -207,6 +211,7 @@ pub fn apply_patch(
         || !images.is_empty()
         || !pdf_insertions.is_empty()
         || !xlsx_merges.is_empty()
+        || !xlsx_unmerges.is_empty()
         || xlsx_cell_set.is_some()
         || xlsx_row_append.is_some()
         || xlsx_row_removal.is_some()
@@ -480,6 +485,79 @@ pub fn apply_patch(
                         ));
                     }
                     merge_xlsx_cells(&mut html, merge)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(unmerge) = xlsx_unmerges.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell"
+                        || !entry.source.editable
+                        || descriptor
+                            .grid
+                            .as_ref()
+                            .is_none_or(|grid| grid.sheet_id != unmerge.sheet_id)
+                    {
+                        return Err(HcdError::Unsupported(
+                            "XLSX unmerge requires an editable anchor cell".to_string(),
+                        ));
+                    }
+                    if unmerge.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "cell {} expected hash {}, actual {}",
+                            entry.node_id, unmerge.node_hash, entry.node_hash
+                        )));
+                    }
+                    let anchor = format!(
+                        "{}{}",
+                        xlsx_column_name(unmerge.start_column),
+                        unmerge.start_row
+                    );
+                    if entry.source.paragraph_id.as_deref() != Some(anchor.as_str()) {
+                        return Err(HcdError::InvalidPatch(
+                            "XLSX unmerge node is not the range anchor".to_string(),
+                        ));
+                    }
+                    if descriptor.grid.as_ref().is_none_or(|grid| {
+                        grid.kind != crate::GridChunkKind::Cells
+                            || grid
+                                .row_start
+                                .is_none_or(|start| u64::from(unmerge.start_row) < start)
+                            || grid
+                                .row_end
+                                .is_none_or(|end| u64::from(unmerge.end_row) > end)
+                    }) {
+                        return Err(HcdError::Unsupported(
+                            "XLSX unmerge must stay within one loaded cell window".to_string(),
+                        ));
+                    }
+                    // Original source merges may hide covered cell values. Only split a merge
+                    // introduced after import, so source-backed export cannot reveal lost data.
+                    let original = bundle.revision(0)?;
+                    let mut initial = manifest.clone();
+                    initial.index_prefix = original.index_prefix;
+                    initial.index_root_href = original.index_root_href;
+                    initial.index_page_count = original
+                        .index_page_count
+                        .unwrap_or(manifest.index_page_count);
+                    let initial_page = bundle.read_index_page(&initial, page_number)?;
+                    let initial_descriptor = initial_page
+                        .chunks
+                        .iter()
+                        .find(|candidate| candidate.chunk_id == descriptor.chunk_id)
+                        .ok_or_else(|| {
+                            HcdError::InvalidBundle("original XLSX chunk is missing".to_string())
+                        })?;
+                    let initial_html = bundle.read_chunk(initial_descriptor)?;
+                    if xlsx_cells(&initial_html)?.iter().any(|cell| {
+                        cell.row == unmerge.start_row
+                            && cell.column == unmerge.start_column
+                            && cell.merged_range.is_some()
+                    }) {
+                        return Err(HcdError::Unsupported(
+                            "splitting a source XLSX merge is not yet supported".to_string(),
+                        ));
+                    }
+                    unmerge_xlsx_cells(&mut html, &initial_html, unmerge)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1043,6 +1121,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_8
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_9
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_10
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_11
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1165,6 +1244,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_8
                         | HCD_PATCH_SCHEMA_VERSION_9
                         | HCD_PATCH_SCHEMA_VERSION_10
+                        | HCD_PATCH_SCHEMA_VERSION_11
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1211,6 +1291,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_8
                         | HCD_PATCH_SCHEMA_VERSION_9
                         | HCD_PATCH_SCHEMA_VERSION_10
+                        | HCD_PATCH_SCHEMA_VERSION_11
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1238,6 +1319,53 @@ fn validate_patch_identity(
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
             }
+            PatchOperation::XlsxUnmerge {
+                node_id,
+                sheet_id,
+                start_row,
+                start_column,
+                end_row,
+                end_column,
+                precondition,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_11
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.unmerge requires one operation on an XLSX bundle with hcd-patch/11"
+                            .to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || *start_row == 0
+                    || *start_column == 0
+                    || *end_row > 1_048_576
+                    || *end_column > 16_384
+                    || *end_row < *start_row
+                    || *end_column < *start_column
+                    || end_row
+                        .saturating_sub(*start_row)
+                        .saturating_add(1)
+                        .saturating_mul(end_column.saturating_sub(*start_column).saturating_add(1))
+                        < 2
+                    || end_row
+                        .saturating_sub(*start_row)
+                        .saturating_add(1)
+                        .saturating_mul(end_column.saturating_sub(*start_column).saturating_add(1))
+                        > 10_000
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX unmerge range".to_string(),
+                    ));
+                }
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+            }
             PatchOperation::XlsxRowAppend {
                 sheet_id,
                 after_row,
@@ -1247,6 +1375,7 @@ fn validate_patch_identity(
                     HCD_PATCH_SCHEMA_VERSION_8
                         | HCD_PATCH_SCHEMA_VERSION_9
                         | HCD_PATCH_SCHEMA_VERSION_10
+                        | HCD_PATCH_SCHEMA_VERSION_11
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1274,7 +1403,9 @@ fn validate_patch_identity(
             } => {
                 if !matches!(
                     patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_9 | HCD_PATCH_SCHEMA_VERSION_10
+                    HCD_PATCH_SCHEMA_VERSION_9
+                        | HCD_PATCH_SCHEMA_VERSION_10
+                        | HCD_PATCH_SCHEMA_VERSION_11
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1298,8 +1429,10 @@ fn validate_patch_identity(
                 }
             }
             PatchOperation::XlsxRowRemoveLast { sheet_id, row } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_10
-                    || manifest.source.format != "xlsx"
+                if !matches!(
+                    patch.schema_version.as_str(),
+                    HCD_PATCH_SCHEMA_VERSION_10 | HCD_PATCH_SCHEMA_VERSION_11
+                ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1581,6 +1714,38 @@ fn collect_xlsx_merges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
         .iter()
         .filter_map(|operation| {
             let PatchOperation::XlsxMerge {
+                node_id,
+                sheet_id,
+                start_row,
+                start_column,
+                end_row,
+                end_column,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                XlsxMerge {
+                    sheet_id: sheet_id.clone(),
+                    start_row: *start_row,
+                    start_column: *start_column,
+                    end_row: *end_row,
+                    end_column: *end_column,
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn collect_xlsx_unmerges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::XlsxUnmerge {
                 node_id,
                 sheet_id,
                 start_row,
@@ -2254,6 +2419,111 @@ fn merge_xlsx_cells(html: &mut String, merge: &XlsxMerge) -> Result<(), HcdError
     Ok(())
 }
 
+fn unmerge_xlsx_cells(
+    html: &mut String,
+    initial_html: &str,
+    merge: &XlsxMerge,
+) -> Result<(), HcdError> {
+    let cells = xlsx_cells(html)?;
+    let original_cells = xlsx_cells(initial_html)?;
+    let anchor = cells
+        .iter()
+        .find(|cell| {
+            cell.row == merge.start_row && cell.column == merge.start_column && cell.has_node
+        })
+        .ok_or_else(|| HcdError::PreconditionFailed("XLSX merge anchor is missing".to_string()))?;
+    let range = (
+        merge.start_row,
+        merge.start_column,
+        merge.end_row,
+        merge.end_column,
+    );
+    if anchor.merged_range != Some(range) {
+        return Err(HcdError::PreconditionFailed(
+            "XLSX anchor is not merged across the requested range".to_string(),
+        ));
+    }
+    let count = (merge.end_row - merge.start_row + 1)
+        .saturating_mul(merge.end_column - merge.start_column + 1);
+    if count > 10_000 {
+        return Err(HcdError::ResourceLimit(
+            "XLSX unmerge exceeds 10000 cells".to_string(),
+        ));
+    }
+    let reference = format!(
+        "{}{}:{}{}",
+        xlsx_column_name(merge.start_column),
+        merge.start_row,
+        xlsx_column_name(merge.end_column),
+        merge.end_row
+    );
+    let mut restored_anchor = html[anchor.start..anchor.end].to_string();
+    for attribute in [
+        format!(" data-hcd-merge=\"{reference}\""),
+        format!(" rowspan=\"{}\"", merge.end_row - merge.start_row + 1),
+        format!(" colspan=\"{}\"", merge.end_column - merge.start_column + 1),
+    ] {
+        if !restored_anchor.contains(&attribute) {
+            return Err(HcdError::InvalidBundle(
+                "XLSX merge anchor has inconsistent span attributes".to_string(),
+            ));
+        }
+        restored_anchor = restored_anchor.replacen(&attribute, "", 1);
+    }
+    let mut changes = vec![(anchor.start, anchor.end, restored_anchor, 0u32)];
+    for row in merge.start_row..=merge.end_row {
+        let marker = format!("<tr data-hcd-row=\"{row}\"");
+        let row_start = html.find(&marker).ok_or_else(|| {
+            HcdError::Unsupported(format!(
+                "XLSX merged row {row} is not present in the HCD window"
+            ))
+        })?;
+        let row_end = html[row_start..]
+            .find("</tr>")
+            .map(|offset| row_start + offset)
+            .ok_or_else(|| HcdError::InvalidBundle("XLSX merged row is not closed".to_string()))?;
+        for column in merge.start_column..=merge.end_column {
+            if row == merge.start_row && column == merge.start_column {
+                continue;
+            }
+            if cells
+                .iter()
+                .any(|cell| cell.row == row && cell.column == column)
+            {
+                return Err(HcdError::PreconditionFailed(
+                    "XLSX covered cell already exists".to_string(),
+                ));
+            }
+            let insertion = cells
+                .iter()
+                .filter(|cell| cell.row == row && cell.column > column)
+                .map(|cell| cell.start)
+                .min()
+                .unwrap_or(row_end);
+            let empty = original_cells
+                .iter()
+                .find(|cell| cell.row == row && cell.column == column)
+                .filter(|cell| {
+                    !cell.has_node
+                        && cell.merged_range.is_none()
+                        && initial_html[cell.tag_end + 1..cell.end - 5]
+                            .trim()
+                            .is_empty()
+                })
+                .map(|cell| initial_html[cell.start..cell.end].to_string())
+                .unwrap_or_else(|| {
+                    format!("<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{column}\"></td>")
+                });
+            changes.push((insertion, insertion, empty, column));
+        }
+    }
+    changes.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| right.3.cmp(&left.3)));
+    for (start, end, replacement, _) in changes {
+        html.replace_range(start..end, &replacement);
+    }
+    Ok(())
+}
+
 fn pdf_page_dimensions(html: &str, page: usize) -> Result<(f32, f32), HcdError> {
     let tag_end = html
         .find('>')
@@ -2889,6 +3159,7 @@ fn apply_annotations(
             PatchOperation::TextSplice { .. }
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::XlsxMerge { .. }
+            | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
             | PatchOperation::XlsxRowAppend { .. }
             | PatchOperation::XlsxRowRemoveLast { .. }
@@ -2999,6 +3270,32 @@ fn is_forbidden_xml_character(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splitting_merge_restores_empty_cell_style_and_column_order() {
+        let original = concat!(
+            "<table><tbody>",
+            "<tr data-hcd-row=\"1\"><td class=\"hcd-cell\" data-hcd-column=\"1\"><span data-hcd-id=\"n_00000000000000000000000000000000\">A</span></td>",
+            "<td class=\"hcd-cell hcd-xs-2\" data-hcd-column=\"2\"></td>",
+            "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"3\"></td></tr>",
+            "<tr data-hcd-row=\"2\"><td class=\"hcd-cell hcd-empty\" data-hcd-column=\"1\"></td>",
+            "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"2\"></td></tr>",
+            "</tbody></table>"
+        );
+        let merge = XlsxMerge {
+            sheet_id: "unused".to_string(),
+            start_row: 1,
+            start_column: 1,
+            end_row: 2,
+            end_column: 2,
+            node_hash: "unused".to_string(),
+        };
+        let mut html = original.to_string();
+        merge_xlsx_cells(&mut html, &merge).unwrap();
+        assert!(!html.contains("hcd-xs-2"));
+        unmerge_xlsx_cells(&mut html, original, &merge).unwrap();
+        assert_eq!(html, original);
+    }
 
     #[test]
     fn unicode_scalar_splice_handles_emoji() {

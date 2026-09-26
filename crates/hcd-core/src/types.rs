@@ -260,6 +260,17 @@ pub enum PatchOperation {
         end_column: u32,
         precondition: NodePrecondition,
     },
+    /// Split an HCD-created merge while retaining its anchor cell and text.
+    #[serde(rename = "xlsx.unmerge", rename_all = "camelCase")]
+    XlsxUnmerge {
+        node_id: String,
+        sheet_id: String,
+        start_row: u32,
+        start_column: u32,
+        end_row: u32,
+        end_column: u32,
+        precondition: NodePrecondition,
+    },
     /// Materialize a previously empty cell inside an existing HCD row window.
     /// The server assigns its stable node ID from document, sheet, and address.
     #[serde(rename = "xlsx.cell.set", rename_all = "camelCase")]
@@ -320,7 +331,8 @@ impl PatchOperation {
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
-            | Self::XlsxMerge { node_id, .. } => Some(node_id),
+            | Self::XlsxMerge { node_id, .. }
+            | Self::XlsxUnmerge { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
             | Self::PdfTextInsert { .. }
@@ -337,6 +349,7 @@ impl PatchOperation {
             Self::TextSplice { .. }
                 | Self::PdfTextInsert { .. }
                 | Self::XlsxMerge { .. }
+                | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxRowAppend { .. }
                 | Self::XlsxRowRemoveLast { .. }

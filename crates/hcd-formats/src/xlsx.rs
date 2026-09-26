@@ -5624,6 +5624,152 @@ mod tests {
     }
 
     #[test]
+    fn unmerges_hcd_created_cells_and_exports_without_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("bundle.hcd");
+        let merged_export = temp.path().join("merged.xlsx");
+        let split_export = temp.path().join("split.xlsx");
+        create_merge_edit_fixture(&source);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("unmerge-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let anchor = extract_text_page(&bundle, None, 10)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let merge = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_6.to_string(),
+            document_id: "unmerge-doc".to_string(),
+            patch_id: "merge-a1-b2".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxMerge {
+                node_id: anchor.node_id.clone(),
+                sheet_id: sheet_id.clone(),
+                start_row: 1,
+                start_column: 1,
+                end_row: 2,
+                end_column: 2,
+                precondition: NodePrecondition {
+                    node_hash: anchor.node_hash.clone(),
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &merge, 0).unwrap();
+        export_xlsx(&bundle, &source, &merged_export, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&merged_export, "xl/worksheets/sheet1.xml")
+            .contains("mergeCell ref=\"A1:B2\""));
+        let split = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_11.to_string(),
+            document_id: "unmerge-doc".to_string(),
+            patch_id: "split-a1-b2".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxUnmerge {
+                node_id: anchor.node_id.clone(),
+                sheet_id,
+                start_row: 1,
+                start_column: 1,
+                end_row: 2,
+                end_column: 2,
+                precondition: NodePrecondition {
+                    node_hash: anchor.node_hash,
+                },
+            }],
+        };
+        let mut stale = split.clone();
+        stale.patch_id = "stale-split-a1-b2".to_string();
+        stale.base_revision = 0;
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("current head revision"));
+        let result = hcd_core::apply_patch(&bundle, &split, 1).unwrap();
+        assert_eq!(result.revision, 2);
+        let head = bundle.manifest().unwrap();
+        let html = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(!html.contains("data-hcd-merge=\"A1:B2\""));
+        assert_eq!(html.matches("data-hcd-column=\"2\"").count(), 2);
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        export_xlsx(&bundle, &source, &split_export, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&split_export, "xl/worksheets/sheet1.xml");
+        assert!(!worksheet.contains("mergeCell ref=\"A1:B2\""));
+        assert!(worksheet.contains("Anchor"));
+        assert_eq!(bundle.revision(1).unwrap().revision, 1);
+    }
+
+    #[test]
+    fn refuses_to_split_source_merge_that_may_hide_cells() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("original-merge.xlsx");
+        let bundle_path = temp.path().join("original-merge.hcd");
+        create_shared_string_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("original-merge-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let anchor = extract_text_page(&bundle, None, 10)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let split = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_11.to_string(),
+            document_id: "original-merge-doc".to_string(),
+            patch_id: "split-source".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxUnmerge {
+                node_id: anchor.node_id,
+                sheet_id,
+                start_row: 1,
+                start_column: 1,
+                end_row: 2,
+                end_column: 2,
+                precondition: NodePrecondition {
+                    node_hash: anchor.node_hash,
+                },
+            }],
+        };
+        assert!(hcd_core::apply_patch(&bundle, &split, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("source XLSX merge"));
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+    }
+
+    #[test]
     fn first_edit_of_sparse_cell_creates_stable_node_and_source_cell() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("sparse.xlsx");
