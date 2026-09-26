@@ -956,7 +956,13 @@ fn page_content_bounded(
                 ))
             })?;
         let remaining = maximum.saturating_sub(content.len());
-        let decoded = decode_stream_bounded(stream, remaining, "PDF page content")?;
+        let decoded = decode_stream_bounded(stream, remaining, "PDF page content").map_err(|error| {
+            HandlerError::OpenError(format!(
+                "PDF page content stream {object_id:?} ({} encoded bytes, first bytes {:02x?}): {error}",
+                stream.content.len(),
+                &stream.content[..stream.content.len().min(8)]
+            ))
+        })?;
         if content.len().saturating_add(decoded.len()) > maximum {
             return Err(resource_limit("PDF page content", maximum));
         }
@@ -1089,20 +1095,32 @@ fn decode_ascii85_bounded(
     let mut output = Vec::with_capacity(input.len().min(maximum));
     let mut buffer: u32 = 0;
     let mut count = 0usize;
-    for &byte in input {
+    let mut terminated = false;
+    for (index, &byte) in input.iter().enumerate() {
         if byte == b'z' && count == 0 {
             append_bounded(&mut output, &[0, 0, 0, 0], maximum, context)?;
             continue;
         }
-        if byte.is_ascii_whitespace() || byte == b'~' || byte == b'>' {
+        if byte.is_ascii_whitespace() {
             continue;
         }
-        if !(b'!'..=b'u').contains(&byte) {
+        if byte == b'~' && input.get(index + 1) == Some(&b'>') {
+            terminated = true;
             break;
         }
+        if !(b'!'..=b'u').contains(&byte) {
+            return Err(HandlerError::OpenError(format!(
+                "failed to decode {context} ASCII85 stream: invalid digit"
+            )));
+        }
         buffer = buffer
-            .saturating_mul(85)
-            .saturating_add((byte - b'!') as u32);
+            .checked_mul(85)
+            .and_then(|value| value.checked_add((byte - b'!') as u32))
+            .ok_or_else(|| {
+                HandlerError::OpenError(format!(
+                    "failed to decode {context} ASCII85 stream: digit group overflows"
+                ))
+            })?;
         count += 1;
         if count == 5 {
             append_bounded(&mut output, &buffer.to_be_bytes(), maximum, context)?;
@@ -1112,7 +1130,7 @@ fn decode_ascii85_bounded(
     }
     if count > 0 {
         for _ in count..5 {
-            buffer = buffer.saturating_mul(85).saturating_add(84);
+            buffer = buffer.wrapping_mul(85).wrapping_add(84);
         }
         append_bounded(
             &mut output,
@@ -1120,6 +1138,11 @@ fn decode_ascii85_bounded(
             maximum,
             context,
         )?;
+    }
+    if !terminated {
+        return Err(HandlerError::OpenError(format!(
+            "failed to decode {context} ASCII85 stream: missing terminator"
+        )));
     }
     Ok(output)
 }
@@ -1165,6 +1188,16 @@ mod tests {
     use flate2::Compression;
     use lopdf::{dictionary, Document, Object, Stream};
     use std::io::Write;
+
+    #[test]
+    fn ascii85_greater_than_is_a_digit_unless_preceded_by_tilde() {
+        assert_eq!(
+            decode_ascii85_bounded(b"!!!!>~>", 4, "test").unwrap(),
+            [0, 0, 0, 29]
+        );
+        assert!(decode_ascii85_bounded(b"!!!!>", 4, "test").is_err());
+        assert!(decode_ascii85_bounded(b"!!!!~x", 4, "test").is_err());
+    }
 
     fn write_pdf(path: &std::path::Path, page_content: Vec<u8>) -> ObjectId {
         let mut document = Document::with_version("1.5");
