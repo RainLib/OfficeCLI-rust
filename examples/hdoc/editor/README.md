@@ -109,6 +109,8 @@ Row and column insertion/deletion move an existing merged range when the entire 
 
 The source-free semantic XLSX exporter leaves blank HTML table cells absent from worksheet XML and writes HCD merged ranges into `mergeCells`, preserving empty cell values, sparse row/column positions, and merges. It still rebuilds workbook styles and opaque parts semantically; use source-backed export when those properties matter.
 
+Pasting a range that contains both existing cells and empty cells now saves one `hcd-patch/19` revision. Each new cell gets a stable node ID. A paste containing a formula, a read-only cell, or more than 10000 changes is restored locally rather than partly committed. See the [real workbook acceptance commands and screenshot](../../../docs/acceptance/hcd-xlsx-range-paste.md).
+
 Verify existing merges with the real workbook and the screenshot above:
 
 ```bash

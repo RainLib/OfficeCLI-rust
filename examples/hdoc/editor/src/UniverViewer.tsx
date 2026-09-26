@@ -122,8 +122,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             collaboration.announceRevision(result.revision)
             if (alive) { setRevision(result.revision); setError('') }
             try {
-              if (patch.schemaVersion === 'hcd-patch/7') await adapter.refreshFromServer()
+              if (patch.schemaVersion === 'hcd-patch/7' || patch.schemaVersion === 'hcd-patch/19') await adapter.refreshFromServer()
               else await client.open()
+              if (alive) setStatus(`revision ${result.revision} · 已保存`)
             } catch (cause) { if (alive) setError(`修订已保存，但索引刷新失败：${String(cause)}`) }
           } catch (cause) {
             adapter.rejectPatch(patch.patchId, '保存失败，已恢复单元格原值')

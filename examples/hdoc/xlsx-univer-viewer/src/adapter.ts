@@ -21,7 +21,7 @@ export interface HcdXlsxCellSet {
 }
 
 export interface HcdPatchBatch {
-  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7';
+  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7' | 'hcd-patch/19';
   documentId: string;
   patchId: string;
   baseRevision: number;
@@ -40,7 +40,7 @@ export type HcdViewerMode = 'readonly' | 'editable';
 interface PendingPatch {
   links: NodeLink[];
   previous: string[];
-  blank?: { sheetId: string; row: number; column: number };
+  blanks: Array<{ sheetId: string; row: number; column: number }>;
 }
 
 interface ChunkRuntime {
@@ -129,8 +129,8 @@ export class HcdUniverAdapter {
       const key = cellKey(event.worksheet.getSheetId(), event.row, event.column);
       const link = this.linksByCell.get(key);
       const blank = !link && this.canEditBlankCell(event.worksheet.getSheetId(), event.row, event.column);
-      const pending = [...this.pending.values()].some(({ links, blank: pendingBlank }) =>
-        (link && links.includes(link)) || (pendingBlank && cellKey(pendingBlank.sheetId, pendingBlank.row, pendingBlank.column) === key));
+      const pending = [...this.pending.values()].some(({ links, blanks }) =>
+        (link && links.includes(link)) || blanks.some(blank => cellKey(blank.sheetId, blank.row, blank.column) === key));
       if ((!link?.editable && !blank) || pending) {
         event.cancel = true;
       }
@@ -215,8 +215,7 @@ export class HcdUniverAdapter {
       pending.links.forEach((link, index) => {
         this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column).setValue(pending.previous[index]);
       });
-      if (pending.blank) {
-        const { sheetId, row, column } = pending.blank;
+      for (const { sheetId, row, column } of pending.blanks) {
         this.workbook.getSheetBySheetId(sheetId)?.getRange(row, column).setValue('');
       }
     });
@@ -241,6 +240,12 @@ export class HcdUniverAdapter {
   /** Reload the visible HCD windows after another editor commits a revision. */
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;
+    const activeSheet = this.workbook.getActiveSheet();
+    const activeRange = activeSheet.getActiveRange();
+    const selection = activeRange && {
+      row: activeRange.getRow(), column: activeRange.getColumn(),
+      height: activeRange.getHeight(), width: activeRange.getWidth(),
+    };
     await this.client.open();
     for (const key of this.appliedDimensions) {
       if (/^s_[0-9a-f]{32}:row:/.test(key)) this.appliedDimensions.delete(key);
@@ -257,7 +262,11 @@ export class HcdUniverAdapter {
       this.appliedDimensions.delete(key);
     }
     this.evictOutsideWindow('', new Set());
-    await this.ensureVisible(this.workbook.getActiveSheet());
+    this.workbook.setActiveSheet(activeSheet);
+    if (selection) activeSheet.setActiveRange(activeSheet.getRange(
+      selection.row, selection.column, selection.height, selection.width,
+    ));
+    await this.ensureVisible(activeSheet);
     this.onStatus(`revision ${this.client.manifest.revision} · 已同步其他协作者的修改`);
     return true;
   }
@@ -465,28 +474,38 @@ export class HcdUniverAdapter {
     return { index: Math.max(0, maximum - 1), offset: 0 };
   }
 
-  private async captureChanges(ranges: Array<{ getSheetId(): string; getRow(): number; getColumn(): number; getHeight(): number; getWidth(): number; getValues(): unknown[][] }>): Promise<void> {
+  private async captureChanges(ranges: Array<{ getSheetId(): string; getRow(): number; getColumn(): number; getHeight(): number; getWidth(): number; getValues(): unknown[][]; getFormulas?(): unknown[][] }>): Promise<void> {
     const operations: HcdTextSplice[] = [];
     const changes: HcdPatchEventDetail['changes'] = [];
     const links: NodeLink[] = [];
     const previous: string[] = [];
+    const seen = new Set<string>();
     const rejected: Array<{ sheetId: string; row: number; column: number; value: string }> = [];
     const blankChanges: Array<{ sheetId: string; row: number; column: number; text: string }> = [];
     for (const range of ranges) {
       const values = range.getValues();
+      const formulas = range.getFormulas?.();
       for (let rowOffset = 0; rowOffset < range.getHeight(); rowOffset += 1) {
         for (let columnOffset = 0; columnOffset < range.getWidth(); columnOffset += 1) {
           const row = range.getRow() + rowOffset;
           const column = range.getColumn() + columnOffset;
           const key = cellKey(range.getSheetId(), row, column);
+          if (seen.has(key)) continue;
+          seen.add(key);
           const link = this.linksByCell.get(key);
           const next = String(values[rowOffset]?.[columnOffset] ?? '');
+          const formula = String(formulas?.[rowOffset]?.[columnOffset] ?? '');
+          if (formula || next.startsWith('=')) {
+            rejected.push({ sheetId: range.getSheetId(), row, column, value: link?.text ?? '' });
+            continue;
+          }
           if (!link?.editable || this.mode === 'readonly') {
             if (this.mode === 'editable' && !link && this.canEditBlankCell(range.getSheetId(), row, column)
               && next !== '' && this.pending.size === 0) {
               blankChanges.push({ sheetId: range.getSheetId(), row, column, text: next });
               continue;
             }
+            if (next === (link?.text ?? '')) continue;
             // Paste and fill can bypass BeforeSheetEditStart. Unsupported
             // cells are restored rather than left as unsaved local changes.
             rejected.push({
@@ -510,57 +529,49 @@ export class HcdUniverAdapter {
         }
       }
     }
-    if (blankChanges.length === 1 && operations.length === 0 && rejected.length === 0) {
-      const blank = blankChanges[0];
-      const patchId = crypto.randomUUID();
-      const patch: HcdPatchBatch = {
-        schemaVersion: 'hcd-patch/7', documentId: this.client.manifest.documentId,
-        patchId, baseRevision: this.client.manifest.revision,
-        actor: { client: 'officecli-hcd-univer-viewer' },
-        operations: [{ type: 'xlsx.cell.set', sheetId: blank.sheetId,
-          row: blank.row + 1, column: blank.column + 1, text: blank.text }],
-        metadata: { rootHash: this.client.manifest.rootHash },
-      };
-      this.pending.set(patchId, { links: [], previous: [], blank });
-      window.dispatchEvent(new CustomEvent<HcdPatchEventDetail>('hcd-patch', {
-        detail: { patch, changes: [{ sheetId: blank.sheetId, row: blank.row,
-          column: blank.column, oldText: '', newText: blank.text }] },
-      }));
-      this.onStatus(`patch ${patchId.slice(0, 8)} 等待服务端确认`);
-      return;
-    }
-    if (blankChanges.length) {
+    if (rejected.length || operations.length + blankChanges.length > 10_000) {
       rejected.push(...blankChanges.map(({ sheetId, row, column }) => ({ sheetId, row, column, value: '' })));
       rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column, value: oldText })));
       operations.length = 0;
-      this.onStatus('首次输入空白格请一次编辑一个单元格');
+      blankChanges.length = 0;
+      this.onStatus('粘贴包含不可编辑单元格、公式或超过 10000 个改动，已恢复原值');
     }
     if (rejected.length) {
       this.withApplying(() => rejected.forEach((cell) => {
         this.workbook.getSheetBySheetId(cell.sheetId)?.getRange(cell.row, cell.column).setValue(cell.value);
       }));
     }
-    if (!operations.length) return;
+    if (!operations.length && !blankChanges.length) return;
     const patchId = crypto.randomUUID();
+    const blankOperations: HcdXlsxCellSet[] = blankChanges.map(blank => ({
+      type: 'xlsx.cell.set', sheetId: blank.sheetId,
+      row: blank.row + 1, column: blank.column + 1, text: blank.text,
+    }));
     const patch: HcdPatchBatch = {
-      schemaVersion: 'hcd-patch/1',
+      schemaVersion: blankChanges.length
+        ? operations.length + blankChanges.length === 1 ? 'hcd-patch/7' : 'hcd-patch/19'
+        : 'hcd-patch/1',
       documentId: this.client.manifest.documentId,
       patchId,
       baseRevision: this.client.manifest.revision,
       actor: { client: 'officecli-hcd-univer-viewer' },
-      operations,
+      operations: [...operations, ...blankOperations],
       metadata: { rootHash: this.client.manifest.rootHash },
     };
-    this.pending.set(patchId, { links, previous });
-    window.dispatchEvent(new CustomEvent<HcdPatchEventDetail>('hcd-patch', { detail: { patch, changes } }));
+    this.pending.set(patchId, { links, previous, blanks: blankChanges });
+    window.dispatchEvent(new CustomEvent<HcdPatchEventDetail>('hcd-patch', { detail: {
+      patch, changes: [...changes, ...blankChanges.map(blank => ({
+        sheetId: blank.sheetId, row: blank.row, column: blank.column, oldText: '', newText: blank.text,
+      }))],
+    } }));
     this.onStatus(`patch ${patchId.slice(0, 8)} 等待服务端确认`);
   }
 
   private evictOutsideWindow(activeSheetId: string, keep: Set<string>): void {
     for (const [chunkId, runtime] of this.runtimes) {
-      const isPending = [...this.pending.values()].some(({ links, blank }) =>
+      const isPending = [...this.pending.values()].some(({ links, blanks }) =>
         links.some((link) => link.chunkId === chunkId)
-          || (blank?.sheetId === runtime.sheetId && runtime.cells.some((cell) =>
+          || blanks.some(blank => blank.sheetId === runtime.sheetId && runtime.cells.some((cell) =>
             cell.blank && cell.row === blank.row && cell.column === blank.column)));
       if (isPending || (runtime.sheetId === activeSheetId && keep.has(chunkId))) continue;
       const sheet = this.workbook.getSheetBySheetId(runtime.sheetId);
