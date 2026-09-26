@@ -1,12 +1,16 @@
 {
   "name": "@officecli/hcd-reference-editor",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "files": ["dist-embed", "src/public.d.ts"],
+  "sideEffects": ["**/*.css"],
   "exports": {
     "./react": {
-      "types": "./src/embed.tsx",
-      "default": "./dist-embed/hcd-editor.js"
-    }
+      "types": "./src/public.d.ts",
+      "import": "./dist-embed/hcd-editor.js"
+    },
+    "./style.css": "./dist-embed/hcd-editor.css"
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -26,14 +30,18 @@
     "@univerjs/preset-sheets-core": "^0.25.1",
     "@univerjs/preset-sheets-drawing": "^0.25.1",
     "@univerjs/presets": "^0.25.1",
-    "react": "19.2.0",
-    "react-dom": "19.2.0",
     "yjs": "13.6.27"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1 || ^19.0.0",
+    "react-dom": "^18.3.1 || ^19.0.0"
   },
   "devDependencies": {
     "@types/node": "22.18.6",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
     "vite": "7.1.11"

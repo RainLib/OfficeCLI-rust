@@ -1,0 +1,11 @@
+body{margin:0;background:#edf1ee;font:14px/1.5 system-ui,sans-serif;color:#25372b}
+.host{padding:20px;max-width:1500px;margin:auto}
+.host>header{display:flex;gap:16px;align-items:center;margin-bottom:16px}
+.host>header strong{font-size:20px;color:#176849}
+.host>form{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:16px}
+.host>form label{display:grid;gap:4px;min-width:230px}
+.host>form input{font:inherit;padding:7px 9px;border:1px solid #c5d1c7;border-radius:6px}
+.host>form button{font:inherit;border:0;border-radius:6px;background:#176849;color:#fff;padding:9px 12px;cursor:pointer}
+.host>p[role=alert]{color:#b4232f}
+.host-panel{height:75vh;min-height:550px;background:#fff;border:1px solid #cdd9d0;border-radius:12px;overflow:hidden}
+.host-panel>p{padding:24px;color:#687b6c}
