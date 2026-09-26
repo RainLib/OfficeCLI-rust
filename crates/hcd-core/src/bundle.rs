@@ -704,6 +704,7 @@ impl BundleWriter {
             asset_index_href: "assets/index.json".to_string(),
             created_at_epoch_ms: now_epoch_ms(),
             dirty_node_ids: Vec::new(),
+            removed_node_ids: Vec::new(),
             dirty_chunk_ids: Vec::new(),
             dirty_source_parts: Vec::new(),
             dirty_grid_parts: Vec::new(),

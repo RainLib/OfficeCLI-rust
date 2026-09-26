@@ -754,6 +754,7 @@ fn validate_revision_chain(
                 || record.patch_hash.is_some()
                 || record.patch_base_revision.is_some()
                 || !record.dirty_node_ids.is_empty()
+                || !record.removed_node_ids.is_empty()
                 || !record.dirty_chunk_ids.is_empty()
                 || !record.dirty_source_parts.is_empty()
                 || !record.dirty_grid_parts.is_empty()
@@ -867,6 +868,24 @@ fn validate_patch_revision(
         path,
         issues,
     );
+    validate_revision_dirty_set(
+        &record.removed_node_ids,
+        "removed node",
+        |value| valid_prefixed_id(value, "n_", 32),
+        path,
+        issues,
+    );
+    if record
+        .removed_node_ids
+        .iter()
+        .any(|node_id| !record.dirty_node_ids.contains(node_id))
+    {
+        issues.push(issue(
+            "REVISION_REMOVED_NODE_NOT_DIRTY",
+            "removedNodeIds must be included in dirtyNodeIds".to_string(),
+            path,
+        ));
+    }
     validate_revision_dirty_set(
         &record.dirty_chunk_ids,
         "chunk",

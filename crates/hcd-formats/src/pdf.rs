@@ -1078,6 +1078,7 @@ pub(crate) fn export_pdf(
         (right_page, right.source.text_ordinal).cmp(&(left_page, left.source.text_ordinal))
     });
     let overlay_positions = pdf_overlay_positions(bundle, &manifest, &nodes)?;
+    let has_active_edits = !nodes.is_empty();
 
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -1198,7 +1199,7 @@ pub(crate) fn export_pdf(
 
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
-        level: if dirty_parts.is_empty() {
+        level: if !has_active_edits {
             FidelityLevel::Exact
         } else {
             FidelityLevel::Semantic

@@ -293,6 +293,12 @@ pub enum PatchOperation {
         geometry: PdfTextGeometry,
         precondition: PdfTextGeometryPrecondition,
     },
+    /// Remove an HCD-created PDF text box from the current revision.
+    #[serde(rename = "pdf.text.delete", rename_all = "camelCase")]
+    PdfTextDelete {
+        node_id: String,
+        precondition: NodePrecondition,
+    },
     /// Add an editable text shape at slide coordinates measured in EMU.
     #[serde(rename = "pptx.text.insert", rename_all = "camelCase")]
     PptxTextInsert {
@@ -435,6 +441,7 @@ impl PatchOperation {
             | Self::ImageGeometry { node_id, .. }
             | Self::PptxShapeGeometry { node_id, .. }
             | Self::PdfTextGeometry { node_id, .. }
+            | Self::PdfTextDelete { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
             | Self::XlsxUnmerge { node_id, .. } => Some(node_id),
             Self::XlsxFormulaSet { node_id, .. } => Some(node_id),
@@ -463,6 +470,7 @@ impl PatchOperation {
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
                 | Self::PdfTextGeometry { .. }
+                | Self::PdfTextDelete { .. }
                 | Self::XlsxMerge { .. }
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
@@ -604,6 +612,9 @@ pub struct RevisionRecord {
     pub created_at_epoch_ms: u128,
     #[serde(default)]
     pub dirty_node_ids: Vec<String>,
+    /// Nodes removed by this revision; source-backed export drops their prior edits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_node_ids: Vec<String>,
     #[serde(default)]
     pub dirty_chunk_ids: Vec<String>,
     #[serde(default)]

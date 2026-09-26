@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:24",
+  "title": "HTML Canonical Document PDF text-box delete",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/24"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 262144
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/pdfTextDelete"
+      }
+    }
+  },
+  "$defs": {
+    "pdfTextDelete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "pdf.text.delete"
+        },
+        "nodeId": {
+          "type": "string",
+          "pattern": "^n_[0-9a-f]{32}$"
+        },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodeHash"
+          ],
+          "properties": {
+            "nodeHash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

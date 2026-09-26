@@ -1,7 +1,7 @@
 use hcd_core::{
-    extract_html_text_nodes, hash_bytes, hash_file, Bundle, FidelityReport, HcdError, HcdManifest,
-    ImportEvent, SourceDescriptor, TextExtractEntry, DEFAULT_CHUNK_BLOCKS,
-    DEFAULT_CHUNK_SOFT_BYTES, HCD_SCHEMA_VERSION, MAX_REVISION,
+    extract_html_text_nodes, hash_bytes, hash_file, node_bloom_might_contain, Bundle,
+    FidelityReport, HcdError, HcdManifest, ImportEvent, SourceDescriptor, TextExtractEntry,
+    DEFAULT_CHUNK_BLOCKS, DEFAULT_CHUNK_SOFT_BYTES, HCD_SCHEMA_VERSION, MAX_REVISION,
 };
 use quick_xml::events::Event;
 use std::collections::HashSet;
@@ -245,6 +245,7 @@ pub(crate) fn dirty_state_through(
 ) -> Result<(HashSet<String>, HashSet<String>), HcdError> {
     let mut dirty_parts = HashSet::new();
     let mut dirty_nodes = HashSet::new();
+    let mut removed_nodes = HashSet::new();
     for current in 1..=revision {
         let record = bundle.revision(current)?;
         if record.structural_change {
@@ -255,6 +256,36 @@ pub(crate) fn dirty_state_through(
         }
         dirty_parts.extend(record.dirty_source_parts);
         dirty_nodes.extend(record.dirty_node_ids);
+        for node_id in record.removed_node_ids {
+            dirty_nodes.remove(&node_id);
+            removed_nodes.insert(node_id);
+        }
+    }
+    if !removed_nodes.is_empty() {
+        let head = bundle.manifest()?;
+        let manifest = manifest_at_revision(bundle, &head, revision)?;
+        for page_number in 0..manifest.index_page_count {
+            let page = bundle.read_index_page(&manifest, page_number)?;
+            for descriptor in page.chunks {
+                if !removed_nodes
+                    .iter()
+                    .any(|node_id| node_bloom_might_contain(&descriptor.node_bloom, node_id))
+                {
+                    continue;
+                }
+                if let Some(entry) = bundle
+                    .read_map_verified(&descriptor)?
+                    .entries
+                    .into_iter()
+                    .find(|entry| removed_nodes.contains(&entry.node_id))
+                {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "removed node {} is still present in the current source map",
+                        entry.node_id
+                    )));
+                }
+            }
+        }
     }
     Ok((dirty_parts, dirty_nodes))
 }
@@ -265,13 +296,12 @@ pub(crate) fn collect_dirty_nodes(
     parts: &HashSet<String>,
     node_ids: &HashSet<String>,
 ) -> Result<Vec<TextExtractEntry>, HcdError> {
-    if parts.is_empty() && node_ids.is_empty() {
+    if node_ids.is_empty() {
         return Ok(Vec::new());
     }
-    if parts.is_empty() || node_ids.is_empty() {
+    if parts.is_empty() {
         return Err(HcdError::InvalidBundle(
-            "revision dirty source parts and dirty node ids must either both be empty or both be present"
-                .to_string(),
+            "revision has dirty node ids without dirty source parts".to_string(),
         ));
     }
     let mut output = Vec::new();
