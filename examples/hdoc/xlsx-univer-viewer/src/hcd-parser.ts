@@ -14,7 +14,9 @@ export interface NodeLink {
   nodeHash: string;
   chunkId: string;
   editable: boolean;
+  rawValue?: number;
   formulaEditable?: boolean;
+  formulaEdited?: boolean;
   formula?: string;
   text: string;
   sheetId: string;
@@ -185,7 +187,8 @@ function emuAttribute(element: HTMLElement, name: string): number | undefined {
   return Number.isFinite(parsed) ? parsed / 9525 : undefined;
 }
 
-export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) => string): ParsedGridChunk {
+export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) => string,
+  styles: Record<string, IStyleData> = {}): ParsedGridChunk {
   const document = new DOMParser().parseFromString(chunk.html, 'text/html');
   const section = document.querySelector<HTMLElement>('[data-hcd-sheet]');
   if (!section || !chunk.descriptor.grid) throw new Error(`无效的 XLSX HCD 分片 ${chunk.descriptor.chunkId}`);
@@ -204,12 +207,21 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
     const entry = nodeId ? entries.get(nodeId) : undefined;
     const text = node?.textContent ?? '';
     const styleIndex = cell.dataset.hcdStyleIndex;
+    const rawValue = cell.dataset.hcdRawValue;
+    const numericValue = rawValue !== undefined && rawValue !== '' ? Number(rawValue) : undefined;
+    const hasNumber = numericValue !== undefined && Number.isFinite(numericValue)
+      && (!Number.isInteger(numericValue) || Number.isSafeInteger(numericValue));
+    const styleKey = styleIndex ? `hcd-xs-${styleIndex}` : undefined;
+    const pattern = cell.dataset.hcdNumFmtPattern;
+    const style = pattern ? { ...(styleKey ? styles[styleKey] : {}), n: { pattern } } : styleKey;
     const link = nodeId && entry ? {
       nodeId,
       nodeHash: entry.nodeHash,
       chunkId: chunk.descriptor.chunkId,
       editable: entry.source.editable,
+      rawValue: hasNumber ? numericValue : undefined,
       formulaEditable: cell.dataset.hcdFormulaEditable === 'true',
+      formulaEdited: cell.dataset.hcdFormulaEdited === 'true',
       formula: cell.dataset.hcdFormulaExpression,
       text,
       sheetId: chunk.descriptor.grid.sheetId,
@@ -218,7 +230,9 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
     } satisfies NodeLink : undefined;
     cells.push({
       ...position,
-      data: { v: text, ...(cell.dataset.hcdFormulaExpression ? { f: cell.dataset.hcdFormulaExpression } : {}), ...(styleIndex ? { s: `hcd-xs-${styleIndex}` } : {}) },
+      data: { v: hasNumber ? numericValue : text,
+        ...(cell.dataset.hcdFormulaExpression ? { f: cell.dataset.hcdFormulaExpression } : {}),
+        ...(style ? { s: style } : {}) },
       link,
       formula: cell.dataset.hcdFormula === 'true',
       blank,

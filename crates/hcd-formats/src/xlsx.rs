@@ -23,6 +23,7 @@ const MAX_CONTROL_BYTES: u64 = 16 * 1024 * 1024;
 const ROWS_PER_WINDOW: usize = 128;
 const MAX_MERGED_RANGES: usize = 1_000_000;
 const MAX_FORMAT_CODE_BYTES: usize = 1_024;
+const MAX_SHARED_FORMULA_MEMBERS: usize = 100_000;
 const MAX_DRAWING_IMAGES: usize = 100_000;
 const MAX_DRAWING_CHARTS: usize = 100_000;
 const MAX_CHART_REFERENCE_POINTS: usize = 2_048;
@@ -121,6 +122,7 @@ struct CellBuilder {
     formula: bool,
     formula_expression: String,
     formula_editable: bool,
+    shared_formula_index: Option<u32>,
     value: String,
     inline_text: String,
     capture: Capture,
@@ -179,6 +181,13 @@ struct MergeCursor {
 struct WorksheetScan {
     merged_ranges: MergeCursor,
     view: WorksheetViewMetadata,
+    shared_formulas: HashMap<u32, Option<SharedFormulaGroup>>,
+}
+
+#[derive(Clone)]
+struct SharedFormulaGroup {
+    range: MergeRange,
+    formula: String,
 }
 
 #[derive(Clone, Default)]
@@ -2067,6 +2076,7 @@ where
         let WorksheetScan {
             mut merged_ranges,
             view,
+            shared_formulas,
         } = archive
             .with_part(&sheet.part, |source| {
                 scan_worksheet_metadata(source, &sheet.part)
@@ -2089,6 +2099,7 @@ where
                     sheet,
                     &mut shared_strings,
                     &mut merged_ranges,
+                    &shared_formulas,
                     &style_catalog,
                     workbook.date_1904,
                     &mut format_stats,
@@ -2168,13 +2179,57 @@ where
         ],
         flattened: vec![
             "locale-dependent, conditional and advanced number formats are best-effort; chart theme/effects, conditional formatting and shapes are not fully materialized; the static HTML fallback uses approximate drawing geometry while grid-canvas clients can reconstruct anchors from exact offsets and worksheet dimensions".to_string(),
-            "showFormulas is preserved as view metadata; ordinary formula expressions can be edited, while shared and array formulas remain read-only"
+            "showFormulas is preserved as view metadata; ordinary formulas and bounded shared groups with safely translatable A1 references can be edited, while unsupported shared and array formulas remain read-only"
                 .to_string(),
         ],
         dropped: Vec::new(),
         warnings: manifest.warnings.clone(),
     });
     finish_import(writer, manifest, emit)
+}
+
+fn expand_shared_formula_replacements(
+    archive: &mut StreamingOxmlArchive,
+    replacements: &mut HashMap<String, BTreeMap<String, String>>,
+) -> Result<usize, HcdError> {
+    let mut expanded_groups = 0usize;
+    for (part, formulas) in replacements {
+        let scan = archive
+            .with_part(part, |source| {
+                scan_worksheet_metadata(source, part)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        for group in scan.shared_formulas.values().flatten() {
+            let edited_member = formulas.keys().any(|reference| {
+                cell_coordinates(reference).is_some_and(|(row, column)| {
+                    (group.range.start_row..=group.range.end_row).contains(&row)
+                        && (group.range.start_col..=group.range.end_col).contains(&column)
+                })
+            });
+            if !edited_member {
+                continue;
+            }
+            expanded_groups += 1;
+            for row in group.range.start_row..=group.range.end_row {
+                for column in group.range.start_col..=group.range.end_col {
+                    let reference = format!("{}{row}", column_name(column));
+                    let expression = translate_shared_formula(
+                        &group.formula,
+                        i64::from(row - group.range.start_row),
+                        i64::from(column - group.range.start_col),
+                    )
+                    .ok_or_else(|| {
+                        HcdError::Unsupported(format!(
+                            "shared formula group in {part} cannot be expanded safely"
+                        ))
+                    })?;
+                    formulas.entry(reference).or_insert(expression);
+                }
+            }
+        }
+    }
+    Ok(expanded_groups)
 }
 
 fn import_assets<F>(
@@ -3540,6 +3595,12 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
     let mut ranges = Vec::new();
     let mut selected_view: Option<WorksheetViewMetadata> = None;
     let mut current_view: Option<WorksheetViewMetadata> = None;
+    let mut current_cell: Option<String> = None;
+    let mut pending_shared: Option<(u32, MergeRange, String)> = None;
+    let mut shared_formulas: HashMap<u32, Option<SharedFormulaGroup>> = HashMap::new();
+    let mut shared_members: HashMap<u32, BTreeSet<(u32, u32)>> = HashMap::new();
+    let mut shared_member_count = 0usize;
+    let mut shared_members_complete = true;
     let mut budget = XmlBudget::default();
     loop {
         let event = reader
@@ -3547,6 +3608,85 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
             .map_err(|error| HcdError::InvalidBundle(format!("worksheet {part} XML: {error}")))?;
         budget.observe(&event, part)?;
         match event {
+            Event::Start(ref element) if local_name(element.name().as_ref()) == "c" => {
+                current_cell = attribute(element, "r");
+            }
+            Event::Start(ref element)
+                if local_name(element.name().as_ref()) == "f"
+                    && current_cell.is_some()
+                    && attribute(element, "t").as_deref() == Some("shared") =>
+            {
+                if let (Some(index), Some(cell)) = (
+                    attribute(element, "si").and_then(|value| value.parse::<u32>().ok()),
+                    current_cell.as_deref().and_then(cell_coordinates),
+                ) {
+                    if shared_member_count < MAX_SHARED_FORMULA_MEMBERS {
+                        if shared_members.entry(index).or_default().insert(cell) {
+                            shared_member_count += 1;
+                        }
+                    } else {
+                        shared_members_complete = false;
+                    }
+                }
+                if let (Some(index), Some(range), Some(cell)) = (
+                    attribute(element, "si").and_then(|value| value.parse::<u32>().ok()),
+                    attribute(element, "ref").and_then(|value| parse_merge_reference(&value)),
+                    current_cell.as_deref().and_then(cell_coordinates),
+                ) {
+                    let area = u64::from(range.end_row - range.start_row + 1)
+                        * u64::from(range.end_col - range.start_col + 1);
+                    if cell == (range.start_row, range.start_col)
+                        && area <= 4096
+                        && shared_formulas.len() < 4096
+                    {
+                        pending_shared = Some((index, range, String::new()));
+                    }
+                }
+            }
+            Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "f"
+                    && current_cell.is_some()
+                    && attribute(element, "t").as_deref() == Some("shared") =>
+            {
+                if let (Some(index), Some(cell)) = (
+                    attribute(element, "si").and_then(|value| value.parse::<u32>().ok()),
+                    current_cell.as_deref().and_then(cell_coordinates),
+                ) {
+                    if shared_member_count < MAX_SHARED_FORMULA_MEMBERS {
+                        if shared_members.entry(index).or_default().insert(cell) {
+                            shared_member_count += 1;
+                        }
+                    } else {
+                        shared_members_complete = false;
+                    }
+                }
+            }
+            Event::Text(ref text) if pending_shared.is_some() => {
+                let decoded = text.unescape().map_err(|error| {
+                    HcdError::InvalidBundle(format!("worksheet {part} shared formula: {error}"))
+                })?;
+                let (_, _, formula) = pending_shared.as_mut().expect("checked formula");
+                formula.push_str(&decoded);
+                if formula.len() > 8191 {
+                    pending_shared = None;
+                }
+            }
+            Event::End(ref element) if local_name(element.name().as_ref()) == "f" => {
+                if let Some((index, range, formula)) = pending_shared.take() {
+                    if !formula.is_empty() {
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            shared_formulas.entry(index)
+                        {
+                            slot.insert(Some(SharedFormulaGroup { range, formula }));
+                        } else {
+                            shared_formulas.insert(index, None);
+                        }
+                    }
+                }
+            }
+            Event::End(ref element) if local_name(element.name().as_ref()) == "c" => {
+                current_cell = None;
+            }
             Event::Start(ref element) if local_name(element.name().as_ref()) == "sheetView" => {
                 if current_view.is_some() {
                     return Err(HcdError::InvalidBundle(format!(
@@ -3606,9 +3746,43 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
         }
         buffer.clear();
     }
+    for group in shared_formulas.values_mut() {
+        if group.as_ref().is_some_and(|item| {
+            translate_shared_formula(&item.formula, 0, 0).is_none()
+                || translate_shared_formula(
+                    &item.formula,
+                    i64::from(item.range.end_row - item.range.start_row),
+                    i64::from(item.range.end_col - item.range.start_col),
+                )
+                .is_none()
+        }) {
+            *group = None;
+        }
+    }
+    for (index, group) in &mut shared_formulas {
+        if let Some(item) = group {
+            let expected = usize::try_from(
+                u64::from(item.range.end_row - item.range.start_row + 1)
+                    * u64::from(item.range.end_col - item.range.start_col + 1),
+            )
+            .unwrap_or(usize::MAX);
+            let complete = shared_members_complete
+                && shared_members.get(index).is_some_and(|members| {
+                    members.len() == expected
+                        && members.iter().all(|(row, column)| {
+                            (item.range.start_row..=item.range.end_row).contains(row)
+                                && (item.range.start_col..=item.range.end_col).contains(column)
+                        })
+                });
+            if !complete {
+                *group = None;
+            }
+        }
+    }
     Ok(WorksheetScan {
         merged_ranges: MergeCursor::new(ranges),
         view: selected_view.unwrap_or_default(),
+        shared_formulas,
     })
 }
 
@@ -3898,6 +4072,7 @@ fn parse_worksheet<F>(
     sheet: &SheetPart,
     shared_strings: &mut SharedStringStore,
     merged_ranges: &mut MergeCursor,
+    shared_formulas: &HashMap<u32, Option<SharedFormulaGroup>>,
     styles: &XlsxStyleCatalog,
     date_1904: bool,
     format_stats: &mut XlsxFormatStats,
@@ -3981,6 +4156,10 @@ where
             {
                 let current = cell.as_mut().expect("checked cell");
                 current.formula = true;
+                if attribute(start, "t").as_deref() == Some("shared") {
+                    current.shared_formula_index =
+                        attribute(start, "si").and_then(|value| value.parse::<u32>().ok());
+                }
                 current.formula_editable = attribute(start, "t")
                     .is_none_or(|kind| kind == "normal")
                     && attribute(start, "si").is_none()
@@ -3990,7 +4169,12 @@ where
             Event::Empty(ref start)
                 if cell.is_some() && local_name(start.name().as_ref()) == "f" =>
             {
-                cell.as_mut().expect("checked cell").formula = true;
+                let current = cell.as_mut().expect("checked cell");
+                current.formula = true;
+                if attribute(start, "t").as_deref() == Some("shared") {
+                    current.shared_formula_index =
+                        attribute(start, "si").and_then(|value| value.parse::<u32>().ok());
+                }
             }
             Event::Start(ref start)
                 if cell.is_some() && local_name(start.name().as_ref()) == "v" =>
@@ -4032,7 +4216,8 @@ where
                 cell.as_mut().expect("checked cell").capture = Capture::None;
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "c" => {
-                let finished = cell.take().unwrap_or_default();
+                let mut finished = cell.take().unwrap_or_default();
+                prepare_shared_formula_cell(&mut finished, shared_formulas);
                 append_finished_cell_if_visible(
                     &mut row,
                     document_id,
@@ -4060,6 +4245,137 @@ where
         buffer.clear();
     }
     Ok(())
+}
+
+fn prepare_shared_formula_cell(
+    cell: &mut CellBuilder,
+    groups: &HashMap<u32, Option<SharedFormulaGroup>>,
+) {
+    let Some(group) = cell
+        .shared_formula_index
+        .and_then(|index| groups.get(&index))
+        .and_then(Option::as_ref)
+    else {
+        return;
+    };
+    let Some((row, column)) = cell_coordinates(&cell.reference) else {
+        return;
+    };
+    if row < group.range.start_row
+        || row > group.range.end_row
+        || column < group.range.start_col
+        || column > group.range.end_col
+    {
+        return;
+    }
+    let delta_row = i64::from(row) - i64::from(group.range.start_row);
+    let delta_column = i64::from(column) - i64::from(group.range.start_col);
+    if let Some(expression) = translate_shared_formula(&group.formula, delta_row, delta_column) {
+        cell.formula_expression = expression;
+        cell.formula_editable = true;
+    }
+}
+
+/// Expand only ordinary A1 references. Unsupported syntax leaves the group read-only.
+fn translate_shared_formula(formula: &str, row_delta: i64, column_delta: i64) -> Option<String> {
+    if formula.is_empty()
+        || formula.len() > 8191
+        || !formula.is_ascii()
+        || formula
+            .bytes()
+            .any(|byte| matches!(byte, b'!' | b'[' | b']' | b'\'' | b'#' | b'@' | b';'))
+    {
+        return None;
+    }
+    let bytes = formula.as_bytes();
+    let mut output = String::with_capacity(formula.len());
+    let mut offset = 0usize;
+    let mut quoted = false;
+    while offset < bytes.len() {
+        let byte = bytes[offset];
+        if byte == b'"' {
+            if quoted && bytes.get(offset + 1) == Some(&b'"') {
+                output.push_str("\"\"");
+                offset += 2;
+                continue;
+            }
+            quoted = !quoted;
+            output.push('"');
+            offset += 1;
+            continue;
+        }
+        if !quoted && (byte == b'$' || byte.is_ascii_alphabetic()) {
+            let boundary = offset == 0
+                || !matches!(bytes[offset - 1],
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.');
+            if boundary {
+                if let Some((end, translated)) =
+                    translate_a1_reference(bytes, offset, row_delta, column_delta)?
+                {
+                    output.push_str(&translated);
+                    offset = end;
+                    continue;
+                }
+            }
+        }
+        output.push(byte as char);
+        offset += 1;
+    }
+    (!quoted && output.len() <= 8191).then_some(output)
+}
+
+fn translate_a1_reference(
+    bytes: &[u8],
+    start: usize,
+    row_delta: i64,
+    column_delta: i64,
+) -> Option<Option<(usize, String)>> {
+    let mut cursor = start;
+    let absolute_column = bytes.get(cursor) == Some(&b'$');
+    if absolute_column {
+        cursor += 1;
+    }
+    let column_start = cursor;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic) && cursor - column_start < 3 {
+        cursor += 1;
+    }
+    if cursor == column_start || bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
+        return Some(None);
+    }
+    let absolute_row = bytes.get(cursor) == Some(&b'$');
+    if absolute_row {
+        cursor += 1;
+    }
+    let row_start = cursor;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_digit) && cursor - row_start < 7 {
+        cursor += 1;
+    }
+    if cursor == row_start || bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+        return Some(None);
+    }
+    if bytes.get(cursor).is_some_and(|byte| {
+        byte.is_ascii_alphabetic() || byte.is_ascii_digit() || matches!(*byte, b'_' | b'.' | b'(')
+    }) {
+        return Some(None);
+    }
+    let reference = std::str::from_utf8(&bytes[start..cursor]).ok()?;
+    let (row, column) = match cell_coordinates(reference) {
+        Some(position) => position,
+        None => return Some(None),
+    };
+    let next_row = i64::from(row) + if absolute_row { 0 } else { row_delta };
+    let next_column = i64::from(column) + if absolute_column { 0 } else { column_delta };
+    if !(1..=1_048_576).contains(&next_row) || !(1..=16_384).contains(&next_column) {
+        return None;
+    }
+    let translated = format!(
+        "{}{}{}{}",
+        if absolute_column { "$" } else { "" },
+        column_name(next_column as u32),
+        if absolute_row { "$" } else { "" },
+        next_row
+    );
+    Some(Some((cursor, translated)))
 }
 
 fn append_column_markup(output: &mut String, element: &BytesStart<'_>) {
@@ -4202,6 +4518,32 @@ fn append_cell(
             )
         })
         .unwrap_or_default();
+    let raw_numeric_attribute = if is_numeric && raw_text.parse::<f64>().is_ok_and(f64::is_finite) {
+        format!(" data-hcd-raw-value=\"{}\"", escape_attribute(&raw_text))
+    } else {
+        String::new()
+    };
+    let number_pattern_attribute = if !raw_numeric_attribute.is_empty() {
+        formatted
+            .num_fmt_id
+            .and_then(|id| {
+                styles
+                    .number_formats
+                    .get(&id)
+                    .map(String::as_str)
+                    .or_else(|| built_in_number_format(id).map(|(pattern, _)| pattern))
+            })
+            .filter(|pattern| pattern.len() <= MAX_FORMAT_CODE_BYTES)
+            .map(|pattern| {
+                format!(
+                    " data-hcd-num-fmt-pattern=\"{}\"",
+                    escape_attribute(pattern)
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let column_span = match merged_ranges.classify(cell_row, cell_col) {
         Some(MergePosition::Anchor(range)) => range.end_col - range.start_col + 1,
         _ => 1,
@@ -4222,7 +4564,7 @@ fn append_cell(
         column: cell_col,
         span: column_span,
         html: format!(
-            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}{}><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
+            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}{}{}{}><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
             cell.style_index
                 .map(|index| format!(" hcd-xs-{index}"))
                 .unwrap_or_default(),
@@ -4234,6 +4576,8 @@ fn append_cell(
                 .map(|index| format!(" data-hcd-style-index=\"{index}\""))
                 .unwrap_or_default(),
             number_format_attributes,
+            raw_numeric_attribute,
+            number_pattern_attribute,
             merge_attributes,
             node_id,
             node_hash,
@@ -4459,6 +4803,13 @@ pub(crate) fn export_xlsx(
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
+    let expanded_shared_groups =
+        expand_shared_formula_replacements(&mut archive, &mut formula_replacements)?;
+    let chart_caches_may_be_stale = !formula_replacements.is_empty()
+        && archive
+            .entries()
+            .iter()
+            .any(|entry| !entry.is_dir && entry.name.starts_with("xl/charts/"));
     if !row_insertions.is_empty() || !column_shifts.is_empty() {
         verify_grid_shift_source(&mut archive, &workbook, &row_insertions, &column_shifts)?;
     }
@@ -4540,7 +4891,7 @@ pub(crate) fn export_xlsx(
         ],
         flattened: {
             let mut items = vec![
-                "edited cells are serialized as inline strings regardless of their original storage type"
+                "edited nonformula cells are serialized as inline strings regardless of their original storage type"
                     .to_string(),
             ];
             if row_insertions
@@ -4557,6 +4908,9 @@ pub(crate) fn export_xlsx(
             {
                 items.push("inserted worksheet columns use default column formatting".to_string());
             }
+            if expanded_shared_groups > 0 {
+                items.push(format!("{expanded_shared_groups} edited shared-formula groups were expanded into independent native formulas"));
+            }
             items
         },
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
@@ -4568,6 +4922,14 @@ pub(crate) fn export_xlsx(
                     message: "Edited formula caches were cleared; recalculate the workbook in Excel or another compatible spreadsheet application".to_string(),
                     node_id: None,
                     source_part: Some("xl/workbook.xml".to_string()),
+                });
+            }
+            if chart_caches_may_be_stale {
+                warnings.push(FidelityWarning {
+                    code: "XLSX_CHART_CACHE_RECALC_REQUIRED".to_string(),
+                    message: "HCD chart preview and copied chart caches may still show values from the source workbook until a spreadsheet application recalculates them".to_string(),
+                    node_id: None,
+                    source_part: Some("xl/charts".to_string()),
                 });
             }
             warnings
@@ -6196,6 +6558,112 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn shared_formula_projection_shifts_only_relative_a1_references() {
+        assert_eq!(
+            translate_shared_formula("SUM($A1:B$2)+\"A1\"+LOG10(C3)", 1, 2).as_deref(),
+            Some("SUM($A2:D$2)+\"A1\"+LOG10(E4)")
+        );
+        assert_eq!(translate_shared_formula("A1", -1, 0), None);
+        assert_eq!(translate_shared_formula("Sheet2!A1", 1, 0), None);
+        assert_eq!(translate_shared_formula("Table1[Amount]", 1, 0), None);
+    }
+
+    #[test]
+    fn incomplete_shared_formula_group_remains_read_only() {
+        let source = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="D1"><f t="shared" ref="D1:D2" si="0">A1+1</f><v>3</v></c></row></sheetData></worksheet>"#;
+        let scan =
+            scan_worksheet_metadata(&mut source.as_slice(), "xl/worksheets/sheet1.xml").unwrap();
+        assert!(scan.shared_formulas.get(&0).is_some_and(Option::is_none));
+    }
+
+    #[test]
+    fn edits_one_shared_formula_member_and_expands_its_source_group() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let exported = temp.path().join("edited.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("shared-formula-budget"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        let overview = page
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Overview" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let html = bundle.read_chunk(overview).unwrap();
+        assert!(html.contains("data-hcd-cell=\"G8\" data-hcd-column=\"7\" data-hcd-formula=\"true\" data-hcd-formula-editable=\"true\" data-hcd-formula-expression=\"=SUM(C8:F8)\""));
+        assert!(html.contains("data-hcd-cell=\"G9\" data-hcd-column=\"7\" data-hcd-formula=\"true\" data-hcd-formula-editable=\"true\" data-hcd-formula-expression=\"=SUM(C9:F9)\""));
+        assert!(html.contains("data-hcd-raw-value=\"375000\""));
+        assert!(html.contains("data-hcd-num-fmt-pattern=\"&quot;$&quot;#,##0\""));
+        let node = bundle
+            .read_map(overview)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("G9"))
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_20.to_string(),
+            document_id: "shared-formula-budget".to_string(),
+            patch_id: "edit-g9".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaSet {
+                node_id: node.node_id,
+                sheet_id: overview.grid.as_ref().unwrap().sheet_id.clone(),
+                formula: "=SUM(C9:E9)".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("shared-formula groups")));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_CHART_CACHE_RECALC_REQUIRED"));
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(worksheet.contains("<f>SUM(C8:F8)</f><v/>"));
+        assert!(worksheet.contains("<f>SUM(C9:E9)</f><v/>"));
+        assert!(worksheet.contains("<f>SUM(C10:F10)</f><v/>"));
+        assert!(!worksheet.contains("ref=\"G8:G14\""));
+        assert!(worksheet.contains("ref=\"H8:H15\""));
+        let history = temp.path().join("history.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &history,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&history, "xl/worksheets/sheet1.xml").contains("ref=\"G8:G14\""));
+    }
 
     #[test]
     fn ordinary_formula_edit_preserves_native_formula_and_recalculates() {
