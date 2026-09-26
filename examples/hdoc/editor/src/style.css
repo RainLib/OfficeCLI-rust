@@ -156,3 +156,23 @@
 .hcd-surface.hcd-embedded .semantic-workspace.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr) 245px}
 @media(max-width:1180px){.hcd-surface .semantic-workspace>header.editor-header{grid-template-columns:minmax(190px,1fr) auto minmax(285px,1fr);gap:8px;padding:7px 12px}.hcd-surface .semantic-workspace .document-title strong{max-width:150px}.hcd-surface .header-tabs{gap:0}.hcd-surface .header-tabs button{padding:0 10px}.hcd-surface .semantic-workspace .export-control label{font-size:0}.hcd-surface .semantic-workspace .export-control select{font-size:12px}.hcd-surface .semantic-workspace .editor-layout{grid-template-columns:180px minmax(0,1fr) 240px}.hcd-surface .semantic-workspace.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr) 240px}}
 @media(max-width:760px){.hcd-surface .semantic-workspace>header.editor-header{display:flex;flex-wrap:wrap;padding:8px 12px}.hcd-surface .header-tabs{order:3;width:100%;overflow:auto;justify-content:flex-start}.hcd-surface .semantic-workspace .header-actions{margin-left:auto}.hcd-surface .semantic-workspace .presence,.hcd-surface .semantic-workspace .export-control label{display:none}.hcd-surface .semantic-workspace .editor-layout,.hcd-surface .semantic-workspace.outline-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.outline-hidden .editor-layout{display:block}.hcd-surface .semantic-workspace .outline-panel{height:auto;border-bottom:1px solid #dce4ee}.hcd-surface .semantic-workspace .workspace-sidebar{border-top:1px solid #dce4ee;height:auto}.hcd-surface .semantic-workspace .document{width:calc(100% - 24px);margin:12px auto;padding:26px}.hcd-surface .semantic-workspace .ribbon{overflow-x:auto;flex-wrap:nowrap}.hcd-surface .semantic-workspace .ribbon .tool-group{flex:none}}
+
+/* Keep chrome in place; only the middle document and each docked panel scroll. */
+.hcd-surface .semantic-workspace{height:100dvh;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.hcd-surface.hcd-embedded .semantic-workspace{height:100%;overflow:hidden}
+.hcd-surface .semantic-workspace>header.editor-header,.hcd-surface .semantic-workspace>.ribbon,.hcd-surface .semantic-workspace>.editor-statusbar{flex:none}
+.hcd-surface .semantic-workspace .editor-layout{flex:1;min-height:0;overflow:hidden}
+.hcd-surface .semantic-workspace .document-scroll{min-width:0;min-height:0;height:100%;overflow-y:auto;overscroll-behavior:contain}
+.hcd-surface .semantic-workspace .outline-panel,.hcd-surface .semantic-workspace .workspace-sidebar{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.hcd-surface .semantic-workspace .document{min-height:calc(100% - 50px)}
+.hcd-surface .semantic-workspace .outline-panel .panel-head h2,.hcd-surface .semantic-workspace .revision-panel .panel-head h2{margin:0}
+.hcd-surface .semantic-workspace .outline-panel .panel-head,.hcd-surface .semantic-workspace .revision-panel .panel-head{margin-bottom:18px}
+.hcd-surface .semantic-workspace .appearance-panel{border-bottom:0}
+.hcd-surface .semantic-workspace .open-revisions{width:100%;margin-top:20px;color:#1769e8;text-align:left}
+.hcd-surface .semantic-workspace .revision-panel{padding-top:0}
+.hcd-surface .semantic-workspace.right-hidden .editor-layout{grid-template-columns:230px minmax(0,1fr)}
+.hcd-surface .semantic-workspace.right-hidden.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr)}
+.hcd-surface.hcd-embedded .semantic-workspace.right-hidden .editor-layout{grid-template-columns:190px minmax(0,1fr)}
+.hcd-surface.hcd-embedded .semantic-workspace.right-hidden.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr)}
+@media(max-width:1180px){.hcd-surface .semantic-workspace.right-hidden .editor-layout{grid-template-columns:180px minmax(0,1fr)}}
+@media(max-width:760px){.hcd-surface .semantic-workspace .editor-layout,.hcd-surface .semantic-workspace.outline-hidden .editor-layout,.hcd-surface .semantic-workspace.right-hidden .editor-layout,.hcd-surface .semantic-workspace.right-hidden.outline-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.outline-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.right-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.right-hidden.outline-hidden .editor-layout{display:flex;flex-direction:column;overflow:auto}.hcd-surface .semantic-workspace .document-scroll{flex:1;min-height:240px;overflow-y:auto}.hcd-surface .semantic-workspace .outline-panel,.hcd-surface .semantic-workspace .workspace-sidebar{height:auto;max-height:180px;flex:none}}
