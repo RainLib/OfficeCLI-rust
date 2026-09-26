@@ -14,10 +14,10 @@ use crate::{
     HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
     HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
     HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
-    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
-    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
-    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
-    MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -100,6 +100,13 @@ struct XlsxCellInsertion {
     row: u32,
     column: u32,
     text: String,
+}
+
+#[derive(Clone)]
+struct XlsxFormulaChange {
+    sheet_id: String,
+    formula: String,
+    node_hash: String,
 }
 
 #[derive(Clone)]
@@ -187,6 +194,7 @@ pub fn apply_patch(
                     | PatchOperation::PptxTextInsert { .. }
                     | PatchOperation::PptxShapeGeometry { .. }
                     | PatchOperation::XlsxCellSet { .. }
+                    | PatchOperation::XlsxFormulaSet { .. }
                     | PatchOperation::XlsxRowAppend { .. }
                     | PatchOperation::XlsxRowRemoveLast { .. }
                     | PatchOperation::XlsxColumnWidth { .. }
@@ -233,6 +241,7 @@ pub fn apply_patch(
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch)?;
+    let xlsx_formula = collect_xlsx_formula_set(patch);
     let shifted_grid = if !xlsx_cell_set.is_empty() {
         (1..=manifest.revision).try_fold(false, |found, revision| {
             let record = bundle.revision(revision)?;
@@ -302,6 +311,7 @@ pub fn apply_patch(
         .chain(images.keys().cloned())
         .chain(xlsx_merges.keys().cloned())
         .chain(xlsx_unmerges.keys().cloned())
+        .chain(xlsx_formula.keys().cloned())
         .chain(pptx_geometry.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
         .collect();
@@ -318,6 +328,7 @@ pub fn apply_patch(
         || !xlsx_merges.is_empty()
         || !xlsx_unmerges.is_empty()
         || !xlsx_cell_set.is_empty()
+        || !xlsx_formula.is_empty()
         || xlsx_row_append.is_some()
         || xlsx_row_insert.is_some()
         || xlsx_row_delete.is_some()
@@ -606,6 +617,39 @@ pub fn apply_patch(
                     entry.node_hash = replacement_hash;
                     found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
                     html_nodes.insert(entry.node_id.clone(), replacement);
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = xlsx_formula.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell"
+                        || descriptor.grid.as_ref().is_none_or(|grid| {
+                            grid.kind != crate::GridChunkKind::Cells
+                                || grid.sheet_id != change.sheet_id
+                        })
+                    {
+                        return Err(HcdError::Unsupported(
+                            "XLSX formula target is not a mapped cell in the requested sheet"
+                                .to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "formula cell {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    set_xlsx_formula(&mut html, &entry.node_id, &change.formula)?;
+                    let replacement_hash = hash_bytes(change.formula.as_bytes());
+                    replace_node_text(
+                        &mut html,
+                        &entry.node_id,
+                        &change.formula,
+                        &replacement_hash,
+                    )?;
+                    entry.node_hash = replacement_hash;
+                    found_nodes.insert(entry.node_id.clone(), change.formula.chars().count());
+                    html_nodes.insert(entry.node_id.clone(), change.formula.clone());
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1156,6 +1200,12 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             }))
+            .chain(xlsx_formula.keys().map(|node_id| FidelityWarning {
+                code: "XLSX_FORMULA_RECALC_REQUIRED".to_string(),
+                message: "HCD displays the edited formula expression; source-backed XLSX clears its cached value so Excel recalculates the result when opened".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .chain(pdf_insertions.values().flatten().map(|insertion| FidelityWarning {
                 code: "PDF_INSERTED_TEXT_OVERLAY".to_string(),
                 message: "new PDF text is positioned over the original page raster; background and typography remain approximate".to_string(),
@@ -1530,6 +1580,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_17
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1570,6 +1621,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/19 accepts XLSX cell insertions and text splices only".to_string(),
+        ));
+    }
+    if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxFormulaSet { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/20 accepts one XLSX formula replacement only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -1837,6 +1900,42 @@ fn validate_patch_identity(
                     ));
                 }
                 inserted = inserted.checked_add(text.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
+                })?;
+            }
+            PatchOperation::XlsxFormulaSet {
+                node_id,
+                sheet_id,
+                formula,
+                precondition,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.formula.set requires one XLSX operation with hcd-patch/20"
+                            .to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !formula.starts_with('=')
+                    || formula.len() < 2
+                    || formula.len() > 8192
+                    || formula.chars().any(is_forbidden_xml_character)
+                    || formula.contains(['\r', '\n'])
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX formula has an invalid sheet, length, or XML character".to_string(),
+                    ));
+                }
+                inserted = inserted.checked_add(formula.len()).ok_or_else(|| {
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
             }
@@ -2536,6 +2635,32 @@ fn collect_xlsx_cell_set(
         }
     }
     Ok(insertions)
+}
+
+fn collect_xlsx_formula_set(patch: &PatchBatch) -> HashMap<String, XlsxFormulaChange> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::XlsxFormulaSet {
+                node_id,
+                sheet_id,
+                formula,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                XlsxFormulaChange {
+                    sheet_id: sheet_id.clone(),
+                    formula: formula.clone(),
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn collect_xlsx_row_append(patch: &PatchBatch) -> Option<XlsxRowAppend> {
@@ -3838,6 +3963,52 @@ fn xlsx_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tag[start..end])
 }
 
+fn set_xlsx_formula(html: &mut String, node_id: &str, formula: &str) -> Result<(), HcdError> {
+    let marker = format!("data-hcd-id=\"{node_id}\"");
+    let node_start = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle(format!("XLSX formula node {node_id} is missing"))
+    })?;
+    let cell_start = html[..node_start].rfind("<td ").ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX formula node has no containing cell".to_string())
+    })?;
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
+        })?;
+    let tag = &html[cell_start..=cell_end];
+    if cell_end > node_start
+        || xlsx_attribute(tag, "data-hcd-formula") != Some("true")
+        || xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true")
+    {
+        return Err(HcdError::Unsupported(
+            "XLSX formula is shared, array based, or otherwise read-only".to_string(),
+        ));
+    }
+    set_attribute_in_range(
+        html,
+        cell_start,
+        cell_end,
+        "data-hcd-formula-expression",
+        formula,
+    )?;
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
+        })?;
+    set_attribute_in_range(
+        html,
+        cell_start,
+        cell_end,
+        "data-hcd-formula-edited",
+        "true",
+    )?;
+    Ok(())
+}
+
 fn xlsx_cells(html: &str) -> Result<Vec<XlsxCellSpan>, HcdError> {
     let mut result = Vec::new();
     let mut cursor = 0usize;
@@ -5131,6 +5302,7 @@ fn apply_annotations(
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
+            | PatchOperation::XlsxFormulaSet { .. }
             | PatchOperation::XlsxRowAppend { .. }
             | PatchOperation::XlsxRowInsert { .. }
             | PatchOperation::XlsxRowDelete { .. }

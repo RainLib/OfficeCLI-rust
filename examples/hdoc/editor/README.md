@@ -111,6 +111,8 @@ The source-free semantic XLSX exporter leaves blank HTML table cells absent from
 
 Pasting a range that contains both existing cells and empty cells now saves one `hcd-patch/19` revision. Each new cell gets a stable node ID. A paste containing a formula, a read-only cell, or more than 10000 changes is restored locally rather than partly committed. See the [real workbook acceptance commands and screenshot](../../../docs/acceptance/hcd-xlsx-range-paste.md).
 
+An existing ordinary XLSX formula can be edited directly in Univer. `hcd-patch/20` saves the expression and source-backed export keeps an OOXML formula while requesting recalculation. Shared and array formulas remain read-only. See the [real workbook commands and browser screenshots](../../../docs/acceptance/hcd-xlsx-formula-edit.md).
+
 Verify existing merges with the real workbook and the screenshot above:
 
 ```bash

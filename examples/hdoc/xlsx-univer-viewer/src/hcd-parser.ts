@@ -14,6 +14,8 @@ export interface NodeLink {
   nodeHash: string;
   chunkId: string;
   editable: boolean;
+  formulaEditable?: boolean;
+  formula?: string;
   text: string;
   sheetId: string;
   row: number;
@@ -207,6 +209,8 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       nodeHash: entry.nodeHash,
       chunkId: chunk.descriptor.chunkId,
       editable: entry.source.editable,
+      formulaEditable: cell.dataset.hcdFormulaEditable === 'true',
+      formula: cell.dataset.hcdFormulaExpression,
       text,
       sheetId: chunk.descriptor.grid.sheetId,
       row: position.row,
@@ -214,7 +218,7 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
     } satisfies NodeLink : undefined;
     cells.push({
       ...position,
-      data: { v: text, ...(styleIndex ? { s: `hcd-xs-${styleIndex}` } : {}) },
+      data: { v: text, ...(cell.dataset.hcdFormulaExpression ? { f: cell.dataset.hcdFormulaExpression } : {}), ...(styleIndex ? { s: `hcd-xs-${styleIndex}` } : {}) },
       link,
       formula: cell.dataset.hcdFormula === 'true',
       blank,

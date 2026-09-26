@@ -119,6 +119,8 @@ struct CellBuilder {
     value_type: String,
     style_index: Option<usize>,
     formula: bool,
+    formula_expression: String,
+    formula_editable: bool,
     value: String,
     inline_text: String,
     capture: Capture,
@@ -129,6 +131,7 @@ enum Capture {
     #[default]
     None,
     Value,
+    Formula,
     InlineText,
 }
 
@@ -2165,7 +2168,7 @@ where
         ],
         flattened: vec![
             "locale-dependent, conditional and advanced number formats are best-effort; chart theme/effects, conditional formatting and shapes are not fully materialized; the static HTML fallback uses approximate drawing geometry while grid-canvas clients can reconstruct anchors from exact offsets and worksheet dimensions".to_string(),
-            "showFormulas is preserved as view metadata, while HCD text continues to display cached cell values and formula expressions remain read-only"
+            "showFormulas is preserved as view metadata; ordinary formula expressions can be edited, while shared and array formulas remain read-only"
                 .to_string(),
         ],
         dropped: Vec::new(),
@@ -2817,6 +2820,7 @@ fn scan_chart_reference_cells(
                 match cell.capture {
                     Capture::Value => cell.value.push_str(&decoded),
                     Capture::InlineText => cell.inline_text.push_str(&decoded),
+                    Capture::Formula => {}
                     Capture::None => {}
                 }
                 if cell.value.len().max(cell.inline_text.len()) > MAX_CHUNK_BYTES {
@@ -3975,6 +3979,17 @@ where
             Event::Start(ref start)
                 if cell.is_some() && local_name(start.name().as_ref()) == "f" =>
             {
+                let current = cell.as_mut().expect("checked cell");
+                current.formula = true;
+                current.formula_editable = attribute(start, "t")
+                    .is_none_or(|kind| kind == "normal")
+                    && attribute(start, "si").is_none()
+                    && attribute(start, "ref").is_none();
+                current.capture = Capture::Formula;
+            }
+            Event::Empty(ref start)
+                if cell.is_some() && local_name(start.name().as_ref()) == "f" =>
+            {
                 cell.as_mut().expect("checked cell").formula = true;
             }
             Event::Start(ref start)
@@ -3994,10 +4009,17 @@ where
                 let cell = cell.as_mut().expect("checked cell");
                 match cell.capture {
                     Capture::Value => cell.value.push_str(&decoded),
+                    Capture::Formula => cell.formula_expression.push_str(&decoded),
                     Capture::InlineText => cell.inline_text.push_str(&decoded),
                     Capture::None => {}
                 }
-                if cell.value.len().max(cell.inline_text.len()) > MAX_CHUNK_BYTES {
+                if cell
+                    .value
+                    .len()
+                    .max(cell.inline_text.len())
+                    .max(cell.formula_expression.len())
+                    > MAX_CHUNK_BYTES
+                {
                     return Err(HcdError::ResourceLimit(format!(
                         "NODE_TOO_LARGE: cell {} exceeds 2 MiB",
                         cell.reference
@@ -4005,7 +4027,7 @@ where
                 }
             }
             Event::End(ref end)
-                if cell.is_some() && matches!(local_name(end.name().as_ref()), "v" | "t") =>
+                if cell.is_some() && matches!(local_name(end.name().as_ref()), "v" | "t" | "f") =>
             {
                 cell.as_mut().expect("checked cell").capture = Capture::None;
             }
@@ -4184,17 +4206,30 @@ fn append_cell(
         Some(MergePosition::Anchor(range)) => range.end_col - range.start_col + 1,
         _ => 1,
     };
+    let formula_attributes = if cell.formula
+        && cell.formula_editable
+        && !cell.formula_expression.is_empty()
+        && cell.formula_expression.len() <= 8191
+    {
+        format!(
+            " data-hcd-formula-editable=\"true\" data-hcd-formula-expression=\"{}\"",
+            escape_attribute(&format!("={}", cell.formula_expression))
+        )
+    } else {
+        String::new()
+    };
     row.cells.push(RenderedCell {
         column: cell_col,
         span: column_span,
         html: format!(
-            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
+            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}{}><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
             cell.style_index
                 .map(|index| format!(" hcd-xs-{index}"))
                 .unwrap_or_default(),
             escape_attribute(&cell.reference),
             cell_col,
             if cell.formula { " data-hcd-formula=\"true\"" } else { "" },
+            formula_attributes,
             cell.style_index
                 .map(|index| format!(" data-hcd-style-index=\"{index}\""))
                 .unwrap_or_default(),
@@ -4343,6 +4378,7 @@ pub(crate) fn export_xlsx(
         collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?
     };
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut formula_replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
     let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
@@ -4383,6 +4419,27 @@ pub(crate) fn export_xlsx(
         let cell = node.source.paragraph_id.ok_or_else(|| {
             HcdError::InvalidBundle(format!("XLSX node {} has no cell locator", node.node_id))
         })?;
+        if !node.source.editable {
+            let formula = node
+                .text
+                .strip_prefix('=')
+                .filter(|formula| !formula.is_empty())
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle(format!(
+                        "edited XLSX formula node {} has no formula expression",
+                        node.node_id
+                    ))
+                })?;
+            formula_replacements
+                .entry(node.source.part.clone())
+                .or_default()
+                .insert(
+                    node.source.source_cell_ref.unwrap_or(cell),
+                    formula.to_string(),
+                );
+            replacements.entry(node.source.part).or_default();
+            continue;
+        }
         if node.source.created_in_hcd {
             created_cells
                 .entry(node.source.part.clone())
@@ -4430,6 +4487,7 @@ pub(crate) fn export_xlsx(
             HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical row heights"))
         })?;
         let inserted = created_cells.get(part).cloned().unwrap_or_default();
+        let formulas = formula_replacements.get(part).cloned().unwrap_or_default();
         let shifts = row_insertions.get(part).cloned().unwrap_or_default();
         let column_shifts = column_shifts.get(part).cloned().unwrap_or_default();
         let last_column = canonical_last_columns.get(part).copied().unwrap_or(0);
@@ -4439,6 +4497,7 @@ pub(crate) fn export_xlsx(
                     input,
                     BufWriter::new(output),
                     values,
+                    &formulas,
                     &inserted,
                     merges,
                     rows,
@@ -4452,6 +4511,14 @@ pub(crate) fn export_xlsx(
             })
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
+    }
+    if !formula_replacements.is_empty() {
+        let path = scratch.path().join("workbook-recalculate.xml");
+        let source_workbook = archive
+            .read_control_part("xl/workbook.xml", MAX_CONTROL_BYTES)
+            .map_err(package_error)?;
+        rewrite_workbook_recalculation(&source_workbook, File::create(&path)?)?;
+        replacement_paths.insert("xl/workbook.xml".to_string(), path);
     }
     let changed =
         StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "xl/workbook.xml")
@@ -4493,7 +4560,18 @@ pub(crate) fn export_xlsx(
             items
         },
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
-        warnings: manifest.warnings,
+        warnings: {
+            let mut warnings = manifest.warnings;
+            if !formula_replacements.is_empty() {
+                warnings.push(FidelityWarning {
+                    code: "XLSX_FORMULA_RECALC_REQUIRED".to_string(),
+                    message: "Edited formula caches were cleared; recalculate the workbook in Excel or another compatible spreadsheet application".to_string(),
+                    node_id: None,
+                    source_part: Some("xl/workbook.xml".to_string()),
+                });
+            }
+            warnings
+        },
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
@@ -4801,6 +4879,7 @@ fn rewrite_worksheet(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<String, String>,
+    formulas: &BTreeMap<String, String>,
     created_cells: &BTreeMap<String, String>,
     merges: &BTreeSet<String>,
     canonical_rows: &BTreeSet<u32>,
@@ -4816,6 +4895,7 @@ fn rewrite_worksheet(
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut skip_depth = 0usize;
     let mut seen_original = BTreeSet::new();
+    let mut seen_formulas = BTreeSet::new();
     let mut seen_created = BTreeSet::new();
     let mut replacement_rows: BTreeMap<u32, BTreeMap<u32, (String, String)>> = BTreeMap::new();
     for (reference, text) in created_cells {
@@ -5157,6 +5237,10 @@ fn rewrite_worksheet(
                     write_inline_cell(&mut writer, &shifted, &text)?;
                     seen_created.insert(created_ref);
                     skip_depth = 1;
+                } else if let Some(formula) = formulas.get(&reference) {
+                    write_formula_cell(&mut writer, &shifted, formula)?;
+                    seen_formulas.insert(reference);
+                    skip_depth = 1;
                 } else if let Some(text) = replacements.get(&reference) {
                     write_inline_cell(&mut writer, &shifted, text)?;
                     seen_original.insert(reference);
@@ -5198,6 +5282,9 @@ fn rewrite_worksheet(
                     }
                     write_inline_cell(&mut writer, &shifted, &text)?;
                     seen_created.insert(created_ref);
+                } else if let Some(formula) = formulas.get(&reference) {
+                    write_formula_cell(&mut writer, &shifted, formula)?;
+                    seen_formulas.insert(reference);
                 } else if let Some(text) = replacements.get(&reference) {
                     write_inline_cell(&mut writer, &shifted, text)?;
                     seen_original.insert(reference);
@@ -5252,7 +5339,10 @@ fn rewrite_worksheet(
             "XLSX worksheet is missing sheetData".to_string(),
         ));
     }
-    if seen_original.len() != replacements.len() || seen_created.len() != created_cells.len() {
+    if seen_original.len() != replacements.len()
+        || seen_created.len() != created_cells.len()
+        || seen_formulas.len() != formulas.len()
+    {
         let missing: Vec<_> = replacements
             .keys()
             .filter(|cell| !seen_original.contains(*cell))
@@ -5260,6 +5350,11 @@ fn rewrite_worksheet(
                 created_cells
                     .keys()
                     .filter(|cell| !seen_created.contains(*cell)),
+            )
+            .chain(
+                formulas
+                    .keys()
+                    .filter(|cell| !seen_formulas.contains(*cell)),
             )
             .cloned()
             .collect();
@@ -5934,6 +6029,90 @@ fn write_inline_cell(
     Ok(())
 }
 
+fn write_formula_cell(
+    writer: &mut Writer<impl Write>,
+    original: &BytesStart<'_>,
+    formula: &str,
+) -> Result<(), HcdError> {
+    let name = String::from_utf8_lossy(original.name().as_ref()).to_string();
+    let mut start = BytesStart::new(name.as_str());
+    for attribute in original.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX cell attribute: {error}"))
+        })?;
+        if local_name(attribute.key.as_ref()) != "t" {
+            start.push_attribute(attribute);
+        }
+    }
+    writer.write_event(Event::Start(start))?;
+    let formula_name = qualified_child_name(original.name().as_ref(), "f");
+    writer.write_event(Event::Start(BytesStart::new(formula_name.as_str())))?;
+    writer.write_event(Event::Text(BytesText::new(formula)))?;
+    writer.write_event(Event::End(BytesEnd::new(formula_name.as_str())))?;
+    let value_name = qualified_child_name(original.name().as_ref(), "v");
+    writer.write_event(Event::Empty(BytesStart::new(value_name.as_str())))?;
+    writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+    Ok(())
+}
+
+fn rewrite_workbook_recalculation(source: &[u8], output: impl Write) -> Result<(), HcdError> {
+    let mut reader = Reader::from_reader(source);
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(output);
+    let mut buffer = Vec::new();
+    let mut saw_calc = false;
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX workbook XML: {error}"))
+        })?;
+        match event {
+            Event::Start(ref start) | Event::Empty(ref start)
+                if local_name(start.name().as_ref()) == "calcPr" =>
+            {
+                let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+                let mut updated = BytesStart::new(name);
+                for attribute in start.attributes().with_checks(false) {
+                    let attribute = attribute.map_err(|error| {
+                        HcdError::InvalidBundle(format!(
+                            "invalid workbook calcPr attribute: {error}"
+                        ))
+                    })?;
+                    if !matches!(
+                        local_name(attribute.key.as_ref()),
+                        "calcMode" | "fullCalcOnLoad" | "forceFullCalc"
+                    ) {
+                        updated.push_attribute(attribute);
+                    }
+                }
+                updated.push_attribute(("calcMode", "auto"));
+                updated.push_attribute(("fullCalcOnLoad", "1"));
+                updated.push_attribute(("forceFullCalc", "1"));
+                if matches!(event, Event::Start(_)) {
+                    writer.write_event(Event::Start(updated))?;
+                } else {
+                    writer.write_event(Event::Empty(updated))?;
+                }
+                saw_calc = true;
+            }
+            Event::End(ref end) if local_name(end.name().as_ref()) == "workbook" => {
+                if !saw_calc {
+                    let name = qualified_child_name(end.name().as_ref(), "calcPr");
+                    let mut calc = BytesStart::new(name);
+                    calc.push_attribute(("calcMode", "auto"));
+                    calc.push_attribute(("fullCalcOnLoad", "1"));
+                    calc.push_attribute(("forceFullCalc", "1"));
+                    writer.write_event(Event::Empty(calc))?;
+                }
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Eof => break,
+            _ => writer.write_event(event.into_owned())?,
+        }
+        buffer.clear();
+    }
+    Ok(())
+}
+
 fn resolve_part(source_part: &str, target: &str) -> Result<String, HcdError> {
     let base = Path::new(source_part)
         .parent()
@@ -6017,6 +6196,117 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn ordinary_formula_edit_preserves_native_formula_and_recalculates() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("formulas.xlsx");
+        let bundle_path = temp.path().join("formulas.hcd");
+        let exported = temp.path().join("edited.xlsx");
+        create_formula_edit_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("formula-edit-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        let descriptor = &page.chunks[0];
+        let html = bundle.read_chunk(descriptor).unwrap();
+        assert!(html.contains("data-hcd-formula-expression=\"=SUM(A1:B1)\""));
+        assert!(html.contains("data-hcd-formula-editable=\"true\""));
+        assert!(!html.contains("data-hcd-cell=\"D1\" data-hcd-column=\"4\" data-hcd-formula=\"true\" data-hcd-formula-editable"));
+        let map = bundle.read_map(descriptor).unwrap();
+        let node = map
+            .entries
+            .iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("C1"))
+            .unwrap();
+        assert!(!node.source.editable);
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        let shared = map
+            .entries
+            .iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("D1"))
+            .unwrap();
+        let shared_patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_20.to_string(),
+            document_id: "formula-edit-doc".to_string(),
+            patch_id: "reject-shared".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaSet {
+                node_id: shared.node_id.clone(),
+                sheet_id: sheet_id.clone(),
+                formula: "=A1+2".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: shared.node_hash.clone(),
+                },
+            }],
+        };
+        assert!(hcd_core::apply_patch(&bundle, &shared_patch, 0).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_20.to_string(),
+            document_id: "formula-edit-doc".to_string(),
+            patch_id: "edit-c1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxFormulaSet {
+                node_id: node.node_id.clone(),
+                sheet_id: sheet_id.clone(),
+                formula: "=SUM(A1:B1)+1".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        let edited = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(edited.contains("data-hcd-formula-expression=\"=SUM(A1:B1)+1\""));
+        assert!(edited.contains("data-hcd-formula-edited=\"true\""));
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_FORMULA_RECALC_REQUIRED"));
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(worksheet.contains("<f>SUM(A1:B1)+1</f><v/>"));
+        assert!(worksheet.contains("<f t=\"shared\" si=\"0\">A1+1</f>"));
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(workbook.contains("fullCalcOnLoad=\"1\""));
+        assert!(workbook.contains("forceFullCalc=\"1\""));
+        let history = temp.path().join("history.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &history,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(read_zip_entry(&history, "xl/worksheets/sheet1.xml")
+            .contains("<f>SUM(A1:B1)</f><v>5</v>"));
+        let stale = PatchBatch {
+            patch_id: "stale-edit".to_string(),
+            base_revision: 1,
+            ..patch
+        };
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1).is_err());
+    }
 
     #[test]
     fn shared_string_store_supports_disk_backed_random_reads() {
@@ -8277,6 +8567,7 @@ mod tests {
             &mut source.as_slice(),
             &mut output,
             &replacements,
+            &BTreeMap::new(),
             &created,
             &BTreeSet::new(),
             &BTreeSet::from([1, 2]),
@@ -8563,6 +8854,26 @@ mod tests {
             output.start_file(&name, options).unwrap();
             if name == "xl/worksheets/sheet1.xml" {
                 output.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D4"/><sheetViews><sheetView workbookViewId="0" topLeftCell="A1"><selection activeCell="A1" sqref="A1:B2"/></sheetView></sheetViews><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Title</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Anchor</t></is></c></row><row r="3"><c r="D3" t="inlineStr"><is><t>Other</t></is></c></row><row r="4"><c r="D4" t="inlineStr"><is><t>Tail</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B3"/></mergeCells></worksheet>"#).unwrap();
+            } else {
+                std::io::copy(&mut entry, &mut output).unwrap();
+            }
+        }
+        output.finish().unwrap();
+    }
+
+    fn create_formula_edit_fixture(path: &Path) {
+        let plain = path.with_extension("plain.xlsx");
+        create_plain_rows_fixture(&plain, 1);
+        let mut source = zip::ZipArchive::new(File::open(&plain).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(path).unwrap());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..source.len() {
+            let mut entry = source.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            output.start_file(&name, options).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                output.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><v>3</v></c><c r="C1"><f>SUM(A1:B1)</f><v>5</v></c><c r="D1"><f t="shared" si="0">A1+1</f><v>3</v></c></row></sheetData></worksheet>"#).unwrap();
             } else {
                 std::io::copy(&mut entry, &mut output).unwrap();
             }

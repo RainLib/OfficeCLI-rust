@@ -20,13 +20,21 @@ export interface HcdXlsxCellSet {
   text: string;
 }
 
+export interface HcdXlsxFormulaSet {
+  type: 'xlsx.formula.set';
+  nodeId: string;
+  sheetId: string;
+  formula: string;
+  precondition: { nodeHash: string };
+}
+
 export interface HcdPatchBatch {
-  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7' | 'hcd-patch/19';
+  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7' | 'hcd-patch/19' | 'hcd-patch/20';
   documentId: string;
   patchId: string;
   baseRevision: number;
   actor: Record<string, string>;
-  operations: Array<HcdTextSplice | HcdXlsxCellSet>;
+  operations: Array<HcdTextSplice | HcdXlsxCellSet | HcdXlsxFormulaSet>;
   metadata: Record<string, string>;
 }
 
@@ -131,7 +139,7 @@ export class HcdUniverAdapter {
       const blank = !link && this.canEditBlankCell(event.worksheet.getSheetId(), event.row, event.column);
       const pending = [...this.pending.values()].some(({ links, blanks }) =>
         (link && links.includes(link)) || blanks.some(blank => cellKey(blank.sheetId, blank.row, blank.column) === key));
-      if ((!link?.editable && !blank) || pending) {
+      if ((!link?.editable && !link?.formulaEditable && !blank) || pending) {
         event.cancel = true;
       }
     });
@@ -201,7 +209,12 @@ export class HcdUniverAdapter {
       const nextHash = nodeHashes[link.nodeId];
       if (nextHash) link.nodeHash = nextHash;
       const sheet = this.workbook.getSheetBySheetId(link.sheetId);
-      link.text = String(sheet?.getRange(link.row, link.column).getValue() ?? '');
+      if (link.formulaEditable) {
+        link.formula = String(sheet?.getRange(link.row, link.column).getFormulas?.()[0]?.[0] ?? link.formula ?? '');
+        link.text = link.formula;
+      } else {
+        link.text = String(sheet?.getRange(link.row, link.column).getValue() ?? '');
+      }
     }
     this.client.manifest.revision = revision;
     this.pending.delete(patchId);
@@ -213,7 +226,9 @@ export class HcdUniverAdapter {
     if (!pending) return;
     this.withApplying(() => {
       pending.links.forEach((link, index) => {
-        this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column).setValue(pending.previous[index]);
+        const range = this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column);
+        if (link.formulaEditable && link.formula) range?.setFormula(link.formula);
+        else range?.setValue(pending.previous[index]);
       });
       for (const { sheetId, row, column } of pending.blanks) {
         this.workbook.getSheetBySheetId(sheetId)?.getRange(row, column).setValue('');
@@ -476,11 +491,12 @@ export class HcdUniverAdapter {
 
   private async captureChanges(ranges: Array<{ getSheetId(): string; getRow(): number; getColumn(): number; getHeight(): number; getWidth(): number; getValues(): unknown[][]; getFormulas?(): unknown[][] }>): Promise<void> {
     const operations: HcdTextSplice[] = [];
+    const formulaOperations: HcdXlsxFormulaSet[] = [];
     const changes: HcdPatchEventDetail['changes'] = [];
     const links: NodeLink[] = [];
     const previous: string[] = [];
     const seen = new Set<string>();
-    const rejected: Array<{ sheetId: string; row: number; column: number; value: string }> = [];
+    const rejected: Array<{ sheetId: string; row: number; column: number; value: string; formula?: string }> = [];
     const blankChanges: Array<{ sheetId: string; row: number; column: number; text: string }> = [];
     for (const range of ranges) {
       const values = range.getValues();
@@ -495,8 +511,19 @@ export class HcdUniverAdapter {
           const link = this.linksByCell.get(key);
           const next = String(values[rowOffset]?.[columnOffset] ?? '');
           const formula = String(formulas?.[rowOffset]?.[columnOffset] ?? '');
-          if (formula || next.startsWith('=')) {
-            rejected.push({ sheetId: range.getSheetId(), row, column, value: link?.text ?? '' });
+          const enteredFormula = formula || (next.startsWith('=') ? next : '');
+          if (link?.formulaEditable && this.mode === 'editable' && enteredFormula) {
+            if ([...this.pending.values()].some(({ links }) => links.includes(link))) continue;
+            if (enteredFormula === link.formula) continue;
+            formulaOperations.push({ type: 'xlsx.formula.set', nodeId: link.nodeId,
+              sheetId: link.sheetId, formula: enteredFormula, precondition: { nodeHash: link.nodeHash } });
+            changes.push({ sheetId: link.sheetId, row, column, oldText: link.formula ?? link.text, newText: enteredFormula });
+            links.push(link);
+            previous.push(link.formula ?? link.text);
+            continue;
+          }
+          if (enteredFormula) {
+            rejected.push({ sheetId: range.getSheetId(), row, column, value: link?.text ?? '', formula: link?.formula });
             continue;
           }
           if (!link?.editable || this.mode === 'readonly') {
@@ -513,6 +540,7 @@ export class HcdUniverAdapter {
               row,
               column,
               value: link?.text ?? '',
+              formula: link?.formula,
             });
             continue;
           }
@@ -529,33 +557,38 @@ export class HcdUniverAdapter {
         }
       }
     }
-    if (rejected.length || operations.length + blankChanges.length > 10_000) {
+    if (rejected.length || operations.length + blankChanges.length > 10_000
+      || (formulaOperations.length && operations.length + blankChanges.length + formulaOperations.length !== 1)) {
       rejected.push(...blankChanges.map(({ sheetId, row, column }) => ({ sheetId, row, column, value: '' })));
-      rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column, value: oldText })));
+      rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column, value: oldText,
+        formula: this.linksByCell.get(cellKey(sheetId, row, column))?.formula })));
       operations.length = 0;
+      formulaOperations.length = 0;
       blankChanges.length = 0;
-      this.onStatus('粘贴包含不可编辑单元格、公式或超过 10000 个改动，已恢复原值');
+      this.onStatus('粘贴包含不可编辑单元格、多个公式或超过 10000 个改动，已恢复原值');
     }
     if (rejected.length) {
       this.withApplying(() => rejected.forEach((cell) => {
-        this.workbook.getSheetBySheetId(cell.sheetId)?.getRange(cell.row, cell.column).setValue(cell.value);
+        const range = this.workbook.getSheetBySheetId(cell.sheetId)?.getRange(cell.row, cell.column);
+        if (cell.formula) range?.setFormula(cell.formula);
+        else range?.setValue(cell.value);
       }));
     }
-    if (!operations.length && !blankChanges.length) return;
+    if (!operations.length && !blankChanges.length && !formulaOperations.length) return;
     const patchId = crypto.randomUUID();
     const blankOperations: HcdXlsxCellSet[] = blankChanges.map(blank => ({
       type: 'xlsx.cell.set', sheetId: blank.sheetId,
       row: blank.row + 1, column: blank.column + 1, text: blank.text,
     }));
     const patch: HcdPatchBatch = {
-      schemaVersion: blankChanges.length
+      schemaVersion: formulaOperations.length ? 'hcd-patch/20' : blankChanges.length
         ? operations.length + blankChanges.length === 1 ? 'hcd-patch/7' : 'hcd-patch/19'
         : 'hcd-patch/1',
       documentId: this.client.manifest.documentId,
       patchId,
       baseRevision: this.client.manifest.revision,
       actor: { client: 'officecli-hcd-univer-viewer' },
-      operations: [...operations, ...blankOperations],
+      operations: [...operations, ...blankOperations, ...formulaOperations],
       metadata: { rootHash: this.client.manifest.rootHash },
     };
     this.pending.set(patchId, { links, previous, blanks: blankChanges });
