@@ -97,6 +97,25 @@
 .hcd-surface .fixed-text-form>div{display:flex;gap:8px;margin-top:8px}
 .hcd-surface .fixed-text-form button{border:1px solid #c5d7c8;border-radius:6px;padding:6px 12px;background:#fff;color:#225437;cursor:pointer}
 .hcd-surface .fixed-text-form button:first-child{background:#176849;color:white}
+.hcd-surface .fixed-workspace .fixed-pages{width:min(1050px,calc(100% - 36px));max-width:none;margin:22px auto}
+.hcd-surface .semantic-workspace.fixed-workspace>header.editor-header{grid-template-columns:minmax(180px,1fr) auto max-content;gap:8px;padding:7px 12px}
+.hcd-surface .fixed-workspace .document-title strong{max-width:180px}
+.hcd-surface .fixed-workspace .header-tabs button{padding:0 8px}
+.hcd-surface .semantic-workspace.fixed-workspace .header-actions{gap:5px}
+.hcd-surface .fixed-workspace .export-control label{font-size:0}
+.hcd-surface .fixed-workspace .export-control select{font-size:12px;max-width:185px}
+.hcd-surface .fixed-workspace .fixed-page{position:relative;margin:0 auto 24px}
+.hcd-surface .fixed-workspace .fixed-page-hitboxes{position:absolute;top:0;left:0;bottom:0;z-index:2;pointer-events:none}
+.hcd-surface .fixed-workspace .fixed-page-hitboxes.centered{left:50%;transform:translateX(-50%)}
+.hcd-surface .fixed-workspace .fixed-page-hitbox{position:absolute;display:block;min-width:12px;min-height:14px;padding:0;background:transparent;border:1px dashed transparent;border-radius:2px;pointer-events:auto;cursor:text}
+.hcd-surface .fixed-workspace .fixed-page-hitbox:hover,.hcd-surface .fixed-workspace .fixed-page-hitbox.selected{border-color:#1769e8;background:#1769e81a}
+.hcd-surface .fixed-workspace .fixed-text-list button.selected{border-color:#1769e8;background:#eaf2ff;color:#164d9c}
+.hcd-surface .fixed-workspace .workspace-sidebar .fixed-text-form{max-width:none;padding:0;border:0;background:transparent}
+.hcd-surface .fixed-workspace .workspace-sidebar .fixed-text-form h2{margin:0}
+.hcd-surface .fixed-workspace .workspace-sidebar .fixed-text-form>small{display:block;overflow-wrap:anywhere;color:#6a7b96;margin:6px 0 12px}
+.hcd-surface .fixed-workspace .workspace-sidebar .fixed-tiptap-text{background:#fff;min-height:118px}
+.hcd-surface .fixed-workspace .workspace-sidebar .fixed-text-form>.primary{margin-top:14px;width:100%;background:#1769e8;color:#fff;border-color:#1769e8}
+.hcd-surface .fixed-workspace .workspace-sidebar .fixed-text-form .panel-close{background:transparent;color:#1c365f;border:0;padding:2px 8px}
 .hcd-surface .viewer-controls{display:flex;justify-content:space-between;gap:12px;padding:10px 28px;background:#e9efe9;color:#54705d;font-size:12px}
 .hcd-surface .load-tail{height:2px}
 .hcd-surface .skeleton{min-height:900px;display:grid;place-items:center;color:#a6b3aa}
@@ -196,6 +215,7 @@
 .hcd-surface.hcd-embedded .semantic-workspace.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr) 245px}
 @media(max-width:1180px){.hcd-surface .semantic-workspace>header.editor-header{grid-template-columns:minmax(190px,1fr) auto minmax(285px,1fr);gap:8px;padding:7px 12px}.hcd-surface .semantic-workspace .document-title strong{max-width:150px}.hcd-surface .header-tabs{gap:0}.hcd-surface .header-tabs button{padding:0 10px}.hcd-surface .semantic-workspace .export-control label{font-size:0}.hcd-surface .semantic-workspace .export-control select{font-size:12px}.hcd-surface .semantic-workspace .editor-layout{grid-template-columns:180px minmax(0,1fr) 240px}.hcd-surface .semantic-workspace.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr) 240px}}
 @media(max-width:760px){.hcd-surface .semantic-workspace>header.editor-header{display:flex;flex-wrap:wrap;padding:8px 12px}.hcd-surface .header-tabs{order:3;width:100%;overflow:auto;justify-content:flex-start}.hcd-surface .semantic-workspace .header-actions{margin-left:auto}.hcd-surface .semantic-workspace .presence,.hcd-surface .semantic-workspace .export-control label{display:none}.hcd-surface .semantic-workspace .editor-layout,.hcd-surface .semantic-workspace.outline-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.outline-hidden .editor-layout{display:block}.hcd-surface .semantic-workspace .outline-panel{height:auto;border-bottom:1px solid #dce4ee}.hcd-surface .semantic-workspace .workspace-sidebar{border-top:1px solid #dce4ee;height:auto}.hcd-surface .semantic-workspace .document{width:calc(100% - 24px);margin:12px auto;padding:26px}.hcd-surface .semantic-workspace .ribbon{overflow-x:auto;flex-wrap:nowrap}.hcd-surface .semantic-workspace .ribbon .tool-group{flex:none}}
+@media(max-width:1100px){.hcd-surface .semantic-workspace.fixed-workspace>header.editor-header{display:flex;flex-wrap:wrap}.hcd-surface .semantic-workspace.fixed-workspace .header-tabs{order:3;width:100%;height:34px;overflow-x:auto}.hcd-surface .semantic-workspace.fixed-workspace .header-actions{margin-left:auto;max-width:100%;overflow-x:auto}}
 
 /* Keep chrome in place; only the middle document and each docked panel scroll. */
 .hcd-surface .semantic-workspace{height:100dvh;min-height:0;display:flex;flex-direction:column;overflow:hidden}

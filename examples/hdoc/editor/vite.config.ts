@@ -12,6 +12,7 @@ const samples = [
   { id: 'accept-txt', title: 'TXT 纯文本', format: 'TXT', mode: '可编辑' },
   { id: 'accept-download-txt', title: '下载测试文本', format: 'TXT', mode: '附件下载验收' },
   { id: 'accept-physics-pdf-v2', title: '初三物理练习卷（1 页）', format: 'PDF', mode: '可编辑识别文字' },
+  { id: 'demo-pdf-raster-quality', title: 'PDF 版式验证样例', format: 'PDF', mode: '可编辑识别文字' },
   { id: 'accept-case-pdf-v2', title: '审查起诉卷（25 页）', format: 'PDF', mode: '可编辑识别文字' },
   { id: 'accept-evidence-pdf-v2', title: '证据目录及证据（235 页）', format: 'PDF', mode: '可编辑识别文字' },
 ] as const

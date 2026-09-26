@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Extension, Node } from '@tiptap/core'
+import { Extension, Node, type Editor } from '@tiptap/core'
 import { EditorContent, useEditor } from '@tiptap/react'
 import { history, redo, undo } from '@tiptap/pm/history'
 import { keymap } from '@tiptap/pm/keymap'
@@ -25,10 +25,11 @@ const fixedTextExtensions = [
   }),
 ]
 
-export function FixedTextBoxEditor({ text, disabled, onChange }: {
+export function FixedTextBoxEditor({ text, disabled, onChange, onReady }: {
   text: string
   disabled: boolean
   onChange: (value: string) => void
+  onReady?: (editor: Editor | null) => void
 }) {
   const editor = useEditor({
     extensions: fixedTextExtensions,
@@ -42,5 +43,9 @@ export function FixedTextBoxEditor({ text, disabled, onChange }: {
     onUpdate: ({ editor: changed }) => onChange(changed.state.doc.textContent),
   })
   useEffect(() => { editor?.setEditable(!disabled) }, [editor, disabled])
+  useEffect(() => {
+    onReady?.(editor)
+    return () => onReady?.(null)
+  }, [editor, onReady])
   return <EditorContent editor={editor} />
 }
