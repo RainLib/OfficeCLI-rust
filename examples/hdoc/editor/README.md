@@ -68,7 +68,24 @@ The XLSX canvas keeps its Univer cell editor and now uses the same fixed documen
 
 For XLSX, select a rectangular range and choose **开始 → 合并单元格**. `hcd-patch/6` saves the merge in one immutable revision, updates the visible Univer grid, and writes `mergeCells` during source-backed XLSX export. The upper-left cell must be mapped and editable; every covered cell must be empty, and the range must fit one HCD cell window. The service rejects overlap and content loss. Use the original immutable XLSX for download; source-free XLSX export now rejects merged cells explicitly instead of silently discarding them. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-merge-cells.png`.
 
-An empty cell in a loaded row can now receive its first value directly in Univer, including up to 256 columns after that row's last materialized cell. `hcd-patch/7` creates a stable HCD node for that address; later edits use the normal text patch, and source-backed XLSX export inserts the new `<c>` element or fills an existing empty styled cell. A completely new row and paste into multiple new cells remain separate structural work. To reproduce with `assets/showcase/budget-tracker.xlsx`, open the Settings sheet, type `HCD blank cell edit` into B3, press Enter, validate the bundle, then download XLSX. `xl/worksheets/sheet3.xml` must contain B3 as an inline string. Entering `Browser tail edit` in F3 checks the row-tail case. Browser screenshots are `docs/screenshots/hcd-xlsx-blank-cell-edit.png` and `docs/screenshots/hcd-xlsx-tail-cell-edit.png`.
+An empty cell in a loaded row can now receive its first value directly in Univer, including up to 256 columns after that row's last materialized cell. `hcd-patch/7` creates a stable HCD node for that address; later edits use the normal text patch, and source-backed XLSX export inserts the new `<c>` element or fills an existing empty styled cell. Paste into multiple new cells remains separate work. To reproduce with `assets/showcase/budget-tracker.xlsx`, open the Settings sheet, type `HCD blank cell edit` into B3, press Enter, validate the bundle, then download XLSX. `xl/worksheets/sheet3.xml` must contain B3 as an inline string. Entering `Browser tail edit` in F3 checks the row-tail case. Browser screenshots are `docs/screenshots/hcd-xlsx-blank-cell-edit.png` and `docs/screenshots/hcd-xlsx-tail-cell-edit.png`.
+
+The **插入 → 在末尾新增行** action uses `hcd-patch/8` to append one empty row after the last materialized row of a nonempty worksheet. It commits an HCD revision, enables direct editing of the new row, and source-backed XLSX export adds a corresponding OOXML `<row>` with any subsequently edited cells. The action preserves existing cell addresses; insertion or deletion in the middle of a sheet requires formula, merge, chart, validation, and drawing reference updates and remains separate work.
+
+For a real-file check, import `assets/showcase/budget-tracker.xlsx` as `accept-xlsx`, open the Settings sheet, choose **插入 → 在末尾新增行**, and type `Browser appended row` into A15. The first action creates r1 and the cell edit creates r2. The reference screenshots are `docs/screenshots/hcd-xlsx-row-append.png` and `docs/screenshots/hcd-xlsx-row-append-edited.png`. Verify the downloaded workbook with:
+
+```bash
+mkdir -p /tmp/hcd-xlsx-append/sources
+target/debug/officecli hdoc import assets/showcase/budget-tracker.xlsx \
+  --output /tmp/hcd-xlsx-append/accept-xlsx.hcd --document-id accept-xlsx
+cp assets/showcase/budget-tracker.xlsx /tmp/hcd-xlsx-append/sources/accept-xlsx.xlsx
+# Start the core API and Vite gallery with HCD_DEMO_ROOT=/tmp/hcd-xlsx-append as shown above.
+# Use the Settings sheet, append row 15, and edit A15 before validating and exporting.
+target/debug/officecli hdoc validate /tmp/hcd-xlsx-append/accept-xlsx.hcd
+target/debug/officecli hdoc export /tmp/hcd-xlsx-append/accept-xlsx.hcd \
+  --source assets/showcase/budget-tracker.xlsx --output /tmp/hcd-xlsx-append/exported.xlsx
+unzip -p /tmp/hcd-xlsx-append/exported.xlsx xl/worksheets/sheet3.xml | rg 'A15|Browser appended row'
+```
 
 Reproduce the merge and download check with the repository workbook:
 

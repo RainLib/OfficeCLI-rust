@@ -23,6 +23,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [mergeBusy, setMergeBusy] = useState(false)
+  const [rowBusy, setRowBusy] = useState(false)
   const host = useRef<HTMLDivElement>(null)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
   const syncing = useRef(false)
@@ -185,6 +186,45 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
+  async function appendRow() {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || rowBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const sheet = current.adapter.workbook.getActiveSheet()
+      const sheetId = sheet.getSheetId()
+      const afterRow = Math.max(0, ...current.client.descriptors
+        .filter(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)
+        .map(({ grid }) => grid?.rowEnd ?? 0))
+      if (afterRow < 1 || afterRow >= 1_048_576) {
+        throw new Error('当前工作表没有可追加的行')
+      }
+      setRowBusy(true)
+      setStatus('正在新增末尾行…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/8', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.row.append', sheetId, afterRow }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setError('')
+      try {
+        await current.adapter.refreshFromServer()
+        await current.adapter.focusCell(sheetId, afterRow, 0)
+        setStatus(`revision ${saved.revision} · 已新增第 ${afterRow + 1} 行`)
+      } catch (syncError) {
+        setError(`第 ${afterRow + 1} 行已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
+      }
+    } catch (cause) {
+      setError(`新增行失败：${String(cause)}`)
+    } finally {
+      setRowBusy(false)
+    }
+  }
+
   const headerStatus = error ? '保存失败' : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
@@ -192,7 +232,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并单元格</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
-      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">当前仅合并左上角有内容、其余单元格为空的区域；行列操作另行接入修订。</span></>}
+      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || mergeBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">新行不移动已有单元格；在中间插入和删除行列仍需调整引用。</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}

@@ -11,7 +11,8 @@ use crate::{
     NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
     TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2,
     HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
-    HCD_PATCH_SCHEMA_VERSION_7, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, MAX_CONTROL_PART_BYTES,
+    MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -77,6 +78,12 @@ struct XlsxCellInsertion {
     text: String,
 }
 
+#[derive(Clone)]
+struct XlsxRowAppend {
+    sheet_id: String,
+    after_row: u32,
+}
+
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
@@ -108,7 +115,9 @@ pub fn apply_patch(
         && patch.operations.iter().any(|operation| {
             matches!(
                 operation,
-                PatchOperation::PdfTextInsert { .. } | PatchOperation::XlsxCellSet { .. }
+                PatchOperation::PdfTextInsert { .. }
+                    | PatchOperation::XlsxCellSet { .. }
+                    | PatchOperation::XlsxRowAppend { .. }
             )
         })
     {
@@ -143,6 +152,11 @@ pub fn apply_patch(
     let pdf_insertions = collect_pdf_insertions(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch);
+    let xlsx_row_append = collect_xlsx_row_append(patch);
+    let xlsx_row_target = xlsx_row_append
+        .as_ref()
+        .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
+        .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -168,7 +182,8 @@ pub fn apply_patch(
         || !images.is_empty()
         || !pdf_insertions.is_empty()
         || !xlsx_merges.is_empty()
-        || xlsx_cell_set.is_some();
+        || xlsx_cell_set.is_some()
+        || xlsx_row_append.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -178,7 +193,9 @@ pub fn apply_patch(
     let mut dirty_nodes = BTreeSet::new();
     let mut dirty_chunks = BTreeSet::new();
     let mut dirty_parts = BTreeSet::new();
+    let mut dirty_grid_parts = BTreeSet::new();
     let mut inserted_xlsx_cell_node_id = None;
+    let mut appended_xlsx_row = false;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -212,6 +229,7 @@ pub fn apply_patch(
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
+            let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let cell_insertion = xlsx_cell_set.as_ref().filter(|insertion| {
                 descriptor.grid.as_ref().is_some_and(|grid| {
                     grid.kind == crate::GridChunkKind::Cells
@@ -228,7 +246,11 @@ pub fn apply_patch(
                 .iter()
                 .filter(|node_id| node_bloom_might_contain(&descriptor.node_bloom, node_id))
                 .collect();
-            if candidates.is_empty() && insertions.is_none() && cell_insertion.is_none() {
+            if candidates.is_empty()
+                && insertions.is_none()
+                && cell_insertion.is_none()
+                && !append_here
+            {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
             }
@@ -489,6 +511,28 @@ pub fn apply_patch(
                 inserted_xlsx_cell_node_id = Some(node_id);
                 chunk_changed = true;
             }
+            if append_here {
+                let append = xlsx_row_append
+                    .as_ref()
+                    .expect("target requires row append");
+                let part = source_map
+                    .entries
+                    .iter()
+                    .find(|entry| entry.source.node_kind == "cell")
+                    .map(|entry| entry.source.part.clone())
+                    .ok_or_else(|| {
+                        HcdError::Unsupported(
+                            "XLSX row append requires a mapped cell in the last window".to_string(),
+                        )
+                    })?;
+                append_xlsx_row(&mut html, append.after_row)?;
+                let grid = descriptor.grid.as_mut().expect("validated row target");
+                grid.row_end = Some(u64::from(append.after_row) + 1);
+                descriptor.block_count += 1;
+                dirty_grid_parts.insert(part);
+                appended_xlsx_row = true;
+                chunk_changed = true;
+            }
 
             if chunk_changed {
                 page_changed = true;
@@ -540,6 +584,11 @@ pub fn apply_patch(
                 insertion.row
             )));
         }
+    }
+    if xlsx_row_append.is_some() && !appended_xlsx_row {
+        return Err(HcdError::InvalidBundle(
+            "XLSX row append target disappeared".to_string(),
+        ));
     }
 
     validate_annotation_ranges(patch, &found_nodes)?;
@@ -622,6 +671,7 @@ pub fn apply_patch(
         dirty_node_ids: result.dirty_node_ids.clone(),
         dirty_chunk_ids: result.dirty_chunk_ids.clone(),
         dirty_source_parts: result.dirty_source_parts.clone(),
+        dirty_grid_parts: dirty_grid_parts.into_iter().collect(),
         structural_change: false,
     };
     bundle.write_revision(&record)?;
@@ -899,6 +949,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_6
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_7
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_8
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1016,7 +1067,9 @@ fn validate_patch_identity(
             } => {
                 if !matches!(
                     patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_6 | HCD_PATCH_SCHEMA_VERSION_7
+                    HCD_PATCH_SCHEMA_VERSION_6
+                        | HCD_PATCH_SCHEMA_VERSION_7
+                        | HCD_PATCH_SCHEMA_VERSION_8
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1057,8 +1110,10 @@ fn validate_patch_identity(
                 column,
                 text,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_7
-                    || manifest.source.format != "xlsx"
+                if !matches!(
+                    patch.schema_version.as_str(),
+                    HCD_PATCH_SCHEMA_VERSION_7 | HCD_PATCH_SCHEMA_VERSION_8
+                ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1084,6 +1139,31 @@ fn validate_patch_identity(
                 inserted = inserted.checked_add(text.len()).ok_or_else(|| {
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
+            }
+            PatchOperation::XlsxRowAppend {
+                sheet_id,
+                after_row,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_8
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.row.append requires one operation on an XLSX bundle with hcd-patch/8"
+                            .to_string(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !(1..1_048_576).contains(after_row)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX row append has an invalid sheet or last row".to_string(),
+                    ));
+                }
             }
             PatchOperation::NodeStyle {
                 node_id,
@@ -1392,6 +1472,95 @@ fn collect_xlsx_cell_set(patch: &PatchBatch) -> Option<XlsxCellInsertion> {
             text: text.clone(),
         })
     })
+}
+
+fn collect_xlsx_row_append(patch: &PatchBatch) -> Option<XlsxRowAppend> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxRowAppend {
+            sheet_id,
+            after_row,
+        } = operation
+        else {
+            return None;
+        };
+        Some(XlsxRowAppend {
+            sheet_id: sheet_id.clone(),
+            after_row: *after_row,
+        })
+    })
+}
+
+fn find_xlsx_row_tail(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    append: &XlsxRowAppend,
+) -> Result<String, HcdError> {
+    let mut tail = None;
+    let mut last_row = 0u64;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != crate::GridChunkKind::Cells || grid.sheet_id != append.sheet_id {
+                continue;
+            }
+            let Some(end) = grid.row_end else { continue };
+            if end > last_row {
+                last_row = end;
+                tail = Some(descriptor.chunk_id);
+            } else if end == last_row {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX last row appears in multiple cell windows".to_string(),
+                ));
+            }
+        }
+    }
+    if last_row != u64::from(append.after_row) {
+        return Err(HcdError::PreconditionFailed(format!(
+            "XLSX current last row is {last_row}, expected {}",
+            append.after_row
+        )));
+    }
+    tail.ok_or_else(|| {
+        HcdError::Unsupported("XLSX row append requires an existing nonempty worksheet".to_string())
+    })
+}
+
+fn append_xlsx_row(html: &mut String, after_row: u32) -> Result<(), HcdError> {
+    let old_end = format!(" data-hcd-row-end=\"{after_row}\"");
+    let section_end = html
+        .find('>')
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet section is not closed".to_string()))?;
+    let marker = html[..section_end].find(&old_end).ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX sheet row end disagrees with its descriptor".to_string())
+    })?;
+    let body_end = html
+        .find("</tbody>")
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet has no table body".to_string()))?;
+    let last_row_start = html[..body_end]
+        .rfind("<tr ")
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet has no last row".to_string()))?;
+    let last_tag_end = html[last_row_start..body_end]
+        .find('>')
+        .map(|offset| last_row_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX last row tag is unclosed".to_string()))?;
+    if !html[last_row_start..last_tag_end].contains(&format!(" data-hcd-row=\"{after_row}\""))
+        || !html[last_tag_end..body_end].ends_with("</tr>")
+    {
+        return Err(HcdError::InvalidBundle(
+            "XLSX last row does not match the append precondition".to_string(),
+        ));
+    }
+    html.insert_str(
+        body_end,
+        &format!("<tr data-hcd-row=\"{}\"></tr>", after_row + 1),
+    );
+    html.replace_range(
+        marker..marker + old_end.len(),
+        &format!(" data-hcd-row-end=\"{}\"", after_row + 1),
+    );
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -2368,6 +2537,7 @@ fn apply_annotations(
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxCellSet { .. }
+            | PatchOperation::XlsxRowAppend { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}

@@ -155,6 +155,15 @@ export class HcdUniverAdapter {
     return this.linksByCell.get(cellKey(sheetId, row, column));
   }
 
+  async focusCell(sheetId: string, row: number, column: number): Promise<void> {
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    if (!sheet) throw new Error('工作表不存在');
+    this.workbook.setActiveSheet(sheet);
+    sheet.scrollToCell(row, column);
+    sheet.setActiveRange(sheet.getRange(row, column));
+    await this.ensureVisible(sheet);
+  }
+
   async focusNode(nodeId: string): Promise<boolean> {
     const link = this.linksByNode.get(nodeId);
     if (!link) return false;
