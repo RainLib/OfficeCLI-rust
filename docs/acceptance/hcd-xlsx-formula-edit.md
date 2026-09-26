@@ -61,7 +61,7 @@ PY
 
 ## 浏览器
 
-把同一个工作簿导入服务根目录，文档 ID 设为 `accept-xlsx`。在参考编辑器打开 Laptops 工作表，双击 E4，把 `=D4*0.85` 改成 `=D4*0.8` 并按 Enter。页面显示 r1、已保存，E4 的计算值变为 1039.2；重新打开后仍能在原格编辑。浏览器生成的修订再次经源文件导出验证，E4 是 `=D4*0.8`，E5 仍为 `=D5*0.85`。
+把同一个工作簿导入服务根目录，文档 ID 设为 `accept-xlsx`，并把源文件放在服务根目录的 `sources/accept-xlsx.xlsx`。在参考编辑器打开 Laptops 工作表，双击 E4，把 `=D4*0.85` 改成 `=D4*0.8` 并按 Enter。页面显示 r1、已保存，E4 的计算值变为 1039.2；重新打开后仍能在原格编辑。点击“准备下载”再点击“下载文件”，浏览器取得 `accept-xlsx-r1.xlsx`。用 openpyxl 打开该文件，E4 为 `=D4*0.8`，E5 仍为 `=D5*0.85`，并设置了完整重算。
 
 编辑中截图：[单元格内公式](../screenshots/hcd-xlsx-formula-editing.png)。保存后截图：[r1 和更新后的计算结果](../screenshots/hcd-xlsx-formula-edited.png)。
 
