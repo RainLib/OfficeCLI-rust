@@ -250,6 +250,8 @@ where
                 node_id,
                 node_hash,
                 source: SourceAnchor {
+                    source_cell_ref: None,
+                    created_in_hcd: false,
                     part: self.part.to_string(),
                     text_ordinal,
                     paragraph_id: None,
@@ -1082,6 +1084,8 @@ where
         node_id,
         node_hash,
         source: SourceAnchor {
+            source_cell_ref: None,
+            created_in_hcd: false,
             part: chunks.part.to_string(),
             text_ordinal: ordinal,
             paragraph_id: None,
@@ -1983,6 +1987,8 @@ fn finish_picture(
             node_id,
             node_hash,
             source: SourceAnchor {
+                source_cell_ref: None,
+                created_in_hcd: false,
                 part: part.to_string(),
                 text_ordinal: picture.ordinal as u64,
                 paragraph_id: Some(source_path),

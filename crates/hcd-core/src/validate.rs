@@ -1186,6 +1186,7 @@ fn validate_map_entry(
     for (name, value) in [
         ("paragraphId", entry.source.paragraph_id.as_deref()),
         ("textId", entry.source.text_id.as_deref()),
+        ("sourceCellRef", entry.source.source_cell_ref.as_deref()),
     ] {
         if value.is_some_and(|value| value.len() > 256) {
             issues.push(issue(
@@ -1194,6 +1195,15 @@ fn validate_map_entry(
                 path,
             ));
         }
+    }
+    if (entry.source.source_cell_ref.is_some() || entry.source.created_in_hcd)
+        && (source.format != "xlsx" || entry.source.node_kind != "cell")
+    {
+        issues.push(issue(
+            "SOURCE_CELL_REF_INVALID",
+            format!("node {} has XLSX-only source metadata", entry.node_id),
+            path,
+        ));
     }
     if matches!(source.format.as_str(), "html" | "md" | "txt") {
         validate_textual_source_range(

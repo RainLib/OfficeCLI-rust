@@ -163,6 +163,12 @@ pub struct ChunkIndexPage {
 pub struct SourceAnchor {
     pub part: String,
     pub text_ordinal: u64,
+    /// Original OOXML cell address when a grid edit moves this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_cell_ref: Option<String>,
+    /// True for a cell materialized by an HCD patch rather than source OOXML.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub created_in_hcd: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -283,6 +289,9 @@ pub enum PatchOperation {
     /// Materialize the next empty worksheet row without shifting existing cells.
     #[serde(rename = "xlsx.row.append", rename_all = "camelCase")]
     XlsxRowAppend { sheet_id: String, after_row: u32 },
+    /// Insert a blank row before an existing row, shifting later rows down.
+    #[serde(rename = "xlsx.row.insert", rename_all = "camelCase")]
+    XlsxRowInsert { sheet_id: String, before_row: u32 },
     /// Remove an empty row appended after the source worksheet's final row.
     #[serde(rename = "xlsx.row.remove-last", rename_all = "camelCase")]
     XlsxRowRemoveLast { sheet_id: String, row: u32 },
@@ -338,6 +347,7 @@ impl PatchOperation {
             | Self::PdfTextInsert { .. }
             | Self::XlsxCellSet { .. }
             | Self::XlsxRowAppend { .. }
+            | Self::XlsxRowInsert { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. } => None,
         }
@@ -352,6 +362,7 @@ impl PatchOperation {
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxRowAppend { .. }
+                | Self::XlsxRowInsert { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
                 | Self::NodeStyle { .. }
@@ -489,8 +500,18 @@ pub struct RevisionRecord {
     /// XLSX worksheets changed structurally without changing a mapped text node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dirty_grid_parts: Vec<String>,
+    /// Sequential row insertions, expressed in the worksheet coordinates at each revision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grid_row_insertions: Vec<GridRowInsertion>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridRowInsertion {
+    pub sheet_part: String,
+    pub before_row: u32,
 }
 
 fn is_false(value: &bool) -> bool {

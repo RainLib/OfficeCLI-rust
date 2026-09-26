@@ -273,6 +273,7 @@ fn revision_record(
         dirty_chunk_ids: Vec::new(),
         dirty_source_parts: Vec::new(),
         dirty_grid_parts: Vec::new(),
+        grid_row_insertions: Vec::new(),
         structural_change,
     })
 }
@@ -1121,6 +1122,8 @@ fn render_new_block(
             node_id,
             node_hash,
             source: SourceAnchor {
+                source_cell_ref: None,
+                created_in_hcd: false,
                 part: part.to_string(),
                 text_ordinal: manifest.revision * 1_000_000
                     + operation_index as u64 * 1000
@@ -1398,6 +1401,8 @@ mod tests {
                 node_id: format!("n_{index:032x}"),
                 node_hash: hash_bytes(value.as_bytes()),
                 source: SourceAnchor {
+                    source_cell_ref: None,
+                    created_in_hcd: false,
                     part: "markdown/document".to_string(),
                     text_ordinal: index as u64,
                     paragraph_id: None,
@@ -1467,6 +1472,8 @@ mod tests {
                 node_id,
                 node_hash,
                 source: SourceAnchor {
+                    source_cell_ref: None,
+                    created_in_hcd: false,
                     part: "text/document".to_string(),
                     text_ordinal: number + 1,
                     paragraph_id: None,

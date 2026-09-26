@@ -192,6 +192,8 @@ fn render_source_text_node(
             node_id,
             node_hash,
             source: SourceAnchor {
+                source_cell_ref: None,
+                created_in_hcd: false,
                 part: source_part.to_string(),
                 text_ordinal,
                 paragraph_id,
@@ -980,6 +982,8 @@ impl<'a> MarkdownHcdRenderer<'a> {
                 node_id,
                 node_hash,
                 source: SourceAnchor {
+                    source_cell_ref: None,
+                    created_in_hcd: false,
                     part: MARKDOWN_PART.to_string(),
                     text_ordinal: self.node_ordinal,
                     paragraph_id: Some(format!("line-{line}")),
@@ -2119,6 +2123,8 @@ fn render_markdown_text_node(
             node_id,
             node_hash,
             source: SourceAnchor {
+                source_cell_ref: None,
+                created_in_hcd: false,
                 part: MARKDOWN_PART.to_string(),
                 text_ordinal,
                 paragraph_id: Some(format!("line-{line_ordinal}")),

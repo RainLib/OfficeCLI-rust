@@ -180,6 +180,8 @@ where
             node_id,
             node_hash,
             source: SourceAnchor {
+                source_cell_ref: None,
+                created_in_hcd: false,
                 part,
                 text_ordinal: index as u64,
                 paragraph_id: Some(source_path),
@@ -226,6 +228,8 @@ where
             node_id,
             node_hash,
             source: SourceAnchor {
+                source_cell_ref: None,
+                created_in_hcd: false,
                 part,
                 text_ordinal: index as u64,
                 paragraph_id: Some(source_path),

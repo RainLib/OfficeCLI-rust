@@ -342,6 +342,13 @@
           "type": "string",
           "maxLength": 256
         },
+        "sourceCellRef": {
+          "type": "string",
+          "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}$"
+        },
+        "createdInHcd": {
+          "type": "boolean"
+        },
         "textId": {
           "type": "string",
           "maxLength": 256
