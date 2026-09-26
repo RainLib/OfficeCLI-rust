@@ -1288,12 +1288,21 @@ fn semantic_export(
         let report = FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             level: FidelityLevel::Visual,
-            preserved: vec![format!("{pages} HCD page rasters and physical page dimensions")],
-            flattened: vec!["PDF page text and vector structure are represented by page images".to_string()],
-            dropped: vec!["selectable PDF text layer and original PDF object metadata".to_string()],
+            preserved: if revision == 0 {
+                vec![format!("{pages} HCD page rasters and physical page dimensions")]
+            } else {
+                vec![format!("{pages} HCD page rasters and physical page dimensions"),
+                    "edited text boxes are redrawn over their original page images".to_string()]
+            },
+            flattened: vec!["original PDF page text and vector structure are represented by page images".to_string()],
+            dropped: vec!["original selectable PDF text layer and object metadata".to_string()],
             warnings: vec![FidelityWarning {
-                code: "HCD_PDF_RASTER_ONLY_EXPORT".to_string(),
-                message: "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for selectable text and exact PDF structure".to_string(),
+                code: if revision == 0 { "HCD_PDF_RASTER_ONLY_EXPORT" } else { "HCD_PDF_EDITED_VISUAL_EXPORT" }.to_string(),
+                message: if revision == 0 {
+                    "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for selectable text and exact PDF structure"
+                } else {
+                    "edited text is drawn over bounded white masks on the original page rasters; placement and font metrics are approximate, so inspect the exported PDF preview before delivery"
+                }.to_string(),
                 node_id: None, source_part: None,
             }],
         };

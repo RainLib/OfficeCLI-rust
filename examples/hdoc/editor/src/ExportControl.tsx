@@ -21,9 +21,6 @@ export function ExportControl({ session, revision, beforeExport }: {
     try {
       const savedRevision = beforeExport ? await beforeExport() : revision
       if (savedRevision === null) throw new Error('文档修订尚未加载')
-      if (session.format === 'pdf' && format === 'pdf' && pdfMode === 'visual' && savedRevision !== 0) {
-        throw new Error('修改后的 PDF 无法用原始页面图像完整导出；请选择“保留源 PDF”并检查保真报告')
-      }
       const source = format === session.format && (
         ['pptx', 'xlsx'].includes(session.format) || (session.format === 'pdf' && pdfMode === 'source'))
       const response = await api(session,
@@ -44,12 +41,12 @@ export function ExportControl({ session, revision, beforeExport }: {
     </select></label>
     {session.format === 'pdf' && format === 'pdf' && <label>PDF 内容
       <select aria-label="PDF 内容" value={pdfMode} onChange={event => { setPdfMode(event.target.value as 'visual' | 'source'); setReady(null) }}>
-        <option value="visual">与原始预览一致（页面图像）</option>
-        <option value="source">保留源 PDF（可选文本）</option>
+        <option value="visual">当前修订的页面视觉</option>
+        <option value="source">保留源 PDF（修订位置近似）</option>
       </select>
     </label>}
     <button onClick={() => void prepare()} disabled={busy}>{busy ? '准备中…' : ready ? '重新准备' : '准备下载'}</button>
-    {ready?.previewUrl && <a className="export-preview" href={ready.previewUrl} target="_blank" rel="noopener noreferrer">预览导出 PDF</a>}
+    {ready?.previewUrl && <a className="export-preview" href={ready.previewUrl}>预览导出 PDF</a>}
     {ready && <a className="download-ready" href={ready.url} download={ready.filename} rel="noreferrer" aria-label={`下载 ${ready.filename}`}>下载文件</a>}
     {error && <span className="export-error" title={error}>{error}</span>}
   </div>
