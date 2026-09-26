@@ -196,6 +196,18 @@ export class HcdUniverAdapter {
     this.onStatus(reason);
   }
 
+  hasPendingPatch(): boolean { return this.pending.size > 0; }
+
+  /** Reload the visible HCD windows after another editor commits a revision. */
+  async refreshFromServer(): Promise<boolean> {
+    if (this.hasPendingPatch()) return false;
+    await this.client.open();
+    this.evictOutsideWindow('', new Set());
+    await this.ensureVisible(this.workbook.getActiveSheet());
+    this.onStatus(`revision ${this.client.manifest.revision} · 已同步其他协作者的修改`);
+    return true;
+  }
+
   private scheduleVisible(sheet: FWorksheet): void {
     window.requestAnimationFrame(() => void this.ensureVisible(sheet));
   }
