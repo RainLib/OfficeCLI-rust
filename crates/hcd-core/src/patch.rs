@@ -409,6 +409,8 @@ pub fn apply_patch(
         patch_id: Some(patch.patch_id.clone()),
         patch_hash: Some(patch_hash),
         patch_base_revision: Some(patch.base_revision),
+        author_id: None,
+        author_name: None,
         root_hash,
         annotation_root_hash,
         index_prefix: manifest.index_prefix.clone(),

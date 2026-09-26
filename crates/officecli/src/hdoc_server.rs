@@ -463,6 +463,36 @@ fn authorize(
     Ok(())
 }
 
+fn write_claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
+    let actor = claims(state, headers, id)?;
+    if actor.scope != "write" {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "read-only token cannot write".to_string(),
+        ));
+    }
+    Ok(actor)
+}
+
+fn stamp_revision_author(bundle: &Bundle, revision: u64, actor: &Claims) -> Result<(), ApiError> {
+    let identity = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(128).collect::<String>())
+    };
+    let author_id = identity(&actor.sub);
+    let author_name = identity(&actor.name);
+    if author_id.is_none() && author_name.is_none() {
+        return Ok(());
+    }
+    let mut record = bundle.revision(revision).map_err(internal)?;
+    record.author_id = author_id;
+    record.author_name = author_name;
+    bundle.write_revision(&record).map_err(internal)
+}
+
 async fn auth_check(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -669,9 +699,10 @@ async fn project(
     headers: HeaderMap,
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&state, &headers, &id, true)?;
+    let actor = write_claims(&state, &headers, &id)?;
     let bundle = open(&state, &id)?;
     let result = project_editor(&bundle, request.expected_revision).map_err(hcd_error)?;
+    stamp_revision_author(&bundle, result.revision, &actor)?;
     publish_mutation(&state, &id, &bundle, request.expected_revision).await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
@@ -682,13 +713,14 @@ async fn patch(
     headers: HeaderMap,
     Json(patch): Json<StructurePatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&state, &headers, &id, true)?;
+    let actor = write_claims(&state, &headers, &id)?;
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
     let bundle = open(&state, &id)?;
     let result = apply_structure_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
     if !result.idempotent_replay {
+        stamp_revision_author(&bundle, result.revision, &actor)?;
         publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
         reset_collaboration(&state, &id).await?;
     }
@@ -737,7 +769,7 @@ async fn checkpoint(
     headers: HeaderMap,
     Json(request): Json<SnapshotRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&state, &headers, &id, true)?;
+    let actor = write_claims(&state, &headers, &id)?;
     check_collaboration_epoch(&state, &id, &headers).await?;
     if request.blocks.len() > 1_000_000 {
         return Err(bad("snapshot block limit exceeded"));
@@ -880,6 +912,7 @@ async fn checkpoint(
         operations,
     };
     let result = apply_structure_patch(&bundle, &patch, current.revision).map_err(hcd_error)?;
+    stamp_revision_author(&bundle, result.revision, &actor)?;
     publish_mutation(&state, &patch.document_id, &bundle, current.revision).await?;
     let projection = editor_projection(&bundle, None).map_err(internal)?;
     Ok(Json(
@@ -939,9 +972,10 @@ async fn restore(
     headers: HeaderMap,
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&state, &headers, &id, true)?;
+    let actor = write_claims(&state, &headers, &id)?;
     let bundle = open(&state, &id)?;
     let result = restore_revision(&bundle, number, request.expected_revision).map_err(hcd_error)?;
+    stamp_revision_author(&bundle, result.revision, &actor)?;
     publish_mutation(&state, &id, &bundle, request.expected_revision).await?;
     reset_collaboration(&state, &id).await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))

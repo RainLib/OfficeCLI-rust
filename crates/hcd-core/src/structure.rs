@@ -259,6 +259,8 @@ fn revision_record(
         patch_id: Some(patch_id.to_string()),
         patch_hash,
         patch_base_revision: Some(revision - 1),
+        author_id: None,
+        author_name: None,
         root_hash: manifest.root_hash.clone(),
         annotation_root_hash: manifest.annotation_root_hash.clone(),
         index_prefix: manifest.index_prefix.clone(),

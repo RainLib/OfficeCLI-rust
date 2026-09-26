@@ -41,6 +41,8 @@ pub fn restore_revision(
         patch_id: Some(patch_id.clone()),
         patch_hash: Some(patch_hash),
         patch_base_revision: Some(expected_head),
+        author_id: None,
+        author_name: None,
         root_hash: target_record.root_hash.clone(),
         annotation_root_hash: target_record.annotation_root_hash.clone(),
         index_prefix: target_record.index_prefix.clone(),
