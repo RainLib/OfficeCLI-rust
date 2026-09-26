@@ -1277,29 +1277,6 @@ fn semantic_export(
     }
     let (manifest, revision) =
         manifest_at_revision(bundle, head, requested_revision).map_err(handler_error)?;
-    if target == "xlsx" && manifest.source.format == "xlsx" {
-        for page_number in 0..manifest.index_page_count {
-            let page = bundle
-                .read_index_page(&manifest, page_number)
-                .map_err(handler_error)?;
-            for descriptor in page.chunks {
-                if descriptor
-                    .grid
-                    .as_ref()
-                    .is_some_and(|grid| grid.kind == hcd_core::GridChunkKind::Cells)
-                    && bundle
-                        .read_chunk(&descriptor)
-                        .map_err(handler_error)?
-                        .contains(" data-hcd-merge=\"")
-                {
-                    return Err(HandlerError::UnsupportedMode(
-                        "source-free XLSX export cannot preserve merged cells; supply the immutable source with --source"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-    }
     let output_path = Path::new(output);
     let parent = output_path
         .parent()
