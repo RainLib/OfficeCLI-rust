@@ -272,6 +272,9 @@ pub enum PatchOperation {
     /// Materialize the next empty worksheet row without shifting existing cells.
     #[serde(rename = "xlsx.row.append", rename_all = "camelCase")]
     XlsxRowAppend { sheet_id: String, after_row: u32 },
+    /// Remove an empty row appended after the source worksheet's final row.
+    #[serde(rename = "xlsx.row.remove-last", rename_all = "camelCase")]
+    XlsxRowRemoveLast { sheet_id: String, row: u32 },
     /// Set a worksheet column's visible width without moving cells.
     #[serde(rename = "xlsx.column.width", rename_all = "camelCase")]
     XlsxColumnWidth {
@@ -323,6 +326,7 @@ impl PatchOperation {
             | Self::PdfTextInsert { .. }
             | Self::XlsxCellSet { .. }
             | Self::XlsxRowAppend { .. }
+            | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. } => None,
         }
     }
@@ -335,6 +339,7 @@ impl PatchOperation {
                 | Self::XlsxMerge { .. }
                 | Self::XlsxCellSet { .. }
                 | Self::XlsxRowAppend { .. }
+                | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
