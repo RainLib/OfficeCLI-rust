@@ -4930,6 +4930,26 @@ fn rewrite_worksheet(
                         .any(|shift| matches!(shift, ColumnShift::Delete(_))),
                 )?))?;
             }
+            Event::Start(ref start)
+                if (!row_insertions.is_empty() || !column_shifts.is_empty())
+                    && matches!(local_name(start.name().as_ref()), "sheetView" | "selection") =>
+            {
+                writer.write_event(Event::Start(rewrite_xlsx_view_attributes(
+                    start,
+                    row_insertions,
+                    column_shifts,
+                )?))?;
+            }
+            Event::Empty(ref empty)
+                if (!row_insertions.is_empty() || !column_shifts.is_empty())
+                    && matches!(local_name(empty.name().as_ref()), "sheetView" | "selection") =>
+            {
+                writer.write_event(Event::Empty(rewrite_xlsx_view_attributes(
+                    empty,
+                    row_insertions,
+                    column_shifts,
+                )?))?;
+            }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "mergeCells" => {
                 if !merge_written {
                     write_merge_cells(&mut writer, start.name().as_ref(), merges)?;
@@ -5263,13 +5283,22 @@ fn verify_grid_shift_source(
                         Event::Start(ref element) | Event::Empty(ref element) => {
                             let name = element.name();
                             let tag = local_name(name.as_ref());
-                            if matches!(tag, "f" | "formula" | "conditionalFormatting"
-                                | "dataValidation" | "dataValidations" | "autoFilter"
-                                | "tableParts" | "hyperlinks" | "drawing" | "legacyDrawing"
-                                | "extLst") {
-                                return Err(PackageError::ReadPartError(
-                                    format!("grid shift cannot update worksheet element {tag}"),
-                                ));
+                            if matches!(
+                                tag,
+                                "f" | "formula"
+                                    | "conditionalFormatting"
+                                    | "dataValidation"
+                                    | "dataValidations"
+                                    | "autoFilter"
+                                    | "tableParts"
+                                    | "hyperlinks"
+                                    | "drawing"
+                                    | "legacyDrawing"
+                                    | "extLst"
+                            ) {
+                                return Err(PackageError::ReadPartError(format!(
+                                    "grid shift cannot update worksheet element {tag}"
+                                )));
                             }
                             if target
                                 && !matches!(
@@ -5302,31 +5331,31 @@ fn verify_grid_shift_source(
                                     "grid shift cannot update worksheet element {tag}"
                                 )));
                             }
-                            if column_shifts.contains_key(&sheet.part) && matches!(tag, "cols" | "col") {
-                                return Err(PackageError::ReadPartError("column shift cannot update explicit source column widths".to_string()));
+                            if column_shifts.contains_key(&sheet.part)
+                                && matches!(tag, "cols" | "col")
+                            {
+                                return Err(PackageError::ReadPartError(
+                                    "column shift cannot update explicit source column widths"
+                                        .to_string(),
+                                ));
                             }
                             if target && matches!(tag, "sheetView" | "selection") {
-                                let first_row = row_insertions.get(&sheet.part).and_then(|rows| rows.iter().map(|shift| match shift { RowShift::Insert(row) | RowShift::Delete(row) => *row }).min());
-                                let first_column = column_shifts.get(&sheet.part).and_then(|columns| columns.iter().map(|shift| match shift { ColumnShift::Insert(column) | ColumnShift::Delete(column) => *column }).min());
-                                for field in ["topLeftCell", "activeCell", "sqref"] {
-                                    if let Some(value) = attribute(element, field) {
-                                        for reference in value.split_whitespace() {
-                                            let (row, column) = cell_coordinates(reference).ok_or_else(|| {
-                                                PackageError::ReadPartError(format!("unsupported XLSX view reference {reference}"))
-                                            })?;
-                                            if first_row.is_some_and(|before| row >= before) || first_column.is_some_and(|before| column >= before) {
-                                                return Err(PackageError::ReadPartError(format!(
-                                                    "grid shift cannot retain {field}={reference}"
-                                                )));
-                                            }
-                                        }
-                                    }
-                                }
+                                rewrite_xlsx_view_attributes(
+                                    element,
+                                    row_insertions
+                                        .get(&sheet.part)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
+                                    column_shifts
+                                        .get(&sheet.part)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
+                                )
+                                .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
                             }
                             if target && tag == "c" && attribute(element, "r").is_none() {
                                 return Err(PackageError::ReadPartError(
-                                    "grid insertion requires explicit cell references"
-                                        .to_string(),
+                                    "grid insertion requires explicit cell references".to_string(),
                                 ));
                             }
                         }
@@ -5387,6 +5416,141 @@ fn shifted_xlsx_cell_reference(
         column_name(shifted_xlsx_column(column, column_shifts)?),
         shifted_xlsx_row(row, row_insertions)?
     ))
+}
+
+fn parse_xlsx_view_cell(reference: &str) -> Option<(u32, u32, bool, bool)> {
+    let (column_absolute, rest) = reference
+        .strip_prefix('$')
+        .map_or((false, reference), |rest| (true, rest));
+    let letters = rest
+        .as_bytes()
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphabetic())
+        .count();
+    if letters == 0 {
+        return None;
+    }
+    let (column, rest) = rest.split_at(letters);
+    let (row_absolute, row) = rest
+        .strip_prefix('$')
+        .map_or((false, rest), |row| (true, row));
+    if row.is_empty() || !row.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (row, column) = cell_coordinates(&format!("{column}{row}"))?;
+    Some((row, column, column_absolute, row_absolute))
+}
+
+fn shifted_xlsx_view_cell(
+    reference: &str,
+    row_shifts: &[RowShift],
+    column_shifts: &[ColumnShift],
+) -> Result<String, HcdError> {
+    let (mut row, mut column, column_absolute, row_absolute) = parse_xlsx_view_cell(reference)
+        .ok_or_else(|| {
+            HcdError::Unsupported(format!("unsupported XLSX view reference {reference}"))
+        })?;
+    for shift in row_shifts {
+        match *shift {
+            RowShift::Insert(before) if row >= before => {
+                row = row
+                    .checked_add(1)
+                    .filter(|row| *row <= 1_048_576)
+                    .ok_or_else(|| {
+                        HcdError::Unsupported(
+                            "XLSX view row exceeds the worksheet limit".to_string(),
+                        )
+                    })?;
+            }
+            RowShift::Delete(at) if row > at => row -= 1,
+            // The selected row was removed. Its successor now occupies the same address.
+            RowShift::Delete(_) => {}
+            _ => {}
+        }
+    }
+    for shift in column_shifts {
+        match *shift {
+            ColumnShift::Insert(before) if column >= before => {
+                column = column
+                    .checked_add(1)
+                    .filter(|column| *column <= 16_384)
+                    .ok_or_else(|| {
+                        HcdError::Unsupported(
+                            "XLSX view column exceeds the worksheet limit".to_string(),
+                        )
+                    })?;
+            }
+            ColumnShift::Delete(at) if column > at => column -= 1,
+            // The selected column was removed. Its successor now occupies the same address.
+            ColumnShift::Delete(_) => {}
+            _ => {}
+        }
+    }
+    Ok(format!(
+        "{}{}{}{}",
+        if column_absolute { "$" } else { "" },
+        column_name(column),
+        if row_absolute { "$" } else { "" },
+        row
+    ))
+}
+
+fn shifted_xlsx_view_reference(
+    value: &str,
+    field: &str,
+    row_shifts: &[RowShift],
+    column_shifts: &[ColumnShift],
+) -> Result<String, HcdError> {
+    let mut rewritten = Vec::new();
+    for token in value.split_whitespace() {
+        let next = if field == "sqref" {
+            if let Some((first, last)) = token.split_once(':') {
+                format!(
+                    "{}:{}",
+                    shifted_xlsx_view_cell(first, row_shifts, column_shifts)?,
+                    shifted_xlsx_view_cell(last, row_shifts, column_shifts)?
+                )
+            } else {
+                shifted_xlsx_view_cell(token, row_shifts, column_shifts)?
+            }
+        } else {
+            shifted_xlsx_view_cell(token, row_shifts, column_shifts)?
+        };
+        rewritten.push(next);
+    }
+    if rewritten.is_empty() || (field != "sqref" && rewritten.len() != 1) {
+        return Err(HcdError::Unsupported(format!(
+            "unsupported XLSX {field} view reference {value}"
+        )));
+    }
+    Ok(rewritten.join(" "))
+}
+
+fn rewrite_xlsx_view_attributes(
+    original: &BytesStart<'_>,
+    row_shifts: &[RowShift],
+    column_shifts: &[ColumnShift],
+) -> Result<BytesStart<'static>, HcdError> {
+    let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
+    let mut rewritten = BytesStart::new(name);
+    for attr in original.attributes().with_checks(false) {
+        let attr = attr.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX view attribute: {error}"))
+        })?;
+        let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+        let field = local_name(attr.key.as_ref());
+        if matches!(field, "topLeftCell" | "activeCell" | "sqref") {
+            let value = attr.unescape_value().map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid XLSX {field} attribute: {error}"))
+            })?;
+            let shifted = shifted_xlsx_view_reference(&value, field, row_shifts, column_shifts)?;
+            rewritten.push_attribute((key.as_str(), shifted.as_str()));
+        } else {
+            let value = String::from_utf8_lossy(attr.value.as_ref()).into_owned();
+            rewritten.push_attribute((key.as_str(), value.as_str()));
+        }
+    }
+    Ok(rewritten)
 }
 
 fn rewrite_xlsx_address_attribute(
@@ -6738,6 +6902,12 @@ mod tests {
             hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
             hcd_core::HCD_PATCH_SCHEMA_VERSION_15,
         ];
+        let views = [
+            ("A1", "A1:B3"),
+            ("A1", "A1:B2"),
+            ("B1", "B1:C2"),
+            ("A1", "A1:B2"),
+        ];
         for (index, (operation, expected_merge, expected_anchor)) in
             operations.into_iter().enumerate()
         {
@@ -6777,6 +6947,15 @@ mod tests {
             let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
             assert!(
                 xml.contains(&format!("mergeCell ref=\"{expected_merge}\"")),
+                "{xml}"
+            );
+            let (selected, range) = views[index];
+            assert!(
+                xml.contains(&format!("topLeftCell=\"{selected}\"")),
+                "{xml}"
+            );
+            assert!(
+                xml.contains(&format!("activeCell=\"{selected}\" sqref=\"{range}\"")),
                 "{xml}"
             );
         }
@@ -6840,6 +7019,29 @@ mod tests {
             ));
         }
         assert_eq!(bundle.manifest().unwrap().revision, 4);
+    }
+
+    #[test]
+    fn grid_view_refs_shift_absolute_and_rectangular_selections() {
+        let rows = [RowShift::Insert(2), RowShift::Delete(1)];
+        let columns = [ColumnShift::Insert(2)];
+        assert_eq!(
+            shifted_xlsx_view_reference("$B$2:$C$4 D5", "sqref", &rows, &columns).unwrap(),
+            "$C$2:$D$4 E5"
+        );
+        assert_eq!(
+            shifted_xlsx_view_reference("$A$1", "activeCell", &rows, &columns).unwrap(),
+            "$A$1"
+        );
+        assert!(shifted_xlsx_view_reference("A1:B2", "activeCell", &rows, &columns).is_err());
+        assert!(shifted_xlsx_view_reference("A:B", "sqref", &rows, &columns).is_err());
+        assert!(shifted_xlsx_view_reference(
+            "XFD1048576",
+            "activeCell",
+            &[RowShift::Insert(1)],
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -8011,7 +8213,7 @@ mod tests {
             let name = entry.name().to_string();
             output.start_file(&name, options).unwrap();
             if name == "xl/worksheets/sheet1.xml" {
-                output.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D4"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Title</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Anchor</t></is></c></row><row r="3"><c r="D3" t="inlineStr"><is><t>Other</t></is></c></row><row r="4"><c r="D4" t="inlineStr"><is><t>Tail</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B3"/></mergeCells></worksheet>"#).unwrap();
+                output.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D4"/><sheetViews><sheetView workbookViewId="0" topLeftCell="A1"><selection activeCell="A1" sqref="A1:B2"/></sheetView></sheetViews><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Title</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Anchor</t></is></c></row><row r="3"><c r="D3" t="inlineStr"><is><t>Other</t></is></c></row><row r="4"><c r="D4" t="inlineStr"><is><t>Tail</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B3"/></mergeCells></worksheet>"#).unwrap();
             } else {
                 std::io::copy(&mut entry, &mut output).unwrap();
             }
