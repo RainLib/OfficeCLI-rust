@@ -13,10 +13,10 @@ use crate::{
     TextExtractEntry, TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION,
     HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
     HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
-    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_2,
-    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
-    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
+    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
+    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
+    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -144,6 +144,13 @@ struct XlsxColumnWidth {
     width_chars: f64,
 }
 
+#[derive(Clone)]
+struct XlsxRowHeight {
+    sheet_id: String,
+    row: u32,
+    height_points: f64,
+}
+
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
@@ -182,6 +189,7 @@ pub fn apply_patch(
                     | PatchOperation::XlsxRowAppend { .. }
                     | PatchOperation::XlsxRowRemoveLast { .. }
                     | PatchOperation::XlsxColumnWidth { .. }
+                    | PatchOperation::XlsxRowHeight { .. }
                     | PatchOperation::XlsxRowInsert { .. }
                     | PatchOperation::XlsxRowDelete { .. }
                     | PatchOperation::XlsxColumnInsert { .. }
@@ -245,6 +253,7 @@ pub fn apply_patch(
     let xlsx_column_delete = collect_xlsx_column_delete(patch);
     let xlsx_row_removal = collect_xlsx_row_removal(patch);
     let xlsx_column_width = collect_xlsx_column_width(patch);
+    let xlsx_row_height = collect_xlsx_row_height(patch);
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
@@ -272,6 +281,10 @@ pub fn apply_patch(
     let xlsx_width_part = xlsx_column_width
         .as_ref()
         .map(|width| find_xlsx_sheet_part(bundle, &manifest, &width.sheet_id))
+        .transpose()?;
+    let xlsx_height_part = xlsx_row_height
+        .as_ref()
+        .map(|height| find_xlsx_sheet_part(bundle, &manifest, &height.sheet_id))
         .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
@@ -310,7 +323,8 @@ pub fn apply_patch(
         || xlsx_column_insert.is_some()
         || xlsx_column_delete.is_some()
         || xlsx_row_removal.is_some()
-        || xlsx_column_width.is_some();
+        || xlsx_column_width.is_some()
+        || xlsx_row_height.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -331,6 +345,7 @@ pub fn apply_patch(
     let mut removed_xlsx_column_node_ids = Vec::new();
     let mut removed_xlsx_row = false;
     let mut changed_xlsx_column = false;
+    let mut changed_xlsx_row_height = false;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -407,6 +422,16 @@ pub fn apply_patch(
                     grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == width.sheet_id
                 })
             });
+            let height_here = xlsx_row_height.as_ref().filter(|height| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells
+                        && grid.sheet_id == height.sheet_id
+                        && grid
+                            .row_start
+                            .is_some_and(|start| u64::from(height.row) >= start)
+                        && grid.row_end.is_some_and(|end| u64::from(height.row) <= end)
+                })
+            });
             let cell_insertion = xlsx_cell_set.as_ref().filter(|insertion| {
                 descriptor.grid.as_ref().is_some_and(|grid| {
                     grid.kind == crate::GridChunkKind::Cells
@@ -434,6 +459,7 @@ pub fn apply_patch(
                 && !column_delete_here
                 && !remove_here
                 && width_here.is_none()
+                && height_here.is_none()
             {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
@@ -952,6 +978,17 @@ pub fn apply_patch(
                 changed_xlsx_column = true;
                 chunk_changed = true;
             }
+            if let Some(height) = height_here {
+                set_xlsx_row_height(&mut html, height.row, height.height_points)?;
+                dirty_grid_parts.insert(
+                    xlsx_height_part
+                        .as_ref()
+                        .expect("resolved sheet part")
+                        .clone(),
+                );
+                changed_xlsx_row_height = true;
+                chunk_changed = true;
+            }
 
             if chunk_changed {
                 page_changed = true;
@@ -1045,6 +1082,11 @@ pub fn apply_patch(
     if xlsx_column_width.is_some() && !changed_xlsx_column {
         return Err(HcdError::InvalidBundle(
             "XLSX column width target disappeared".to_string(),
+        ));
+    }
+    if xlsx_row_height.is_some() && !changed_xlsx_row_height {
+        return Err(HcdError::InvalidBundle(
+            "XLSX row height target disappeared".to_string(),
         ));
     }
 
@@ -1470,6 +1512,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_16
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_17
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1974,6 +2017,34 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "invalid XLSX column width target or value".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::XlsxRowHeight {
+                sheet_id,
+                row,
+                height_points,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.row.height requires one operation on an XLSX bundle with hcd-patch/18".to_string(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !(1..=1_048_576).contains(row)
+                    || !height_points.is_finite()
+                    || !(1.0..=409.0).contains(height_points)
+                    || ((height_points * 100.0).round() - height_points * 100.0).abs() > 1e-7
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX row height target or value".to_string(),
                     ));
                 }
             }
@@ -2516,6 +2587,63 @@ fn collect_xlsx_column_width(patch: &PatchBatch) -> Option<XlsxColumnWidth> {
             width_chars: *width_chars,
         })
     })
+}
+
+fn collect_xlsx_row_height(patch: &PatchBatch) -> Option<XlsxRowHeight> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxRowHeight {
+            sheet_id,
+            row,
+            height_points,
+        } = operation
+        else {
+            return None;
+        };
+        Some(XlsxRowHeight {
+            sheet_id: sheet_id.clone(),
+            row: *row,
+            height_points: *height_points,
+        })
+    })
+}
+
+fn set_xlsx_row_height(html: &mut String, row: u32, height: f64) -> Result<(), HcdError> {
+    let marker = format!("<tr data-hcd-row=\"{row}\"");
+    let start = html.find(&marker).ok_or_else(|| {
+        HcdError::Unsupported("XLSX row height requires a materialized row".to_string())
+    })?;
+    let end = html[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
+    if xlsx_attribute(&html[start..=end], "data-hcd-hidden") == Some("true") {
+        return Err(HcdError::Unsupported(
+            "XLSX hidden row cannot be resized before it is shown".to_string(),
+        ));
+    }
+    update_start_tag_style(
+        html,
+        &marker,
+        &BTreeMap::from([("height".to_string(), format!("{height:.2}pt"))]),
+        false,
+    )?;
+    let end = html[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
+    set_attribute_in_range(
+        html,
+        start,
+        end,
+        "data-hcd-height-points",
+        &format!("{height:.2}"),
+    )?;
+    let end = html[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
+    set_attribute_in_range(html, start, end, "data-hcd-height-edited", "true")?;
+    Ok(())
 }
 
 fn find_xlsx_sheet_part(
@@ -4959,6 +5087,7 @@ fn apply_annotations(
             | PatchOperation::XlsxColumnDelete { .. }
             | PatchOperation::XlsxRowRemoveLast { .. }
             | PatchOperation::XlsxColumnWidth { .. }
+            | PatchOperation::XlsxRowHeight { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}

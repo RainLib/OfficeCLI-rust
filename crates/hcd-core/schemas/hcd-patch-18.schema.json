@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:18",
+  "title": "HTML Canonical Document patch batch with XLSX row height",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/18"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 262144
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/xlsxRowHeight"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "xlsxRowHeight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "sheetId",
+        "row",
+        "heightPoints"
+      ],
+      "properties": {
+        "op": {
+          "const": "xlsx.row.height"
+        },
+        "sheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "heightPoints": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 409
+        }
+      }
+    }
+  }
+}
