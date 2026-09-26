@@ -1,16 +1,17 @@
 use crate::bundle::{
     finalize_root_hash, hash_descriptor, now_epoch_ms, read_json_bounded, Bundle, INDEX_PAGE_SIZE,
 };
-use crate::hash::{hash_bytes, node_bloom_might_contain};
+use crate::hash::{hash_bytes, node_bloom, node_bloom_might_contain, stable_node_id};
 #[cfg(test)]
 use crate::HCD_SCHEMA_VERSION;
 use crate::{
     extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, AnnotationSet,
     ApplyResult, AssetDescriptor, FidelityWarning, HcdError, ImageExtractEntry, ImageExtractPage,
-    ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeStylePatch, PatchBatch,
-    PatchOperation, RevisionRecord, TextExtractEntry, TextExtractPage, TextNodeLookup,
-    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
+    NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
+    TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, MAX_CONTROL_PART_BYTES,
+    MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -46,6 +47,18 @@ struct ImageChange {
     visual_hash: String,
 }
 
+#[derive(Clone)]
+struct PdfTextInsertion {
+    page: usize,
+    node_id: String,
+    x_pt: f32,
+    y_pt: f32,
+    width_pt: f32,
+    height_pt: f32,
+    font_size_pt: f32,
+    text: String,
+}
+
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
@@ -73,6 +86,16 @@ pub fn apply_patch(
         return Ok(result);
     }
     validate_patch_header(&manifest, patch, expected_revision)?;
+    if patch.base_revision < manifest.revision
+        && patch
+            .operations
+            .iter()
+            .any(|operation| matches!(operation, PatchOperation::PdfTextInsert { .. }))
+    {
+        return Err(HcdError::RevisionConflict(
+            "PDF text insertion requires the current head revision".to_string(),
+        ));
+    }
 
     let mut stale_content_nodes = HashSet::new();
     if patch.base_revision < manifest.revision {
@@ -97,6 +120,7 @@ pub fn apply_patch(
     let splices = collect_splices(patch)?;
     let styles = collect_styles(patch)?;
     let images = collect_image_changes(patch)?;
+    let pdf_insertions = collect_pdf_insertions(patch);
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -116,7 +140,10 @@ pub fn apply_patch(
     let new_revision = manifest.revision + 1;
     let new_index_prefix = format!("indexes/rev-{new_revision:020}");
     let new_index_root = bundle.root().join(&new_index_prefix);
-    let content_changed = !splices.is_empty() || !styles.is_empty() || !images.is_empty();
+    let content_changed = !splices.is_empty()
+        || !styles.is_empty()
+        || !images.is_empty()
+        || !pdf_insertions.is_empty();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -158,11 +185,12 @@ pub fn apply_patch(
         let mut page = bundle.read_index_page(&manifest, page_number)?;
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
+            let insertions = pdf_insertions.get(&descriptor.chunk_id);
             let candidates: Vec<&String> = target_node_ids
                 .iter()
                 .filter(|node_id| node_bloom_might_contain(&descriptor.node_bloom, node_id))
                 .collect();
-            if candidates.is_empty() {
+            if candidates.is_empty() && insertions.is_none() {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
             }
@@ -313,6 +341,32 @@ pub fn apply_patch(
                 }
             }
 
+            if let Some(insertions) = insertions {
+                for insertion in insertions {
+                    insert_pdf_text(&mut html, &mut source_map, insertion)?;
+                    html_nodes.insert(insertion.node_id.clone(), insertion.text.clone());
+                    dirty_nodes.insert(insertion.node_id.clone());
+                    dirty_parts.insert(format!("pdf/pages/{}", insertion.page));
+                }
+                descriptor.node_count += insertions.len();
+                descriptor.block_count += insertions.len();
+                descriptor.node_bloom = node_bloom(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.node_id.as_str()),
+                );
+                if descriptor.first_node_id.is_none() {
+                    descriptor.first_node_id = source_map
+                        .entries
+                        .first()
+                        .map(|entry| entry.node_id.clone());
+                }
+                descriptor.last_node_id =
+                    source_map.entries.last().map(|entry| entry.node_id.clone());
+                chunk_changed = true;
+            }
+
             if chunk_changed {
                 page_changed = true;
                 let (html_href, html_hash) = bundle.write_chunk_object(&html)?;
@@ -345,6 +399,14 @@ pub fn apply_patch(
     for node_id in &target_node_ids {
         if !found_nodes.contains_key(node_id) {
             return Err(HcdError::NodeNotFound(node_id.clone()));
+        }
+    }
+    for insertion in pdf_insertions.values().flatten() {
+        if !dirty_nodes.contains(&insertion.node_id) {
+            return Err(HcdError::NodeNotFound(format!(
+                "PDF page {}",
+                insertion.page
+            )));
         }
     }
 
@@ -397,6 +459,12 @@ pub fn apply_patch(
                 message: "edited PDF text is painted over its original page raster for preview; source typography and background cannot be restored exactly".to_string(),
                 node_id: Some(node_id.clone()),
                 source_part: None,
+            }))
+            .chain(pdf_insertions.values().flatten().map(|insertion| FidelityWarning {
+                code: "PDF_INSERTED_TEXT_OVERLAY".to_string(),
+                message: "new PDF text is positioned over the original page raster; background and typography remain approximate".to_string(),
+                node_id: Some(insertion.node_id.clone()),
+                source_part: Some(format!("pdf/pages/{}", insertion.page)),
             }))
             .collect(),
         idempotent_replay: false,
@@ -696,6 +764,7 @@ fn validate_patch_identity(
     if patch.schema_version != HCD_PATCH_SCHEMA_VERSION
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_2
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -749,6 +818,59 @@ fn validate_patch_identity(
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
             }
+            PatchOperation::PdfTextInsert {
+                page,
+                x_pt,
+                y_pt,
+                width_pt,
+                height_pt,
+                font_size_pt,
+                text,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
+                    || manifest.source.format != "pdf"
+                {
+                    return Err(HcdError::Unsupported(
+                        "pdf.text.insert requires a PDF bundle and hcd-patch/5".to_string(),
+                    ));
+                }
+                if *page == 0 || *page > manifest.chunk_count {
+                    return Err(HcdError::InvalidPatch(
+                        "PDF page is outside the document".to_string(),
+                    ));
+                }
+                if !x_pt.is_finite()
+                    || !y_pt.is_finite()
+                    || !width_pt.is_finite()
+                    || !height_pt.is_finite()
+                    || !font_size_pt.is_finite()
+                    || *x_pt < 0.0
+                    || *y_pt < 0.0
+                    || *width_pt <= 0.0
+                    || *height_pt <= 0.0
+                    || *x_pt > 14_400.0
+                    || *y_pt > 14_400.0
+                    || *width_pt > 14_400.0
+                    || *height_pt > 14_400.0
+                    || !(1.0..=256.0).contains(font_size_pt)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "PDF text box geometry is invalid".to_string(),
+                    ));
+                }
+                if text.trim().is_empty()
+                    || text.chars().count() > 10_000
+                    || text.contains(['\r', '\n'])
+                    || text.chars().any(is_forbidden_xml_character)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "PDF text box is empty or contains unsupported text".to_string(),
+                    ));
+                }
+                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
+                })?;
+            }
             PatchOperation::NodeStyle {
                 node_id,
                 style,
@@ -768,7 +890,9 @@ fn validate_patch_identity(
                 asset_hash,
                 precondition,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3 {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
+                    && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
+                {
                     return Err(HcdError::InvalidPatch(
                         "image.replace requires schemaVersion hcd-patch/3".to_string(),
                     ));
@@ -782,7 +906,9 @@ fn validate_patch_identity(
                 geometry,
                 precondition,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3 {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
+                    && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
+                {
                     return Err(HcdError::InvalidPatch(
                         "image.geometry requires schemaVersion hcd-patch/3".to_string(),
                     ));
@@ -962,6 +1088,144 @@ fn collect_splices(patch: &PatchBatch) -> Result<BTreeMap<String, Vec<Splice>>, 
         }
     }
     Ok(grouped)
+}
+
+fn collect_pdf_insertions(patch: &PatchBatch) -> HashMap<String, Vec<PdfTextInsertion>> {
+    let mut grouped: HashMap<String, Vec<PdfTextInsertion>> = HashMap::new();
+    for (index, operation) in patch.operations.iter().enumerate() {
+        let PatchOperation::PdfTextInsert {
+            page,
+            x_pt,
+            y_pt,
+            width_pt,
+            height_pt,
+            font_size_pt,
+            text,
+        } = operation
+        else {
+            continue;
+        };
+        let part = format!("pdf/pages/{page}");
+        let chunk_id =
+            stable_node_id(&[&patch.document_id, &part, "page-chunk", "0"]).replacen("n_", "c_", 1);
+        let node_id = stable_node_id(&[
+            &patch.document_id,
+            &patch.patch_id,
+            &index.to_string(),
+            "pdf-text-insert",
+        ]);
+        grouped.entry(chunk_id).or_default().push(PdfTextInsertion {
+            page: *page,
+            node_id,
+            x_pt: *x_pt,
+            y_pt: *y_pt,
+            width_pt: *width_pt,
+            height_pt: *height_pt,
+            font_size_pt: *font_size_pt,
+            text: text.clone(),
+        });
+    }
+    grouped
+}
+
+fn pdf_page_dimensions(html: &str, page: usize) -> Result<(f32, f32), HcdError> {
+    let tag_end = html
+        .find('>')
+        .ok_or_else(|| HcdError::InvalidBundle("PDF page tag is missing".to_string()))?;
+    let tag = &html[..tag_end];
+    if !tag.starts_with("<section class=\"hcd-pdf-page\"")
+        || !tag.contains(&format!("data-hcd-page=\"{page}\""))
+        || !tag.contains("data-hcd-continuation=\"false\"")
+        || !tag.contains("data-hcd-source-raster=\"true\"")
+    {
+        return Err(HcdError::InvalidBundle(format!(
+            "PDF page {page} has no primary raster chunk"
+        )));
+    }
+    let style = tag
+        .split_once("style=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(value, _)| value)
+        .ok_or_else(|| HcdError::InvalidBundle("PDF page style is missing".to_string()))?;
+    let dimension = |name: &str| -> Result<f32, HcdError> {
+        let value = style
+            .split(';')
+            .find_map(|property| property.trim().strip_prefix(name))
+            .and_then(|value| value.strip_suffix("pt"))
+            .ok_or_else(|| HcdError::InvalidBundle(format!("PDF page {name} is missing")))?;
+        let parsed: f32 = value
+            .parse()
+            .map_err(|_| HcdError::InvalidBundle(format!("PDF page {name} is invalid")))?;
+        if !parsed.is_finite() || parsed <= 0.0 || parsed > 14_400.0 {
+            return Err(HcdError::InvalidBundle(format!(
+                "PDF page {name} exceeds safe limits"
+            )));
+        }
+        Ok(parsed)
+    };
+    Ok((dimension("width:")?, dimension("height:")?))
+}
+
+fn insert_pdf_text(
+    html: &mut String,
+    source_map: &mut crate::ChunkSourceMap,
+    insertion: &PdfTextInsertion,
+) -> Result<(), HcdError> {
+    let (page_width, page_height) = pdf_page_dimensions(html, insertion.page)?;
+    if insertion.x_pt + insertion.width_pt > page_width
+        || insertion.y_pt + insertion.height_pt > page_height
+    {
+        return Err(HcdError::InvalidPatch(format!(
+            "PDF text box is outside page {}",
+            insertion.page
+        )));
+    }
+    if source_map
+        .entries
+        .iter()
+        .any(|entry| entry.node_id == insertion.node_id)
+    {
+        return Err(HcdError::InvalidPatch(
+            "PDF text node ID already exists".to_string(),
+        ));
+    }
+    let ordinal = source_map
+        .entries
+        .iter()
+        .map(|entry| entry.source.text_ordinal)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| HcdError::ResourceLimit("PDF text ordinal overflowed".to_string()))?;
+    let source_path = format!("/page[{}]/hcd-text[{}]", insertion.page, insertion.node_id);
+    let node_hash = hash_bytes(insertion.text.as_bytes());
+    let top = page_height - insertion.y_pt - insertion.height_pt;
+    let block = format!(
+        "<p class=\"hcd-pdf-text\" data-hcd-text-node=\"{}\" data-hcd-source-path=\"{source_path}\" data-hcd-source-order=\"{ordinal}\" data-hcd-mapping=\"hcd-overlay\" data-hcd-bbox=\"{},{},{},{}\" data-hcd-x=\"{}\" data-hcd-y=\"{}\" data-hcd-width=\"{}\" data-hcd-height=\"{}\" style=\"position:absolute;left:{}pt;top:{top}pt;width:{}pt;height:{}pt;font-family:Arial, Helvetica, sans-serif;font-size:{}pt;font-weight:normal;font-style:normal;color:black;line-height:{}pt\"><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-patched=\"true\">{}</span></p>",
+        insertion.node_id,
+        insertion.x_pt, insertion.y_pt, insertion.width_pt, insertion.height_pt,
+        insertion.x_pt, insertion.y_pt, insertion.width_pt, insertion.height_pt,
+        insertion.x_pt, insertion.width_pt, insertion.height_pt,
+        insertion.font_size_pt, insertion.font_size_pt,
+        insertion.node_id, escape_text(&insertion.text),
+    );
+    let end = html
+        .rfind("</section>")
+        .ok_or_else(|| HcdError::InvalidBundle("PDF page closing tag is missing".to_string()))?;
+    html.insert_str(end, &block);
+    source_map.entries.push(NodeMapEntry {
+        node_id: insertion.node_id.clone(),
+        node_hash,
+        source: SourceAnchor {
+            part: format!("pdf/pages/{}", insertion.page),
+            text_ordinal: ordinal,
+            paragraph_id: Some(source_path),
+            text_id: None,
+            node_kind: "pdf-text".to_string(),
+            editable: true,
+        },
+    });
+    Ok(())
 }
 
 fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, HcdError> {
@@ -1497,6 +1761,7 @@ fn apply_annotations(
                     .retain(|annotation| annotation.annotation_id != *annotation_id);
             }
             PatchOperation::TextSplice { .. }
+            | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}

@@ -109,6 +109,8 @@
 .hcd-surface .fixed-workspace .fixed-page-hitboxes.centered{left:50%;transform:translateX(-50%)}
 .hcd-surface .fixed-workspace .fixed-page-hitbox{position:absolute;display:block;min-width:12px;min-height:14px;padding:0;background:transparent;border:1px dashed transparent;border-radius:2px;pointer-events:auto;cursor:text}
 .hcd-surface .fixed-workspace .fixed-page-hitbox:hover,.hcd-surface .fixed-workspace .fixed-page-hitbox.selected{border-color:#1769e8;background:#1769e81a}
+.hcd-surface .fixed-workspace .fixed-placement-layer{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;background:rgba(23,105,232,.04);pointer-events:auto;cursor:crosshair;z-index:3}
+.hcd-surface .fixed-workspace .fixed-placement-layer:hover{outline:2px dashed #1769e8;outline-offset:-2px}
 .hcd-surface .fixed-workspace .fixed-inline-editor{position:absolute;z-index:4;min-width:48px;max-width:100%;background:#fff;outline:2px solid #1769e8;box-shadow:0 2px 12px #21477a25;pointer-events:auto;white-space:nowrap}
 .hcd-surface .fixed-workspace .fixed-inline-editor .fixed-tiptap-text{min-height:inherit;outline:0;margin:0;padding:0 2px;font:inherit;line-height:inherit;color:inherit;white-space:nowrap;overflow:hidden}
 .hcd-surface .fixed-workspace .fixed-inline-editor .fixed-tiptap-text p{margin:0;white-space:nowrap}

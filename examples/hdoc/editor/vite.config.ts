@@ -70,8 +70,8 @@ export default defineConfig({
   server: {
     port: 8767,
     proxy: {
-      '/v1': 'http://127.0.0.1:8766',
-      '/health': 'http://127.0.0.1:8766',
+      '/v1': process.env.HCD_API_TARGET || 'http://127.0.0.1:8766',
+      '/health': process.env.HCD_API_TARGET || 'http://127.0.0.1:8766',
     },
   },
 })
