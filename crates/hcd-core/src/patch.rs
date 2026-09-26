@@ -113,8 +113,14 @@ struct XlsxCellInsertion {
 #[derive(Clone)]
 struct XlsxFormulaChange {
     sheet_id: String,
-    formula: String,
+    replacement: XlsxFormulaReplacement,
     node_hash: String,
+}
+
+#[derive(Clone)]
+enum XlsxFormulaReplacement {
+    Formula(String),
+    Value(String),
 }
 
 #[derive(Clone)]
@@ -200,6 +206,7 @@ pub fn apply_patch(
     validate_patch_header(&manifest, patch, expected_revision)?;
     if patch.base_revision < manifest.revision
         && (patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_22
+            || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28
             || patch.operations.iter().any(|operation| {
                 matches!(
                     operation,
@@ -211,6 +218,7 @@ pub fn apply_patch(
                         | PatchOperation::PptxTextDelete { .. }
                         | PatchOperation::XlsxCellSet { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
+                        | PatchOperation::XlsxFormulaToValue { .. }
                         | PatchOperation::XlsxFormulaCreate { .. }
                         | PatchOperation::XlsxRowAppend { .. }
                         | PatchOperation::XlsxRowRemoveLast { .. }
@@ -679,17 +687,22 @@ pub fn apply_patch(
                             entry.node_id, change.node_hash, entry.node_hash
                         )));
                     }
-                    set_xlsx_formula(&mut html, &entry.node_id, &change.formula)?;
-                    let replacement_hash = hash_bytes(change.formula.as_bytes());
-                    replace_node_text(
-                        &mut html,
-                        &entry.node_id,
-                        &change.formula,
-                        &replacement_hash,
-                    )?;
+                    let replacement = match &change.replacement {
+                        XlsxFormulaReplacement::Formula(formula) => {
+                            set_xlsx_formula(&mut html, &entry.node_id, formula)?;
+                            formula
+                        }
+                        XlsxFormulaReplacement::Value(text) => {
+                            set_xlsx_formula_value(&mut html, &entry.node_id)?;
+                            entry.source.editable = true;
+                            text
+                        }
+                    };
+                    let replacement_hash = hash_bytes(replacement.as_bytes());
+                    replace_node_text(&mut html, &entry.node_id, replacement, &replacement_hash)?;
                     entry.node_hash = replacement_hash;
-                    found_nodes.insert(entry.node_id.clone(), change.formula.chars().count());
-                    html_nodes.insert(entry.node_id.clone(), change.formula.clone());
+                    found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
+                    html_nodes.insert(entry.node_id.clone(), replacement.clone());
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1479,6 +1492,17 @@ pub fn apply_patch(
         dirty_chunk_ids: result.dirty_chunk_ids.clone(),
         dirty_source_parts: result.dirty_source_parts.clone(),
         dirty_grid_parts: dirty_grid_parts.into_iter().collect(),
+        converted_formula_node_ids: patch
+            .operations
+            .iter()
+            .filter_map(|operation| {
+                if let PatchOperation::XlsxFormulaToValue { node_id, .. } = operation {
+                    Some(node_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
         grid_row_insertions: xlsx_row_insert
             .as_ref()
             .into_iter()
@@ -1840,6 +1864,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_25
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1927,6 +1952,38 @@ fn validate_patch_identity(
         {
             return Err(HcdError::Unsupported(
                 "hcd-patch/22 accepts XLSX text, blank-cell, and formula changes only".to_string(),
+            ));
+        }
+        let mut targets = HashSet::new();
+        for operation in &patch.operations {
+            if let Some(node_id) = operation.node_id() {
+                if !targets.insert(node_id) {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX batch contains duplicate node targets".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28 {
+        if manifest.source.format != "xlsx"
+            || !patch
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, PatchOperation::XlsxFormulaToValue { .. }))
+            || patch.operations.iter().any(|operation| {
+                !matches!(
+                    operation,
+                    PatchOperation::TextSplice { .. }
+                        | PatchOperation::XlsxCellSet { .. }
+                        | PatchOperation::XlsxFormulaSet { .. }
+                        | PatchOperation::XlsxFormulaCreate { .. }
+                        | PatchOperation::XlsxFormulaToValue { .. }
+                )
+            })
+        {
+            return Err(HcdError::Unsupported(
+                "hcd-patch/28 accepts XLSX formula conversion with cell edits only".to_string(),
             ));
         }
         let mut targets = HashSet::new();
@@ -2333,13 +2390,15 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_15
                         | HCD_PATCH_SCHEMA_VERSION_19
                         | crate::HCD_PATCH_SCHEMA_VERSION_22
+                        | crate::HCD_PATCH_SCHEMA_VERSION_28
                 ) || manifest.source.format != "xlsx"
                     || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
+                        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                         && patch.operations.len() != 1)
                 {
                     return Err(HcdError::Unsupported(
-                        "xlsx.cell.set requires one operation with hcd-patch/7-15 or an XLSX range batch with hcd-patch/19 or /22"
+                        "xlsx.cell.set requires one operation with hcd-patch/7-15 or an XLSX range batch with hcd-patch/19, /22, or /28"
                             .to_string(),
                     ));
                 }
@@ -2369,13 +2428,14 @@ fn validate_patch_identity(
                 precondition,
             } => {
                 if (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22)
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28)
                     || manifest.source.format != "xlsx"
                     || (patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
                         && patch.operations.len() != 1)
                 {
                     return Err(HcdError::Unsupported(
-                        "xlsx.formula.set requires one XLSX operation with hcd-patch/20 or a batch with /22"
+                        "xlsx.formula.set requires one XLSX operation with hcd-patch/20 or a batch with /22 or /28"
                             .to_string(),
                     ));
                 }
@@ -2400,6 +2460,37 @@ fn validate_patch_identity(
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
             }
+            PatchOperation::XlsxFormulaToValue {
+                node_id,
+                sheet_id,
+                text,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
+                    || manifest.source.format != "xlsx"
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.formula.to-value requires an XLSX hcd-patch/28 batch".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || text.chars().count() > 32_767
+                    || text.chars().any(is_forbidden_xml_character)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX formula conversion has an invalid sheet or value".to_string(),
+                    ));
+                }
+                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
+                })?;
+            }
             PatchOperation::XlsxFormulaCreate {
                 sheet_id,
                 row,
@@ -2407,7 +2498,8 @@ fn validate_patch_identity(
                 formula,
             } => {
                 if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22)
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28)
                     || manifest.source.format != "xlsx"
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
@@ -3278,19 +3370,38 @@ fn collect_xlsx_formula_set(
 ) -> Result<HashMap<String, XlsxFormulaChange>, HcdError> {
     let mut changes = HashMap::new();
     for operation in &patch.operations {
-        if let PatchOperation::XlsxFormulaSet {
-            node_id,
-            sheet_id,
-            formula,
-            precondition,
-        } = operation
-        {
+        let change = match operation {
+            PatchOperation::XlsxFormulaSet {
+                node_id,
+                sheet_id,
+                formula,
+                precondition,
+            } => Some((
+                node_id,
+                sheet_id,
+                XlsxFormulaReplacement::Formula(formula.clone()),
+                precondition,
+            )),
+            PatchOperation::XlsxFormulaToValue {
+                node_id,
+                sheet_id,
+                text,
+                precondition,
+            } => Some((
+                node_id,
+                sheet_id,
+                XlsxFormulaReplacement::Value(text.clone()),
+                precondition,
+            )),
+            _ => None,
+        };
+        if let Some((node_id, sheet_id, replacement, precondition)) = change {
             if changes
                 .insert(
                     node_id.clone(),
                     XlsxFormulaChange {
                         sheet_id: sheet_id.clone(),
-                        formula: formula.clone(),
+                        replacement,
                         node_hash: precondition.node_hash.clone(),
                     },
                 )
@@ -4756,6 +4867,47 @@ fn set_xlsx_formula(html: &mut String, node_id: &str, formula: &str) -> Result<(
         "data-hcd-formula-edited",
         "true",
     )?;
+    Ok(())
+}
+
+fn set_xlsx_formula_value(html: &mut String, node_id: &str) -> Result<(), HcdError> {
+    let marker = format!("data-hcd-id=\"{node_id}\"");
+    let node_start = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle(format!("XLSX formula node {node_id} is missing"))
+    })?;
+    let cell_start = html[..node_start].rfind("<td ").ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX formula node has no containing cell".to_string())
+    })?;
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
+        })?;
+    let tag = &html[cell_start..=cell_end];
+    if cell_end > node_start
+        || xlsx_attribute(tag, "data-hcd-formula") != Some("true")
+        || xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true")
+    {
+        return Err(HcdError::Unsupported(
+            "XLSX formula is shared, array based, or otherwise read-only".to_string(),
+        ));
+    }
+    for (name, value) in [
+        ("data-hcd-formula", "false"),
+        ("data-hcd-formula-editable", "false"),
+        ("data-hcd-formula-expression", ""),
+        ("data-hcd-formula-edited", "false"),
+        ("data-hcd-raw-value", ""),
+    ] {
+        let cell_end = html[cell_start..]
+            .find('>')
+            .map(|offset| cell_start + offset)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
+            })?;
+        set_attribute_in_range(html, cell_start, cell_end, name, value)?;
+    }
     Ok(())
 }
 
@@ -6332,6 +6484,7 @@ fn apply_annotations(
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
             | PatchOperation::XlsxFormulaSet { .. }
+            | PatchOperation::XlsxFormulaToValue { .. }
             | PatchOperation::XlsxFormulaCreate { .. }
             | PatchOperation::XlsxRowAppend { .. }
             | PatchOperation::XlsxRowInsert { .. }

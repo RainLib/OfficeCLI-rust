@@ -274,6 +274,7 @@ fn revision_record(
         dirty_chunk_ids: Vec::new(),
         dirty_source_parts: Vec::new(),
         dirty_grid_parts: Vec::new(),
+        converted_formula_node_ids: Vec::new(),
         grid_row_insertions: Vec::new(),
         grid_row_deletions: Vec::new(),
         grid_column_insertions: Vec::new(),
