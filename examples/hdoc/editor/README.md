@@ -84,6 +84,8 @@ The XLSX canvas keeps its Univer cell editor and now uses the same fixed documen
 
 For XLSX, select a rectangular range and choose **开始 → 合并单元格**. `hcd-patch/6` saves the merge in one immutable revision, updates the visible Univer grid, and writes `mergeCells` during source-backed and source-free semantic XLSX export. The upper-left cell must be mapped and editable; every covered cell must be empty, and the range must fit one HCD cell window. The service rejects overlap and content loss. Source-free export preserves merged ranges and cell coordinates but rebuilds workbook styles and flattens sheets into one semantic sheet. The browser acceptance screenshot is `docs/screenshots/hcd-xlsx-merge-cells.png`.
 
+The same operations are available by right-clicking the worksheet canvas. The HCD menu offers merge, split, and insert/delete for the selected rows or columns; it reuses the toolbar's revision and permission checks. Right-clicking the sheet tabs or using read-only mode leaves the native browser menu alone. See `docs/acceptance/hcd-xlsx-context-menu.md` for the real-workbook command sequence and screenshot.
+
 Choose **开始 → 拆分单元格** on a merge created in HCD to restore individual cells. `hcd-patch/11` keeps the anchor text and node ID, restores the original styles of covered empty cells, and removes the merge from the next source-backed XLSX export. Original source merges remain protected because their covered cells may contain hidden values. The merged and split browser states are `docs/screenshots/hcd-xlsx-unmerge-merged.png` and `docs/screenshots/hcd-xlsx-unmerge-after.png`.
 
 Reproduce the split with the real workbook:

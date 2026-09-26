@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import { BooleanNumber, createUniver, defaultTheme, LocaleType, type IWorkbookData } from '@univerjs/presets'
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
 import zhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
@@ -7,6 +7,7 @@ import { HcdUniverAdapter, type HcdPatchEventDetail } from '../../xlsx-univer-vi
 import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
@@ -24,6 +25,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [mergeBusy, setMergeBusy] = useState(false)
   const [rowBusy, setRowBusy] = useState(false)
   const [columnBusy, setColumnBusy] = useState(false)
@@ -611,6 +613,37 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
+  function openGridContextMenu(event: MouseEvent<HTMLDivElement>) {
+    if (!(event.target instanceof HTMLCanvasElement)
+      || !event.target.id.startsWith('univer-sheet-main-canvas_')
+      || !editing || session.scope !== 'write') return
+    event.preventDefault()
+    event.stopPropagation()
+    const { clientX, clientY } = event
+    // Univer updates the active range on right mouse down. Read it after that
+    // event has finished so the menu acts on the cell under the pointer.
+    requestAnimationFrame(() => setContextMenu({ x: clientX, y: clientY }))
+  }
+
+  const activeSheet = contextMenu && runtime.current?.adapter.workbook.getActiveSheet()
+  const activeRange = activeSheet?.getActiveRange()
+  const selectedMerge = activeRange && activeSheet?.getMergeData().some(range =>
+    activeRange.getRow() >= range.getRow()
+    && activeRange.getRow() < range.getRow() + range.getHeight()
+    && activeRange.getColumn() >= range.getColumn()
+    && activeRange.getColumn() < range.getColumn() + range.getWidth())
+  const gridActionDisabled = !editing || session.scope !== 'write' || mergeBusy || rowBusy || columnBusy
+    || !!runtime.current?.adapter.hasPendingPatch()
+  const contextActions: MenuAction[] = [
+    { label: '合并单元格', action: () => void mergeSelection(),
+      disabled: gridActionDisabled || !activeRange || !!selectedMerge || activeRange.getHeight() * activeRange.getWidth() < 2 },
+    { label: '拆分单元格', action: () => void unmergeSelection(), disabled: gridActionDisabled || !selectedMerge },
+    { label: '在上方插入行', action: () => void insertRowBeforeSelection(), disabled: gridActionDisabled || !activeRange, separated: true },
+    { label: '删除选中行', action: () => void deleteSelectedRow(), disabled: gridActionDisabled || !activeRange },
+    { label: '在左侧插入列', action: () => void insertColumnBeforeSelection(), disabled: gridActionDisabled || !activeRange, separated: true },
+    { label: '删除选中列', action: () => void deleteSelectedColumn(), disabled: gridActionDisabled || !activeRange },
+  ]
+
   const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
@@ -618,14 +651,15 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
-      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · {status}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · 右键显示操作菜单 · {status}</span></>}
       {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowBeforeSelection()}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">支持一次选择 2–100 行或列并在单个修订中处理；合并区域可整体移动 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}
-    <div className="univer-editor-area"><div ref={host} className="hcd-univer-host" />
+    <div className="univer-editor-area" onContextMenu={openGridContextMenu} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" />
       {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
     </div>
+    {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions} onClose={() => setContextMenu(null)} />}
     <EditorStatusbar mode="工作簿视图" format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
     {error && <div className="toast error">{error}</div>}
   </div>
