@@ -100,6 +100,7 @@ struct XlsxCellInsertion {
     row: u32,
     column: u32,
     text: String,
+    formula: bool,
 }
 
 #[derive(Clone)]
@@ -195,6 +196,7 @@ pub fn apply_patch(
                     | PatchOperation::PptxShapeGeometry { .. }
                     | PatchOperation::XlsxCellSet { .. }
                     | PatchOperation::XlsxFormulaSet { .. }
+                    | PatchOperation::XlsxFormulaCreate { .. }
                     | PatchOperation::XlsxRowAppend { .. }
                     | PatchOperation::XlsxRowRemoveLast { .. }
                     | PatchOperation::XlsxColumnWidth { .. }
@@ -1581,6 +1583,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1633,6 +1636,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/20 accepts one XLSX formula replacement only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_21
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxFormulaCreate { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/21 accepts one XLSX formula creation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -1933,6 +1948,36 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "XLSX formula has an invalid sheet, length, or XML character".to_string(),
+                    ));
+                }
+                inserted = inserted.checked_add(formula.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
+                })?;
+            }
+            PatchOperation::XlsxFormulaCreate {
+                sheet_id,
+                row,
+                column,
+                formula,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
+                    || manifest.source.format != "xlsx"
+                    || sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !(1..=1_048_576).contains(row)
+                    || !(1..=16_384).contains(column)
+                    || !formula.starts_with('=')
+                    || formula.len() < 2
+                    || formula.len() > 8192
+                    || formula.chars().any(is_forbidden_xml_character)
+                    || formula.contains(['\r', '\n'])
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX formula creation has an invalid sheet, address, or formula"
+                            .to_string(),
                     ));
                 }
                 inserted = inserted.checked_add(formula.len()).ok_or_else(|| {
@@ -2607,14 +2652,20 @@ fn collect_xlsx_cell_set(
 ) -> Result<BTreeMap<(String, u32, u32), XlsxCellInsertion>, HcdError> {
     let mut insertions = BTreeMap::new();
     for operation in &patch.operations {
-        let PatchOperation::XlsxCellSet {
-            sheet_id,
-            row,
-            column,
-            text,
-        } = operation
-        else {
-            continue;
+        let (sheet_id, row, column, text, formula) = match operation {
+            PatchOperation::XlsxCellSet {
+                sheet_id,
+                row,
+                column,
+                text,
+            } => (sheet_id, row, column, text, false),
+            PatchOperation::XlsxFormulaCreate {
+                sheet_id,
+                row,
+                column,
+                formula,
+            } => (sheet_id, row, column, formula, true),
+            _ => continue,
         };
         let key = (sheet_id.clone(), *row, *column);
         if insertions
@@ -2625,6 +2676,7 @@ fn collect_xlsx_cell_set(
                     row: *row,
                     column: *column,
                     text: text.clone(),
+                    formula,
                 },
             )
             .is_some()
@@ -4137,10 +4189,14 @@ fn insert_xlsx_cell(
         )));
     }
     let node_hash = hash_bytes(insertion.text.as_bytes());
+    let formula_attrs = if insertion.formula {
+        format!(" data-hcd-formula=\"true\" data-hcd-formula-editable=\"true\" data-hcd-formula-expression=\"{}\" data-hcd-formula-edited=\"true\"", escape_attribute(&insertion.text))
+    } else {
+        String::new()
+    };
     let replacement = format!(
-        "<td class=\"hcd-cell\" data-hcd-cell=\"{reference}\" data-hcd-column=\"{}\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></td>",
-        insertion.column,
-        escape_text(&insertion.text)
+        "<td class=\"hcd-cell\" data-hcd-cell=\"{reference}\" data-hcd-column=\"{}\"{formula_attrs}><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></td>",
+        insertion.column, escape_text(&insertion.text)
     );
     if let Some(cell) = cell {
         html.replace_range(cell.start..cell.end, &replacement);
@@ -4222,7 +4278,7 @@ fn insert_xlsx_cell(
                 paragraph_id: Some(reference),
                 text_id: None,
                 node_kind: "cell".to_string(),
-                editable: true,
+                editable: !insertion.formula,
             },
         },
     );
@@ -5303,6 +5359,7 @@ fn apply_annotations(
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
             | PatchOperation::XlsxFormulaSet { .. }
+            | PatchOperation::XlsxFormulaCreate { .. }
             | PatchOperation::XlsxRowAppend { .. }
             | PatchOperation::XlsxRowInsert { .. }
             | PatchOperation::XlsxRowDelete { .. }

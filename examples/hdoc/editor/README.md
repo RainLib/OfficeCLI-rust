@@ -113,6 +113,8 @@ Pasting a range that contains both existing cells and empty cells now saves one 
 
 An existing ordinary XLSX formula can be edited directly in Univer. `hcd-patch/20` saves the expression and source-backed export keeps an OOXML formula while requesting recalculation. See the [real workbook commands and browser screenshots](../../../docs/acceptance/hcd-xlsx-formula-edit.md). Complete, bounded shared-formula groups with safely translatable A1 references now support single-member editing; source-backed export expands the edited group into independent formulas. Array formulas and unsupported shared groups remain read-only. See the [budget workbook acceptance](../../../docs/acceptance/hcd-xlsx-shared-formula-edit.md).
 
+An empty XLSX cell can receive one new formula with `hcd-patch/21`. The source-backed XLSX download preserves it as a native formula and requests recalculation. See the [product catalog commands and screenshot](../../../docs/acceptance/hcd-xlsx-formula-create.md).
+
 Verify existing merges with the real workbook and the screenshot above:
 
 ```bash
