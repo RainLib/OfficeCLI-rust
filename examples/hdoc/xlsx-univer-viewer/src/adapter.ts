@@ -151,6 +151,7 @@ function displayedNumber(source: string): number | undefined {
 
 export class HcdUniverAdapter {
   private readonly loaded = new Set<string>();
+  private readonly loadedVersions = new Map<string, string>();
   private readonly loading = new Map<string, Promise<void>>();
   private readonly appliedDimensions = new Set<string>();
   private readonly linksByCell = new Map<string, NodeLink>();
@@ -335,18 +336,41 @@ export class HcdUniverAdapter {
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;
     const activeSheet = this.workbook.getActiveSheet();
+    const sheetId = activeSheet.getSheetId();
     const activeRange = activeSheet.getActiveRange();
     const selection = activeRange && {
       row: activeRange.getRow(), column: activeRange.getColumn(),
       height: activeRange.getHeight(), width: activeRange.getWidth(),
     };
+    this.rangeGeneration.set(sheetId, (this.rangeGeneration.get(sheetId) ?? 0) + 1);
     await this.client.open();
+    this.rangeGeneration.set(sheetId, (this.rangeGeneration.get(sheetId) ?? 0) + 1);
+    const visible = activeSheet.getVisibleRange();
+    const startRow = Math.max(0, (visible?.startRow ?? 0) - 128);
+    const endRow = Math.min(activeSheet.getMaxRows() - 1, (visible?.endRow ?? 127) + 128);
+    const nextMerges = new Set<string>();
+    const nextRowHeights = new Map<number, number>();
+    for (const descriptor of this.client.cellWindows(sheetId, startRow + 1, endRow + 1)) {
+      const chunk = await this.client.readChunk(descriptor);
+      const parsed = parseGridChunk(chunk, href => this.client.resolve(href).toString(), this.styleCatalog);
+      for (const merge of parsed.merges) {
+        nextMerges.add(`${sheetId}:merge:${merge.startRow}:${merge.startColumn}:${merge.endRow}:${merge.endColumn}`);
+      }
+      for (const row of parsed.rowHeights) {
+        if (row.hidden || row.height) nextRowHeights.set(row.row, row.hidden ? 0 : row.height!);
+      }
+    }
     for (const key of this.appliedDimensions) {
-      if (/^s_[0-9a-f]{32}:row:/.test(key)) this.appliedDimensions.delete(key);
+      const match = key.match(/^(s_[0-9a-f]{32}):row:(\d+)$/);
+      if (match && match[1] === sheetId && nextRowHeights.has(Number(match[2]))
+        && this.dimensions.get(sheetId)?.rows.get(Number(match[2])) !== nextRowHeights.get(Number(match[2]))) {
+        this.appliedDimensions.delete(key);
+      }
     }
     for (const key of this.appliedDimensions) {
       const match = key.match(/^(s_[0-9a-f]{32}):merge:(\d+):(\d+):(\d+):(\d+)$/);
-      if (!match) continue;
+      if (!match || match[1] !== sheetId || Number(match[4]) < startRow
+        || Number(match[2]) > endRow || nextMerges.has(key)) continue;
       const sheet = this.workbook.getSheetBySheetId(match[1]);
       if (sheet) {
         this.withApplying(() => sheet.getRange(Number(match[2]), Number(match[3]),
@@ -355,12 +379,12 @@ export class HcdUniverAdapter {
       }
       this.appliedDimensions.delete(key);
     }
-    this.evictOutsideWindow('', new Set());
-    this.workbook.setActiveSheet(activeSheet);
+    // Load the replacement window before retiring old chunks. Clearing the
+    // whole grid first makes every collaborator update visibly jump.
+    await this.ensureVisible(activeSheet);
     if (selection) activeSheet.setActiveRange(activeSheet.getRange(
       selection.row, selection.column, selection.height, selection.width,
     ));
-    await this.ensureVisible(activeSheet);
     this.onStatus(`revision ${this.client.manifest.revision} · 已同步其他协作者的修改`);
     return true;
   }
@@ -368,8 +392,17 @@ export class HcdUniverAdapter {
   /** Reconcile an acknowledged local cell patch without clearing the visible grid. */
   async refreshChangedCells(changes: HcdPatchEventDetail['changes']): Promise<void> {
     if (this.hasPendingPatch()) throw new Error('仍有未保存的单元格修改');
+    // A scroll/selection change may have scheduled a load using the old index.
+    // Prevent that load from evicting the newly reconciled chunk afterwards.
+    const changedSheets = new Set(changes.map(change => change.sheetId));
+    for (const sheetId of changedSheets) {
+      this.rangeGeneration.set(sheetId, (this.rangeGeneration.get(sheetId) ?? 0) + 1);
+    }
     const previous = new Map(this.client.descriptors.map(descriptor => [descriptor.sequence, descriptor]));
     await this.client.open();
+    for (const sheetId of changedSheets) {
+      this.rangeGeneration.set(sheetId, (this.rangeGeneration.get(sheetId) ?? 0) + 1);
+    }
     const affected = new Map<number, ChunkDescriptor>();
     for (const { sheetId, row, column } of changes) {
       const descriptor = this.client.cellWindows(sheetId, row + 1, row + 1).find(({ grid }) =>
@@ -380,7 +413,8 @@ export class HcdUniverAdapter {
     }
     for (const descriptor of affected.values()) {
       const oldId = previous.get(descriptor.sequence)?.chunkId;
-      if (oldId === descriptor.chunkId) continue;
+      if (previous.get(descriptor.sequence)?.htmlHash === descriptor.htmlHash
+        && previous.get(descriptor.sequence)?.mapHash === descriptor.mapHash) continue;
       const old = oldId && this.runtimes.get(oldId);
       if (!old) {
         await this.loadChunk(descriptor);
@@ -418,13 +452,16 @@ export class HcdUniverAdapter {
       }
       this.runtimes.delete(oldId);
       this.loaded.delete(oldId);
+      this.loadedVersions.delete(oldId);
       this.runtimes.set(descriptor.chunkId, {
         sheetId: old.sheetId, kind: old.kind,
         cells: parsed.cells.map(({ row, column, link, blank }) => ({ row, column, link, blank })),
         rows: parsed.rowHeights.map(({ row }) => row), visualIds: [],
       });
       this.loaded.add(descriptor.chunkId);
+      this.loadedVersions.set(descriptor.chunkId, this.descriptorVersion(descriptor));
     }
+    await this.ensureVisible(this.workbook.getActiveSheet());
   }
 
   private scheduleVisible(sheet: FWorksheet): void {
@@ -454,15 +491,21 @@ export class HcdUniverAdapter {
   }
 
   private async loadChunk(descriptor: ChunkDescriptor): Promise<void> {
-    if (this.loaded.has(descriptor.chunkId)) return;
-    const existing = this.loading.get(descriptor.chunkId);
+    const version = this.descriptorVersion(descriptor);
+    if (this.loadedVersions.get(descriptor.chunkId) === version) return;
+    const existing = this.loading.get(version);
     if (existing) return existing;
     const operation = (async () => {
       const chunk = await this.client.readChunk(descriptor);
+      // A newer revision can arrive while the old object is being fetched.
+      const current = this.client.descriptors.find(item => item.sequence === descriptor.sequence);
+      if (!current || this.descriptorVersion(current) !== version) return;
       const parsed = parseGridChunk(chunk, (href) => this.client.resolve(href).toString(), this.styleCatalog);
       const sheet = this.workbook.getSheetBySheetId(descriptor.grid!.sheetId);
       if (!sheet) throw new Error(`工作表不存在: ${descriptor.grid!.sheetName}`);
+      const previous = this.runtimes.get(descriptor.chunkId);
       await this.applyParsedChunk(sheet, descriptor, parsed);
+      if (previous) this.retireReplacedCells(sheet, previous, parsed);
       this.runtimes.set(descriptor.chunkId, {
         sheetId: descriptor.grid!.sheetId,
         kind: descriptor.grid!.kind,
@@ -485,10 +528,34 @@ export class HcdUniverAdapter {
         }
       }
       this.loaded.add(descriptor.chunkId);
+      this.loadedVersions.set(descriptor.chunkId, version);
       this.onStatus(`revision ${this.client.manifest.revision} · ${this.loaded.size}/${this.client.descriptors.length} 个分片已加载`);
-    })().finally(() => this.loading.delete(descriptor.chunkId));
-    this.loading.set(descriptor.chunkId, operation);
+    })().finally(() => this.loading.delete(version));
+    this.loading.set(version, operation);
     return operation;
+  }
+
+  private descriptorVersion(descriptor: ChunkDescriptor): string {
+    return `${descriptor.chunkId}:${descriptor.htmlHash}:${descriptor.mapHash}`;
+  }
+
+  private retireReplacedCells(sheet: FWorksheet, previous: ChunkRuntime, parsed: ParsedGridChunk): void {
+    const next = new Set(parsed.cells.map(cell => cellKey(previous.sheetId, cell.row, cell.column)));
+    const nextBlanks = new Set(parsed.cells.filter(cell => cell.blank)
+      .map(cell => cellKey(previous.sheetId, cell.row, cell.column)));
+    const removed = previous.cells.filter(cell => !next.has(cellKey(previous.sheetId, cell.row, cell.column)));
+    this.withApplying(() => {
+      for (const cell of removed) sheet.getRange(cell.row, cell.column).setValue('');
+    });
+    for (const cell of previous.cells) {
+      const key = cellKey(previous.sheetId, cell.row, cell.column);
+      if (cell.link) {
+        if (this.linksByCell.get(key) === cell.link) this.linksByCell.delete(key);
+        if (this.linksByNode.get(cell.link.nodeId) === cell.link) this.linksByNode.delete(cell.link.nodeId);
+        if (!next.has(key)) this.recalculatedFormulas.delete(cell.link.nodeId);
+      }
+      if (cell.blank && !nextBlanks.has(key)) this.blankCells.delete(key);
+    }
   }
 
   private async applyParsedChunk(sheet: FWorksheet, descriptor: ChunkDescriptor, parsed: ParsedGridChunk): Promise<void> {
@@ -850,6 +917,15 @@ export class HcdUniverAdapter {
   }
 
   private evictOutsideWindow(activeSheetId: string, keep: Set<string>): void {
+    const retainedCells = new Map<string, { blank: boolean }>();
+    const retainedRows = new Set<string>();
+    const retainedVisuals = new Set<string>();
+    for (const [chunkId, runtime] of this.runtimes) {
+      if (runtime.sheetId !== activeSheetId || !keep.has(chunkId)) continue;
+      for (const cell of runtime.cells) retainedCells.set(cellKey(runtime.sheetId, cell.row, cell.column), cell);
+      for (const row of runtime.rows) retainedRows.add(`${runtime.sheetId}:${row}`);
+      for (const nodeId of runtime.visualIds) retainedVisuals.add(`${runtime.sheetId}:visual:${nodeId}`);
+    }
     for (const [chunkId, runtime] of this.runtimes) {
       const isPending = [...this.pending.values()].some(({ links, blanks }) =>
         links.some((link) => link.chunkId === chunkId)
@@ -866,31 +942,42 @@ export class HcdUniverAdapter {
           let minColumn = Number.MAX_SAFE_INTEGER;
           let maxColumn = 0;
           for (const cell of runtime.cells) {
-            (values[cell.row] ??= {})[cell.column] = { v: null, s: null };
-            minRow = Math.min(minRow, cell.row);
-            maxRow = Math.max(maxRow, cell.row);
-            minColumn = Math.min(minColumn, cell.column);
-            maxColumn = Math.max(maxColumn, cell.column);
-            if (cell.link) {
-              this.linksByCell.delete(cellKey(cell.link.sheetId, cell.row, cell.column));
-              this.linksByNode.delete(cell.link.nodeId);
-              this.recalculatedFormulas.delete(cell.link.nodeId);
+            const key = cellKey(runtime.sheetId, cell.row, cell.column);
+            if (!retainedCells.has(key)) {
+              (values[cell.row] ??= {})[cell.column] = { v: null, s: null };
+              minRow = Math.min(minRow, cell.row);
+              maxRow = Math.max(maxRow, cell.row);
+              minColumn = Math.min(minColumn, cell.column);
+              maxColumn = Math.max(maxColumn, cell.column);
             }
-            if (cell.blank) this.blankCells.delete(cellKey(runtime.sheetId, cell.row, cell.column));
+            if (cell.link) {
+              if (this.linksByCell.get(key) === cell.link) this.linksByCell.delete(key);
+              if (this.linksByNode.get(cell.link.nodeId) === cell.link) this.linksByNode.delete(cell.link.nodeId);
+              if (!retainedCells.has(key)) this.recalculatedFormulas.delete(cell.link.nodeId);
+            }
+            if (cell.blank && !retainedCells.get(key)?.blank) this.blankCells.delete(key);
           }
-          sheet.getRange(minRow, minColumn, maxRow - minRow + 1, maxColumn - minColumn + 1).setValues(values);
+          if (minRow !== Number.MAX_SAFE_INTEGER) {
+            sheet.getRange(minRow, minColumn, maxRow - minRow + 1, maxColumn - minColumn + 1).setValues(values);
+          }
         }
         const images = runtime.visualIds
+          .filter((nodeId) => !retainedVisuals.has(`${runtime.sheetId}:visual:${nodeId}`))
           .map((nodeId) => sheet.getImageById(nodeId))
           .filter((image): image is NonNullable<typeof image> => image !== null);
         if (images.length) sheet.deleteImages(images);
       });
       for (const nodeId of runtime.visualIds) {
-        this.appliedDimensions.delete(`${runtime.sheetId}:visual:${nodeId}`);
+        const key = `${runtime.sheetId}:visual:${nodeId}`;
+        if (!retainedVisuals.has(key)) this.appliedDimensions.delete(key);
       }
-      for (const row of runtime.rows) this.loadedRowCeilings.delete(`${runtime.sheetId}:${row}`);
+      for (const row of runtime.rows) {
+        const key = `${runtime.sheetId}:${row}`;
+        if (!retainedRows.has(key)) this.loadedRowCeilings.delete(key);
+      }
       this.runtimes.delete(chunkId);
       this.loaded.delete(chunkId);
+      this.loadedVersions.delete(chunkId);
     }
   }
 

@@ -94,6 +94,9 @@ export function useFixedCollaboration(session: Session, revision: number | null,
 
   const announceRevision = useCallback((next: number) => {
     if (Number.isSafeInteger(next) && next >= 0) {
+      // A stateless update can be echoed before React commits setRevision.
+      // Treat our own acknowledged revision as seen before broadcasting it.
+      revisionRef.current = Math.max(revisionRef.current ?? -1, next)
       provider.sendStateless(JSON.stringify({ type: 'hcd-fixed-revision', revision: next }))
     }
   }, [provider])
