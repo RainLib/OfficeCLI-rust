@@ -260,6 +260,15 @@ pub enum PatchOperation {
         end_column: u32,
         precondition: NodePrecondition,
     },
+    /// Materialize a previously empty cell inside an existing HCD row window.
+    /// The server assigns its stable node ID from document, sheet, and address.
+    #[serde(rename = "xlsx.cell.set", rename_all = "camelCase")]
+    XlsxCellSet {
+        sheet_id: String,
+        row: u32,
+        column: u32,
+        text: String,
+    },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -300,7 +309,9 @@ impl PatchOperation {
             | Self::ImageGeometry { node_id, .. }
             | Self::XlsxMerge { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
-            Self::AnnotationRemove { .. } | Self::PdfTextInsert { .. } => None,
+            Self::AnnotationRemove { .. }
+            | Self::PdfTextInsert { .. }
+            | Self::XlsxCellSet { .. } => None,
         }
     }
 
@@ -310,6 +321,7 @@ impl PatchOperation {
             Self::TextSplice { .. }
                 | Self::PdfTextInsert { .. }
                 | Self::XlsxMerge { .. }
+                | Self::XlsxCellSet { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }

@@ -4474,6 +4474,26 @@ fn rewrite_worksheet(
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut skip_depth = 0usize;
     let mut seen = BTreeSet::new();
+    let mut replacement_rows: BTreeMap<u32, BTreeMap<u32, (String, String)>> = BTreeMap::new();
+    for (reference, text) in replacements {
+        let (row, column) = cell_coordinates(reference).ok_or_else(|| {
+            HcdError::InvalidBundle(format!("invalid XLSX cell locator {reference}"))
+        })?;
+        if replacement_rows
+            .entry(row)
+            .or_default()
+            .insert(column, (reference.clone(), text.clone()))
+            .is_some()
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "duplicate XLSX cell locator {reference}"
+            )));
+        }
+    }
+    let mut row_pending = BTreeMap::new();
+    let mut active_row = None;
+    let mut last_row = 0u32;
+    let mut row_cell_name = String::from("c");
     let mut merge_written = false;
     let mut sheet_data_seen = false;
     loop {
@@ -4508,8 +4528,54 @@ fn rewrite_worksheet(
                     merge_written = true;
                 }
             }
+            Event::Start(ref start) if local_name(start.name().as_ref()) == "row" => {
+                let row = attribute(start, "r")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .or_else(|| last_row.checked_add(1))
+                    .filter(|row| (1..=1_048_576).contains(row))
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("invalid XLSX row number".to_string())
+                    })?;
+                last_row = row;
+                active_row = Some(row);
+                row_pending = replacement_rows.remove(&row).unwrap_or_default();
+                row_cell_name = qualified_child_name(start.name().as_ref(), "c");
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "row" => {
+                let row = attribute(empty, "r")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .or_else(|| last_row.checked_add(1))
+                    .filter(|row| (1..=1_048_576).contains(row))
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("invalid XLSX row number".to_string())
+                    })?;
+                last_row = row;
+                let mut pending = replacement_rows.remove(&row).unwrap_or_default();
+                if pending.is_empty() {
+                    writer.write_event(event.into_owned())?;
+                } else {
+                    let name = String::from_utf8_lossy(empty.name().as_ref()).to_string();
+                    let cell_name = qualified_child_name(empty.name().as_ref(), "c");
+                    writer.write_event(Event::Start(empty.to_owned()))?;
+                    flush_new_xlsx_cells(&mut writer, &mut pending, None, &cell_name, &mut seen)?;
+                    writer.write_event(Event::End(BytesEnd::new(name)))?;
+                }
+            }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "c" => {
                 let reference = attribute(start, "r").unwrap_or_default();
+                if let Some((row, column)) = cell_coordinates(&reference) {
+                    if active_row == Some(row) {
+                        flush_new_xlsx_cells(
+                            &mut writer,
+                            &mut row_pending,
+                            Some(column),
+                            &row_cell_name,
+                            &mut seen,
+                        )?;
+                        row_pending.remove(&column);
+                    }
+                }
                 if let Some(text) = replacements.get(&reference) {
                     write_inline_cell(&mut writer, start, text)?;
                     seen.insert(reference);
@@ -4520,12 +4586,35 @@ fn rewrite_worksheet(
             }
             Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "c" => {
                 let reference = attribute(empty, "r").unwrap_or_default();
+                if let Some((row, column)) = cell_coordinates(&reference) {
+                    if active_row == Some(row) {
+                        flush_new_xlsx_cells(
+                            &mut writer,
+                            &mut row_pending,
+                            Some(column),
+                            &row_cell_name,
+                            &mut seen,
+                        )?;
+                        row_pending.remove(&column);
+                    }
+                }
                 if let Some(text) = replacements.get(&reference) {
                     write_inline_cell(&mut writer, empty, text)?;
                     seen.insert(reference);
                 } else {
                     writer.write_event(event.into_owned())?;
                 }
+            }
+            Event::End(ref end) if local_name(end.name().as_ref()) == "row" => {
+                flush_new_xlsx_cells(
+                    &mut writer,
+                    &mut row_pending,
+                    None,
+                    &row_cell_name,
+                    &mut seen,
+                )?;
+                active_row = None;
+                writer.write_event(event.into_owned())?;
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "sheetData" => {
                 sheet_data_seen = true;
@@ -4565,6 +4654,34 @@ fn rewrite_worksheet(
     Ok(())
 }
 
+fn qualified_child_name(parent: &[u8], child: &str) -> String {
+    let parent = String::from_utf8_lossy(parent);
+    parent.split_once(':').map_or_else(
+        || child.to_string(),
+        |(prefix, _)| format!("{prefix}:{child}"),
+    )
+}
+
+fn flush_new_xlsx_cells(
+    writer: &mut Writer<impl Write>,
+    pending: &mut BTreeMap<u32, (String, String)>,
+    before_column: Option<u32>,
+    cell_name: &str,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), HcdError> {
+    while let Some((&column, _)) = pending.first_key_value() {
+        if before_column.is_some_and(|before| column >= before) {
+            break;
+        }
+        let (_, (reference, text)) = pending.pop_first().expect("first key exists");
+        let mut cell = BytesStart::new(cell_name);
+        cell.push_attribute(("r", reference.as_str()));
+        write_inline_cell(writer, &cell, &text)?;
+        seen.insert(reference);
+    }
+    Ok(())
+}
+
 fn write_inline_cell(
     writer: &mut Writer<impl Write>,
     original: &BytesStart<'_>,
@@ -4587,8 +4704,10 @@ fn write_inline_cell(
     }
     start.push_attribute(("t", "inlineStr"));
     writer.write_event(Event::Start(start))?;
-    writer.write_event(Event::Start(BytesStart::new("is")))?;
-    let mut text_start = BytesStart::new("t");
+    let is_name = qualified_child_name(original.name().as_ref(), "is");
+    let text_name = qualified_child_name(original.name().as_ref(), "t");
+    writer.write_event(Event::Start(BytesStart::new(is_name.as_str())))?;
+    let mut text_start = BytesStart::new(text_name.as_str());
     if text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace) {
         text_start.push_attribute(("xml:space", "preserve"));
     }
@@ -4596,8 +4715,8 @@ fn write_inline_cell(
     if !text.is_empty() {
         writer.write_event(Event::Text(BytesText::new(text)))?;
     }
-    writer.write_event(Event::End(BytesEnd::new("t")))?;
-    writer.write_event(Event::End(BytesEnd::new("is")))?;
+    writer.write_event(Event::End(BytesEnd::new(text_name.as_str())))?;
+    writer.write_event(Event::End(BytesEnd::new(is_name.as_str())))?;
     writer.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
         original.name().as_ref(),
     ))))?;
@@ -5090,6 +5209,157 @@ mod tests {
         assert!(worksheet.contains("mergeCell ref=\"A1:B2\""));
         assert!(worksheet.contains("Anchor"));
         assert!(worksheet.contains("Other"));
+    }
+
+    #[test]
+    fn first_edit_of_sparse_cell_creates_stable_node_and_source_cell() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("sparse.xlsx");
+        let bundle_path = temp.path().join("sparse.hcd");
+        let exported = temp.path().join("edited.xlsx");
+        create_merge_edit_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sparse-cell-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_7.to_string(),
+            document_id: "sparse-cell-doc".to_string(),
+            patch_id: "add-b1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id: sheet_id.clone(),
+                row: 1,
+                column: 2,
+                text: "Added & safe".to_string(),
+            }],
+            metadata: BTreeMap::new(),
+        };
+        let mut occupied = patch.clone();
+        occupied.patch_id = "overwrite-d1".to_string();
+        if let PatchOperation::XlsxCellSet { column, .. } = &mut occupied.operations[0] {
+            *column = 4;
+        }
+        assert!(hcd_core::apply_patch(&bundle, &occupied, 0).is_err());
+        let result = hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 1).unwrap().revision,
+            1
+        );
+        let mut stale = patch.clone();
+        stale.patch_id = "add-c1-stale".to_string();
+        if let PatchOperation::XlsxCellSet { column, .. } = &mut stale.operations[0] {
+            *column = 3;
+        }
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("current head"));
+        let inserted = extract_text_page(&bundle, None, 10)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("B1"))
+            .unwrap();
+        assert_eq!(inserted.text, "Added & safe");
+        assert_eq!(result.dirty_node_ids, vec![inserted.node_id.clone()]);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let historical =
+            hcd_core::manifest_at_revision(&bundle, &bundle.manifest().unwrap(), Some(0))
+                .unwrap()
+                .0;
+        let old_html = bundle
+            .read_chunk(&bundle.read_index_page(&historical, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(!old_html.contains(&inserted.node_id));
+        let update = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.to_string(),
+            patch_id: "edit-b1".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::TextSplice {
+                node_id: inserted.node_id.clone(),
+                start: 0,
+                delete_count: inserted.text.chars().count(),
+                insert_text: "Updated".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: inserted.node_hash,
+                },
+            }],
+            ..patch.clone()
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &update, 1).unwrap().revision,
+            2
+        );
+        let tail = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_7.to_string(),
+            patch_id: "add-g1-tail".to_string(),
+            base_revision: 2,
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id,
+                row: 1,
+                column: 7,
+                text: "Tail".to_string(),
+            }],
+            ..patch
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &tail, 2).unwrap().revision,
+            3
+        );
+        let head = bundle.manifest().unwrap();
+        let html = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(html.contains("data-hcd-column=\"5\"></td>"));
+        assert!(html.contains("data-hcd-column=\"6\"></td>"));
+        assert!(html.contains("data-hcd-cell=\"G1\""));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(worksheet.contains("r=\"B1\" t=\"inlineStr\""));
+        assert!(worksheet.contains("<t>Updated</t>"));
+        assert!(worksheet.contains("r=\"G1\" t=\"inlineStr\""));
+        assert!(worksheet.contains("<t>Tail</t>"));
+        assert!(worksheet.contains("Other"));
+    }
+
+    #[test]
+    fn worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows() {
+        let source = br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>Original</x:t></x:is></x:c><x:c r="B1" s="3"/><x:c r="D1" t="inlineStr"><x:is><x:t>Right</x:t></x:is></x:c></x:row><x:row r="2"/></x:sheetData></x:worksheet>"#;
+        let replacements = BTreeMap::from([
+            ("B1".to_string(), "Styled".to_string()),
+            ("C1".to_string(), "Inserted".to_string()),
+            ("A2".to_string(), "New row value".to_string()),
+        ]);
+        let mut output = Vec::new();
+        rewrite_worksheet(
+            &mut source.as_slice(),
+            &mut output,
+            &replacements,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(xml.contains(
+            "<x:c r=\"B1\" s=\"3\" t=\"inlineStr\"><x:is><x:t>Styled</x:t></x:is></x:c>"
+        ));
+        assert!(
+            xml.contains("<x:c r=\"C1\" t=\"inlineStr\"><x:is><x:t>Inserted</x:t></x:is></x:c>")
+        );
+        assert!(xml.contains("<x:row r=\"2\"><x:c r=\"A2\" t=\"inlineStr\"><x:is><x:t>New row value</x:t></x:is></x:c></x:row>"));
     }
 
     #[test]
