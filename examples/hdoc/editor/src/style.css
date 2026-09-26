@@ -65,6 +65,13 @@
 .hcd-surface .hcd-context-menu{position:fixed;z-index:1000;width:204px;padding:5px;background:#fff;border:1px solid #d9e3db;box-shadow:0 14px 40px #19392a2b;border-radius:10px;display:grid}
 .hcd-surface .hcd-context-menu button{border:0;text-align:left;padding:7px 10px;font-size:13px}
 .hcd-surface .hcd-context-menu button.separated{border-top:1px solid #e9eee9;border-radius:0;margin-top:3px;padding-top:9px}
+.hcd-surface .hcd-dialog-backdrop{position:fixed;inset:0;z-index:1100;background:#122d2080;display:grid;place-items:center;padding:20px}
+.hcd-surface .hcd-dialog{width:min(430px,100%);padding:24px;background:#fff;border-radius:14px;box-shadow:0 22px 70px #10281b55}
+.hcd-surface .hcd-dialog h2{margin:0 0 18px;font-size:18px}
+.hcd-surface .hcd-dialog label{display:grid;gap:8px;font-size:13px;font-weight:600}
+.hcd-surface .hcd-dialog input{width:100%;padding:10px;border:1px solid #cfd9d1;border-radius:8px;outline:none}
+.hcd-surface .hcd-dialog input:focus{border-color:#318463;box-shadow:0 0 0 3px #31846325}
+.hcd-surface .hcd-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
 .hcd-surface .collaboration-carets__caret{border-left:2px solid;position:relative;margin-left:-1px;margin-right:-1px;pointer-events:none}
 .hcd-surface .collaboration-carets__label{position:absolute;top:-1.75em;left:-2px;white-space:nowrap;border-radius:4px 4px 4px 0;color:#fff;font:600 11px/1.2 Inter,sans-serif;padding:3px 6px;user-select:none}
 .hcd-surface.hcd-embedded{min-height:0;height:100%;overflow:hidden}

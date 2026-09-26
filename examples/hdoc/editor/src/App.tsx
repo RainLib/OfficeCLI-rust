@@ -58,7 +58,9 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [nextBefore, setNextBefore] = useState<number | null | undefined>(undefined)
   const [historical, setHistorical] = useState<Projection | null>(null)
   const [error, setError] = useState('')
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null)
+  const [linkOpen, setLinkOpen] = useState(false)
+  const [linkHref, setLinkHref] = useState('')
   const [presence, setPresence] = useState<Array<{ name: string; color: string }>>([])
   const lastSemantic = useRef<string | null>(null)
   const localUser = useMemo(() => {
@@ -212,8 +214,24 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     })
     if (range) editor.chain().focus().deleteRange(range).run()
   }
+  function openLink() {
+    if (!editor || readOnly) return
+    setLinkHref(String(editor.getAttributes('link').href || ''))
+    setLinkOpen(true)
+  }
+  function applyLink() {
+    if (!editor || readOnly) return
+    const value = linkHref.trim()
+    try {
+      const url = new URL(value)
+      if (!['http:', 'https:', 'mailto:'].includes(url.protocol) || value.length > 2048) throw new Error('链接只支持 http、https 或 mailto，且不能超过 2048 个字符')
+      editor.chain().focus().extendMarkRange('link').setLink({ href: url.href }).run()
+      setLinkOpen(false)
+      setError('')
+    } catch (cause) { setError(cause instanceof TypeError ? '请输入完整的 http、https 或 mailto 链接' : String(cause)) }
+  }
   const actions: MenuAction[] = [
-    { label: '复制选中内容', action: () => { if (editor) void navigator.clipboard.writeText(editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, '\n')) } },
+    { label: '复制选中内容', action: () => { if (editor) void navigator.clipboard.writeText(menu?.selectedText || editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, '\n')).catch(cause => setError(String(cause))) } },
     { label: '粘贴文本', disabled: readOnly, action: () => { if (editor) void navigator.clipboard.readText().then(text => editor.chain().focus().insertContent(text).run()).catch(cause => setError(String(cause))) } },
     { label: '新增段落', disabled: readOnly, separated: true, action: () => editor?.chain().focus().insertContent({ type: 'paragraph', content: [{ type: 'text', text: '新段落' }] }).run() },
     { label: '删除段落', disabled: readOnly, action: deleteCurrentBlock },
@@ -221,8 +239,12 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     { label: '设为列表', disabled: readOnly, action: () => editor?.chain().focus().toggleBulletList().run() },
     { label: '加粗', disabled: readOnly, separated: true, action: () => editor?.chain().focus().toggleBold().run() },
     { label: '斜体', disabled: readOnly, action: () => editor?.chain().focus().toggleItalic().run() },
+    { label: '设置链接', disabled: readOnly, action: openLink },
+    { label: '移除链接', disabled: readOnly || !editor?.isActive('link'), action: () => editor?.chain().focus().extendMarkRange('link').unsetLink().run() },
     { label: '上移段落', disabled: readOnly, separated: true, action: () => moveBlock(-1) },
     { label: '下移段落', disabled: readOnly, action: () => moveBlock(1) },
+    { label: '撤销', disabled: readOnly || !editor?.can().undo(), separated: true, action: () => editor?.chain().focus().undo().run() },
+    { label: '重做', disabled: readOnly || !editor?.can().redo(), action: () => editor?.chain().focus().redo().run() },
   ]
   return <div className={`workspace ${embedded ? 'embedded' : ''}`}>
     <header>
@@ -234,19 +256,25 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     </header>
     <nav className="toolbar" aria-label="编辑工具栏">
       <div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly}>加粗</button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly}>斜体</button></div>
+      <div className="tool-group"><button onClick={openLink} disabled={readOnly}>链接</button><button onClick={() => editor?.chain().focus().extendMarkRange('link').unsetLink().run()} disabled={readOnly || !editor?.isActive('link')}>移除链接</button></div>
       <div className="tool-group"><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}>标题</button><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}>列表</button></div>
       <div className="tool-group"><button onClick={() => editor?.chain().focus().insertContent({ type: 'paragraph', content: [{ type: 'text', text: '新段落' }] }).run()} disabled={readOnly}>新增段落</button><button onClick={deleteCurrentBlock} disabled={readOnly}>删除段落</button><button onClick={() => moveBlock(-1)} disabled={readOnly}>上移</button><button onClick={() => moveBlock(1)} disabled={readOnly}>下移</button></div>
+      <div className="tool-group"><button onClick={() => editor?.chain().focus().undo().run()} disabled={readOnly || !editor?.can().undo()}>撤销</button><button onClick={() => editor?.chain().focus().redo().run()} disabled={readOnly || !editor?.can().redo()}>重做</button></div>
       <button className="primary" onClick={() => void save()} disabled={readOnly}>保存点</button>
       <label className="mode"><input type="checkbox" checked={readOnly} disabled={session.scope === 'read'} onChange={event => setReadOnly(event.target.checked)} />只读</label>
     </nav>
     <div className="layout">
       <main className="document" onContextMenu={event => {
         event.preventDefault()
+        const selection = window.getSelection()
+        const selectedAtPoint = selection && selection.rangeCount > 0 && Array.from(selection.getRangeAt(0).getClientRects()).some(rect =>
+          event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom)
+        const selectedText = selectedAtPoint ? selection?.toString() || '' : ''
         if (editor) {
           const point = editor.view.posAtCoords({ left: event.clientX, top: event.clientY })
-          if (point) editor.commands.setTextSelection(point.pos)
+          if (point && !selectedText) editor.commands.setTextSelection(point.pos)
         }
-        setMenu({ x: event.clientX, y: event.clientY })
+        setMenu({ x: event.clientX, y: event.clientY, selectedText })
       }}><EditorContent editor={editor} /></main>
       <aside><h2>修订历史</h2><p>结构编辑后导出 DOCX 将重建语义版式。</p>
         <div className="history">{history.slice().reverse().map(item => <button key={item.revision} onClick={() => void showRevision(item.revision)}><strong>r{item.revision}</strong><span>{item.patchId || '导入'}</span></button>)}
@@ -256,6 +284,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       </aside>
     </div>
     {menu && <ContextMenu x={menu.x} y={menu.y} actions={actions} onClose={() => setMenu(null)} />}
+    {linkOpen && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setLinkOpen(false) }}><div className="hcd-dialog" role="dialog" aria-modal="true" aria-label="设置链接"><h2>设置链接</h2><label>链接地址<input autoFocus type="url" value={linkHref} onChange={event => setLinkHref(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyLink(); if (event.key === 'Escape') setLinkOpen(false) }} placeholder="https://example.com" /></label><div className="hcd-dialog-actions"><button onClick={() => setLinkOpen(false)}>取消</button><button className="primary" onClick={applyLink}>应用链接</button></div></div></div>}
     {error && <div className="toast error">{error}</div>}
   </div>
 }
