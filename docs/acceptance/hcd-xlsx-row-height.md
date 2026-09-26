@@ -84,4 +84,4 @@ HCD_API_TARGET=http://127.0.0.1:8786 npm run dev -- --port 8787
 | --- | --- |
 | ![默认行高](../assets/hcd/xlsx-row-height-before.png) | ![第 8 行设为 60 磅](../assets/hcd/xlsx-row-height-after.png) |
 
-**导出边界：** 固定行高应使用 source-backed XLSX 导出。`--to xlsx` 无源语义导出目前不保留行高，保真级别为 `SEMANTIC`。公式、图形和冻结窗格的行列移动限制仍适用。
+**导出边界：** source-backed XLSX 保留原工作簿结构；无源语义导出现在也保留 HCD 中显式设置的行高，但仍将工作表扁平化，保真级别为 `SEMANTIC`。公式、图形和冻结窗格的行列移动限制仍适用。
