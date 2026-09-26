@@ -11,8 +11,8 @@ use crate::{
     NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
     TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2,
     HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
-    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, MAX_CONTROL_PART_BYTES,
-    MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -84,6 +84,13 @@ struct XlsxRowAppend {
     after_row: u32,
 }
 
+#[derive(Clone)]
+struct XlsxColumnWidth {
+    sheet_id: String,
+    column: u32,
+    width_chars: f64,
+}
+
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
@@ -118,6 +125,7 @@ pub fn apply_patch(
                 PatchOperation::PdfTextInsert { .. }
                     | PatchOperation::XlsxCellSet { .. }
                     | PatchOperation::XlsxRowAppend { .. }
+                    | PatchOperation::XlsxColumnWidth { .. }
             )
         })
     {
@@ -153,9 +161,14 @@ pub fn apply_patch(
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch);
     let xlsx_row_append = collect_xlsx_row_append(patch);
+    let xlsx_column_width = collect_xlsx_column_width(patch);
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
+        .transpose()?;
+    let xlsx_width_part = xlsx_column_width
+        .as_ref()
+        .map(|width| find_xlsx_sheet_part(bundle, &manifest, &width.sheet_id))
         .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
@@ -183,7 +196,8 @@ pub fn apply_patch(
         || !pdf_insertions.is_empty()
         || !xlsx_merges.is_empty()
         || xlsx_cell_set.is_some()
-        || xlsx_row_append.is_some();
+        || xlsx_row_append.is_some()
+        || xlsx_column_width.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -196,6 +210,7 @@ pub fn apply_patch(
     let mut dirty_grid_parts = BTreeSet::new();
     let mut inserted_xlsx_cell_node_id = None;
     let mut appended_xlsx_row = false;
+    let mut changed_xlsx_column = false;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -230,6 +245,11 @@ pub fn apply_patch(
         for descriptor in &mut page.chunks {
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
             let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
+            let width_here = xlsx_column_width.as_ref().filter(|width| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == width.sheet_id
+                })
+            });
             let cell_insertion = xlsx_cell_set.as_ref().filter(|insertion| {
                 descriptor.grid.as_ref().is_some_and(|grid| {
                     grid.kind == crate::GridChunkKind::Cells
@@ -250,6 +270,7 @@ pub fn apply_patch(
                 && insertions.is_none()
                 && cell_insertion.is_none()
                 && !append_here
+                && width_here.is_none()
             {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
@@ -533,6 +554,22 @@ pub fn apply_patch(
                 appended_xlsx_row = true;
                 chunk_changed = true;
             }
+            if let Some(width) = width_here {
+                set_xlsx_column_width(&mut html, width.column, width.width_chars)?;
+                let grid = descriptor
+                    .grid
+                    .as_mut()
+                    .expect("validated column width target");
+                grid.column_end = Some(grid.column_end.unwrap_or(0).max(width.column));
+                dirty_grid_parts.insert(
+                    xlsx_width_part
+                        .as_ref()
+                        .expect("resolved sheet part")
+                        .clone(),
+                );
+                changed_xlsx_column = true;
+                chunk_changed = true;
+            }
 
             if chunk_changed {
                 page_changed = true;
@@ -588,6 +625,11 @@ pub fn apply_patch(
     if xlsx_row_append.is_some() && !appended_xlsx_row {
         return Err(HcdError::InvalidBundle(
             "XLSX row append target disappeared".to_string(),
+        ));
+    }
+    if xlsx_column_width.is_some() && !changed_xlsx_column {
+        return Err(HcdError::InvalidBundle(
+            "XLSX column width target disappeared".to_string(),
         ));
     }
 
@@ -950,6 +992,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_6
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_7
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_8
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_9
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1070,6 +1113,7 @@ fn validate_patch_identity(
                     HCD_PATCH_SCHEMA_VERSION_6
                         | HCD_PATCH_SCHEMA_VERSION_7
                         | HCD_PATCH_SCHEMA_VERSION_8
+                        | HCD_PATCH_SCHEMA_VERSION_9
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1112,7 +1156,9 @@ fn validate_patch_identity(
             } => {
                 if !matches!(
                     patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_7 | HCD_PATCH_SCHEMA_VERSION_8
+                    HCD_PATCH_SCHEMA_VERSION_7
+                        | HCD_PATCH_SCHEMA_VERSION_8
+                        | HCD_PATCH_SCHEMA_VERSION_9
                 ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
@@ -1144,8 +1190,10 @@ fn validate_patch_identity(
                 sheet_id,
                 after_row,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_8
-                    || manifest.source.format != "xlsx"
+                if !matches!(
+                    patch.schema_version.as_str(),
+                    HCD_PATCH_SCHEMA_VERSION_8 | HCD_PATCH_SCHEMA_VERSION_9
+                ) || manifest.source.format != "xlsx"
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1162,6 +1210,34 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "XLSX row append has an invalid sheet or last row".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::XlsxColumnWidth {
+                sheet_id,
+                column,
+                width_chars,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_9
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.column.width requires one operation on an XLSX bundle with hcd-patch/9".to_string(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    || !(1..=16_384).contains(column)
+                    || !width_chars.is_finite()
+                    || !(1.0..=255.0).contains(width_chars)
+                    || ((width_chars * 100.0).round() - width_chars * 100.0).abs() > 1e-7
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX column width target or value".to_string(),
                     ));
                 }
             }
@@ -1488,6 +1564,133 @@ fn collect_xlsx_row_append(patch: &PatchBatch) -> Option<XlsxRowAppend> {
             after_row: *after_row,
         })
     })
+}
+
+fn collect_xlsx_column_width(patch: &PatchBatch) -> Option<XlsxColumnWidth> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxColumnWidth {
+            sheet_id,
+            column,
+            width_chars,
+        } = operation
+        else {
+            return None;
+        };
+        Some(XlsxColumnWidth {
+            sheet_id: sheet_id.clone(),
+            column: *column,
+            width_chars: *width_chars,
+        })
+    })
+}
+
+fn find_xlsx_sheet_part(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    sheet_id: &str,
+) -> Result<String, HcdError> {
+    let mut found_sheet = false;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != crate::GridChunkKind::Cells || grid.sheet_id != sheet_id {
+                continue;
+            }
+            found_sheet = true;
+            if let Some(part) = bundle
+                .read_map(&descriptor)?
+                .entries
+                .iter()
+                .find(|entry| entry.source.node_kind == "cell")
+                .map(|entry| entry.source.part.clone())
+            {
+                return Ok(part);
+            }
+        }
+    }
+    Err(HcdError::Unsupported(if found_sheet {
+        "XLSX column width requires a worksheet with a mapped cell".to_string()
+    } else {
+        "XLSX worksheet is not in the HCD grid".to_string()
+    }))
+}
+
+fn hcd_column_tag(start: u32, end: u32, width: Option<f64>, hidden: bool, edited: bool) -> String {
+    let mut tag = format!(
+        "<col span=\"{}\" data-hcd-column-start=\"{start}\" data-hcd-column-end=\"{end}\"",
+        end - start + 1
+    );
+    if let Some(width) = width {
+        tag.push_str(&format!(" data-hcd-width=\"{width:.2}\""));
+    }
+    if edited {
+        tag.push_str(" data-hcd-width-edited=\"true\"");
+    }
+    if hidden {
+        tag.push_str(" data-hcd-hidden=\"true\" style=\"display:none\"");
+    } else if let Some(width) = width {
+        tag.push_str(&format!(" style=\"width:{:.2}px\"", width * 7.5));
+    }
+    tag.push_str("/>");
+    tag
+}
+
+fn set_xlsx_column_width(html: &mut String, column: u32, width: f64) -> Result<(), HcdError> {
+    let group_start = html.find("<colgroup>").ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX grid is missing its column group".to_string())
+    })?;
+    let group_end = html[group_start..]
+        .find("</colgroup>")
+        .map(|offset| group_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX column group is not closed".to_string()))?;
+    let mut cursor = group_start + "<colgroup>".len();
+    let mut insert_at = group_end;
+    while let Some(offset) = html[cursor..group_end].find("<col ") {
+        let tag_start = cursor + offset;
+        let tag_end = html[tag_start..group_end]
+            .find("/>")
+            .map(|offset| tag_start + offset + 2)
+            .ok_or_else(|| HcdError::InvalidBundle("XLSX column tag is not closed".to_string()))?;
+        let tag = &html[tag_start..tag_end];
+        let start = xlsx_attribute(tag, "data-hcd-column-start")
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| HcdError::InvalidBundle("XLSX column start is invalid".to_string()))?;
+        let end = xlsx_attribute(tag, "data-hcd-column-end")
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| HcdError::InvalidBundle("XLSX column end is invalid".to_string()))?;
+        if start == 0 || end < start || end > 16_384 {
+            return Err(HcdError::InvalidBundle(
+                "XLSX column range is invalid".to_string(),
+            ));
+        }
+        if column < start {
+            insert_at = tag_start;
+            break;
+        }
+        if column <= end {
+            let old_width =
+                xlsx_attribute(tag, "data-hcd-width").and_then(|value| value.parse().ok());
+            let hidden = xlsx_attribute(tag, "data-hcd-hidden") == Some("true");
+            let mut replacement = String::new();
+            if start < column {
+                replacement.push_str(&hcd_column_tag(start, column - 1, old_width, hidden, false));
+            }
+            replacement.push_str(&hcd_column_tag(column, column, Some(width), hidden, true));
+            if column < end {
+                replacement.push_str(&hcd_column_tag(column + 1, end, old_width, hidden, false));
+            }
+            html.replace_range(tag_start..tag_end, &replacement);
+            return Ok(());
+        }
+        cursor = tag_end;
+    }
+    html.insert_str(
+        insert_at,
+        &hcd_column_tag(column, column, Some(width), false, true),
+    );
+    Ok(())
 }
 
 fn find_xlsx_row_tail(
@@ -2538,6 +2741,7 @@ fn apply_annotations(
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxCellSet { .. }
             | PatchOperation::XlsxRowAppend { .. }
+            | PatchOperation::XlsxColumnWidth { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}
