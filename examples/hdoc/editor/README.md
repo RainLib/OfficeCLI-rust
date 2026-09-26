@@ -64,6 +64,8 @@ PDF editing mounts Tiptap inside the selected canonical page text element in the
 
 PPTX uses the same in-frame text editing, keeping the shape's font and color at its slide position. The slide outline opens by default with its own visibility preference, and unloaded slides reserve the measured slide height instead of a generic page height. The reference screenshot is `docs/screenshots/hcd-pptx-direct-slide-edit.jpg`.
 
+The XLSX canvas keeps its Univer cell editor and now uses the same fixed document header, view controls, appearance panel, export control, and status bar as the other formats. Double-click an existing cell or press F2 to edit its content. The reference screenshot is `docs/screenshots/hcd-xlsx-unified-chrome.jpg`.
+
 For PDF, **插入 → 新增文字框** places a plain-text box on the original page. Type in place, save, then click the box again to edit it. The `hcd-patch/5` `pdf.text.insert` operation assigns a stable node ID and records page coordinates; PDF export draws the box at those coordinates. The rendered fixture export is at `docs/screenshots/hcd-pdf-text-insert-export.png`. This operation adds text to an existing page; it does not add a PDF page. Lines and tables in a raster-backed PDF remain page artwork rather than editable table cells, so PDF cell merging is not supported by this operation.
 
 ## Storage and save flow

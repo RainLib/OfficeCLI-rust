@@ -6,7 +6,8 @@ import { UniverSheetsDrawingPreset } from '@univerjs/preset-sheets-drawing'
 import { HcdUniverAdapter, type HcdPatchEventDetail } from '../../xlsx-univer-viewer/src/adapter.ts'
 import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
-import { ExportControl } from './ExportControl.tsx'
+import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { api, type Session } from './api.ts'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
@@ -16,7 +17,14 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [revision, setRevision] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState(session.scope === 'write')
+  const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout('xlsx'))
+  const [activeTab, setActiveTab] = useState<EditorTab>('home')
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const host = useRef<HTMLDivElement>(null)
+  useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
+  function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
+    setLayout(previous => ({ ...previous, [key]: value }))
+  }
 
   useEffect(() => {
     let alive = true
@@ -54,7 +62,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         locale: LocaleType.ZH_CN, locales: { [LocaleType.ZH_CN]: zhCN }, theme: defaultTheme,
         presets: [UniverSheetsCorePreset({
           container: host.current,
-          header: false, toolbar: false, formulaBar: false, contextMenu: false,
+          header: false, toolbar: false, formulaBar: true, contextMenu: false,
           footer: { sheetBar: true, statisticBar: false, menus: false, zoomSlider: true,
             addSheetButtonConfig: { show: false } },
         }), UniverSheetsDrawingPreset()],
@@ -101,11 +109,21 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     return () => { alive = false; removePatchListener?.(); disposeUniver?.(); client.dispose() }
   }, [session, editing])
 
-  return <div className={`workspace ${embedded ? 'embedded' : ''}`}>
-    <header><div><span className="eyebrow">OfficeCLI / HCD / XLSX</span><h1>工作簿编辑器</h1><small>{status}</small></div>
-      <div className="header-actions"><ExportControl session={session} revision={revision} /><button className="ghost" onClick={onClose}>关闭</button></div></header>
-    <div className="viewer-controls"><span>Univer Canvas · {editing ? '可编辑' : '只读'} · 仅现有单元格内容</span><span>按工作表与可见行窗口加载</span>{session.scope === 'write' && <label><input type="checkbox" checked={!editing} onChange={event => setEditing(!event.target.checked)} />只读模式</label>}</div>
-    <div ref={host} className="hcd-univer-host" />
+  const headerStatus = error ? '保存失败' : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
+  return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
+    {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
+      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} settingsOpen={settingsOpen} />}
+    {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
+    {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
+      {activeTab === 'home' && <><span className="ribbon-note">双击单元格或按 F2 编辑 · 支持现有单元格内容</span><span className="ribbon-note">{status}</span></>}
+      {activeTab === 'insert' && <span className="ribbon-note">当前工作簿支持编辑已有单元格；插入行列与合并单元格尚未接入 HCD 修订。</span>}
+      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
+      {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
+    </nav>}
+    <div className="univer-editor-area"><div ref={host} className="hcd-univer-host" />
+      {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
+    </div>
+    <EditorStatusbar mode="工作簿视图" format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
     {error && <div className="toast error">{error}</div>}
   </div>
 }
