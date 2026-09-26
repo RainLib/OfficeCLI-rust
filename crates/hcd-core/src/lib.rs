@@ -10,6 +10,7 @@ mod stats;
 mod structure;
 mod types;
 mod validate;
+mod xlsx_formula;
 
 pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
 pub use error::HcdError;
@@ -37,6 +38,7 @@ pub use structure::{
 };
 pub use types::*;
 pub use validate::validate_bundle;
+pub use xlsx_formula::{delete_formula_references, FormulaDeletion};
 
 pub const HCD_SCHEMA_VERSION: &str = "hcd/2";
 pub const HCD_SCHEMA_VERSION_1: &str = "hcd/1";
