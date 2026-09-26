@@ -47,22 +47,59 @@ export function App() {
   const [token, setToken] = useState(sessionStorage.getItem('hcd-token') || '')
   const [session, setSession] = useState<Session | null>(null)
   const [error, setError] = useState('')
-  async function open() {
+  const [samples, setSamples] = useState<Array<{ id: string; title: string; format: string; mode: string }>>([])
+  const [openingSample, setOpeningSample] = useState<string | null>(null)
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    let active = true
+    fetch('/__hcd_demo/documents').then(response => response.ok ? response.json() : [])
+      .then((available: typeof samples) => { if (active) setSamples(available) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [])
+  async function open(id: string, accessToken: string, remember = true) {
     setError('')
     try {
-      const draft: Session = { documentId: documentId.trim(), token: token.trim(), scope: 'read', format: '' }
+      const draft: Session = { documentId: id.trim(), token: accessToken.trim(), scope: 'read', format: '' }
       const [auth, manifest] = await Promise.all([api(draft, '/auth'), api(draft, '')])
       const access = await auth.json() as { scope: 'read' | 'write'; userId?: string; displayName?: string; collaborationEpoch: number }
       const metadata = await manifest.json() as { source: { format: string } }
-      sessionStorage.setItem('hcd-document', draft.documentId)
-      sessionStorage.setItem('hcd-token', draft.token)
+      if (remember) {
+        sessionStorage.setItem('hcd-document', draft.documentId)
+        sessionStorage.setItem('hcd-token', draft.token)
+      }
       setSession({ ...draft, scope: access.scope, format: metadata.source.format,
         userId: access.userId || undefined, displayName: access.displayName || undefined,
         collaborationEpoch: access.collaborationEpoch })
     } catch (cause) { setError(String(cause)) }
   }
+  async function openSample(id: string) {
+    setOpeningSample(id)
+    setError('')
+    try {
+      const response = await fetch(`/__hcd_demo/session/${encodeURIComponent(id)}`, { method: 'POST' })
+      if (!response.ok) throw new Error(`无法打开验收文档：${response.status}`)
+      const sample = await response.json() as { documentId: string; token: string }
+      sessionStorage.removeItem('hcd-document')
+      sessionStorage.removeItem('hcd-token')
+      setDocumentId('')
+      setToken('')
+      await open(sample.documentId, sample.token, false)
+    } catch (cause) { setError(String(cause)) }
+    finally { setOpeningSample(null) }
+  }
   if (session) return <div className="hcd-surface"><Workspace key={`${session.documentId}:${session.collaborationEpoch ?? 0}`} session={session} onClose={() => setSession(null)} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} /></div>
-  return <div className="hcd-surface"><main className="login"><div className="login-card"><div className="eyebrow">OfficeCLI / HCD</div><h1>文档编辑工作台</h1><p>输入文档 ID 和短期访问令牌。只读令牌无法提交修改。</p><label>文档 ID<input value={documentId} onChange={event => setDocumentId(event.target.value)} placeholder="doc-…" /></label><label>访问令牌<textarea rows={4} value={token} onChange={event => setToken(event.target.value)} placeholder="粘贴短期令牌" /></label><button onClick={() => void open()} disabled={!documentId || !token}>打开文档</button>{error && <p className="error">{error}</p>}</div></main></div>
+  return <div className="hcd-surface"><main className="login"><div className={`login-card ${samples.length ? 'login-card-with-samples' : ''}`}>
+    <div className="eyebrow">OfficeCLI / HCD</div><h1>文档编辑工作台</h1>
+    {samples.length > 0 && <section className="acceptance-samples" aria-label="本地验收文档">
+      <p>选择真实文件验收预览、编辑、修订与下载。</p>
+      <div className="acceptance-grid">{samples.map(sample => <button key={sample.id} onClick={() => void openSample(sample.id)} disabled={openingSample !== null}>
+        <span className="sample-format">{sample.format}</span><strong>{sample.title}</strong><small>{sample.mode}</small><span className="sample-open">{openingSample === sample.id ? '打开中…' : '打开文档 →'}</span>
+      </button>)}</div>
+    </section>}
+    <section className="manual-access"><p>输入文档 ID 和短期访问令牌。只读令牌无法提交修改。</p><label>文档 ID<input value={documentId} onChange={event => setDocumentId(event.target.value)} placeholder="doc-…" /></label><label>访问令牌<textarea rows={4} value={token} onChange={event => setToken(event.target.value)} placeholder="粘贴短期令牌" /></label><button onClick={() => void open(documentId, token)} disabled={!documentId || !token}>打开文档</button></section>
+    {error && <p className="error">{error}</p>}
+  </div></main></div>
 }
 
 export function Workspace({ session, onClose, onEpochChange, embedded = false }: { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded?: boolean }) {
