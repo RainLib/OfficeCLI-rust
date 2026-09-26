@@ -14,9 +14,10 @@ use crate::{
     HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
     HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
     HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
-    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
-    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
-    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
+    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
+    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
+    MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -231,8 +232,8 @@ pub fn apply_patch(
     let pptx_geometry = collect_pptx_geometry(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
-    let xlsx_cell_set = collect_xlsx_cell_set(patch);
-    let shifted_grid = if xlsx_cell_set.is_some() {
+    let xlsx_cell_set = collect_xlsx_cell_set(patch)?;
+    let shifted_grid = if !xlsx_cell_set.is_empty() {
         (1..=manifest.revision).try_fold(false, |found, revision| {
             let record = bundle.revision(revision)?;
             Ok::<_, HcdError>(
@@ -316,7 +317,7 @@ pub fn apply_patch(
         || !pptx_geometry.is_empty()
         || !xlsx_merges.is_empty()
         || !xlsx_unmerges.is_empty()
-        || xlsx_cell_set.is_some()
+        || !xlsx_cell_set.is_empty()
         || xlsx_row_append.is_some()
         || xlsx_row_insert.is_some()
         || xlsx_row_delete.is_some()
@@ -335,7 +336,7 @@ pub fn apply_patch(
     let mut dirty_chunks = BTreeSet::new();
     let mut dirty_parts = BTreeSet::new();
     let mut dirty_grid_parts = BTreeSet::new();
-    let mut inserted_xlsx_cell_node_id = None;
+    let mut inserted_xlsx_cells = HashSet::new();
     let mut appended_xlsx_row = false;
     let mut inserted_xlsx_row = false;
     let mut deleted_xlsx_row = false;
@@ -432,25 +433,31 @@ pub fn apply_patch(
                         && grid.row_end.is_some_and(|end| u64::from(height.row) <= end)
                 })
             });
-            let cell_insertion = xlsx_cell_set.as_ref().filter(|insertion| {
-                descriptor.grid.as_ref().is_some_and(|grid| {
-                    grid.kind == crate::GridChunkKind::Cells
-                        && grid.sheet_id == insertion.sheet_id
-                        && grid
-                            .row_start
-                            .is_some_and(|start| u64::from(insertion.row) >= start)
-                        && grid
-                            .row_end
-                            .is_some_and(|end| u64::from(insertion.row) <= end)
+            let cell_insertions: Vec<&XlsxCellInsertion> = descriptor
+                .grid
+                .as_ref()
+                .filter(|grid| grid.kind == crate::GridChunkKind::Cells)
+                .and_then(|grid| {
+                    Some((
+                        grid.sheet_id.clone(),
+                        u32::try_from(grid.row_start?).ok()?,
+                        u32::try_from(grid.row_end?).ok()?,
+                    ))
                 })
-            });
+                .map(|(sheet_id, start, end)| {
+                    xlsx_cell_set
+                        .range((sheet_id.clone(), start, 0)..=(sheet_id, end, 16_384))
+                        .map(|(_, insertion)| insertion)
+                        .collect()
+                })
+                .unwrap_or_default();
             let candidates: Vec<&String> = target_node_ids
                 .iter()
                 .filter(|node_id| node_bloom_might_contain(&descriptor.node_bloom, node_id))
                 .collect();
             if candidates.is_empty()
                 && insertions.is_none()
-                && cell_insertion.is_none()
+                && cell_insertions.is_empty()
                 && slide_insertions.is_none()
                 && !append_here
                 && !row_shift_here
@@ -789,21 +796,39 @@ pub fn apply_patch(
                     source_map.entries.last().map(|entry| entry.node_id.clone());
                 chunk_changed = true;
             }
-            if let Some(insertion) = cell_insertion {
-                if inserted_xlsx_cell_node_id.is_some() {
-                    return Err(HcdError::InvalidBundle(
-                        "XLSX row occurs in more than one cell window".to_string(),
-                    ));
+            if !cell_insertions.is_empty() {
+                for insertion in cell_insertions {
+                    if !inserted_xlsx_cells.insert((
+                        insertion.sheet_id.clone(),
+                        insertion.row,
+                        insertion.column,
+                    )) {
+                        return Err(HcdError::InvalidBundle(
+                            "XLSX cell occurs in more than one cell window".to_string(),
+                        ));
+                    }
+                    let (node_id, part) = insert_xlsx_cell(
+                        &mut html,
+                        &mut source_map,
+                        &manifest.document_id,
+                        insertion,
+                        shifted_grid.then_some(manifest.revision),
+                    )?;
+                    html_nodes.insert(node_id.clone(), insertion.text.clone());
+                    descriptor.node_count += 1;
+                    if let Some(grid) = descriptor.grid.as_mut() {
+                        grid.column_start = Some(
+                            grid.column_start
+                                .map_or(insertion.column, |start| start.min(insertion.column)),
+                        );
+                        grid.column_end = Some(
+                            grid.column_end
+                                .map_or(insertion.column, |end| end.max(insertion.column)),
+                        );
+                    }
+                    dirty_nodes.insert(node_id);
+                    dirty_parts.insert(part);
                 }
-                let (node_id, part) = insert_xlsx_cell(
-                    &mut html,
-                    &mut source_map,
-                    &manifest.document_id,
-                    insertion,
-                    shifted_grid.then_some(manifest.revision),
-                )?;
-                html_nodes.insert(node_id.clone(), insertion.text.clone());
-                descriptor.node_count += 1;
                 descriptor.node_bloom = node_bloom(
                     source_map
                         .entries
@@ -816,19 +841,6 @@ pub fn apply_patch(
                     .map(|entry| entry.node_id.clone());
                 descriptor.last_node_id =
                     source_map.entries.last().map(|entry| entry.node_id.clone());
-                if let Some(grid) = descriptor.grid.as_mut() {
-                    grid.column_start = Some(
-                        grid.column_start
-                            .map_or(insertion.column, |start| start.min(insertion.column)),
-                    );
-                    grid.column_end = Some(
-                        grid.column_end
-                            .map_or(insertion.column, |end| end.max(insertion.column)),
-                    );
-                }
-                dirty_nodes.insert(node_id.clone());
-                dirty_parts.insert(part);
-                inserted_xlsx_cell_node_id = Some(node_id);
                 chunk_changed = true;
             }
             if append_here {
@@ -1040,8 +1052,12 @@ pub fn apply_patch(
             )));
         }
     }
-    if let Some(insertion) = &xlsx_cell_set {
-        if inserted_xlsx_cell_node_id.is_none() {
+    for insertion in xlsx_cell_set.values() {
+        if !inserted_xlsx_cells.contains(&(
+            insertion.sheet_id.clone(),
+            insertion.row,
+            insertion.column,
+        )) {
             return Err(HcdError::Unsupported(format!(
                 "XLSX cell {}{} is outside an existing HCD cell window",
                 xlsx_column_name(insertion.column),
@@ -1513,6 +1529,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_16
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_17
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1537,6 +1554,23 @@ fn validate_patch_identity(
         return Err(HcdError::ResourceLimit(format!(
             "patch operation count must be between 1 and {MAX_PATCH_OPERATIONS}"
         )));
+    }
+    if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_19
+        && (manifest.source.format != "xlsx"
+            || !patch
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, PatchOperation::XlsxCellSet { .. }))
+            || patch.operations.iter().any(|operation| {
+                !matches!(
+                    operation,
+                    PatchOperation::XlsxCellSet { .. } | PatchOperation::TextSplice { .. }
+                )
+            }))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/19 accepts XLSX cell insertions and text splices only".to_string(),
+        ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
     validate_string_map(
@@ -1777,11 +1811,13 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
+                        | HCD_PATCH_SCHEMA_VERSION_19
                 ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
+                    || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
+                        && patch.operations.len() != 1)
                 {
                     return Err(HcdError::Unsupported(
-                        "xlsx.cell.set requires one operation on an XLSX bundle with hcd-patch/7"
+                        "xlsx.cell.set requires one operation with hcd-patch/7-15 or an XLSX range batch with hcd-patch/19"
                             .to_string(),
                     ));
                 }
@@ -2467,8 +2503,11 @@ fn collect_xlsx_unmerges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
         .collect()
 }
 
-fn collect_xlsx_cell_set(patch: &PatchBatch) -> Option<XlsxCellInsertion> {
-    patch.operations.iter().find_map(|operation| {
+fn collect_xlsx_cell_set(
+    patch: &PatchBatch,
+) -> Result<BTreeMap<(String, u32, u32), XlsxCellInsertion>, HcdError> {
+    let mut insertions = BTreeMap::new();
+    for operation in &patch.operations {
         let PatchOperation::XlsxCellSet {
             sheet_id,
             row,
@@ -2476,15 +2515,27 @@ fn collect_xlsx_cell_set(patch: &PatchBatch) -> Option<XlsxCellInsertion> {
             text,
         } = operation
         else {
-            return None;
+            continue;
         };
-        Some(XlsxCellInsertion {
-            sheet_id: sheet_id.clone(),
-            row: *row,
-            column: *column,
-            text: text.clone(),
-        })
-    })
+        let key = (sheet_id.clone(), *row, *column);
+        if insertions
+            .insert(
+                key,
+                XlsxCellInsertion {
+                    sheet_id: sheet_id.clone(),
+                    row: *row,
+                    column: *column,
+                    text: text.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(HcdError::InvalidPatch(
+                "XLSX batch contains duplicate cell addresses".to_string(),
+            ));
+        }
+    }
+    Ok(insertions)
 }
 
 fn collect_xlsx_row_append(patch: &PatchBatch) -> Option<XlsxRowAppend> {

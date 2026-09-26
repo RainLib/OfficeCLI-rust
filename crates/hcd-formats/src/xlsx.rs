@@ -6713,6 +6713,109 @@ mod tests {
     }
 
     #[test]
+    fn range_paste_creates_cells_across_windows_and_edits_existing_cell_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("rows.xlsx");
+        let bundle_path = temp.path().join("rows.hcd");
+        let exported = temp.path().join("pasted.xlsx");
+        create_plain_rows_fixture(&source, 130);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("range-paste-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        assert!(page.chunks.len() >= 2);
+        let sheet_id = page.chunks[0].grid.as_ref().unwrap().sheet_id.clone();
+        let existing = extract_text_page(&bundle, None, 10)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A2"))
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_19.to_string(),
+            document_id: "range-paste-doc".to_string(),
+            patch_id: "paste-three-blanks-and-edit".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![
+                PatchOperation::XlsxCellSet {
+                    sheet_id: sheet_id.clone(),
+                    row: 1,
+                    column: 2,
+                    text: "B1".to_string(),
+                },
+                PatchOperation::XlsxCellSet {
+                    sheet_id: sheet_id.clone(),
+                    row: 129,
+                    column: 2,
+                    text: "B129".to_string(),
+                },
+                PatchOperation::XlsxCellSet {
+                    sheet_id: sheet_id.clone(),
+                    row: 130,
+                    column: 3,
+                    text: "C130".to_string(),
+                },
+                PatchOperation::TextSplice {
+                    node_id: existing.node_id.clone(),
+                    start: 0,
+                    delete_count: existing.text.chars().count(),
+                    insert_text: "Changed".to_string(),
+                    precondition: NodePrecondition {
+                        node_hash: existing.node_hash.clone(),
+                    },
+                },
+            ],
+        };
+        let mut duplicate = patch.clone();
+        duplicate.patch_id = "duplicate-target".to_string();
+        duplicate.operations.push(duplicate.operations[0].clone());
+        assert!(hcd_core::apply_patch(&bundle, &duplicate, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
+        let mut occupied = patch.clone();
+        occupied.patch_id = "occupied-target".to_string();
+        if let PatchOperation::XlsxCellSet { column, .. } = &mut occupied.operations[0] {
+            *column = 1;
+        }
+        assert!(hcd_core::apply_patch(&bundle, &occupied, 0).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+
+        let result = hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert_eq!(result.dirty_node_ids.len(), 4);
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 1).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        assert_eq!(bundle.revision(0).unwrap().revision, 0);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        for (cell, text) in [("B1", "B1"), ("B129", "B129"), ("C130", "C130")] {
+            assert!(
+                xml.contains(&format!("<c r=\"{cell}\" t=\"inlineStr\">")),
+                "{cell}: {xml}"
+            );
+            assert!(xml.contains(&format!("<t>{text}</t>")), "{cell}: {xml}");
+        }
+        assert!(xml.contains("<t>Changed</t>"));
+        let mut stale = patch.clone();
+        stale.patch_id = "stale-paste".to_string();
+        assert!(hcd_core::apply_patch(&bundle, &stale, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("current head"));
+    }
+
+    #[test]
     fn appended_xlsx_row_is_editable_and_survives_source_backed_export() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("rows.xlsx");
