@@ -12,9 +12,10 @@ use axum::{Json, Router};
 use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
-    apply_structure_patch, editor_projection, hash_file, manifest_at_revision, project_editor,
-    restore_revision, BlockPrecondition, Bundle, EditorBlockContent, EditorInline, HcdError,
-    StructureOperation, StructurePatchBatch, HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
+    apply_patch, apply_structure_patch, editor_projection, hash_file, manifest_at_revision,
+    project_editor, restore_revision, BlockPrecondition, Bundle, EditorBlockContent, EditorInline,
+    HcdError, PatchBatch, StructureOperation, StructurePatchBatch, HCD_PATCH_SCHEMA_VERSION_4,
+    MAX_PATCH_JSON_BYTES,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -134,6 +135,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/editor", get(editor))
         .route("/v1/documents/{id}/project", post(project))
         .route("/v1/documents/{id}/patch", post(patch))
+        .route("/v1/documents/{id}/node-patch", post(node_patch))
         .route("/v1/documents/{id}/checkpoints", post(checkpoint))
         .route("/v1/documents/{id}/revisions", get(revisions))
         .route("/v1/documents/{id}/revisions/{revision}", get(revision))
@@ -742,6 +744,29 @@ async fn patch(
         stamp_revision_author(&bundle, result.revision, &actor)?;
         publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
         reset_collaboration(&state, &id).await?;
+    }
+    Ok(Json(serde_json::to_value(result).map_err(internal)?))
+}
+
+async fn node_patch(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(patch): Json<PatchBatch>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    if patch.document_id != id {
+        return Err(bad("patch document ID mismatch"));
+    }
+    let bundle = open(&state, &id)?;
+    let format = bundle.manifest().map_err(hcd_error)?.source.format;
+    if !matches!(format.as_str(), "pdf" | "pptx" | "xlsx") {
+        return Err(bad("node patch endpoint accepts PDF, PPTX or XLSX bundles"));
+    }
+    let result = apply_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
+    if !result.idempotent_replay {
+        stamp_revision_author(&bundle, result.revision, &actor)?;
+        publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
     }
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
