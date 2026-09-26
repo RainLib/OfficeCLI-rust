@@ -176,3 +176,15 @@
 .hcd-surface.hcd-embedded .semantic-workspace.right-hidden.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr)}
 @media(max-width:1180px){.hcd-surface .semantic-workspace.right-hidden .editor-layout{grid-template-columns:180px minmax(0,1fr)}}
 @media(max-width:760px){.hcd-surface .semantic-workspace .editor-layout,.hcd-surface .semantic-workspace.outline-hidden .editor-layout,.hcd-surface .semantic-workspace.right-hidden .editor-layout,.hcd-surface .semantic-workspace.right-hidden.outline-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.outline-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.right-hidden .editor-layout,.hcd-surface.hcd-embedded .semantic-workspace.right-hidden.outline-hidden .editor-layout{display:flex;flex-direction:column;overflow:auto}.hcd-surface .semantic-workspace .document-scroll{flex:1;min-height:240px;overflow-y:auto}.hcd-surface .semantic-workspace .outline-panel,.hcd-surface .semantic-workspace .workspace-sidebar{height:auto;max-height:180px;flex:none}}
+
+.hcd-surface .semantic-workspace details.presence{position:relative;display:block}
+.hcd-surface .semantic-workspace .presence summary{display:flex;align-items:center;gap:6px;list-style:none;cursor:pointer}
+.hcd-surface .semantic-workspace .presence summary::-webkit-details-marker{display:none}
+.hcd-surface .semantic-workspace .presence-avatars{display:flex;padding-left:6px}
+.hcd-surface .semantic-workspace .presence-menu{position:absolute;right:0;top:calc(100% + 12px);z-index:120;width:250px;max-height:300px;overflow:auto;padding:12px;background:#fff;border:1px solid #d9e3f1;border-radius:9px;box-shadow:0 12px 32px #17325830;color:#26395e}
+.hcd-surface .semantic-workspace .presence-menu>strong{display:block;margin-bottom:10px;font-size:12px}
+.hcd-surface .semantic-workspace .presence-person{display:flex;align-items:center;gap:8px;padding:6px 0;min-width:0}
+.hcd-surface .semantic-workspace .presence-person .avatar{margin-left:0}
+.hcd-surface .semantic-workspace .presence-person>span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px}
+.hcd-surface .semantic-workspace .presence-person small{margin-left:auto;color:#75849f;white-space:nowrap}
+.hcd-surface .collaboration-carets__label{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;z-index:5}
