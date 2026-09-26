@@ -3,8 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "files": ["dist-embed", "src/public.d.ts"],
-  "sideEffects": ["**/*.css"],
+  "files": [
+    "dist-embed",
+    "src/public.d.ts"
+  ],
+  "sideEffects": [
+    "**/*.css"
+  ],
   "exports": {
     "./react": {
       "types": "./src/public.d.ts",
@@ -30,6 +35,7 @@
     "@univerjs/preset-sheets-core": "^0.25.1",
     "@univerjs/preset-sheets-drawing": "^0.25.1",
     "@univerjs/presets": "^0.25.1",
+    "pdfjs-dist": "^6.3.289",
     "yjs": "13.6.27"
   },
   "peerDependencies": {

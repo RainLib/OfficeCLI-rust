@@ -12,7 +12,7 @@ export function ExportControl({ session, revision, beforeExport }: {
   const [pdfMode, setPdfMode] = useState<'visual' | 'source'>('visual')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [ready, setReady] = useState<{ url: string; filename: string } | null>(null)
+  const [ready, setReady] = useState<{ url: string; filename: string; previewUrl?: string } | null>(null)
 
   async function prepare() {
     setBusy(true)
@@ -30,7 +30,10 @@ export function ExportControl({ session, revision, beforeExport }: {
         `/downloads/${format}?revision=${savedRevision}${source ? '&source=true' : ''}`, { method: 'POST' })
       const ticket = await response.json() as { url: string; filename: string }
       const base = new URL(session.apiUrl || '/v1/documents', window.location.href)
-      setReady({ url: new URL(ticket.url, base.origin).href, filename: ticket.filename })
+      const url = new URL(ticket.url, base.origin).href
+      const previewUrl = new URL(window.location.href)
+      previewUrl.searchParams.set('pdfPreview', `${new URL(url).pathname}/preview`)
+      setReady({ url, filename: ticket.filename, previewUrl: format === 'pdf' ? previewUrl.href : undefined })
     } catch (cause) { setError(String(cause)) }
     finally { setBusy(false) }
   }
@@ -46,6 +49,7 @@ export function ExportControl({ session, revision, beforeExport }: {
       </select>
     </label>}
     <button onClick={() => void prepare()} disabled={busy}>{busy ? '准备中…' : ready ? '重新准备' : '准备下载'}</button>
+    {ready?.previewUrl && <a className="export-preview" href={ready.previewUrl} target="_blank" rel="noopener noreferrer">预览导出 PDF</a>}
     {ready && <a className="download-ready" href={ready.url} download={ready.filename} rel="noreferrer" aria-label={`下载 ${ready.filename}`}>下载文件</a>}
     {error && <span className="export-error" title={error}>{error}</span>}
   </div>
