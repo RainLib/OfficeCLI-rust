@@ -349,6 +349,13 @@ pub enum PatchOperation {
         column: u32,
         width_chars: f64,
     },
+    /// Set one materialized worksheet row's height in points.
+    #[serde(rename = "xlsx.row.height", rename_all = "camelCase")]
+    XlsxRowHeight {
+        sheet_id: String,
+        row: u32,
+        height_points: f64,
+    },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -401,7 +408,8 @@ impl PatchOperation {
             | Self::XlsxColumnInsert { .. }
             | Self::XlsxColumnDelete { .. }
             | Self::XlsxRowRemoveLast { .. }
-            | Self::XlsxColumnWidth { .. } => None,
+            | Self::XlsxColumnWidth { .. }
+            | Self::XlsxRowHeight { .. } => None,
         }
     }
 
@@ -422,6 +430,7 @@ impl PatchOperation {
                 | Self::XlsxColumnDelete { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
+                | Self::XlsxRowHeight { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }

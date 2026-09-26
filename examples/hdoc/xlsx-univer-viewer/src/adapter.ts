@@ -232,10 +232,19 @@ export class HcdUniverAdapter {
     }
   }
 
+  invalidateRowHeights(sheetId: string): void {
+    for (const key of this.appliedDimensions) {
+      if (key.startsWith(`${sheetId}:row:`)) this.appliedDimensions.delete(key);
+    }
+  }
+
   /** Reload the visible HCD windows after another editor commits a revision. */
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;
     await this.client.open();
+    for (const key of this.appliedDimensions) {
+      if (/^s_[0-9a-f]{32}:row:/.test(key)) this.appliedDimensions.delete(key);
+    }
     for (const key of this.appliedDimensions) {
       const match = key.match(/^(s_[0-9a-f]{32}):merge:(\d+):(\d+):(\d+):(\d+)$/);
       if (!match) continue;

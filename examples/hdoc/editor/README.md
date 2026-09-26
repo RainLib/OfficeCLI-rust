@@ -261,6 +261,8 @@ The **插入 → 撤销末尾空行** action uses `hcd-patch/10` to remove the f
 
 The **开始 → 列宽 → 设置列宽** action uses `hcd-patch/9` for the selected column (1–255 Excel width units, two decimal places). The HCD grid updates every window of that worksheet, while source-backed XLSX export splits any covering `<col>` range so neighboring columns retain their widths. On the real `assets/showcase/budget-tracker.xlsx` Settings sheet, select B1 and set its width to `28`. The reference screenshots are `docs/screenshots/hcd-xlsx-column-width-before.png` and `docs/screenshots/hcd-xlsx-column-width-after.png`. After export, `xl/worksheets/sheet3.xml` must include `<col min="2" max="2" width="28.00" customWidth="1"/>` while A and C remain at width 18. This adjusts layout without moving cell addresses; inserting and deleting columns remain separate work.
 
+The **开始 → 行高 → 设置行高** action uses `hcd-patch/18` for one materialized row (1–409 points, two decimal places). It updates the HCD grid and source-backed XLSX row height; source-free semantic XLSX export does not yet preserve this physical dimension. Browser and real-data validation are in [the row-height acceptance](../../../docs/acceptance/hcd-xlsx-row-height.md).
+
 For a real-file check, import `assets/showcase/budget-tracker.xlsx` as `accept-xlsx`, open the Settings sheet, choose **插入 → 在末尾新增行**, and type `Browser appended row` into A15. The first action creates r1 and the cell edit creates r2. The reference screenshots are `docs/screenshots/hcd-xlsx-row-append.png` and `docs/screenshots/hcd-xlsx-row-append-edited.png`. Verify the downloaded workbook with:
 
 ```bash

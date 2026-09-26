@@ -4411,6 +4411,7 @@ pub(crate) fn export_xlsx(
         collect_canonical_sheet_last_columns(bundle, &manifest, &workbook, &replacements)?;
     let column_widths =
         collect_canonical_column_widths(bundle, &manifest, &workbook, &replacements)?;
+    let row_heights = collect_canonical_row_heights(bundle, &manifest, &workbook, &replacements)?;
     for (part, values) in &replacements {
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
@@ -4424,6 +4425,9 @@ pub(crate) fn export_xlsx(
         })?;
         let widths = column_widths.get(part).ok_or_else(|| {
             HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical column map"))
+        })?;
+        let heights = row_heights.get(part).ok_or_else(|| {
+            HcdError::InvalidBundle(format!("XLSX sheet {part} has no canonical row heights"))
         })?;
         let inserted = created_cells.get(part).cloned().unwrap_or_default();
         let shifts = row_insertions.get(part).cloned().unwrap_or_default();
@@ -4439,6 +4443,7 @@ pub(crate) fn export_xlsx(
                     merges,
                     rows,
                     widths,
+                    heights,
                     &shifts,
                     &column_shifts,
                     last_column,
@@ -4564,6 +4569,68 @@ fn collect_canonical_column_widths(
         }
     }
     Ok(widths)
+}
+
+fn collect_canonical_row_heights(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    workbook: &WorkbookInfo,
+    replacements: &HashMap<String, BTreeMap<String, String>>,
+) -> Result<HashMap<String, BTreeMap<u32, f64>>, HcdError> {
+    let mut heights: HashMap<String, BTreeMap<u32, f64>> = replacements
+        .keys()
+        .map(|part| (part.clone(), BTreeMap::new()))
+        .collect();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let sheet = workbook.sheets.get(grid.sheet_index).ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX HCD sheet index is missing".to_string())
+            })?;
+            let Some(sheet_heights) = heights.get_mut(&sheet.part) else {
+                continue;
+            };
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut cursor = 0;
+            while let Some(relative) = html[cursor..].find("<tr data-hcd-row=\"") {
+                let start = cursor + relative;
+                let end = html[start..]
+                    .find('>')
+                    .map(|offset| start + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("XLSX HCD row tag is not closed".to_string())
+                    })?;
+                let tag = &html[start..=end];
+                cursor = end + 1;
+                if hcd_column_attribute(tag, "data-hcd-height-edited") != Some("true") {
+                    continue;
+                }
+                let row = hcd_column_attribute(tag, "data-hcd-row")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|row| (1..=1_048_576).contains(row))
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("XLSX HCD edited row number is invalid".to_string())
+                    })?;
+                let height = hcd_column_attribute(tag, "data-hcd-height-points")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .filter(|height| height.is_finite() && (1.0..=409.0).contains(height))
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("XLSX HCD edited row height is invalid".to_string())
+                    })?;
+                if sheet_heights.insert(row, height).is_some() {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX HCD edited row is duplicated".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(heights)
 }
 
 fn hcd_column_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
@@ -4738,6 +4805,7 @@ fn rewrite_worksheet(
     merges: &BTreeSet<String>,
     canonical_rows: &BTreeSet<u32>,
     column_widths: &BTreeMap<u32, f64>,
+    row_heights: &BTreeMap<u32, f64>,
     row_insertions: &[RowShift],
     column_shifts: &[ColumnShift],
     hcd_last_column: u32,
@@ -4988,15 +5056,17 @@ fn rewrite_worksheet(
                     row,
                     &row_name,
                     &row_cell_name,
+                    row_heights,
                     &mut seen_created,
                 )?;
                 last_source_row = source_row;
                 last_row = row;
                 active_row = Some(row);
                 row_pending = replacement_rows.remove(&row).unwrap_or_default();
-                writer.write_event(Event::Start(rewrite_xlsx_address_attribute(
+                writer.write_event(Event::Start(rewrite_xlsx_row_attributes(
                     start,
-                    &row.to_string(),
+                    row,
+                    row_heights.get(&row).copied(),
                 )?))?;
             }
             Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "row" => {
@@ -5023,21 +5093,24 @@ fn rewrite_worksheet(
                     row,
                     &row_name,
                     &row_cell_name,
+                    row_heights,
                     &mut seen_created,
                 )?;
                 last_source_row = source_row;
                 last_row = row;
                 let mut pending = replacement_rows.remove(&row).unwrap_or_default();
                 if pending.is_empty() {
-                    writer.write_event(Event::Empty(rewrite_xlsx_address_attribute(
+                    writer.write_event(Event::Empty(rewrite_xlsx_row_attributes(
                         empty,
-                        &row.to_string(),
+                        row,
+                        row_heights.get(&row).copied(),
                     )?))?;
                 } else {
                     let name = String::from_utf8_lossy(empty.name().as_ref()).to_string();
-                    writer.write_event(Event::Start(rewrite_xlsx_address_attribute(
+                    writer.write_event(Event::Start(rewrite_xlsx_row_attributes(
                         empty,
-                        &row.to_string(),
+                        row,
+                        row_heights.get(&row).copied(),
                     )?))?;
                     flush_new_xlsx_cells(
                         &mut writer,
@@ -5153,6 +5226,7 @@ fn rewrite_worksheet(
                     1_048_577,
                     &row_name,
                     &row_cell_name,
+                    row_heights,
                     &mut seen_created,
                 )?;
                 let name = end.name().as_ref().to_vec();
@@ -5578,6 +5652,46 @@ fn rewrite_xlsx_address_attribute(
     Ok(rewritten)
 }
 
+fn rewrite_xlsx_row_attributes(
+    original: &BytesStart<'_>,
+    row: u32,
+    height: Option<f64>,
+) -> Result<BytesStart<'static>, HcdError> {
+    let shifted = rewrite_xlsx_address_attribute(original, &row.to_string())?;
+    let Some(height) = height else {
+        return Ok(shifted);
+    };
+    let name = String::from_utf8_lossy(shifted.name().as_ref()).into_owned();
+    let mut rewritten = BytesStart::new(name);
+    let value = format!("{height:.2}");
+    let mut has_height = false;
+    let mut has_custom_height = false;
+    for attr in shifted.attributes().with_checks(false) {
+        let attr = attr.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX row attribute: {error}"))
+        })?;
+        let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+        match local_name(attr.key.as_ref()) {
+            "ht" => {
+                rewritten.push_attribute((key.as_str(), value.as_str()));
+                has_height = true;
+            }
+            "customHeight" => {
+                rewritten.push_attribute((key.as_str(), "1"));
+                has_custom_height = true;
+            }
+            _ => rewritten.push_attribute((key.as_bytes(), attr.value.as_ref())),
+        }
+    }
+    if !has_height {
+        rewritten.push_attribute(("ht", value.as_str()));
+    }
+    if !has_custom_height {
+        rewritten.push_attribute(("customHeight", "1"));
+    }
+    Ok(rewritten)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_missing_xlsx_rows(
     writer: &mut Writer<impl Write>,
@@ -5587,6 +5701,7 @@ fn write_missing_xlsx_rows(
     before_row: u32,
     row_name: &str,
     cell_name: &str,
+    row_heights: &BTreeMap<u32, f64>,
     seen: &mut BTreeSet<String>,
 ) -> Result<(), HcdError> {
     for &row in canonical_rows.range((last_row.saturating_add(1))..before_row) {
@@ -5594,6 +5709,11 @@ fn write_missing_xlsx_rows(
         let mut element = BytesStart::new(row_name);
         let value = row.to_string();
         element.push_attribute(("r", value.as_str()));
+        if let Some(height) = row_heights.get(&row) {
+            let height = format!("{height:.2}");
+            element.push_attribute(("ht", height.as_str()));
+            element.push_attribute(("customHeight", "1"));
+        }
         if pending.is_empty() {
             writer.write_event(Event::Empty(element))?;
         } else {
@@ -7810,6 +7930,113 @@ mod tests {
     }
 
     #[test]
+    fn xlsx_row_height_exports_existing_and_inserted_rows_with_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("rows.xlsx");
+        let bundle_path = temp.path().join("rows.hcd");
+        create_plain_rows_fixture(&source, 3);
+        let mut options = ImportOptions::new("row-height-doc");
+        options.chunk_blocks = 1;
+        let imported = import_xlsx(&source, &bundle_path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = |id: &str, revision: u64, operation| PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_18.to_string(),
+            document_id: "row-height-doc".to_string(),
+            patch_id: id.to_string(),
+            base_revision: revision,
+            actor: BTreeMap::new(),
+            operations: vec![operation],
+            metadata: BTreeMap::new(),
+        };
+        let first = patch(
+            "height-existing",
+            0,
+            PatchOperation::XlsxRowHeight {
+                sheet_id: sheet_id.clone(),
+                row: 1,
+                height_points: 30.5,
+            },
+        );
+        hcd_core::apply_patch(&bundle, &first, 0).unwrap();
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &first, 1).unwrap().revision,
+            1
+        );
+        let insert = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id: sheet_id.clone(),
+                before_row: 1,
+            }],
+            ..patch(
+                "insert-middle",
+                1,
+                PatchOperation::XlsxRowHeight {
+                    sheet_id: sheet_id.clone(),
+                    row: 1,
+                    height_points: 30.5,
+                },
+            )
+        };
+        hcd_core::apply_patch(&bundle, &insert, 1).unwrap();
+        let second = patch(
+            "height-inserted",
+            2,
+            PatchOperation::XlsxRowHeight {
+                sheet_id: sheet_id.clone(),
+                row: 1,
+                height_points: 44.0,
+            },
+        );
+        hcd_core::apply_patch(&bundle, &second, 2).unwrap();
+        let stale = patch(
+            "stale-height",
+            2,
+            PatchOperation::XlsxRowHeight {
+                sheet_id,
+                row: 1,
+                height_points: 52.0,
+            },
+        );
+        assert!(hcd_core::apply_patch(&bundle, &stale, 3).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 3);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains("<row r=\"1\" ht=\"44.00\" customHeight=\"1\"/>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<row r=\"2\" ht=\"30.50\" customHeight=\"1\">"),
+            "{xml}"
+        );
+        assert!(xml.contains("<row r=\"3\"><c r=\"A3\""), "{xml}");
+        let historical = temp.path().join("original.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        let old = read_zip_entry(&historical, "xl/worksheets/sheet1.xml");
+        assert!(!old.contains("customHeight"));
+        assert!(!old.contains("<row r=\"4\""));
+    }
+
+    #[test]
     fn removes_only_empty_appended_xlsx_tail_row() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("tail.xlsx");
@@ -7951,6 +8178,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::from([1, 2]),
             &BTreeMap::from([(2, 24.0)]),
+            &BTreeMap::new(),
             &[],
             &[],
             4,
