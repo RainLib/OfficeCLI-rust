@@ -9,10 +9,13 @@ import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.t
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
-type Descriptor = { sequence: number; region: string }
+type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
 type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; left?: string; top?: string; width?: string; height?: string; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
 type Selection = { node: TextNode; page: number }
-type NewTextBox = { page: number; xPt: number; yPt: number; widthPt: number; heightPt: number; fontSizePt: number; left: string; top: string; width: string; height: string }
+type NewTextBox = (
+  | { format: 'pdf'; page: number; xPt: number; yPt: number; widthPt: number; heightPt: number; fontSizePt: number }
+  | { format: 'pptx'; chunkId: string; slidePart: string; xEmu: number; yEmu: number; widthEmu: number; heightEmu: number; fontSizePt: number }
+) & { left: string; top: string; width: string; height: string }
 type Revision = { revision: number; patchId?: string; authorName?: string; createdAtEpochMs?: number }
 
 export function FixedViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
@@ -150,17 +153,20 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     onClose()
   }
   async function saveNewBox(box: NewTextBox, value: string): Promise<number | null> {
-    if (session.format !== 'pdf' || readOnly || historical || saving || !value.trim()) return null
+    if (!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || !value.trim()) return null
     setSaving(true)
     setError('')
     try {
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaVersion: 'hcd-patch/5', documentId: session.documentId,
+        body: JSON.stringify({ schemaVersion: box.format === 'pdf' ? 'hcd-patch/5' : 'hcd-patch/16', documentId: session.documentId,
           patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
           actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
-          operations: [{ op: 'pdf.text.insert', page: box.page, xPt: box.xPt, yPt: box.yPt,
-            widthPt: box.widthPt, heightPt: box.heightPt, fontSizePt: box.fontSizePt, text: value }] }),
+          operations: [box.format === 'pdf'
+            ? { op: 'pdf.text.insert', page: box.page, xPt: box.xPt, yPt: box.yPt,
+              widthPt: box.widthPt, heightPt: box.heightPt, fontSizePt: box.fontSizePt, text: value }
+            : { op: 'pptx.text.insert', chunkId: box.chunkId, slidePart: box.slidePart, xEmu: box.xEmu,
+              yEmu: box.yEmu, widthEmu: box.widthEmu, heightEmu: box.heightEmu, fontSizePt: box.fontSizePt, text: value }] }),
       })
       const result = await response.json() as { revision: number }
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
@@ -193,7 +199,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setRightPanel('settings')}>⚙ 界面设置</button>}
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><span className="ribbon-note">点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消</span></>}
-      {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={session.format !== 'pdf' || readOnly || historical || saving} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击 PDF 页面的空白处放置文字框' : '新增文字框保留固定页布局'}</span></>}
+      {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} />显示页面目录</label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} />只读模式</label><button onClick={() => setRightPanel('settings')}>界面设置</button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}>查看修订历史</button><span className="ribbon-note">当前版本 r{manifest?.revision ?? '…'}</span></>}
       {selected && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}>保存修改</button>}
@@ -230,6 +236,9 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   const [pageNumber, setPageNumber] = useState(0)
   const [pageHeightPt, setPageHeightPt] = useState(0)
   const [primaryPage, setPrimaryPage] = useState(false)
+  const [slidePart, setSlidePart] = useState('')
+  const [slideWidthEmu, setSlideWidthEmu] = useState(0)
+  const [slideHeightEmu, setSlideHeightEmu] = useState(0)
   const [nodes, setNodes] = useState<TextNode[]>([])
   const [directTarget, setDirectTarget] = useState<HTMLElement | null>(null)
   const [newTarget, setNewTarget] = useState<HTMLElement | null>(null)
@@ -251,23 +260,27 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   }
   useEffect(() => { findDirectTarget() }, [selected?.nodeId, session.format, srcDoc])
   useEffect(() => {
-    if (session.format !== 'pdf' || !newBox || !primaryPage || newBox.page !== pageNumber) {
+    const matches = newBox?.format === 'pdf'
+      ? session.format === 'pdf' && primaryPage && newBox.page === pageNumber
+      : newBox?.format === 'pptx' && session.format === 'pptx' && newBox.chunkId === descriptor.chunkId
+    if (!matches || !newBox) {
       setNewTarget(null)
       return
     }
-    const page = frame.current?.contentDocument?.querySelector<HTMLElement>('.hcd-pdf-page[data-hcd-continuation="false"]')
+    const page = frame.current?.contentDocument?.querySelector<HTMLElement>(newBox.format === 'pdf' ? '.hcd-pdf-page[data-hcd-continuation="false"]' : '.hcd-slide')
     if (!page) return
-    const target = page.ownerDocument.createElement('p')
-    target.className = 'hcd-pdf-text hcd-draft-text'
+    const target = page.ownerDocument.createElement(newBox.format === 'pdf' ? 'p' : 'div')
+    target.className = newBox.format === 'pdf' ? 'hcd-pdf-text hcd-draft-text' : 'hcd-slide-shape hcd-draft-text'
     Object.assign(target.style, {
       position: 'absolute', left: newBox.left, top: newBox.top, width: newBox.width,
       height: newBox.height, fontSize: `${newBox.fontSizePt}pt`,
-      fontFamily: 'Arial, Helvetica, sans-serif', lineHeight: newBox.height,
+      fontFamily: 'Arial, Helvetica, sans-serif', lineHeight: newBox.format === 'pdf' ? newBox.height : '1.2',
+      background: '#fff', zIndex: '4', outline: '1px solid #1769e8',
     })
     page.append(target)
     setNewTarget(target)
     return () => target.remove()
-  }, [session.format, newBox, primaryPage, pageNumber, srcDoc])
+  }, [session.format, descriptor.chunkId, newBox, primaryPage, pageNumber, srcDoc])
   useEffect(() => {
     const node = marker.current
     if (!node) return
@@ -324,7 +337,10 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
         setCanvasWidth(canvas?.style.width || '100%')
         setPageNumber(Number(canvas?.getAttribute('data-hcd-page') || 0))
         setPageHeightPt(Number.parseFloat(canvas?.style.height || '0'))
-        setPrimaryPage(canvas?.getAttribute('data-hcd-continuation') === 'false')
+        setPrimaryPage(session.format === 'pptx' ? !descriptor.continuation : canvas?.getAttribute('data-hcd-continuation') === 'false')
+        setSlidePart(canvas?.getAttribute('data-hcd-source-part') || '')
+        setSlideWidthEmu(Number(canvas?.getAttribute('data-hcd-width-emu') || 0))
+        setSlideHeightEmu(Number(canvas?.getAttribute('data-hcd-height-emu') || 0))
         const canvasHeight = canvas?.style.height || ''
         if (canvasHeight.endsWith('pt')) setFrameHeight(Math.max(200, Math.ceil(Number.parseFloat(canvasHeight) * 4 / 3) + 4))
         if (canvasHeight.endsWith('px')) {
@@ -332,22 +348,36 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           setFrameHeight(height)
           if (session.format === 'pptx') onMeasureHeight(height)
         }
-        const directCss = session.format === 'pdf' ? `.hcd-pdf-page[data-hcd-source-raster="true"] .hcd-pdf-text:has(>.hcd-direct-editor),.hcd-draft-text{background:#fff!important;color:#111!important;z-index:4;outline:1px solid #1769e8;outline-offset:1px}.hcd-pdf-text:has(>.hcd-direct-editor)>span[data-hcd-id]{display:none}.hcd-direct-editor{display:block;width:100%;min-width:max-content;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text{outline:0;min-height:inherit;padding:0;margin:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text p{position:static!important;margin:0;padding:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}` : session.format === 'pptx' ? `.hcd-slide [data-hcd-id]:has(>.hcd-direct-editor){font-size:0!important;line-height:0!important;outline:1px solid #1769e8;outline-offset:2px}.hcd-slide .hcd-direct-editor{display:inline-block;vertical-align:baseline;font-size:var(--hcd-edit-font-size)!important;line-height:var(--hcd-edit-line-height)!important;color:var(--hcd-edit-color)!important;white-space:pre-wrap}.hcd-slide .hcd-direct-editor .fixed-tiptap-text,.hcd-slide .hcd-direct-editor .fixed-tiptap-text p{display:inline;margin:0;padding:0;min-height:0;outline:0;font:inherit;line-height:inherit;color:inherit;white-space:pre-wrap}` : ''
+        const directCss = session.format === 'pdf' ? `.hcd-pdf-page[data-hcd-source-raster="true"] .hcd-pdf-text:has(>.hcd-direct-editor),.hcd-draft-text{background:#fff!important;color:#111!important;z-index:4;outline:1px solid #1769e8;outline-offset:1px}.hcd-pdf-text:has(>.hcd-direct-editor)>span[data-hcd-id]{display:none}.hcd-direct-editor{display:block;width:100%;min-width:max-content;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text{outline:0;min-height:inherit;padding:0;margin:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}.hcd-direct-editor .fixed-tiptap-text p{position:static!important;margin:0;padding:0;font:inherit;line-height:inherit;color:inherit;white-space:nowrap}` : session.format === 'pptx' ? `.hcd-slide [data-hcd-id]:has(>.hcd-direct-editor){font-size:0!important;line-height:0!important;outline:1px solid #1769e8;outline-offset:2px}.hcd-slide .hcd-direct-editor{display:inline-block;vertical-align:baseline;font-size:var(--hcd-edit-font-size)!important;line-height:var(--hcd-edit-line-height)!important;color:var(--hcd-edit-color)!important;white-space:pre-wrap}.hcd-slide .hcd-direct-editor .fixed-tiptap-text,.hcd-slide .hcd-direct-editor .fixed-tiptap-text p{display:inline;margin:0;padding:0;min-height:0;outline:0;font:inherit;line-height:inherit;color:inherit;white-space:pre-wrap}.hcd-slide .hcd-draft-text .hcd-direct-editor,.hcd-slide .hcd-draft-text .fixed-tiptap-text,.hcd-slide .hcd-draft-text .fixed-tiptap-text p{display:block;min-width:100%;min-height:1.2em}.hcd-slide .hcd-draft-text .fixed-tiptap-text{width:100%}` : ''
         setSrcDoc(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}${safeCss}${directCss}</style></head><body data-hcd-image-hitboxes="off" data-hcd-text-hitboxes="off">${html}</body></html>`)
       }
     }
     void render().catch(cause => { if (live) setSrcDoc(`<p style="padding:24px;color:#b33">${String(cause).replaceAll('<', '&lt;')}</p>`) })
     return () => { live = false }
-  }, [active, session, descriptor.sequence, revision, stylesheet, refresh, onMeasureHeight])
+  }, [active, session, descriptor.sequence, descriptor.continuation, revision, stylesheet, refresh, onMeasureHeight])
   function place(event: MouseEvent<HTMLButtonElement>) {
     const pageWidthPt = Number.parseFloat(canvasWidth)
+    if (session.format === 'pptx') {
+      if (!slidePart || !slideWidthEmu || !slideHeightEmu || !pageWidthPt) return
+      const rect = event.currentTarget.getBoundingClientRect()
+      const scale = slideWidthEmu / pageWidthPt
+      const x = Math.min(Math.max(0, event.clientX - rect.left), pageWidthPt - 80)
+      const y = Math.min(Math.max(0, event.clientY - rect.top), slideHeightEmu / scale - 30)
+      const width = Math.min(260, pageWidthPt - x)
+      const height = Math.min(42, slideHeightEmu / scale - y)
+      onPlace({ format: 'pptx', chunkId: descriptor.chunkId, slidePart,
+        xEmu: Math.round(x * scale), yEmu: Math.round(y * scale),
+        widthEmu: Math.round(width * scale), heightEmu: Math.round(height * scale), fontSizePt: 18,
+        left: `${x}px`, top: `${y}px`, width: `${width}px`, height: `${height}px` })
+      return
+    }
     if (!pageNumber || !pageWidthPt || !pageHeightPt) return
     const rect = event.currentTarget.getBoundingClientRect()
     const xPt = Math.min(Math.max(0, (event.clientX - rect.left) * 0.75), pageWidthPt - 60)
     const topPt = Math.min(Math.max(0, (event.clientY - rect.top) * 0.75), pageHeightPt - 24)
     const widthPt = Math.min(240, pageWidthPt - xPt)
     const heightPt = 18
-    onPlace({ page: pageNumber, xPt, yPt: pageHeightPt - topPt - heightPt, widthPt, heightPt,
+    onPlace({ format: 'pdf', page: pageNumber, xPt, yPt: pageHeightPt - topPt - heightPt, widthPt, heightPt,
       fontSizePt: 12, left: `${xPt}pt`, top: `${topPt}pt`, width: `${widthPt}pt`, height: `${heightPt}pt` })
   }
   // Fixed-page editors need same-origin DOM access for the portal; scripts stay disabled.
@@ -356,9 +386,9 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
     {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={`HCD 分片 ${descriptor.sequence + 1}`} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight }} onLoad={findDirectTarget} />
       : <div className="skeleton" style={{ minHeight: placeholderHeight }}>{session.format === 'pptx' ? `幻灯片 ${descriptor.sequence + 1}` : `第 ${descriptor.sequence + 1} 个分片`}</div>}
     {!readOnly && ['pdf', 'pptx'].includes(session.format) && selected && directTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus={session.format === 'pptx' ? 'start' : true} onSave={value => onSave(selected, value)} onCancel={onCancel} /></div>, directTarget)}
-    {!readOnly && session.format === 'pdf' && newBox && newTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /></div>, newTarget)}
+    {!readOnly && newBox && newTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /></div>, newTarget)}
     {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => selected?.nodeId === node.nodeId ? null : <button key={node.nodeId} className="fixed-page-hitbox" style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`编辑文字：${node.text.slice(0, 48) || '空文字框'}`} title={node.text || '空文字框'} onClick={() => onSelect(node)} />)}
-      {placingText && session.format === 'pdf' && primaryPage && <button className="fixed-placement-layer" aria-label={`在第 ${pageNumber} 页放置新文字框`} onClick={place} />}
+      {placingText && primaryPage && <button className="fixed-placement-layer" aria-label={`在第 ${session.format === 'pdf' ? pageNumber : descriptor.sequence + 1} 页放置新文字框`} onClick={place} />}
     </div>}
     {!readOnly && nodes.some(node => node.editable && (!node.left || !node.top || !node.width || !node.height)) && <div className="fixed-text-panel"><strong>第 {descriptor.sequence + 1} 页未定位文字</strong><div className="fixed-text-list">{nodes.filter(node => node.editable && (!node.left || !node.top || !node.width || !node.height)).map(node => <button key={node.nodeId} className={selected?.nodeId === node.nodeId ? 'selected' : ''} onClick={() => onSelect(node)} title={node.nodeId}>{node.text || '（空文字框）'}</button>)}</div>{selected && (!selected.left || !selected.top || !selected.width || !selected.height) && <div className="fixed-text-form"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div><button onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}>保存</button><button onClick={onCancel}>取消</button></div></div>}</div>}
     {!readOnly && srcDoc && nodes.length === 0 && session.format === 'pdf' && <div className="fixed-text-panel">本页没有可映射的文字节点；扫描图像里的文字需要 OCR 后才能编辑。</div>}

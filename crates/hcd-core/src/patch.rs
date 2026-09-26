@@ -12,10 +12,10 @@ use crate::{
     NodeStylePatch, PatchBatch, PatchOperation, RevisionRecord, SourceAnchor, TextExtractEntry,
     TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
     HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
-    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_2,
-    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
-    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
+    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
+    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
+    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -60,6 +60,18 @@ struct PdfTextInsertion {
     width_pt: f32,
     height_pt: f32,
     font_size_pt: f32,
+    text: String,
+}
+
+#[derive(Clone)]
+struct PptxTextInsertion {
+    node_id: String,
+    slide_part: String,
+    x_emu: u64,
+    y_emu: u64,
+    width_emu: u64,
+    height_emu: u64,
+    font_size_hundredths: u32,
     text: String,
 }
 
@@ -156,6 +168,7 @@ pub fn apply_patch(
             matches!(
                 operation,
                 PatchOperation::PdfTextInsert { .. }
+                    | PatchOperation::PptxTextInsert { .. }
                     | PatchOperation::XlsxCellSet { .. }
                     | PatchOperation::XlsxRowAppend { .. }
                     | PatchOperation::XlsxRowRemoveLast { .. }
@@ -197,6 +210,7 @@ pub fn apply_patch(
     let styles = collect_styles(patch)?;
     let images = collect_image_changes(patch)?;
     let pdf_insertions = collect_pdf_insertions(patch);
+    let pptx_insertions = collect_pptx_insertions(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch);
@@ -274,6 +288,7 @@ pub fn apply_patch(
         || !styles.is_empty()
         || !images.is_empty()
         || !pdf_insertions.is_empty()
+        || !pptx_insertions.is_empty()
         || !xlsx_merges.is_empty()
         || !xlsx_unmerges.is_empty()
         || xlsx_cell_set.is_some()
@@ -337,6 +352,7 @@ pub fn apply_patch(
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
+            let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
             let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let row_insert_here = xlsx_insert_target
                 .as_ref()
@@ -398,6 +414,7 @@ pub fn apply_patch(
             if candidates.is_empty()
                 && insertions.is_none()
                 && cell_insertion.is_none()
+                && slide_insertions.is_none()
                 && !append_here
                 && !row_shift_here
                 && !row_delete_here
@@ -702,6 +719,31 @@ pub fn apply_patch(
                     source_map.entries.last().map(|entry| entry.node_id.clone());
                 chunk_changed = true;
             }
+            if let Some(insertions) = slide_insertions {
+                for insertion in insertions {
+                    insert_pptx_text(&mut html, &mut source_map, insertion)?;
+                    html_nodes.insert(insertion.node_id.clone(), insertion.text.clone());
+                    dirty_nodes.insert(insertion.node_id.clone());
+                    dirty_parts.insert(insertion.slide_part.clone());
+                }
+                descriptor.node_count += insertions.len();
+                descriptor.block_count += insertions.len();
+                descriptor.node_bloom = node_bloom(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.node_id.as_str()),
+                );
+                if descriptor.first_node_id.is_none() {
+                    descriptor.first_node_id = source_map
+                        .entries
+                        .first()
+                        .map(|entry| entry.node_id.clone());
+                }
+                descriptor.last_node_id =
+                    source_map.entries.last().map(|entry| entry.node_id.clone());
+                chunk_changed = true;
+            }
             if let Some(insertion) = cell_insertion {
                 if inserted_xlsx_cell_node_id.is_some() {
                     return Err(HcdError::InvalidBundle(
@@ -934,6 +976,14 @@ pub fn apply_patch(
             )));
         }
     }
+    for insertion in pptx_insertions.values().flatten() {
+        if !dirty_nodes.contains(&insertion.node_id) {
+            return Err(HcdError::NodeNotFound(format!(
+                "PPTX slide chunk for {}",
+                insertion.slide_part
+            )));
+        }
+    }
     if let Some(insertion) = &xlsx_cell_set {
         if inserted_xlsx_cell_node_id.is_none() {
             return Err(HcdError::Unsupported(format!(
@@ -1034,6 +1084,12 @@ pub fn apply_patch(
                 message: "new PDF text is positioned over the original page raster; background and typography remain approximate".to_string(),
                 node_id: Some(insertion.node_id.clone()),
                 source_part: Some(format!("pdf/pages/{}", insertion.page)),
+            }))
+            .chain(pptx_insertions.values().flatten().map(|insertion| FidelityWarning {
+                code: "PPTX_INSERTED_EDITABLE_TEXT_SHAPE".to_string(),
+                message: "new slide text box is editable and exported as a native PowerPoint shape; font fallback may differ from the source theme".to_string(),
+                node_id: Some(insertion.node_id.clone()),
+                source_part: Some(insertion.slide_part.clone()),
             }))
             .collect(),
         idempotent_replay: false,
@@ -1393,6 +1449,7 @@ fn validate_patch_identity(
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_13
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_14
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_16
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -1493,6 +1550,67 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "PDF text box is empty or contains unsupported text".to_string(),
+                    ));
+                }
+                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
+                })?;
+            }
+            PatchOperation::PptxTextInsert {
+                chunk_id,
+                slide_part,
+                x_emu,
+                y_emu,
+                width_emu,
+                height_emu,
+                font_size_pt,
+                text,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_16
+                    || manifest.source.format != "pptx"
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.text.insert requires a PPTX bundle and hcd-patch/16".to_string(),
+                    ));
+                }
+                if !chunk_id.starts_with("c_")
+                    || chunk_id.len() != 34
+                    || !chunk_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "PPTX chunk ID is invalid".to_string(),
+                    ));
+                }
+                let number = slide_part
+                    .strip_prefix("ppt/slides/slide")
+                    .and_then(|part| part.strip_suffix(".xml"));
+                if !number.is_some_and(|part| {
+                    !part.starts_with('0') && part.parse::<u32>().is_ok_and(|value| value > 0)
+                }) {
+                    return Err(HcdError::InvalidPatch(
+                        "PPTX slide part is invalid".to_string(),
+                    ));
+                }
+                if *x_emu > 100_000_000
+                    || *y_emu > 100_000_000
+                    || !(1..=100_000_000).contains(width_emu)
+                    || !(1..=100_000_000).contains(height_emu)
+                    || !font_size_pt.is_finite()
+                    || !(1.0..=256.0).contains(font_size_pt)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "PPTX text box geometry is invalid".to_string(),
+                    ));
+                }
+                if text.trim().is_empty()
+                    || text.chars().count() > 10_000
+                    || text.contains(['\r', '\n'])
+                    || text.chars().any(is_forbidden_xml_character)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "PPTX text box is empty or contains unsupported text".to_string(),
                     ));
                 }
                 inserted = inserted.checked_add(text.len()).ok_or_else(|| {
@@ -2095,6 +2213,44 @@ fn collect_pdf_insertions(patch: &PatchBatch) -> HashMap<String, Vec<PdfTextInse
             font_size_pt: *font_size_pt,
             text: text.clone(),
         });
+    }
+    grouped
+}
+
+fn collect_pptx_insertions(patch: &PatchBatch) -> HashMap<String, Vec<PptxTextInsertion>> {
+    let mut grouped: HashMap<String, Vec<PptxTextInsertion>> = HashMap::new();
+    for (index, operation) in patch.operations.iter().enumerate() {
+        let PatchOperation::PptxTextInsert {
+            chunk_id,
+            slide_part,
+            x_emu,
+            y_emu,
+            width_emu,
+            height_emu,
+            font_size_pt,
+            text,
+        } = operation
+        else {
+            continue;
+        };
+        grouped
+            .entry(chunk_id.clone())
+            .or_default()
+            .push(PptxTextInsertion {
+                node_id: stable_node_id(&[
+                    &patch.document_id,
+                    &patch.patch_id,
+                    &index.to_string(),
+                    "pptx-text-insert",
+                ]),
+                slide_part: slide_part.clone(),
+                x_emu: *x_emu,
+                y_emu: *y_emu,
+                width_emu: *width_emu,
+                height_emu: *height_emu,
+                font_size_hundredths: (*font_size_pt * 100.0).round() as u32,
+                text: text.clone(),
+            });
     }
     grouped
 }
@@ -3923,6 +4079,94 @@ fn insert_pdf_text(
     Ok(())
 }
 
+fn insert_pptx_text(
+    html: &mut String,
+    source_map: &mut crate::ChunkSourceMap,
+    insertion: &PptxTextInsertion,
+) -> Result<(), HcdError> {
+    let source_tag = format!("data-hcd-source-part=\"{}\"", insertion.slide_part);
+    if !html.starts_with("<section class=\"hcd-slide\"") || !html.contains(&source_tag) {
+        return Err(HcdError::InvalidPatch(
+            "PPTX chunk does not match the requested slide".to_string(),
+        ));
+    }
+    let dimension = |key: &str| -> Result<u64, HcdError> {
+        let marker = format!("{key}=\"");
+        html.split_once(&marker)
+            .and_then(|(_, suffix)| suffix.split_once('"'))
+            .and_then(|(number, _)| number.parse::<u64>().ok())
+            .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {key} is missing")))
+    };
+    let slide_width = dimension("data-hcd-width-emu")?;
+    let slide_height = dimension("data-hcd-height-emu")?;
+    if insertion
+        .x_emu
+        .checked_add(insertion.width_emu)
+        .is_none_or(|end| end > slide_width)
+        || insertion
+            .y_emu
+            .checked_add(insertion.height_emu)
+            .is_none_or(|end| end > slide_height)
+    {
+        return Err(HcdError::InvalidPatch(
+            "PPTX text box is outside the slide".to_string(),
+        ));
+    }
+    if source_map
+        .entries
+        .iter()
+        .any(|entry| entry.node_id == insertion.node_id)
+    {
+        return Err(HcdError::InvalidPatch(
+            "PPTX text node ID already exists".to_string(),
+        ));
+    }
+    let ordinal = source_map
+        .entries
+        .iter()
+        .map(|entry| entry.source.text_ordinal)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| HcdError::ResourceLimit("PPTX text ordinal overflowed".to_string()))?;
+    let node_hash = hash_bytes(insertion.text.as_bytes());
+    let emu_px = |value: u64| value as f64 * 96.0 / 914_400.0;
+    let font_pt = insertion.font_size_hundredths as f64 / 100.0;
+    let block = format!(
+        "<div class=\"hcd-slide-shape\" data-hcd-x-emu=\"{}\" data-hcd-y-emu=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\" style=\"position:absolute;left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px;overflow:hidden\"><p class=\"hcd-slide-text\" style=\"font-family:Arial,sans-serif;font-size:{font_pt:.2}pt;margin-top:0;margin-bottom:0;margin-left:0;margin-right:0\"><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{node_hash}\">{}</span></p></div>",
+        insertion.x_emu, insertion.y_emu, insertion.width_emu, insertion.height_emu,
+        emu_px(insertion.x_emu), emu_px(insertion.y_emu), emu_px(insertion.width_emu), emu_px(insertion.height_emu),
+        insertion.node_id, escape_text(&insertion.text),
+    );
+    let end = html
+        .rfind("</section>")
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX slide closing tag is missing".to_string()))?;
+    html.insert_str(end, &block);
+    source_map.entries.push(NodeMapEntry {
+        node_id: insertion.node_id.clone(),
+        node_hash,
+        source: SourceAnchor {
+            source_cell_ref: None,
+            created_in_hcd: true,
+            part: insertion.slide_part.clone(),
+            text_ordinal: ordinal,
+            paragraph_id: None,
+            // The native shape locator is immutable across text edits.
+            text_id: Some(format!(
+                "hcd-pptx-box:{},{},{},{},{}",
+                insertion.x_emu,
+                insertion.y_emu,
+                insertion.width_emu,
+                insertion.height_emu,
+                insertion.font_size_hundredths
+            )),
+            node_kind: "slide-text".to_string(),
+            editable: true,
+        },
+    });
+    Ok(())
+}
+
 fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, HcdError> {
     let mut styles = BTreeMap::new();
     for operation in &patch.operations {
@@ -4457,6 +4701,7 @@ fn apply_annotations(
             }
             PatchOperation::TextSplice { .. }
             | PatchOperation::PdfTextInsert { .. }
+            | PatchOperation::PptxTextInsert { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }

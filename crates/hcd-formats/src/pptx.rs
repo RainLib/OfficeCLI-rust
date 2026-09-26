@@ -3023,21 +3023,36 @@ pub(crate) fn export_pptx(
     let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<u64, String>> = HashMap::new();
+    let mut insertions: HashMap<String, Vec<InsertedPptxShape>> = HashMap::new();
     for node in nodes {
-        replacements
-            .entry(node.source.part)
-            .or_default()
-            .insert(node.source.text_ordinal, node.text);
+        if node.source.created_in_hcd {
+            let shape = InsertedPptxShape::from_node(&node)?;
+            insertions.entry(node.source.part).or_default().push(shape);
+        } else {
+            replacements
+                .entry(node.source.part)
+                .or_default()
+                .insert(node.source.text_ordinal, node.text);
+        }
+    }
+    for shapes in insertions.values_mut() {
+        shapes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     }
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
-    for (part, values) in &replacements {
+    for part in replacements
+        .keys()
+        .chain(insertions.keys())
+        .collect::<BTreeSet<_>>()
+    {
+        let values = replacements.get(part).cloned().unwrap_or_default();
+        let shapes = insertions.get(part).cloned().unwrap_or_default();
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
         archive
             .with_part(part, |input| {
-                rewrite_text_part(input, BufWriter::new(output), values)
+                rewrite_text_part(input, BufWriter::new(output), &values, &shapes)
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
@@ -3065,10 +3080,67 @@ pub(crate) fn export_pptx(
     Ok(report)
 }
 
+#[derive(Clone)]
+struct InsertedPptxShape {
+    node_id: String,
+    x_emu: u64,
+    y_emu: u64,
+    width_emu: u64,
+    height_emu: u64,
+    font_size_hundredths: u32,
+    text: String,
+}
+
+impl InsertedPptxShape {
+    fn from_node(node: &hcd_core::TextExtractEntry) -> Result<Self, HcdError> {
+        if node.source.node_kind != "slide-text" {
+            return Err(HcdError::Unsupported(
+                "PPTX created node is not a slide text box".to_string(),
+            ));
+        }
+        let raw = node
+            .source
+            .text_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("hcd-pptx-box:"))
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX inserted text box locator is missing".to_string())
+            })?;
+        let values = raw
+            .split(',')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| {
+                HcdError::InvalidBundle("PPTX inserted text box locator is invalid".to_string())
+            })?;
+        if values.len() != 5
+            || values[0] > 100_000_000
+            || values[1] > 100_000_000
+            || !(1..=100_000_000).contains(&values[2])
+            || !(1..=100_000_000).contains(&values[3])
+            || !(100..=25_600).contains(&values[4])
+        {
+            return Err(HcdError::InvalidBundle(
+                "PPTX inserted text box locator is out of bounds".to_string(),
+            ));
+        }
+        Ok(Self {
+            node_id: node.node_id.clone(),
+            x_emu: values[0],
+            y_emu: values[1],
+            width_emu: values[2],
+            height_emu: values[3],
+            font_size_hundredths: values[4] as u32,
+            text: node.text.clone(),
+        })
+    }
+}
+
 fn rewrite_text_part(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<u64, String>,
+    insertions: &[InsertedPptxShape],
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -3077,11 +3149,47 @@ fn rewrite_text_part(
     let mut ordinal = 0u64;
     let mut replacing = false;
     let mut seen = BTreeSet::new();
+    let mut max_shape_id = 0u32;
+    let mut inserted = false;
+    let mut depth = 0usize;
+    let mut shape_tree_depth = None;
+    let mut shape_tree_count = 0usize;
     loop {
         let event = reader
             .read_event_into(&mut buffer)
             .map_err(|error| HcdError::InvalidBundle(format!("slide export XML: {error}")))?;
+        let opens = matches!(event, Event::Start(_));
+        let closes = matches!(event, Event::End(_));
+        if let Event::Start(ref start) = event {
+            if local_name(start.name().as_ref()) == "spTree" {
+                shape_tree_count += 1;
+                if shape_tree_count > 1 && !insertions.is_empty() {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX slide has multiple shape trees".to_string(),
+                    ));
+                }
+                shape_tree_depth = Some(depth + 1);
+            }
+        }
+        if let Event::Start(ref element) | Event::Empty(ref element) = event {
+            if local_name(element.name().as_ref()) == "extLst"
+                && shape_tree_depth == Some(depth)
+                && !inserted
+                && !insertions.is_empty()
+            {
+                write_inserted_shapes(&mut writer, &mut max_shape_id, insertions)?;
+                inserted = true;
+            }
+        }
         match event {
+            Event::Start(ref start) | Event::Empty(ref start)
+                if local_name(start.name().as_ref()) == "cNvPr" =>
+            {
+                if let Some(id) = attribute(start, "id").and_then(|id| id.parse::<u32>().ok()) {
+                    max_shape_id = max_shape_id.max(id);
+                }
+                writer.write_event(event.into_owned())?;
+            }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "t" => {
                 ordinal += 1;
                 if let Some(text) = replacements.get(&ordinal) {
@@ -3115,8 +3223,22 @@ fn rewrite_text_part(
                 writer.write_event(event.into_owned())?;
                 replacing = false;
             }
+            Event::End(ref end)
+                if local_name(end.name().as_ref()) == "spTree" && !insertions.is_empty() =>
+            {
+                if !inserted {
+                    write_inserted_shapes(&mut writer, &mut max_shape_id, insertions)?;
+                    inserted = true;
+                }
+                writer.write_event(event.into_owned())?;
+            }
             Event::Eof => break,
             _ => writer.write_event(event.into_owned())?,
+        }
+        if opens {
+            depth += 1;
+        } else if closes {
+            depth = depth.saturating_sub(1);
         }
         buffer.clear();
     }
@@ -3125,6 +3247,39 @@ fn rewrite_text_part(
             "slide source map contains missing text ordinals".to_string(),
         ));
     }
+    if !insertions.is_empty() && !inserted {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide shape tree is missing".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn write_inserted_shapes<W: Write>(
+    writer: &mut Writer<W>,
+    max_shape_id: &mut u32,
+    insertions: &[InsertedPptxShape],
+) -> Result<(), HcdError> {
+    for shape in insertions {
+        *max_shape_id = max_shape_id
+            .checked_add(1)
+            .ok_or_else(|| HcdError::ResourceLimit("PPTX shape ID overflowed".to_string()))?;
+        write_inserted_shape(writer, *max_shape_id, shape)?;
+    }
+    Ok(())
+}
+
+fn write_inserted_shape<W: Write>(
+    writer: &mut Writer<W>,
+    shape_id: u32,
+    shape: &InsertedPptxShape,
+) -> Result<(), HcdError> {
+    let xml = format!(
+        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"{}\"/><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
+        shape.x_emu, shape.y_emu, shape.width_emu, shape.height_emu,
+        shape.font_size_hundredths, escape_text(&shape.text),
+    );
+    writer.get_mut().write_all(xml.as_bytes())?;
     Ok(())
 }
 
@@ -3231,11 +3386,131 @@ mod tests {
     use super::*;
     use hcd_core::{
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
-        PatchOperation, HCD_PATCH_SCHEMA_VERSION,
+        PatchOperation, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_16,
     };
     use std::cell::Cell;
     use std::rc::Rc;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn inserted_slide_text_box_is_valid_and_exports_as_native_shape() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("exported.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("insert-shape"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let chunk_id = descriptor.chunk_id.clone();
+        let slide_part = bundle.read_map(descriptor).unwrap().entries[0]
+            .source
+            .part
+            .clone();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_16.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "insert-shape-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxTextInsert {
+                chunk_id,
+                slide_part: slide_part.clone(),
+                x_emu: 914_400,
+                y_emu: 5_000_000,
+                width_emu: 2_000_000,
+                height_emu: 457_200,
+                font_size_pt: 18.0,
+                text: "新文字 <&>".to_string(),
+            }],
+        };
+        let result = apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        let slide = read_zip_entry(&exported, &slide_part);
+        assert!(slide.contains("name=\"HCD Text"));
+        assert!(slide.contains("新文字 &lt;&amp;&gt;"));
+        assert!(slide.contains("xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\""));
+
+        let inserted = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "新文字 <&>")
+            .unwrap();
+        let edit = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "insert-shape-r2".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: inserted.node_id,
+                start: 0,
+                delete_count: inserted.text.chars().count(),
+                insert_text: "再次编辑".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: inserted.node_hash,
+                },
+            }],
+        };
+        apply_patch(&bundle, &edit, 1).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported_r2 = temp.path().join("exported-r2.pptx");
+        export_pptx(&bundle, &source, &exported_r2, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported_r2, &slide_part);
+        assert!(slide.contains("再次编辑"));
+        assert!(!slide.contains("新文字 &lt;&amp;&gt;"));
+
+        let original = temp.path().join("original.pptx");
+        let report = export_pptx(
+            &bundle,
+            &source,
+            &original,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert!(!read_zip_entry(&original, &slide_part).contains("HCD Text"));
+    }
+
+    #[test]
+    fn inserts_slide_shape_before_extension_list() {
+        let source = b"<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld><p:spTree><p:cNvPr id=\"4\"/><p:extLst/></p:spTree></p:cSld></p:sld>";
+        let shape = InsertedPptxShape {
+            node_id: "n_00000000000000000000000000000000".to_string(),
+            x_emu: 0,
+            y_emu: 0,
+            width_emu: 914_400,
+            height_emu: 457_200,
+            font_size_hundredths: 1_200,
+            text: "new".to_string(),
+        };
+        let mut output = Vec::new();
+        rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[shape],
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(xml.find("HCD Text 5").unwrap() < xml.find("<p:extLst").unwrap());
+    }
 
     struct EofTrackingReader {
         source: std::io::Cursor<Vec<u8>>,

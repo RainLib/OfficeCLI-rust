@@ -1196,12 +1196,31 @@ fn validate_map_entry(
             ));
         }
     }
-    if (entry.source.source_cell_ref.is_some() || entry.source.created_in_hcd)
+    if entry.source.source_cell_ref.is_some()
         && (source.format != "xlsx" || entry.source.node_kind != "cell")
     {
         issues.push(issue(
             "SOURCE_CELL_REF_INVALID",
             format!("node {} has XLSX-only source metadata", entry.node_id),
+            path,
+        ));
+    }
+    if entry.source.created_in_hcd
+        && !((source.format == "xlsx" && entry.source.node_kind == "cell")
+            || (source.format == "pptx"
+                && entry.source.node_kind == "slide-text"
+                && entry
+                    .source
+                    .text_id
+                    .as_deref()
+                    .is_some_and(valid_pptx_box_locator)))
+    {
+        issues.push(issue(
+            "CREATED_NODE_SOURCE_INVALID",
+            format!(
+                "node {} has unsupported created source metadata",
+                entry.node_id
+            ),
             path,
         ));
     }
@@ -1215,6 +1234,25 @@ fn validate_map_entry(
             issues,
         );
     }
+}
+
+fn valid_pptx_box_locator(locator: &str) -> bool {
+    let Some(values) = locator.strip_prefix("hcd-pptx-box:") else {
+        return false;
+    };
+    let Ok(values) = values
+        .split(',')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    values.len() == 5
+        && values[0] <= 100_000_000
+        && values[1] <= 100_000_000
+        && (1..=100_000_000).contains(&values[2])
+        && (1..=100_000_000).contains(&values[3])
+        && (100..=25_600).contains(&values[4])
 }
 
 fn validate_textual_source_range(

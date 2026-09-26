@@ -166,7 +166,7 @@ pub struct SourceAnchor {
     /// Original OOXML cell address when a grid edit moves this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_cell_ref: Option<String>,
-    /// True for a cell materialized by an HCD patch rather than source OOXML.
+    /// True for a cell or slide text box materialized by an HCD patch.
     #[serde(default, skip_serializing_if = "is_false")]
     pub created_in_hcd: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -251,6 +251,18 @@ pub enum PatchOperation {
         y_pt: f32,
         width_pt: f32,
         height_pt: f32,
+        font_size_pt: f32,
+        text: String,
+    },
+    /// Add an editable text shape at slide coordinates measured in EMU.
+    #[serde(rename = "pptx.text.insert", rename_all = "camelCase")]
+    PptxTextInsert {
+        chunk_id: String,
+        slide_part: String,
+        x_emu: u64,
+        y_emu: u64,
+        width_emu: u64,
+        height_emu: u64,
         font_size_pt: f32,
         text: String,
     },
@@ -357,6 +369,7 @@ impl PatchOperation {
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
             | Self::PdfTextInsert { .. }
+            | Self::PptxTextInsert { .. }
             | Self::XlsxCellSet { .. }
             | Self::XlsxRowAppend { .. }
             | Self::XlsxRowInsert { .. }
@@ -373,6 +386,7 @@ impl PatchOperation {
             self,
             Self::TextSplice { .. }
                 | Self::PdfTextInsert { .. }
+                | Self::PptxTextInsert { .. }
                 | Self::XlsxMerge { .. }
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
