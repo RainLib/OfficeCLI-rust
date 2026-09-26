@@ -34,8 +34,16 @@ office_oxide = { workspace = true }
 tempfile = { workspace = true }
 ironpress = { version = "=1.6.0", default-features = false }
 unicode-segmentation = { workspace = true }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+quick-xml = { workspace = true }
+zip = { workspace = true }
+jsonwebtoken = "9.3"
+sha2 = { workspace = true }
+base64 = "0.22"
+regex = "1"
+object_store = { version = "0.12", features = ["aws"] }
+tokio-postgres = "0.7"
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-zip = { workspace = true }

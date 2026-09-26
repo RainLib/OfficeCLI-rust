@@ -54,6 +54,16 @@ pub enum HdocSubcommand {
     RenderHtml(HdocRenderHtmlCommand),
     /// Apply a text/annotation patch and append a revision
     Apply(HdocApplyCommand),
+    /// Create a revision that enables semantic block editing while preserving the original view
+    ProjectEditor(HdocProjectEditorCommand),
+    /// Read bounded semantic blocks and precondition hashes for an editor
+    EditorState(HdocEditorStateCommand),
+    /// Serve authorized HCD document, revision and edit APIs
+    Serve(HdocServeCommand),
+    /// Issue a short-lived document-scoped token for a caller or local test
+    IssueToken(HdocIssueTokenCommand),
+    /// Restore historical content as a new immutable revision
+    Restore(HdocRestoreCommand),
     /// Export one HCD revision by source-backed rewrite or pure-Rust semantic conversion
     Export(HdocExportCommand),
 }
@@ -263,6 +273,75 @@ pub struct HdocApplyCommand {
 }
 
 #[derive(Args)]
+pub struct HdocProjectEditorCommand {
+    pub bundle: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Args)]
+pub struct HdocEditorStateCommand {
+    pub bundle: String,
+    #[arg(long)]
+    pub revision: Option<u64>,
+}
+
+#[derive(Args)]
+pub struct HdocServeCommand {
+    /// Directory containing one <documentId>.hcd bundle per document
+    #[arg(long)]
+    pub root: PathBuf,
+    #[arg(long, default_value = "127.0.0.1:8766")]
+    pub bind: String,
+    /// Environment variable holding the JWT HMAC secret (at least 32 bytes)
+    #[arg(long, default_value = "HCD_TOKEN_SECRET")]
+    pub secret_env: String,
+    /// PostgreSQL connection URL environment variable; enables durable metadata when set with S3 bucket
+    #[arg(long, default_value = "HCD_DATABASE_URL")]
+    pub database_url_env: String,
+    /// Private S3-compatible bucket environment variable
+    #[arg(long, default_value = "HCD_S3_BUCKET")]
+    pub s3_bucket_env: String,
+    /// Optional S3-compatible endpoint environment variable
+    #[arg(long, default_value = "HCD_S3_ENDPOINT")]
+    pub s3_endpoint_env: String,
+}
+
+#[derive(Args)]
+pub struct HdocIssueTokenCommand {
+    #[arg(long)]
+    pub document_id: String,
+    #[arg(long, value_enum)]
+    pub scope: HdocTokenScope,
+    /// Stable caller user ID for collaboration presence
+    #[arg(long)]
+    pub user_id: Option<String>,
+    /// Name shown above the user's collaborative caret
+    #[arg(long)]
+    pub display_name: Option<String>,
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub ttl_seconds: u64,
+    #[arg(long, default_value = "HCD_TOKEN_SECRET")]
+    pub secret_env: String,
+}
+
+#[derive(Args)]
+pub struct HdocRestoreCommand {
+    pub bundle: String,
+    #[arg(long)]
+    pub revision: u64,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum HdocTokenScope {
+    Read,
+    Write,
+    Upload,
+}
+
+#[derive(Args)]
 pub struct HdocExportCommand {
     pub bundle: String,
     /// Immutable source for same-format source-backed EXACT/HIGH export. Omit for semantic export.
@@ -300,6 +379,35 @@ pub fn handle_hdoc(
         HdocSubcommand::PutAsset(command) => put_asset(command, format),
         HdocSubcommand::RenderHtml(command) => render_html(command, format),
         HdocSubcommand::Apply(command) => apply(command, format),
+        HdocSubcommand::ProjectEditor(command) => project_editor(command, format),
+        HdocSubcommand::EditorState(command) => editor_state(command, format),
+        HdocSubcommand::Serve(command) => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            runtime
+                .block_on(crate::hdoc_server::serve(command))
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            Ok(("HCD server stopped".to_string(), true))
+        }
+        HdocSubcommand::IssueToken(command) => {
+            let token = crate::hdoc_server::issue_token(&command)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            render(&serde_json::json!({"token": token}), format, token)
+        }
+        HdocSubcommand::Restore(command) => {
+            let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+            let result =
+                hcd_core::restore_revision(&bundle, command.revision, command.expected_revision)
+                    .map_err(handler_error)?;
+            render(
+                &result,
+                format,
+                format!(
+                    "Restored revision {} as revision {}",
+                    command.revision, result.revision
+                ),
+            )
+        }
         HdocSubcommand::Export(command) => export(command, format),
     }
 }
@@ -994,10 +1102,16 @@ fn deterministic_document_id(source: &str) -> Result<String, HandlerError> {
 
 fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, bool), HandlerError> {
     let patch_json = read_patch_json(&command.patch)?;
-    let patch: PatchBatch = serde_json::from_str(&patch_json)?;
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
-    let result =
-        hcd_core::apply_patch(&bundle, &patch, command.expected_revision).map_err(handler_error)?;
+    let header: serde_json::Value = serde_json::from_str(&patch_json)?;
+    let result = if header["schemaVersion"] == hcd_core::HCD_PATCH_SCHEMA_VERSION_4 {
+        let patch: hcd_core::StructurePatchBatch = serde_json::from_str(&patch_json)?;
+        hcd_core::apply_structure_patch(&bundle, &patch, command.expected_revision)
+    } else {
+        let patch: PatchBatch = serde_json::from_str(&patch_json)?;
+        hcd_core::apply_patch(&bundle, &patch, command.expected_revision)
+    }
+    .map_err(handler_error)?;
     render(
         &result,
         format,
@@ -1007,6 +1121,34 @@ fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, boo
             result.revision,
             result.dirty_chunk_ids.len()
         ),
+    )
+}
+
+fn project_editor(
+    command: HdocProjectEditorCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let result =
+        hcd_core::project_editor(&bundle, command.expected_revision).map_err(handler_error)?;
+    render(
+        &result,
+        format,
+        format!("Editor projection created at revision {}", result.revision),
+    )
+}
+
+fn editor_state(
+    command: HdocEditorStateCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let state = hcd_core::editor_projection(&bundle, command.revision).map_err(handler_error)?;
+    let count = state.blocks.len();
+    render(
+        &state,
+        format,
+        format!("Editor projection has {count} blocks"),
     )
 }
 
@@ -1141,6 +1283,29 @@ fn semantic_export(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
+    if target == "pdf"
+        && manifest.profile == "fixed-layout"
+        && manifest.source.format == "pdf"
+        && revision == 0
+    {
+        let pages = super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path)?;
+        let report = FidelityReport {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            level: FidelityLevel::Visual,
+            preserved: vec![format!("{pages} HCD page rasters and physical page dimensions")],
+            flattened: vec!["PDF page text and vector structure are represented by page images".to_string()],
+            dropped: vec!["selectable PDF text layer and original PDF object metadata".to_string()],
+            warnings: vec![FidelityWarning {
+                code: "HCD_PDF_RASTER_ONLY_EXPORT".to_string(),
+                message: "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for selectable text and exact PDF structure".to_string(),
+                node_id: None, source_part: None,
+            }],
+        };
+        if let Some(path) = fidelity_report {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return Ok(report);
+    }
     let mut materialized = tempfile::Builder::new()
         .prefix(".officecli-hcd-semantic-")
         .suffix(".html")
