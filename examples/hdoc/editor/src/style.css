@@ -84,6 +84,16 @@
 .hcd-surface .fixed-page{min-height:900px;background:#fff;margin:18px 0;box-shadow:0 3px 30px #1738221a;overflow:hidden}
 .hcd-surface .fixed-page img{max-width:100%;height:auto}
 .hcd-surface .fixed-page iframe{width:100%;border:0;display:block}
+.hcd-surface .fixed-text-panel{padding:14px 20px 18px;border-top:1px solid #dce8dd;background:#f9fcf9;color:#274936;font-size:13px}
+.hcd-surface .fixed-text-panel>span{margin-left:12px;color:#6f8275}
+.hcd-surface .fixed-text-list{display:flex;gap:7px;overflow-x:auto;padding:10px 0}
+.hcd-surface .fixed-text-list button{flex:0 0 auto;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #cbdcd0;border-radius:6px;padding:6px 9px;background:#fff;color:#274936;cursor:pointer}
+.hcd-surface .fixed-text-form{max-width:680px;padding:10px;border:1px solid #d0dfd2;border-radius:8px;background:#fff}
+.hcd-surface .fixed-text-form label{display:grid;gap:6px;font-weight:600}
+.hcd-surface .fixed-text-form textarea{width:100%;min-height:75px;border:1px solid #becfc1;border-radius:6px;padding:9px;font:inherit;resize:vertical}
+.hcd-surface .fixed-text-form>div{display:flex;gap:8px;margin-top:8px}
+.hcd-surface .fixed-text-form button{border:1px solid #c5d7c8;border-radius:6px;padding:6px 12px;background:#fff;color:#225437;cursor:pointer}
+.hcd-surface .fixed-text-form button:first-child{background:#176849;color:white}
 .hcd-surface .viewer-controls{display:flex;justify-content:space-between;gap:12px;padding:10px 28px;background:#e9efe9;color:#54705d;font-size:12px}
 .hcd-surface .load-tail{height:2px}
 .hcd-surface .skeleton{min-height:900px;display:grid;place-items:center;color:#a6b3aa}
