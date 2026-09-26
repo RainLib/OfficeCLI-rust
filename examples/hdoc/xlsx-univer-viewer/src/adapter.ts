@@ -545,7 +545,7 @@ export class HcdUniverAdapter {
       .map(cell => cellKey(previous.sheetId, cell.row, cell.column)));
     const removed = previous.cells.filter(cell => !next.has(cellKey(previous.sheetId, cell.row, cell.column)));
     this.withApplying(() => {
-      for (const cell of removed) sheet.getRange(cell.row, cell.column).setValue('');
+      for (const cell of removed) sheet.getRange(cell.row, cell.column).clear();
     });
     for (const cell of previous.cells) {
       const key = cellKey(previous.sheetId, cell.row, cell.column);
@@ -626,8 +626,23 @@ export class HcdUniverAdapter {
     });
     for (const visual of parsed.visuals) {
       const key = `${sheet.getSheetId()}:visual:${visual.nodeId}`;
-      if (this.appliedDimensions.has(key)) continue;
       const geometry = this.resolveVisualGeometry(sheet, visual);
+      if (this.appliedDimensions.has(key)) {
+        const existing = sheet.getImageById(visual.nodeId);
+        if (existing) {
+          const updated = await existing.toBuilder()
+            .setColumn(geometry.column)
+            .setRow(geometry.row)
+            .setColumnOffset(geometry.columnOffset)
+            .setRowOffset(geometry.rowOffset)
+            .setWidth(geometry.width)
+            .setHeight(geometry.height)
+            .buildAsync();
+          this.withApplying(() => sheet.updateImages([{ ...updated, drawingId: visual.nodeId }]));
+          continue;
+        }
+        this.appliedDimensions.delete(key);
+      }
       const built = await sheet.newOverGridImage()
         .setSource(visual.assetUrl, this.univerAPI.Enum.ImageSourceType.URL)
         .setColumn(geometry.column)

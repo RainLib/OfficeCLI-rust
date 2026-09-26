@@ -4851,11 +4851,39 @@ pub(crate) fn export_xlsx(
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
+    let drawing_shifts = collect_structural_drawings(
+        bundle,
+        &manifest,
+        &workbook,
+        &row_insertions,
+        &column_shifts,
+    )?;
+    if !row_insertions.is_empty() || !column_shifts.is_empty() {
+        collect_structural_formulas(
+            bundle,
+            &manifest,
+            &workbook,
+            &row_insertions,
+            &column_shifts,
+            &mut formula_replacements,
+            &mut created_formulas,
+        )?;
+    }
     let expanded_shared_groups = expand_shared_formula_replacements(
         &mut archive,
         &mut formula_replacements,
         &converted_formula_cells,
     )?;
+    for (part, formulas) in &mut formula_replacements {
+        let rows = row_insertions.get(part).map(Vec::as_slice).unwrap_or(&[]);
+        let columns = column_shifts.get(part).map(Vec::as_slice).unwrap_or(&[]);
+        formulas.retain(|reference, _| {
+            cell_coordinates(reference).is_some_and(|(row, column)| {
+                shifted_xlsx_row(row, rows).is_ok_and(|row| row != 0)
+                    && shifted_xlsx_column(column, columns).is_ok_and(|column| column != 0)
+            })
+        });
+    }
     let chart_caches_may_be_stale = (!formula_replacements.is_empty()
         || !created_formulas.is_empty()
         || formula_converted_to_value)
@@ -4864,14 +4892,25 @@ pub(crate) fn export_xlsx(
             .iter()
             .any(|entry| !entry.is_dir && entry.name.starts_with("xl/charts/"));
     if !row_insertions.is_empty() || !column_shifts.is_empty() {
-        verify_grid_shift_source(&mut archive, &workbook, &row_insertions, &column_shifts)?;
+        verify_grid_shift_source(
+            &mut archive,
+            &workbook,
+            &row_insertions,
+            &column_shifts,
+            &drawing_shifts,
+        )?;
     }
     let merge_ranges = collect_canonical_merge_ranges(bundle, &manifest, &workbook, &replacements)?;
     let canonical_rows = collect_canonical_sheet_rows(bundle, &manifest, &workbook, &replacements)?;
     let canonical_last_columns =
         collect_canonical_sheet_last_columns(bundle, &manifest, &workbook, &replacements)?;
-    let column_widths =
-        collect_canonical_column_widths(bundle, &manifest, &workbook, &replacements)?;
+    let column_widths = collect_canonical_column_widths(
+        bundle,
+        &manifest,
+        &workbook,
+        &replacements,
+        &column_shifts,
+    )?;
     let row_heights = collect_canonical_row_heights(bundle, &manifest, &workbook, &replacements)?;
     for (part, values) in &replacements {
         let path = scratch.path().join(safe_temp_name(part));
@@ -4918,6 +4957,17 @@ pub(crate) fn export_xlsx(
                     last_column,
                 )
                 .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        replacement_paths.insert(part.clone(), path);
+    }
+    for (part, (_, rows, columns)) in &drawing_shifts {
+        let path = scratch.path().join(safe_temp_name(part));
+        let output = File::create(&path)?;
+        archive
+            .with_part(part, |source| {
+                rewrite_xlsx_drawing_anchors(source, BufWriter::new(output), rows, columns)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
@@ -5014,6 +5064,7 @@ fn collect_canonical_column_widths(
     manifest: &HcdManifest,
     workbook: &WorkbookInfo,
     replacements: &HashMap<String, BTreeMap<String, String>>,
+    column_shifts: &HashMap<String, Vec<ColumnShift>>,
 ) -> Result<HashMap<String, BTreeMap<u32, f64>>, HcdError> {
     let mut widths: HashMap<String, BTreeMap<u32, f64>> = replacements
         .keys()
@@ -5045,7 +5096,8 @@ fn collect_canonical_column_widths(
                     })?;
                 let tag = &html[start..end];
                 cursor = end;
-                if !tag.contains(" data-hcd-width-edited=\"true\"") {
+                let structural = column_shifts.contains_key(&sheet.part);
+                if !structural && !tag.contains(" data-hcd-width-edited=\"true\"") {
                     continue;
                 }
                 let first = hcd_column_attribute(tag, "data-hcd-column-start")
@@ -5059,20 +5111,24 @@ fn collect_canonical_column_widths(
                         "XLSX HCD edited column width is incomplete".to_string(),
                     ));
                 };
-                if column != end_column
+                if (column != end_column && !structural)
                     || !(1..=16_384).contains(&column)
+                    || !(column..=16_384).contains(&end_column)
                     || !width.is_finite()
                     || !(1.0..=255.0).contains(&width)
+                    || (structural && tag.contains(" data-hcd-hidden=\"true\""))
                 {
                     return Err(HcdError::InvalidBundle(
                         "XLSX HCD edited column width is invalid".to_string(),
                     ));
                 }
-                if let Some(previous) = sheet_widths.insert(column, width) {
-                    if previous != width {
-                        return Err(HcdError::InvalidBundle(
-                            "XLSX HCD column width differs between windows".to_string(),
-                        ));
+                for column in column..=end_column {
+                    if let Some(previous) = sheet_widths.insert(column, width) {
+                        if previous != width {
+                            return Err(HcdError::InvalidBundle(
+                                "XLSX HCD column width differs between windows".to_string(),
+                            ));
+                        }
                     }
                 }
             }
@@ -5460,6 +5516,7 @@ fn rewrite_worksheet(
     let mut column_group_seen = false;
     let mut column_group_open = false;
     let mut last_source_column = 0u32;
+    let mut in_conditional_formula = false;
     let canonical_last_row = canonical_rows.last().copied().unwrap_or(0);
     let canonical_last_column = replacements
         .keys()
@@ -5497,6 +5554,57 @@ fn rewrite_worksheet(
             continue;
         }
         match event {
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "conditionalFormatting"
+                    && (!row_insertions.is_empty() || !column_shifts.is_empty()) =>
+            {
+                writer.write_event(Event::Start(rewrite_xlsx_view_attributes(
+                    start,
+                    row_insertions,
+                    column_shifts,
+                )?))?;
+            }
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "formula"
+                    && (!row_insertions.is_empty() || !column_shifts.is_empty()) =>
+            {
+                in_conditional_formula = true;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Text(ref value) if in_conditional_formula => {
+                let expression = value.unescape().map_err(|error| {
+                    HcdError::InvalidBundle(format!("XLSX conditional formula: {error}"))
+                })?;
+                let rewritten = rewrite_grid_formula(&expression, row_insertions, column_shifts)?;
+                writer.write_event(Event::Text(BytesText::new(&rewritten)))?;
+            }
+            Event::End(ref end)
+                if local_name(end.name().as_ref()) == "formula" && in_conditional_formula =>
+            {
+                in_conditional_formula = false;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "cols" && !column_shifts.is_empty() =>
+            {
+                column_group_seen = true;
+                let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+                let col_name = qualified_child_name(start.name().as_ref(), "col");
+                writer.write_event(Event::Start(start.to_owned()))?;
+                write_new_worksheet_columns(&mut writer, &col_name, &mut pending_widths)?;
+                writer.write_event(Event::End(BytesEnd::new(name)))?;
+                skip_depth = 1;
+            }
+            Event::Empty(ref empty)
+                if local_name(empty.name().as_ref()) == "cols" && !column_shifts.is_empty() =>
+            {
+                column_group_seen = true;
+                let name = String::from_utf8_lossy(empty.name().as_ref()).into_owned();
+                let col_name = qualified_child_name(empty.name().as_ref(), "col");
+                writer.write_event(Event::Start(empty.to_owned()))?;
+                write_new_worksheet_columns(&mut writer, &col_name, &mut pending_widths)?;
+                writer.write_event(Event::End(BytesEnd::new(name)))?;
+            }
             Event::Start(ref start)
                 if local_name(start.name().as_ref()) == "cols" && !column_widths.is_empty() =>
             {
@@ -5955,17 +6063,327 @@ fn shifted_xlsx_row(mut row: u32, shifts: &[RowShift]) -> Result<u32, HcdError> 
     Ok(row)
 }
 
+fn collect_structural_formulas(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    workbook: &WorkbookInfo,
+    row_shifts: &HashMap<String, Vec<RowShift>>,
+    column_shifts: &HashMap<String, Vec<ColumnShift>>,
+    formulas: &mut HashMap<String, BTreeMap<String, String>>,
+    created: &mut HashMap<String, BTreeMap<String, String>>,
+) -> Result<(), HcdError> {
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let sheet = workbook.sheets.get(grid.sheet_index).ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX HCD sheet index is missing".to_string())
+            })?;
+            if !row_shifts.contains_key(&sheet.part) && !column_shifts.contains_key(&sheet.part) {
+                continue;
+            }
+            let source_map = bundle.read_map(&descriptor)?;
+            let by_cell: HashMap<_, _> = source_map
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .source
+                        .paragraph_id
+                        .as_deref()
+                        .map(|cell| (cell, entry))
+                })
+                .collect();
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut reader = Reader::from_str(&html);
+            let mut buffer = Vec::new();
+            loop {
+                let event = reader.read_event_into(&mut buffer).map_err(|error| {
+                    HcdError::InvalidBundle(format!("XLSX HCD formula HTML: {error}"))
+                })?;
+                match event {
+                    Event::Start(ref element) if local_name(element.name().as_ref()) == "td" => {
+                        if attribute(element, "data-hcd-formula").as_deref() != Some("true") {
+                            buffer.clear();
+                            continue;
+                        }
+                        let current = attribute(element, "data-hcd-cell").ok_or_else(|| {
+                            HcdError::InvalidBundle("XLSX formula has no cell address".to_string())
+                        })?;
+                        let expression = attribute(element, "data-hcd-formula-expression")
+                            .and_then(|value| value.strip_prefix('=').map(str::to_string))
+                            .filter(|value| !value.is_empty())
+                            .ok_or_else(|| {
+                                HcdError::Unsupported(
+                                    "XLSX structural deletion requires an editable A1 formula"
+                                        .to_string(),
+                                )
+                            })?;
+                        let entry = by_cell.get(current.as_str()).ok_or_else(|| {
+                            HcdError::InvalidBundle(format!(
+                                "XLSX formula {current} has no source map"
+                            ))
+                        })?;
+                        if entry.source.created_in_hcd {
+                            created
+                                .entry(sheet.part.clone())
+                                .or_default()
+                                .insert(current, expression);
+                        } else {
+                            let original =
+                                entry.source.source_cell_ref.as_deref().unwrap_or(&current);
+                            formulas
+                                .entry(sheet.part.clone())
+                                .or_default()
+                                .insert(original.to_string(), expression);
+                        }
+                    }
+                    Event::Eof => break,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+        }
+    }
+    Ok(())
+}
+
+type DrawingShifts = HashMap<String, (String, Vec<RowShift>, Vec<ColumnShift>)>;
+
+fn collect_structural_drawings(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    workbook: &WorkbookInfo,
+    row_shifts: &HashMap<String, Vec<RowShift>>,
+    column_shifts: &HashMap<String, Vec<ColumnShift>>,
+) -> Result<DrawingShifts, HcdError> {
+    let mut parts = HashMap::new();
+    if row_shifts.is_empty() && column_shifts.is_empty() {
+        return Ok(parts);
+    }
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind == GridChunkKind::Cells {
+                continue;
+            }
+            let sheet = workbook.sheets.get(grid.sheet_index).ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX drawing sheet index is missing".to_string())
+            })?;
+            if !row_shifts.contains_key(&sheet.part) && !column_shifts.contains_key(&sheet.part) {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut reader = Reader::from_str(&html);
+            let mut buffer = Vec::new();
+            let mut found = false;
+            loop {
+                let event = reader.read_event_into(&mut buffer).map_err(|error| {
+                    HcdError::InvalidBundle(format!("XLSX drawing HTML: {error}"))
+                })?;
+                match event {
+                    Event::Start(ref element) | Event::Empty(ref element) => {
+                        if let Some(part) = attribute(element, "data-hcd-drawing-part") {
+                            if !part.starts_with("xl/drawings/") || !part.ends_with(".xml") {
+                                return Err(HcdError::InvalidBundle(
+                                    "XLSX drawing part is outside xl/drawings".to_string(),
+                                ));
+                            }
+                            if attribute(element, "data-hcd-anchor-kind").as_deref()
+                                != Some("two-cell")
+                            {
+                                return Err(HcdError::Unsupported(
+                                    "XLSX grid deletion requires two-cell drawing anchors"
+                                        .to_string(),
+                                ));
+                            }
+                            parts.insert(
+                                part,
+                                (
+                                    sheet.part.clone(),
+                                    row_shifts.get(&sheet.part).cloned().unwrap_or_default(),
+                                    column_shifts.get(&sheet.part).cloned().unwrap_or_default(),
+                                ),
+                            );
+                            found = true;
+                        }
+                    }
+                    Event::Eof => break,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+            if !found {
+                return Err(HcdError::Unsupported(
+                    "XLSX drawing has no mapped OOXML part".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(parts)
+}
+
+fn shifted_drawing_marker(
+    mut marker: u32,
+    rows: &[RowShift],
+    columns: &[ColumnShift],
+    is_row: bool,
+) -> Result<u32, HcdError> {
+    if is_row {
+        for shift in rows {
+            match *shift {
+                RowShift::Insert(before) if marker >= before - 1 => {
+                    marker = marker
+                        .checked_add(1)
+                        .filter(|value| *value < 1_048_576)
+                        .ok_or_else(|| {
+                            HcdError::ResourceLimit(
+                                "XLSX drawing row exceeds worksheet".to_string(),
+                            )
+                        })?
+                }
+                RowShift::Delete(at) if marker > at - 1 => marker -= 1,
+                _ => {}
+            }
+        }
+    } else {
+        for shift in columns {
+            match *shift {
+                ColumnShift::Insert(before) if marker >= before - 1 => {
+                    marker = marker
+                        .checked_add(1)
+                        .filter(|value| *value < 16_384)
+                        .ok_or_else(|| {
+                            HcdError::ResourceLimit(
+                                "XLSX drawing column exceeds worksheet".to_string(),
+                            )
+                        })?
+                }
+                ColumnShift::Delete(at) if marker > at - 1 => marker -= 1,
+                _ => {}
+            }
+        }
+    }
+    Ok(marker)
+}
+
+fn rewrite_grid_formula(
+    formula: &str,
+    rows: &[RowShift],
+    columns: &[ColumnShift],
+) -> Result<String, HcdError> {
+    let mut result = formula.to_string();
+    for shift in rows {
+        result = match shift {
+            RowShift::Delete(row) => {
+                hcd_core::delete_formula_references(&result, hcd_core::FormulaDeletion::Row(*row))?
+            }
+            RowShift::Insert(_) => {
+                return Err(HcdError::Unsupported(
+                    "XLSX conditional formula insertion is not supported".to_string(),
+                ))
+            }
+        };
+    }
+    for shift in columns {
+        result = match shift {
+            ColumnShift::Delete(column) => hcd_core::delete_formula_references(
+                &result,
+                hcd_core::FormulaDeletion::Column(*column),
+            )?,
+            ColumnShift::Insert(_) => {
+                return Err(HcdError::Unsupported(
+                    "XLSX conditional formula insertion is not supported".to_string(),
+                ))
+            }
+        };
+    }
+    Ok(result)
+}
+
+fn rewrite_xlsx_drawing_anchors(
+    source: impl Read,
+    output: impl Write,
+    rows: &[RowShift],
+    columns: &[ColumnShift],
+) -> Result<(), HcdError> {
+    let mut reader = Reader::from_reader(BufReader::new(source));
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(output);
+    let mut buffer = Vec::new();
+    let mut in_two_cell = false;
+    let mut in_marker = false;
+    let mut coordinate = None;
+    let mut anchor_count = 0usize;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX drawing XML: {error}")))?;
+        match &event {
+            Event::Start(element) => match local_name(element.name().as_ref()) {
+                "twoCellAnchor" => {
+                    in_two_cell = true;
+                    anchor_count += 1;
+                }
+                "oneCellAnchor" | "absoluteAnchor" => {
+                    return Err(HcdError::Unsupported(
+                        "XLSX grid deletion cannot shift this drawing anchor kind".to_string(),
+                    ))
+                }
+                "from" | "to" if in_two_cell => in_marker = true,
+                "row" | "col" if in_marker => {
+                    coordinate = Some(local_name(element.name().as_ref()) == "row")
+                }
+                _ => {}
+            },
+            Event::Text(text) if coordinate.is_some() => {
+                let original = std::str::from_utf8(text.as_ref())
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("XLSX drawing marker is invalid".to_string())
+                    })?;
+                let shifted = shifted_drawing_marker(original, rows, columns, coordinate.unwrap())?;
+                writer.write_event(Event::Text(BytesText::new(&shifted.to_string())))?;
+                buffer.clear();
+                continue;
+            }
+            Event::End(element) => match local_name(element.name().as_ref()) {
+                "row" | "col" => coordinate = None,
+                "from" | "to" => in_marker = false,
+                "twoCellAnchor" => in_two_cell = false,
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+        writer.write_event(event.into_owned())?;
+        buffer.clear();
+    }
+    if anchor_count == 0 {
+        return Err(HcdError::Unsupported(
+            "XLSX drawing has no two-cell anchor".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_grid_shift_source(
     archive: &mut StreamingOxmlArchive,
     workbook: &WorkbookInfo,
     row_insertions: &HashMap<String, Vec<RowShift>>,
     column_shifts: &HashMap<String, Vec<ColumnShift>>,
+    drawing_shifts: &DrawingShifts,
 ) -> Result<(), HcdError> {
     for entry in archive.entries() {
         let name = entry.name.as_str();
-        if name.starts_with("xl/charts/")
-            || name.starts_with("xl/drawings/")
-            || name.starts_with("xl/tables/")
+        if name.starts_with("xl/tables/")
             || name.starts_with("xl/pivot")
             || name.starts_with("xl/externalLinks/")
             || name == "xl/calcChain.xml"
@@ -5980,6 +6398,7 @@ fn verify_grid_shift_source(
         .map_err(package_error)?;
     let mut workbook_reader = Reader::from_reader(workbook_xml.as_slice());
     let mut workbook_buffer = Vec::new();
+    let mut in_defined_name = false;
     loop {
         let event = workbook_reader
             .read_event_into(&mut workbook_buffer)
@@ -5987,12 +6406,31 @@ fn verify_grid_shift_source(
                 HcdError::InvalidBundle(format!("invalid XLSX workbook XML: {error}"))
             })?;
         match event {
-            Event::Start(ref element) | Event::Empty(ref element)
-                if local_name(element.name().as_ref()) == "definedName" =>
-            {
-                return Err(HcdError::Unsupported(
-                    "XLSX grid shift cannot update defined names".to_string(),
-                ));
+            Event::Start(ref element) if local_name(element.name().as_ref()) == "definedName" => {
+                in_defined_name = true;
+            }
+            Event::Text(ref value) if in_defined_name => {
+                let reference = value.unescape().map_err(|error| {
+                    HcdError::InvalidBundle(format!("XLSX defined name: {error}"))
+                })?;
+                let target_names = workbook.sheets.iter().filter(|sheet| {
+                    row_insertions.contains_key(&sheet.part)
+                        || column_shifts.contains_key(&sheet.part)
+                });
+                if !reference.contains('!')
+                    || target_names.into_iter().any(|sheet| {
+                        reference.contains(&format!("{}!", sheet.name))
+                            || reference.contains(&format!("'{}'!", sheet.name.replace('\'', "''")))
+                    })
+                {
+                    return Err(HcdError::Unsupported(
+                        "XLSX grid shift cannot update a defined name on the edited sheet"
+                            .to_string(),
+                    ));
+                }
+            }
+            Event::End(ref element) if local_name(element.name().as_ref()) == "definedName" => {
+                in_defined_name = false;
             }
             Event::Eof => break,
             _ => {}
@@ -6007,6 +6445,8 @@ fn verify_grid_shift_source(
                 let mut reader = Reader::from_reader(BufReader::new(source));
                 reader.config_mut().check_end_names = true;
                 let mut buffer = Vec::new();
+                let mut in_other_sheet_formula = false;
+                let mut in_conditional_formula = false;
                 loop {
                     let event = reader.read_event_into(&mut buffer).map_err(|error| {
                         PackageError::ReadPartError(format!("{}: {error}", sheet.part))
@@ -6015,19 +6455,24 @@ fn verify_grid_shift_source(
                         Event::Start(ref element) | Event::Empty(ref element) => {
                             let name = element.name();
                             let tag = local_name(name.as_ref());
-                            if matches!(
-                                tag,
-                                "f" | "formula"
-                                    | "conditionalFormatting"
-                                    | "dataValidation"
-                                    | "dataValidations"
-                                    | "autoFilter"
-                                    | "tableParts"
-                                    | "hyperlinks"
-                                    | "drawing"
-                                    | "legacyDrawing"
-                                    | "extLst"
-                            ) {
+                            if !target && tag == "f" && matches!(event, Event::Start(_)) {
+                                in_other_sheet_formula = true;
+                            }
+                            if target && tag == "formula" && matches!(event, Event::Start(_)) {
+                                in_conditional_formula = true;
+                            }
+                            if target
+                                && matches!(
+                                    tag,
+                                    "dataValidation"
+                                        | "dataValidations"
+                                        | "autoFilter"
+                                        | "tableParts"
+                                        | "hyperlinks"
+                                        | "legacyDrawing"
+                                        | "extLst"
+                                )
+                            {
                                 return Err(PackageError::ReadPartError(format!(
                                     "grid shift cannot update worksheet element {tag}"
                                 )));
@@ -6037,6 +6482,7 @@ fn verify_grid_shift_source(
                                     tag,
                                     "worksheet"
                                         | "sheetPr"
+                                        | "tabColor"
                                         | "outlinePr"
                                         | "pageSetUpPr"
                                         | "dimension"
@@ -6049,11 +6495,19 @@ fn verify_grid_shift_source(
                                         | "sheetData"
                                         | "row"
                                         | "c"
+                                        | "f"
                                         | "v"
                                         | "is"
                                         | "t"
                                         | "mergeCells"
                                         | "mergeCell"
+                                        | "conditionalFormatting"
+                                        | "cfRule"
+                                        | "formula"
+                                        | "drawing"
+                                        | "headerFooter"
+                                        | "oddHeader"
+                                        | "oddFooter"
                                         | "pageMargins"
                                         | "pageSetup"
                                         | "printOptions"
@@ -6063,15 +6517,40 @@ fn verify_grid_shift_source(
                                     "grid shift cannot update worksheet element {tag}"
                                 )));
                             }
-                            if column_shifts.contains_key(&sheet.part)
-                                && matches!(tag, "cols" | "col")
+                            if target
+                                && tag == "drawing"
+                                && !drawing_shifts
+                                    .values()
+                                    .any(|(part, _, _)| part == &sheet.part)
                             {
                                 return Err(PackageError::ReadPartError(
-                                    "column shift cannot update explicit source column widths"
-                                        .to_string(),
+                                    "grid shift cannot update an unmapped drawing".to_string(),
                                 ));
                             }
-                            if target && matches!(tag, "sheetView" | "selection") {
+                            if target && tag == "col" && column_shifts.contains_key(&sheet.part) {
+                                for attribute in element.attributes().with_checks(false) {
+                                    let attribute = attribute.map_err(|error| {
+                                        PackageError::ReadPartError(format!(
+                                            "column attribute: {error}"
+                                        ))
+                                    })?;
+                                    if !matches!(
+                                        local_name(attribute.key.as_ref()),
+                                        "min" | "max" | "width" | "customWidth"
+                                    ) {
+                                        return Err(PackageError::ReadPartError(
+                                            "grid shift cannot preserve this column property"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                            }
+                            if target
+                                && matches!(
+                                    tag,
+                                    "sheetView" | "selection" | "conditionalFormatting"
+                                )
+                            {
                                 rewrite_xlsx_view_attributes(
                                     element,
                                     row_insertions
@@ -6091,6 +6570,38 @@ fn verify_grid_shift_source(
                                 ));
                             }
                         }
+                        Event::Text(ref text)
+                            if in_other_sheet_formula && text.as_ref().contains(&b'!') =>
+                        {
+                            return Err(PackageError::ReadPartError(
+                                "grid shift cannot update a cross-sheet formula".to_string(),
+                            ));
+                        }
+                        Event::Text(ref text) if in_conditional_formula => {
+                            let expression = text.unescape().map_err(|error| {
+                                PackageError::ReadPartError(format!("conditional formula: {error}"))
+                            })?;
+                            rewrite_grid_formula(
+                                &expression,
+                                row_insertions
+                                    .get(&sheet.part)
+                                    .map(Vec::as_slice)
+                                    .unwrap_or(&[]),
+                                column_shifts
+                                    .get(&sheet.part)
+                                    .map(Vec::as_slice)
+                                    .unwrap_or(&[]),
+                            )
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                        }
+                        Event::End(ref element) if local_name(element.name().as_ref()) == "f" => {
+                            in_other_sheet_formula = false;
+                        }
+                        Event::End(ref element)
+                            if local_name(element.name().as_ref()) == "formula" =>
+                        {
+                            in_conditional_formula = false;
+                        }
                         Event::Eof => break,
                         _ => {}
                     }
@@ -6099,6 +6610,51 @@ fn verify_grid_shift_source(
                 Ok(())
             })
             .map_err(|error| HcdError::Unsupported(error.to_string()))?;
+    }
+    let edited_sheet_names: Vec<_> = workbook
+        .sheets
+        .iter()
+        .filter(|sheet| {
+            row_insertions.contains_key(&sheet.part) || column_shifts.contains_key(&sheet.part)
+        })
+        .map(|sheet| sheet.name.clone())
+        .collect();
+    let chart_parts: Vec<_> = archive
+        .entries()
+        .iter()
+        .filter(|entry| {
+            !entry.is_dir && entry.name.starts_with("xl/charts/") && entry.name.ends_with(".xml")
+        })
+        .map(|entry| entry.name.clone())
+        .collect();
+    for part in chart_parts {
+        archive.with_part(&part, |source| {
+            let mut reader = Reader::from_reader(BufReader::new(source));
+            let mut buffer = Vec::new();
+            let mut in_formula = false;
+            loop {
+                let event = reader.read_event_into(&mut buffer).map_err(|error|
+                    PackageError::ReadPartError(format!("{part}: {error}")))?;
+                match event {
+                    Event::Start(ref element) if local_name(element.name().as_ref()) == "f" => in_formula = true,
+                    Event::End(ref element) if local_name(element.name().as_ref()) == "f" => in_formula = false,
+                    Event::Text(ref value) if in_formula => {
+                        let formula = value.unescape().map_err(|error|
+                            PackageError::ReadPartError(format!("{part}: {error}")))?;
+                        if edited_sheet_names.iter().any(|name|
+                            formula.contains(&format!("{name}!"))
+                                || formula.contains(&format!("'{}'!", name.replace('\'', "''")))) {
+                            return Err(PackageError::ReadPartError(
+                                "grid shift cannot update a chart linked to the edited worksheet".to_string()));
+                        }
+                    }
+                    Event::Eof => break,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+            Ok(())
+        }).map_err(|error| HcdError::Unsupported(error.to_string()))?;
     }
     Ok(())
 }
@@ -9003,7 +9559,8 @@ mod tests {
         let bundle = Bundle::open(&bundle_path).unwrap();
         let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
         let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
-        for (start, count) in [(2, 101), (3, 2)] {
+        {
+            let (start, count) = (2, 101);
             let patch = PatchBatch {
                 schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
                 document_id: "range-reject".to_string(),
@@ -9437,22 +9994,33 @@ mod tests {
                 },
             ),
         ];
+        let mut revision = 4;
         for (index, (schema, operation)) in crossing.into_iter().enumerate() {
             let patch = PatchBatch {
                 schema_version: schema.to_string(),
                 document_id: "merged-grid-doc".to_string(),
                 patch_id: format!("split-merge-{index}"),
-                base_revision: 4,
+                base_revision: revision,
                 actor: BTreeMap::new(),
                 operations: vec![operation],
                 metadata: BTreeMap::new(),
             };
-            assert!(matches!(
-                hcd_core::apply_patch(&bundle, &patch, 4),
-                Err(hcd_core::HcdError::Unsupported(_))
-            ));
+            if index % 2 == 0 {
+                let result = hcd_core::apply_patch(&bundle, &patch, revision);
+                assert!(
+                    matches!(result, Err(hcd_core::HcdError::Unsupported(_))),
+                    "crossing operation {index}: {result:?}"
+                );
+            } else {
+                revision = hcd_core::apply_patch(&bundle, &patch, revision)
+                    .unwrap()
+                    .revision;
+                assert!(validate_bundle(&bundle).unwrap().valid);
+                let exported = temp.path().join(format!("crossing-delete-{index}.xlsx"));
+                export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+            }
         }
-        assert_eq!(bundle.manifest().unwrap().revision, 4);
+        assert_eq!(bundle.manifest().unwrap().revision, revision);
     }
 
     #[test]
@@ -9582,6 +10150,200 @@ mod tests {
         .unwrap();
         assert!(read_zip_entry(&historical, "xl/worksheets/sheet1.xml")
             .contains("<c r=\"A128\" t=\"inlineStr\"><is><t>Row 128</t>"));
+    }
+
+    #[test]
+    fn grid_deletion_ignores_formulas_on_an_unrelated_sheet() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("two-sheets.xlsx");
+        let bundle_path = temp.path().join("two-sheets.hcd");
+        create_unrelated_formula_sheet_fixture(&source);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("unrelated-formula-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let mut patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_14.to_string(),
+            document_id: "unrelated-formula-doc".to_string(),
+            patch_id: "delete-plain-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowDelete {
+                sheet_id: sheet_id.clone(),
+                row: 2,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        patch.schema_version = hcd_core::HCD_PATCH_SCHEMA_VERSION_15.to_string();
+        patch.patch_id = "delete-plain-column".to_string();
+        patch.base_revision = 1;
+        patch.operations = vec![PatchOperation::XlsxColumnDelete {
+            sheet_id,
+            column: 4,
+        }];
+        hcd_core::apply_patch(&bundle, &patch, 1).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let plain = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!plain.contains("Delete"));
+        assert!(plain.contains("<c r=\"A2\" t=\"inlineStr\"><is><t>Last</t>"));
+        assert!(!plain.contains("Right 3"));
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml"),
+        );
+    }
+
+    #[test]
+    fn grid_deletion_rewrites_native_formulas_on_target_sheet() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain = temp.path().join("plain.xlsx");
+        let source = temp.path().join("formula.xlsx");
+        let bundle_path = temp.path().join("formula.hcd");
+        create_plain_rows_fixture(&plain, 3);
+        let mut original = zip::ZipArchive::new(File::open(&plain).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..original.len() {
+            let mut entry = original.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            output.start_file(&name, options).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                output.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C3"/><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1"><f>SUM(A1:B1)</f><v>3</v></c></row><row r="2"><c r="A2"><v>3</v></c><c r="B2"><v>4</v></c><c r="C2"><f>SUM(A2:B2)</f><v>7</v></c></row><row r="3"><c r="A3"><v>5</v></c><c r="B3"><v>6</v></c><c r="C3"><f>SUM(A3:B3)</f><v>11</v></c></row></sheetData></worksheet>"#).unwrap();
+            } else {
+                std::io::copy(&mut entry, &mut output).unwrap();
+            }
+        }
+        output.finish().unwrap();
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("formula-delete-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let mut patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_14.to_string(),
+            document_id: "formula-delete-doc".to_string(),
+            patch_id: "formula-row-delete".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowDelete {
+                sheet_id: sheet_id.clone(),
+                row: 1,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        patch.schema_version = hcd_core::HCD_PATCH_SCHEMA_VERSION_15.to_string();
+        patch.patch_id = "formula-column-delete".to_string();
+        patch.base_revision = 1;
+        patch.operations = vec![PatchOperation::XlsxColumnDelete {
+            sheet_id,
+            column: 2,
+        }];
+        hcd_core::apply_patch(&bundle, &patch, 1).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains("<c r=\"B1\"><f>SUM(A1:A1)</f><v/></c>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<c r=\"B2\"><f>SUM(A2:A2)</f><v/></c>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("<c r=\"C1\""), "{xml}");
+    }
+
+    #[test]
+    fn budget_workbook_grid_deletion_preserves_formulas_merges_and_chart() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("budget-delete"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let mut patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_14.to_string(),
+            document_id: "budget-delete".to_string(),
+            patch_id: "delete-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowDelete {
+                sheet_id: sheet_id.clone(),
+                row: 9,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        patch.schema_version = hcd_core::HCD_PATCH_SCHEMA_VERSION_15.to_string();
+        patch.patch_id = "delete-column".to_string();
+        patch.base_revision = 1;
+        patch.operations = vec![PatchOperation::XlsxColumnDelete {
+            sheet_id,
+            column: 2,
+        }];
+        hcd_core::apply_patch(&bundle, &patch, 1).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<f>SUM(B8:E8)</f>"), "{sheet}");
+        assert!(sheet.contains("mergeCell ref=\"A1:G1\""), "{sheet}");
+        assert!(
+            sheet.contains("<col min=\"1\" max=\"1\" width=\"16.00\""),
+            "{sheet}"
+        );
+        assert!(
+            sheet.contains("<col min=\"2\" max=\"2\" width=\"14.00\""),
+            "{sheet}"
+        );
+        assert!(
+            sheet.contains("conditionalFormatting sqref=\"G8:G13\""),
+            "{sheet}"
+        );
+        let drawing = read_zip_entry(&exported, "xl/drawings/drawing1.xml");
+        assert!(drawing.contains("<xdr:col>7</xdr:col>"), "{drawing}");
+        assert!(drawing.contains("<xdr:row>34</xdr:row>"), "{drawing}");
+        assert_eq!(
+            read_zip_entry(&exported, "xl/charts/chart1.xml"),
+            read_zip_entry(&source, "xl/charts/chart1.xml")
+        );
     }
 
     #[test]
@@ -10745,6 +11507,44 @@ mod tests {
             write!(zip, "<row r=\"{row}\"><c r=\"A{row}\" t=\"inlineStr\"><is><t>Row {row}</t></is></c><c r=\"D{row}\" t=\"inlineStr\"><is><t>Right {row}</t></is></c></row>").unwrap();
         }
         zip.write_all(b"</sheetData></worksheet>").unwrap();
+        zip.finish().unwrap();
+    }
+
+    fn create_unrelated_formula_sheet_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Formula" sheetId="2" r:id="rId2"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>First</t></is></c><c r="D1" t="inlineStr"><is><t>Right 1</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Delete</t></is></c><c r="D2" t="inlineStr"><is><t>Right 2</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Last</t></is></c><c r="D3" t="inlineStr"><is><t>Right 3</t></is></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>A1+1</f><v>3</v></c></row></sheetData></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
         zip.finish().unwrap();
     }
 
