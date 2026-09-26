@@ -58,6 +58,8 @@ The other fixture IDs are listed in `vite.config.ts`. DOCX/Markdown/TXT cards ed
 
 The built-in app uses the Vite proxy for `/v1`. Products can import `EmbeddedHcdEditor` from `@officecli/hcd-reference-editor/react` and pass an API base URL, collaboration WebSocket URL, document ID, and token. Each editor keeps one ProseMirror document and one Yjs document; offscreen blocks use CSS `content-visibility` and fixed-layout assets load by viewport.
 
+PDF and PPTX text boxes use the same Tiptap/ProseMirror editing core as DOCX, scoped to one fixed-page text node. Their current patch protocol stores plain text only, so the strict box schema prevents formatting from being silently lost. Select a mapped text node, type, undo with `Cmd/Ctrl+Z`, and save; the updated page and revision should appear immediately. The reference screenshot is `docs/screenshots/hcd-fixed-tiptap-text-box.jpg`.
+
 ## Storage and save flow
 
 - `hdoc import` defaults to `hcd/2`, gzip text objects, and PDF `auto` raster selection. `hdoc stats BUNDLE` reports compressed categories, revision growth, and unreferenced objects. `hdoc validate BUNDLE` verifies content and revision roots.
