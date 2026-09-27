@@ -12,6 +12,7 @@ import { FixedViewer } from './FixedViewer.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
+import { ErrorToast } from './ErrorToast.tsx'
 import './style.css'
 
 const UniverViewer = lazy(() => import('./UniverViewer.tsx').then(module => ({ default: module.UniverViewer })))
@@ -408,6 +409,6 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     <EditorStatusbar mode="连续视图" format={session.format} revision={revision} readOnly={readOnly} status={status} />
     {menu && <ContextMenu x={menu.x} y={menu.y} actions={actions} onClose={() => setMenu(null)} />}
     {linkOpen && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setLinkOpen(false) }}><div className="hcd-dialog" role="dialog" aria-modal="true" aria-label="设置链接"><h2>设置链接</h2><label>链接地址<input autoFocus type="url" value={linkHref} onChange={event => setLinkHref(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyLink(); if (event.key === 'Escape') setLinkOpen(false) }} placeholder="https://example.com" /></label><div className="hcd-dialog-actions"><button onClick={() => setLinkOpen(false)}>取消</button><button className="primary" onClick={applyLink}>应用链接</button></div></div></div>}
-    {error && <div className="toast error">{error}</div>}
+    {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>
 }
