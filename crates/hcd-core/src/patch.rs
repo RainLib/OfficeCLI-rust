@@ -490,7 +490,17 @@ pub fn apply_patch(
                         && grid.sheet_id == insert.sheet_id
                         && grid
                             .column_end
-                            .is_some_and(|end| end >= insert.before_column)
+                            .is_some_and(|end| end.saturating_add(1) >= insert.before_column)
+                })
+            });
+            let column_formula_here = xlsx_column_insert.as_ref().is_some_and(|insert| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == insert.sheet_id
+                })
+            });
+            let visual_column_insert_here = xlsx_column_insert.as_ref().is_some_and(|insert| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind != crate::GridChunkKind::Cells && grid.sheet_id == insert.sheet_id
                 })
             });
             let column_delete_here = xlsx_column_delete.as_ref().is_some_and(|delete| {
@@ -1295,6 +1305,34 @@ pub fn apply_patch(
                 );
                 inserted_xlsx_column = true;
                 chunk_changed = true;
+            }
+            if column_formula_here {
+                let insert = xlsx_column_insert
+                    .as_ref()
+                    .expect("column insertion exists");
+                let original_html = html.clone();
+                for _ in 0..insert.count {
+                    rewrite_xlsx_inserted_formula_references(
+                        &mut html,
+                        crate::FormulaInsertion::Column(insert.before_column),
+                    )?;
+                    shift_xlsx_column_widths(&mut html, insert.before_column)?;
+                }
+                chunk_changed |= html != original_html;
+            }
+            if visual_column_insert_here {
+                let insert = xlsx_column_insert
+                    .as_ref()
+                    .expect("column insertion exists");
+                let original_html = html.clone();
+                for _ in 0..insert.count {
+                    shift_xlsx_visual_anchor(
+                        &mut html,
+                        descriptor,
+                        XlsxVisualShift::InsertColumn(insert.before_column),
+                    )?;
+                }
+                chunk_changed |= html != original_html;
             }
             if column_delete_here {
                 let delete = xlsx_column_delete.as_ref().expect("column deletion exists");
@@ -2876,7 +2914,7 @@ fn validate_patch_identity(
                     || !sheet_id[2..]
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=16_383).contains(before_column)
+                    || !(1..=16_384).contains(before_column)
                 {
                     return Err(HcdError::InvalidPatch(
                         "invalid XLSX middle column insertion target".to_string(),
@@ -4167,30 +4205,29 @@ fn find_xlsx_column_insert_part(
             if matches!(
                 grid.kind,
                 crate::GridChunkKind::Picture | crate::GridChunkKind::Chart
-            ) {
-                return Err(HcdError::Unsupported(
-                    "middle column insertion cannot yet shift workbook drawings or charts"
-                        .to_string(),
-                ));
+            ) && grid.sheet_id == insert.sheet_id
+            {
+                let mut html = bundle.read_chunk(&descriptor)?;
+                let mut preview = descriptor.clone();
+                shift_xlsx_visual_anchor(
+                    &mut html,
+                    &mut preview,
+                    XlsxVisualShift::InsertColumn(insert.before_column),
+                )?;
             }
             if grid.kind != crate::GridChunkKind::Cells {
                 continue;
             }
             let html = bundle.read_chunk(&descriptor)?;
-            if html.contains("data-hcd-formula=\"true\"") {
-                return Err(HcdError::Unsupported(
-                    "middle column insertion requires a workbook without formulas".to_string(),
-                ));
-            }
             if grid.sheet_id != insert.sheet_id {
                 continue;
             }
+            rewrite_xlsx_inserted_formula_references(
+                &mut html.clone(),
+                crate::FormulaInsertion::Column(insert.before_column),
+            )?;
             check_xlsx_merge_shift(&html, XlsxMergeShift::InsertColumn(insert.before_column))?;
-            if html.contains("data-hcd-column-start=\"") {
-                return Err(HcdError::Unsupported(
-                    "middle column insertion cannot yet shift explicit column widths".to_string(),
-                ));
-            }
+            shift_xlsx_column_widths(&mut html.clone(), insert.before_column)?;
             last_column = last_column.max(grid.column_end.unwrap_or(0));
             if part.is_none() {
                 part = bundle
@@ -4207,9 +4244,9 @@ fn find_xlsx_column_insert_part(
             "XLSX column insertion exceeds the last worksheet column".to_string(),
         ));
     }
-    if insert.before_column > last_column {
+    if insert.before_column > last_column.saturating_add(1) {
         return Err(HcdError::Unsupported(
-            "insert before an existing XLSX column".to_string(),
+            "insert at or before the next XLSX column".to_string(),
         ));
     }
     part.ok_or_else(|| {
@@ -4881,6 +4918,69 @@ fn delete_xlsx_column_window(
     Ok(removed)
 }
 
+fn shift_xlsx_column_widths(html: &mut String, before_column: u32) -> Result<(), HcdError> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = html[cursor..].find("<col ") {
+        let start = cursor + relative;
+        let end = html[start..]
+            .find("/>")
+            .map(|offset| start + offset + 2)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX column width tag is not closed".to_string())
+            })?;
+        let tag = &html[start..end];
+        let first = xlsx_attribute(tag, "data-hcd-column-start")
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX column width start is invalid".to_string())
+            })?;
+        let last = xlsx_attribute(tag, "data-hcd-column-end")
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX column width end is invalid".to_string())
+            })?;
+        if first == 0 || first > last || last > 16_384 {
+            return Err(HcdError::InvalidBundle(
+                "XLSX column width range is invalid".to_string(),
+            ));
+        }
+        if xlsx_attribute(tag, "data-hcd-hidden") == Some("true") {
+            return Err(HcdError::Unsupported(
+                "column insertion with hidden worksheet columns is not supported".to_string(),
+            ));
+        }
+        if last >= before_column {
+            if last == 16_384 {
+                return Err(HcdError::ResourceLimit(
+                    "XLSX column width range exceeds the worksheet".to_string(),
+                ));
+            }
+            let width = xlsx_attribute(tag, "data-hcd-width")
+                .map(str::parse::<f64>)
+                .transpose()
+                .map_err(|_| HcdError::InvalidBundle("XLSX column width is invalid".to_string()))?;
+            let hidden = xlsx_attribute(tag, "data-hcd-hidden") == Some("true");
+            let edited = xlsx_attribute(tag, "data-hcd-width-edited") == Some("true");
+            let replacement = if first >= before_column {
+                hcd_column_tag(first + 1, last + 1, width, hidden, edited)
+            } else {
+                format!(
+                    "{}{}",
+                    hcd_column_tag(first, before_column - 1, width, hidden, edited),
+                    hcd_column_tag(before_column + 1, last + 1, width, hidden, edited)
+                )
+            };
+            spans.push((start, end, replacement));
+        }
+        cursor = end;
+    }
+    for (start, end, replacement) in spans.into_iter().rev() {
+        html.replace_range(start..end, &replacement);
+    }
+    Ok(())
+}
+
 fn delete_xlsx_column_widths(html: &mut String, deleted_column: u32) -> Result<(), HcdError> {
     let mut spans = Vec::new();
     let mut cursor = 0;
@@ -4941,6 +5041,7 @@ fn delete_xlsx_column_widths(html: &mut String, deleted_column: u32) -> Result<(
 #[derive(Clone, Copy)]
 enum XlsxVisualShift {
     InsertRow(u32),
+    InsertColumn(u32),
     DeleteRow(u32),
     DeleteColumn(u32),
 }
@@ -4988,6 +5089,21 @@ fn shift_xlsx_visual_anchor(
                     row
                 },
                 column,
+            ),
+            XlsxVisualShift::InsertColumn(at) => (
+                row,
+                if column >= at {
+                    column
+                        .checked_add(1)
+                        .filter(|value| *value <= 16_384)
+                        .ok_or_else(|| {
+                            HcdError::ResourceLimit(
+                                "XLSX drawing column exceeds worksheet".to_string(),
+                            )
+                        })?
+                } else {
+                    column
+                },
             ),
             XlsxVisualShift::DeleteRow(at) => (if row > at { row - 1 } else { row }, column),
             XlsxVisualShift::DeleteColumn(at) => {
@@ -5145,7 +5261,15 @@ fn shifted_xlsx_merge(
             Ok(Some((start_row - 1, start_column, end_row - 1, end_column)))
         }
         XlsxMergeShift::InsertColumn(before) if before > start_column && before <= end_column => {
-            Err(crossing())
+            Ok(Some((
+                start_row,
+                start_column,
+                end_row,
+                end_column
+                    .checked_add(1)
+                    .filter(|col| *col <= 16_384)
+                    .ok_or_else(overflow)?,
+            )))
         }
         XlsxMergeShift::InsertColumn(before) if before <= start_column => Ok(Some((
             start_row,

@@ -6295,11 +6295,10 @@ fn rewrite_grid_formula(
                 &result,
                 hcd_core::FormulaDeletion::Column(*column),
             )?,
-            ColumnShift::Insert(_) => {
-                return Err(HcdError::Unsupported(
-                    "XLSX conditional formula insertion is not supported".to_string(),
-                ))
-            }
+            ColumnShift::Insert(column) => hcd_core::insert_formula_references(
+                &result,
+                hcd_core::FormulaInsertion::Column(*column),
+            )?,
         };
     }
     Ok(result)
@@ -10251,7 +10250,7 @@ mod tests {
                 operations: vec![operation],
                 metadata: BTreeMap::new(),
             };
-            if index % 2 == 0 {
+            if index == 0 {
                 let result = hcd_core::apply_patch(&bundle, &patch, revision);
                 assert!(
                     matches!(result, Err(hcd_core::HcdError::Unsupported(_))),
@@ -10262,7 +10261,7 @@ mod tests {
                     .unwrap()
                     .revision;
                 assert!(validate_bundle(&bundle).unwrap().valid);
-                let exported = temp.path().join(format!("crossing-delete-{index}.xlsx"));
+                let exported = temp.path().join(format!("crossing-shift-{index}.xlsx"));
                 export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
             }
         }
@@ -10916,6 +10915,48 @@ mod tests {
     }
 
     #[test]
+    fn column_insertion_after_last_materialized_column_keeps_exportable_blank_column() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("columns.hcd");
+        create_plain_rows_fixture(&source, 2);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("tail-column-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_13.to_string(),
+            document_id: "tail-column-doc".to_string(),
+            patch_id: "insert-after-d".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxColumnInsert {
+                sheet_id,
+                before_column: 5,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("<dimension ref=\"A1:E2\"/>"), "{xml}");
+        assert!(xml.contains("<c r=\"D2\""), "{xml}");
+        assert!(!xml.contains("<c r=\"E2\""), "{xml}");
+    }
+
+    #[test]
     fn middle_column_deletion_shifts_all_windows_and_preserves_history() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("long.xlsx");
@@ -11138,7 +11179,7 @@ mod tests {
     }
 
     #[test]
-    fn middle_column_insertion_rejects_explicit_source_widths() {
+    fn middle_column_insertion_preserves_explicit_source_widths() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("widths.xlsx");
         let bundle_path = temp.path().join("widths.hcd");
@@ -11160,17 +11201,88 @@ mod tests {
         let patch = PatchBatch {
             schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_13.to_string(),
             document_id: "widths-column-doc".to_string(),
-            patch_id: "reject-source-widths".to_string(),
+            patch_id: "insert-with-source-widths".to_string(),
             base_revision: 0,
             actor: BTreeMap::new(),
             operations: vec![PatchOperation::XlsxColumnInsert {
                 sheet_id,
-                before_column: 4,
+                before_column: 3,
             }],
             metadata: BTreeMap::new(),
         };
-        assert!(hcd_core::apply_patch(&bundle, &patch, 0).is_err());
-        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("shifted-widths.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains("<col min=\"1\" max=\"1\" width=\"12.00\""),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<col min=\"2\" max=\"2\" width=\"12.00\""),
+            "{xml}"
+        );
+        assert!(
+            !xml.contains("<col min=\"3\" max=\"3\" width=\"12.00\""),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<col min=\"4\" max=\"4\" width=\"12.00\""),
+            "{xml}"
+        );
+        assert!(xml.contains("<c r=\"E1\""), "{xml}");
+    }
+
+    #[test]
+    fn budget_workbook_column_insertion_preserves_formulas_merges_and_chart() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("budget-column-insert"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_13.to_string(),
+            document_id: "budget-column-insert".to_string(),
+            patch_id: "insert-column-c".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxColumnInsert {
+                sheet_id,
+                before_column: 3,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<f>SUM(D8:G8)</f>"), "{sheet}");
+        assert!(sheet.contains("mergeCell ref=\"A1:I1\""), "{sheet}");
+        assert!(
+            sheet.contains("conditionalFormatting sqref=\"I8:I14\""),
+            "{sheet}"
+        );
+        let drawing = read_zip_entry(&exported, "xl/drawings/drawing1.xml");
+        assert!(drawing.contains("<xdr:col>9</xdr:col>"), "{drawing}");
+        assert_eq!(
+            read_zip_entry(&exported, "xl/charts/chart1.xml"),
+            read_zip_entry(&source, "xl/charts/chart1.xml")
+        );
     }
 
     #[test]
