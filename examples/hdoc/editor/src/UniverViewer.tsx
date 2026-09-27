@@ -47,6 +47,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [mergeBusy, setMergeBusy] = useState(false)
   const [rowBusy, setRowBusy] = useState(false)
   const [columnBusy, setColumnBusy] = useState(false)
+  const [rowInsertCount, setRowInsertCount] = useState('1')
   const [columnWidthBusy, setColumnWidthBusy] = useState(false)
   const [columnWidthChars, setColumnWidthChars] = useState('28')
   const [rowHeightBusy, setRowHeightBusy] = useState(false)
@@ -306,11 +307,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
       const sheet = current.adapter.workbook.getActiveSheet()
       const sheetId = sheet.getSheetId()
+      const count = Number(rowInsertCount)
+      if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error('插入行数必须是 1 到 100 的整数')
       const afterRow = Math.max(0, ...current.client.descriptors
         .filter(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)
         .map(({ grid }) => grid?.rowEnd ?? 0))
-      if (afterRow < 1 || afterRow >= 1_048_576) {
+      if (afterRow < 1 || afterRow + count > 1_048_576) {
         throw new Error('当前工作表没有可追加的行')
+      }
+      if (count > 1) {
+        await applySelectedGridRange('row', 'insert', afterRow + 1, count)
+        return
       }
       setRowBusy(true)
       setStatus('正在新增末尾行…')
@@ -326,7 +333,6 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        await current.adapter.focusCell(sheetId, afterRow, 0)
         setStatus(`revision ${saved.revision} · 已新增第 ${afterRow + 1} 行`)
       } catch (syncError) {
         setError(`第 ${afterRow + 1} 行已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
@@ -338,14 +344,14 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
-  async function applySelectedGridRange(axis: 'row' | 'column', action: 'insert' | 'delete', startOverride?: number) {
+  async function applySelectedGridRange(axis: 'row' | 'column', action: 'insert' | 'delete', startOverride?: number, countOverride?: number) {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || gridBusy.current) return
     const sheet = current.adapter.workbook.getActiveSheet()
     const range = sheet.getActiveRange()
     if (!range) { setError('请先选中行或列'); return }
     const start = startOverride ?? (axis === 'row' ? range.getRow() : range.getColumn()) + 1
-    const count = axis === 'row' ? range.getHeight() : range.getWidth()
+    const count = countOverride ?? (axis === 'row' ? range.getHeight() : range.getWidth())
     if (count < 2 || count > 100) { setError('一次请选择 2 到 100 行或列'); return }
     const label = axis === 'row' ? '行' : '列'
     if (action === 'delete' && !window.confirm(`删除选中的 ${count} ${label}及其内容？可从历史修订恢复。`)) return
@@ -395,17 +401,19 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if (!range) throw new Error('请先选中目标行中的单元格')
-      if (position === 'above' && range.getHeight() > 1) {
-        await applySelectedGridRange('row', 'insert')
-        return
-      }
+      const count = Number(rowInsertCount)
+      if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error('插入行数必须是 1 到 100 的整数')
       const beforeRow = range.getRow() + (position === 'below' ? range.getHeight() + 1 : 1)
       const sheetId = sheet.getSheetId()
       const lastRow = Math.max(0, ...current.client.descriptors
         .filter(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)
         .map(({ grid }) => grid?.rowEnd ?? 0))
-      if (beforeRow > lastRow + 1 || beforeRow > 1_048_576) {
+      if (beforeRow > lastRow + 1 || beforeRow + count - 1 > 1_048_576) {
         throw new Error('选中位置已在存储的最后一行之后；空白网格可直接编辑，需新增行请先选中最后一条已有行')
+      }
+      if (count > 1) {
+        await applySelectedGridRange('row', 'insert', beforeRow, count)
+        return
       }
       const append = beforeRow === lastRow + 1
       setRowBusy(true)
@@ -698,6 +706,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
 
   const activeSheet = contextMenu && runtime.current?.adapter.workbook.getActiveSheet()
   const activeRange = activeSheet?.getActiveRange()
+  const parsedRowInsertCount = Number(rowInsertCount)
+  const validRowInsertCount = Number.isInteger(parsedRowInsertCount) && parsedRowInsertCount >= 1 && parsedRowInsertCount <= 100
   const contextSelectionKind = activeSheet ? selectionKind(activeSheet) : 'cell'
   const showRowContext = contextSelectionKind === 'cell' || contextSelectionKind === 'row'
   const showColumnContext = contextSelectionKind === 'cell' || contextSelectionKind === 'column'
@@ -713,8 +723,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       disabled: gridActionDisabled || !activeRange || !!selectedMerge || activeRange.getHeight() * activeRange.getWidth() < 2 },
     { label: '拆分单元格', action: () => void unmergeSelection(), disabled: gridActionDisabled || !selectedMerge }] : []),
     ...(showRowContext ? [
-      { label: '在上方插入行', action: () => void insertRowNearSelection('above'), disabled: gridActionDisabled || !activeRange, separated: true },
-      { label: '在下方插入 1 行', action: () => void insertRowNearSelection('below'), disabled: gridActionDisabled || !activeRange },
+      { label: `在上方插入 ${rowInsertCount || '…'} 行`, action: () => void insertRowNearSelection('above'), disabled: gridActionDisabled || !activeRange || !validRowInsertCount, separated: true },
+      { label: `在下方插入 ${rowInsertCount || '…'} 行`, action: () => void insertRowNearSelection('below'), disabled: gridActionDisabled || !activeRange || !validRowInsertCount },
       { label: '删除选中行', action: () => void deleteSelectedRow(), disabled: gridActionDisabled || !activeRange },
     ] : []),
     ...(showColumnContext ? [
@@ -735,10 +745,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · 右键显示操作菜单 · {status}</span></>}
       {activeTab === 'insert' && <><div className="tool-group">
         {gridSelectionKind !== 'column' && gridSelectionKind !== 'all' && <>
-          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('above')}>在选中行前插入</button>
-          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('below')}>在选中行后插入 1 行</button>
+          <label className="xlsx-insert-count">插入行数 <input aria-label="插入行数" type="number" min="1" max="100" step="1" value={rowInsertCount} disabled={!editing || rowBusy} onChange={event => { setRowInsertCount(event.target.value); if (error.includes('插入行数必须')) setError('') }} /></label>
+          <button disabled={!editing || rowBusy || columnBusy || !validRowInsertCount} onClick={() => void insertRowNearSelection('above')}>在选中行前插入 {rowInsertCount || '…'} 行</button>
+          <button disabled={!editing || rowBusy || columnBusy || !validRowInsertCount} onClick={() => void insertRowNearSelection('below')}>在选中行后插入 {rowInsertCount || '…'} 行</button>
           <button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button>
-          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button>
+          <button disabled={!editing || rowBusy || columnBusy || !validRowInsertCount} onClick={() => void appendRow()}>在末尾新增 {rowInsertCount || '…'} 行</button>
           <button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button>
         </>}
         {gridSelectionKind !== 'row' && gridSelectionKind !== 'all' && <>
@@ -771,7 +782,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     <div className="univer-editor-area" onContextMenu={openGridContextMenu} onMouseDownCapture={() => setContextMenu(null)} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" />
       {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
     </div>
-    {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions} onClose={() => setContextMenu(null)} />}
+    {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions}
+      count={showRowContext ? { label: '插入行数', value: rowInsertCount, onChange: value => { setRowInsertCount(value); if (error.includes('插入行数必须')) setError('') } } : undefined}
+      onClose={() => setContextMenu(null)} />}
     <EditorStatusbar mode="工作簿视图" format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
     {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>

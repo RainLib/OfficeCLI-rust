@@ -462,9 +462,9 @@ pub fn apply_patch(
                 descriptor.grid.as_ref().is_some_and(|grid| {
                     grid.kind == crate::GridChunkKind::Cells
                         && grid.sheet_id == insert.sheet_id
-                        && grid
-                            .row_end
-                            .is_some_and(|end| end >= u64::from(insert.before_row))
+                        && grid.row_end.is_some_and(|end| {
+                            end.saturating_add(1) >= u64::from(insert.before_row)
+                        })
                 })
             });
             let row_formula_here = xlsx_row_insert.as_ref().is_some_and(|insert| {
@@ -4060,15 +4060,15 @@ fn find_xlsx_row_insert_target(
     manifest: &crate::HcdManifest,
     insert: &XlsxRowInsert,
 ) -> Result<(String, String), HcdError> {
-    let (last_row, _) = last_xlsx_row(bundle, manifest, &insert.sheet_id)?;
+    let (last_row, tail) = last_xlsx_row(bundle, manifest, &insert.sheet_id)?;
     if last_row + u64::from(insert.count) > 1_048_576 {
         return Err(HcdError::ResourceLimit(
             "XLSX row insertion exceeds the last worksheet row".to_string(),
         ));
     }
-    if u64::from(insert.before_row) > last_row {
+    if u64::from(insert.before_row) > last_row + 1 {
         return Err(HcdError::Unsupported(
-            "use xlsx.row.append after the last row".to_string(),
+            "insert at or before the next XLSX row".to_string(),
         ));
     }
     let mut target = None;
@@ -4126,9 +4126,11 @@ fn find_xlsx_row_insert_target(
             }
         }
     }
-    let target = target.ok_or_else(|| {
-        HcdError::Unsupported("insert before a materialized XLSX row".to_string())
-    })?;
+    let target = target
+        .or_else(|| (u64::from(insert.before_row) == last_row + 1).then_some(tail))
+        .ok_or_else(|| {
+            HcdError::Unsupported("insert before a materialized XLSX row".to_string())
+        })?;
     let part = part.ok_or_else(|| {
         HcdError::Unsupported("XLSX worksheet has no mapped source cells".to_string())
     })?;
@@ -4432,6 +4434,12 @@ fn shift_xlsx_row_window(
     let old_end = grid
         .row_end
         .ok_or_else(|| HcdError::InvalidBundle("XLSX row window has no end".to_string()))?;
+    if insert_here && u64::from(before_row) == old_end + 1 {
+        append_xlsx_row(html, old_end as u32)?;
+        grid.row_end = Some(old_end + 1);
+        descriptor.block_count += 1;
+        return Ok(());
+    }
     let mut rows = BTreeSet::new();
     let cells = xlsx_cells(html)?;
     let mut cursor = 0usize;
