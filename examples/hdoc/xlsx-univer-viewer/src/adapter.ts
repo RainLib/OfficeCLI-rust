@@ -546,8 +546,9 @@ export class HcdUniverAdapter {
       const sheet = this.workbook.getSheetBySheetId(descriptor.grid!.sheetId);
       if (!sheet) throw new Error(`工作表不存在: ${descriptor.grid!.sheetName}`);
       const previous = this.runtimes.get(descriptor.chunkId);
+      const previousCleared = previous ? this.clearMovedCells(sheet, previous, parsed) : false;
       await this.applyParsedChunk(sheet, descriptor, parsed);
-      if (previous) this.retireReplacedCells(sheet, previous, parsed);
+      if (previous) this.retireReplacedCells(sheet, previous, parsed, previousCleared);
       this.runtimes.set(descriptor.chunkId, {
         sheetId: descriptor.grid!.sheetId,
         kind: descriptor.grid!.kind,
@@ -581,14 +582,40 @@ export class HcdUniverAdapter {
     return `${descriptor.chunkId}:${descriptor.htmlHash}:${descriptor.mapHash}`;
   }
 
-  private retireReplacedCells(sheet: FWorksheet, previous: ChunkRuntime, parsed: ParsedGridChunk): void {
+  private clearMovedCells(sheet: FWorksheet, previous: ChunkRuntime, parsed: ParsedGridChunk): boolean {
+    const oldPositions = new Map(previous.cells.filter(cell => cell.link)
+      .map(cell => [cell.link!.nodeId, `${cell.row}:${cell.column}`]));
+    const moved = parsed.cells.some(cell => cell.link && oldPositions.has(cell.link.nodeId)
+      && oldPositions.get(cell.link.nodeId) !== `${cell.row}:${cell.column}`);
+    if (!moved) return false;
+    // A structural shift can reuse an old coordinate for a different cell.
+    // Clear the affected rows synchronously before setValues so Univer does not
+    // paint the old text/style over the newly moved cells until a full reload.
+    const rows = new Map<number, { first: number; last: number }>();
+    for (const cell of previous.cells) {
+      const span = rows.get(cell.row);
+      rows.set(cell.row, span
+        ? { first: Math.min(span.first, cell.column), last: Math.max(span.last, cell.column) }
+        : { first: cell.column, last: cell.column });
+    }
+    this.withApplying(() => {
+      for (const [row, span] of rows) {
+        sheet.getRange(row, span.first, 1, span.last - span.first + 1).clear();
+      }
+    });
+    return true;
+  }
+
+  private retireReplacedCells(sheet: FWorksheet, previous: ChunkRuntime, parsed: ParsedGridChunk, previousCleared = false): void {
     const next = new Set(parsed.cells.map(cell => cellKey(previous.sheetId, cell.row, cell.column)));
     const nextBlanks = new Set(parsed.cells.filter(cell => cell.blank)
       .map(cell => cellKey(previous.sheetId, cell.row, cell.column)));
     const removed = previous.cells.filter(cell => !next.has(cellKey(previous.sheetId, cell.row, cell.column)));
-    this.withApplying(() => {
-      for (const cell of removed) sheet.getRange(cell.row, cell.column).clear();
-    });
+    if (!previousCleared) {
+      this.withApplying(() => {
+        for (const cell of removed) sheet.getRange(cell.row, cell.column).clear();
+      });
+    }
     for (const cell of previous.cells) {
       const key = cellKey(previous.sheetId, cell.row, cell.column);
       if (cell.link) {

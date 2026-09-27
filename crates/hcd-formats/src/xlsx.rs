@@ -10957,6 +10957,70 @@ mod tests {
     }
 
     #[test]
+    fn selected_row_count_can_insert_multiple_rows_after_sheet_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("rows.hcd");
+        create_plain_rows_fixture(&source, 2);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("tail-row-count-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
+            document_id: "tail-row-count-doc".to_string(),
+            patch_id: "insert-three-after-tail".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxGridRange {
+                sheet_id,
+                axis: hcd_core::XlsxGridAxis::Row,
+                action: hcd_core::XlsxGridAction::Insert,
+                start: 3,
+                count: 3,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("<dimension ref=\"A1:D5\"/>"), "{xml}");
+        for row in 3..=5 {
+            assert!(xml.contains(&format!("<row r=\"{row}\"/>")), "{xml}");
+        }
+        let historical = temp.path().join("original.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+        );
+    }
+
+    #[test]
     fn middle_column_deletion_shifts_all_windows_and_preserves_history() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("long.xlsx");

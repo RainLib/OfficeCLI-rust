@@ -155,6 +155,8 @@
 .hcd-surface .toast-dismiss:hover,.hcd-surface .toast-dismiss:focus-visible{background:#f8e8e8;outline:2px solid #aa3434;outline-offset:1px}
 .hcd-surface .error{color:#aa3434}
 .hcd-surface .hcd-context-menu{position:fixed;z-index:1000;width:204px;padding:5px;background:#fff;border:1px solid #d9e3db;box-shadow:0 14px 40px #19392a2b;border-radius:10px;display:grid}
+.hcd-surface .hcd-context-menu-count{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;font-size:13px;color:#304b7a}
+.hcd-surface .hcd-context-menu-count input{width:64px;height:30px;padding:3px 6px;border:1px solid #cbd8e6;border-radius:5px;color:#20365e}
 .hcd-surface .hcd-context-menu button{border:0;text-align:left;padding:7px 10px;font-size:13px}
 .hcd-surface .hcd-context-menu button.separated{border-top:1px solid #e9eee9;border-radius:0;margin-top:3px;padding-top:9px}
 .hcd-surface .hcd-dialog-backdrop{position:fixed;inset:0;z-index:1100;background:#122d2080;display:grid;place-items:center;padding:20px}
@@ -199,6 +201,8 @@
 .hcd-surface .floating-settings{position:fixed;z-index:100;right:16px;top:14px;box-shadow:0 8px 24px #20375a30;color:#164b9a!important;font-weight:700}
 .hcd-surface .semantic-workspace .ribbon{min-height:70px;align-items:stretch;padding:9px 20px;gap:12px;box-shadow:0 2px 9px #2139650d}
 .hcd-surface .semantic-workspace .ribbon .tool-group{align-items:center;gap:6px;padding-right:12px;border-right-color:#d7e0ed}
+.hcd-surface .univer-workspace .xlsx-insert-count{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:13px;color:#304b7a}
+.hcd-surface .univer-workspace .xlsx-insert-count input{width:62px;height:32px;padding:4px 6px;border:1px solid #cbd8e6;border-radius:5px;color:#20365e}
 .hcd-surface .semantic-workspace .ribbon button{border-color:transparent;background:transparent;color:#20365e;min-height:37px}
 .hcd-surface .semantic-workspace .ribbon button:hover{background:#edf4ff;border-color:#d4e4ff}
 .hcd-surface .semantic-workspace .ribbon .save-trigger{margin-left:auto;background:#1667e8;color:#fff;border-color:#1667e8;align-self:center}
