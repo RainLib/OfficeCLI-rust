@@ -348,9 +348,13 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        await current.adapter.focusCell(sheet.getSheetId(),
-          axis === 'row' ? Math.max(0, start - 1) : range.getRow(),
-          axis === 'column' ? Math.max(0, start - 1) : range.getColumn())
+        // Row insertion keeps the selected grid coordinate and viewport in place.
+        // focusCell calls scrollToCell, which jumps a scrolled worksheet to the new row.
+        if (axis !== 'row' || action !== 'insert') {
+          await current.adapter.focusCell(sheet.getSheetId(),
+            axis === 'row' ? Math.max(0, start - 1) : range.getRow(),
+            axis === 'column' ? Math.max(0, start - 1) : range.getColumn())
+        }
         setStatus(`revision ${saved.revision} · 已${action === 'insert' ? '插入' : '删除'} ${count} ${label}`)
       } catch (syncError) {
         setError(`${count} ${label}已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
@@ -364,25 +368,35 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
-  async function insertRowBeforeSelection() {
+  async function insertRowNearSelection(position: 'above' | 'below') {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || rowBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
       const sheet = current.adapter.workbook.getActiveSheet()
-      if ((sheet.getActiveRange()?.getHeight() ?? 0) > 1) {
+      const range = sheet.getActiveRange()
+      if (!range) throw new Error('请先选中目标行中的单元格')
+      if (position === 'above' && range.getHeight() > 1) {
         await applySelectedGridRange('row', 'insert')
         return
       }
-      const beforeRow = (sheet.getActiveRange()?.getRow() ?? -1) + 1
-      if (beforeRow < 1) throw new Error('请先选中目标行中的单元格')
+      const beforeRow = range.getRow() + (position === 'below' ? range.getHeight() + 1 : 1)
+      const sheetId = sheet.getSheetId()
+      const lastRow = Math.max(0, ...current.client.descriptors
+        .filter(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)
+        .map(({ grid }) => grid?.rowEnd ?? 0))
+      if (beforeRow > lastRow + 1 || beforeRow > 1_048_576) {
+        throw new Error('选中位置已在存储的最后一行之后；空白网格可直接编辑，需新增行请先选中最后一条已有行')
+      }
+      const append = beforeRow === lastRow + 1
       setRowBusy(true)
-      setStatus('正在插入行…')
+      setStatus(position === 'below' ? '正在下方插入行…' : '正在上方插入行…')
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaVersion: 'hcd-patch/12', documentId: session.documentId,
+        body: JSON.stringify({ schemaVersion: append ? 'hcd-patch/8' : 'hcd-patch/12', documentId: session.documentId,
           patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
-          operations: [{ op: 'xlsx.row.insert', sheetId: sheet.getSheetId(), beforeRow }] }),
+          operations: [append ? { op: 'xlsx.row.append', sheetId, afterRow: lastRow }
+            : { op: 'xlsx.row.insert', sheetId, beforeRow }] }),
       })
       const saved = await response.json() as { revision: number }
       collaboration.announceRevision(saved.revision)
@@ -390,13 +404,12 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        await current.adapter.focusCell(sheet.getSheetId(), beforeRow - 1, 0)
-        setStatus(`revision ${saved.revision} · 已在第 ${beforeRow} 行前插入空行`)
+        setStatus(`revision ${saved.revision} · 已在第 ${position === 'below' ? beforeRow - 1 : beforeRow} 行${position === 'below' ? '后' : '前'}插入空行`)
       } catch (syncError) {
         setError(`第 ${beforeRow} 行已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
       }
     } catch (cause) {
-      setError(`插入行失败：${String(cause)}`)
+      setError(`${position === 'below' ? '下方' : '上方'}插入行失败：${String(cause)}`)
     } finally { setRowBusy(false) }
   }
 
@@ -671,7 +684,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     { label: '合并单元格', action: () => void mergeSelection(),
       disabled: gridActionDisabled || !activeRange || !!selectedMerge || activeRange.getHeight() * activeRange.getWidth() < 2 },
     { label: '拆分单元格', action: () => void unmergeSelection(), disabled: gridActionDisabled || !selectedMerge },
-    { label: '在上方插入行', action: () => void insertRowBeforeSelection(), disabled: gridActionDisabled || !activeRange, separated: true },
+    { label: '在上方插入行', action: () => void insertRowNearSelection('above'), disabled: gridActionDisabled || !activeRange, separated: true },
+    { label: '在下方插入 1 行', action: () => void insertRowNearSelection('below'), disabled: gridActionDisabled || !activeRange },
     { label: '删除选中行', action: () => void deleteSelectedRow(), disabled: gridActionDisabled || !activeRange },
     { label: '在左侧插入列', action: () => void insertColumnBeforeSelection(), disabled: gridActionDisabled || !activeRange, separated: true },
     { label: '删除选中列', action: () => void deleteSelectedColumn(), disabled: gridActionDisabled || !activeRange },
@@ -685,7 +699,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · 右键显示操作菜单 · {status}</span></>}
-      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowBeforeSelection()}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">支持一次选择 2–100 行或列并在单个修订中处理；合并区域可整体移动 · {status}</span></>}
+      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('above')}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('below')}>在选中行后插入 1 行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">上方插入与删除支持一次选择 2–100 行或列；合并区域可整体移动 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}
