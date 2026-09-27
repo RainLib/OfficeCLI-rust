@@ -467,6 +467,16 @@ pub fn apply_patch(
                             .is_some_and(|end| end >= u64::from(insert.before_row))
                 })
             });
+            let row_formula_here = xlsx_row_insert.as_ref().is_some_and(|insert| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == insert.sheet_id
+                })
+            });
+            let visual_row_insert_here = xlsx_row_insert.as_ref().is_some_and(|insert| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind != crate::GridChunkKind::Cells && grid.sheet_id == insert.sheet_id
+                })
+            });
             let row_delete_here = xlsx_row_delete.as_ref().is_some_and(|delete| {
                 descriptor.grid.as_ref().is_some_and(|grid| {
                     grid.kind == crate::GridChunkKind::Cells
@@ -551,6 +561,8 @@ pub fn apply_patch(
                 && !blank_merge_here
                 && !append_here
                 && !row_shift_here
+                && !row_formula_here
+                && !visual_row_insert_here
                 && !row_delete_here
                 && !column_shift_here
                 && !column_delete_here
@@ -1206,6 +1218,29 @@ pub fn apply_patch(
                 }
                 chunk_changed = true;
             }
+            if row_formula_here {
+                let insert = xlsx_row_insert.as_ref().expect("row insertion exists");
+                let original_html = html.clone();
+                for _ in 0..insert.count {
+                    rewrite_xlsx_inserted_formula_references(
+                        &mut html,
+                        crate::FormulaInsertion::Row(insert.before_row),
+                    )?;
+                }
+                chunk_changed |= html != original_html;
+            }
+            if visual_row_insert_here {
+                let insert = xlsx_row_insert.as_ref().expect("row insertion exists");
+                let original_html = html.clone();
+                for _ in 0..insert.count {
+                    shift_xlsx_visual_anchor(
+                        &mut html,
+                        descriptor,
+                        XlsxVisualShift::InsertRow(insert.before_row),
+                    )?;
+                }
+                chunk_changed |= html != original_html;
+            }
             if row_delete_here {
                 let delete = xlsx_row_delete.as_ref().expect("row deletion exists");
                 for _ in 0..delete.count {
@@ -1297,7 +1332,7 @@ pub fn apply_patch(
                     shift_xlsx_visual_anchor(
                         &mut html,
                         descriptor,
-                        crate::FormulaDeletion::Row(delete.row),
+                        XlsxVisualShift::DeleteRow(delete.row),
                     )?;
                 }
                 chunk_changed = true;
@@ -1310,7 +1345,7 @@ pub fn apply_patch(
                     shift_xlsx_visual_anchor(
                         &mut html,
                         descriptor,
-                        crate::FormulaDeletion::Column(delete.column),
+                        XlsxVisualShift::DeleteColumn(delete.column),
                     )?;
                 }
                 chunk_changed = true;
@@ -4005,25 +4040,30 @@ fn find_xlsx_row_insert_target(
             let Some(grid) = descriptor.grid.as_ref() else {
                 continue;
             };
-            if grid.kind == crate::GridChunkKind::Picture
-                || grid.kind == crate::GridChunkKind::Chart
+            if matches!(
+                grid.kind,
+                crate::GridChunkKind::Picture | crate::GridChunkKind::Chart
+            ) && grid.sheet_id == insert.sheet_id
             {
-                return Err(HcdError::Unsupported(
-                    "middle row insertion cannot yet shift workbook drawings or charts".to_string(),
-                ));
+                let mut html = bundle.read_chunk(&descriptor)?;
+                let mut preview = descriptor.clone();
+                shift_xlsx_visual_anchor(
+                    &mut html,
+                    &mut preview,
+                    XlsxVisualShift::InsertRow(insert.before_row),
+                )?;
             }
             if grid.kind != crate::GridChunkKind::Cells {
                 continue;
             }
             let html = bundle.read_chunk(&descriptor)?;
-            if html.contains("data-hcd-formula=\"true\"") {
-                return Err(HcdError::Unsupported(
-                    "middle row insertion requires a workbook without formulas".to_string(),
-                ));
-            }
             if grid.sheet_id != insert.sheet_id {
                 continue;
             }
+            rewrite_xlsx_inserted_formula_references(
+                &mut html.clone(),
+                crate::FormulaInsertion::Row(insert.before_row),
+            )?;
             check_xlsx_merge_shift(&html, XlsxMergeShift::InsertRow(insert.before_row))?;
             if part.is_none() {
                 part = bundle
@@ -4898,10 +4938,17 @@ fn delete_xlsx_column_widths(html: &mut String, deleted_column: u32) -> Result<(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum XlsxVisualShift {
+    InsertRow(u32),
+    DeleteRow(u32),
+    DeleteColumn(u32),
+}
+
 fn shift_xlsx_visual_anchor(
     html: &mut String,
     descriptor: &mut crate::ChunkDescriptor,
-    deletion: crate::FormulaDeletion,
+    shift: XlsxVisualShift,
 ) -> Result<(), HcdError> {
     let marker = " data-hcd-anchor-from=\"";
     let offset = html.find(marker).ok_or_else(|| {
@@ -4927,9 +4974,23 @@ fn shift_xlsx_visual_anchor(
         let (row, column) = xlsx_cell_coordinates(reference).ok_or_else(|| {
             HcdError::InvalidBundle("XLSX drawing has an invalid cell marker".to_string())
         })?;
-        let next = match deletion {
-            crate::FormulaDeletion::Row(at) => (if row > at { row - 1 } else { row }, column),
-            crate::FormulaDeletion::Column(at) => {
+        let next = match shift {
+            XlsxVisualShift::InsertRow(at) => (
+                if row >= at {
+                    row.checked_add(1)
+                        .filter(|value| *value <= 1_048_576)
+                        .ok_or_else(|| {
+                            HcdError::ResourceLimit(
+                                "XLSX drawing row exceeds worksheet".to_string(),
+                            )
+                        })?
+                } else {
+                    row
+                },
+                column,
+            ),
+            XlsxVisualShift::DeleteRow(at) => (if row > at { row - 1 } else { row }, column),
+            XlsxVisualShift::DeleteColumn(at) => {
                 (row, if column > at { column - 1 } else { column })
             }
         };
@@ -5198,6 +5259,47 @@ fn rewrite_xlsx_formula_references(
             HcdError::InvalidBundle(format!("XLSX formula HTML entity: {error}"))
         })?;
         let shifted = crate::delete_formula_references(&decoded, deletion)?;
+        if shifted != decoded {
+            set_attribute_in_range(
+                html,
+                cell.start,
+                cell.tag_end,
+                "data-hcd-formula-expression",
+                &shifted,
+            )?;
+            let new_end = html[cell.start..]
+                .find('>')
+                .map(|offset| cell.start + offset)
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle("XLSX formula cell is not closed".to_string())
+                })?;
+            set_attribute_in_range(html, cell.start, new_end, "data-hcd-formula-edited", "true")?;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_xlsx_inserted_formula_references(
+    html: &mut String,
+    insertion: crate::FormulaInsertion,
+) -> Result<(), HcdError> {
+    for cell in xlsx_cells(html)?.into_iter().rev() {
+        let tag = &html[cell.start..=cell.tag_end];
+        if xlsx_attribute(tag, "data-hcd-formula") != Some("true") {
+            continue;
+        }
+        let expression = xlsx_attribute(tag, "data-hcd-formula-expression")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                HcdError::Unsupported(
+                    "XLSX structural insertion requires a safely parsed formula expression"
+                        .to_string(),
+                )
+            })?;
+        let decoded = quick_xml::escape::unescape(expression).map_err(|error| {
+            HcdError::InvalidBundle(format!("XLSX formula HTML entity: {error}"))
+        })?;
+        let shifted = crate::insert_formula_references(&decoded, insertion)?;
         if shifted != decoded {
             set_attribute_in_range(
                 html,

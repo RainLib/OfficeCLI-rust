@@ -38,7 +38,9 @@ pub use structure::{
 };
 pub use types::*;
 pub use validate::validate_bundle;
-pub use xlsx_formula::{delete_formula_references, FormulaDeletion};
+pub use xlsx_formula::{
+    delete_formula_references, insert_formula_references, FormulaDeletion, FormulaInsertion,
+};
 
 pub const HCD_SCHEMA_VERSION: &str = "hcd/2";
 pub const HCD_SCHEMA_VERSION_1: &str = "hcd/1";
