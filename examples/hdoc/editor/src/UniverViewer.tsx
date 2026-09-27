@@ -44,6 +44,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [deletionPrompt, setDeletionPrompt] = useState<string | null>(null)
+  const deletionResolver = useRef<((confirmed: boolean) => void) | null>(null)
   const [mergeBusy, setMergeBusy] = useState(false)
   const [rowBusy, setRowBusy] = useState(false)
   const [columnBusy, setColumnBusy] = useState(false)
@@ -62,7 +64,21 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const syncing = useRef(false)
   const gridBusy = useRef(false)
   const collaboration = useFixedCollaboration(session, revision, next => setRemoteRevision(previous => Math.max(previous ?? 0, next)))
+  useEffect(() => () => { deletionResolver.current?.(false); deletionResolver.current = null }, [])
   useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
+  function confirmDeletion(message: string): Promise<boolean> {
+    return new Promise(resolve => {
+      if (deletionResolver.current) { resolve(false); return }
+      deletionResolver.current = resolve
+      setDeletionPrompt(message)
+    })
+  }
+  function answerDeletion(confirmed: boolean) {
+    const resolve = deletionResolver.current
+    deletionResolver.current = null
+    setDeletionPrompt(null)
+    resolve?.(confirmed)
+  }
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
@@ -354,7 +370,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     const count = countOverride ?? (axis === 'row' ? range.getHeight() : range.getWidth())
     if (count < 2 || count > 100) { setError('一次请选择 2 到 100 行或列'); return }
     const label = axis === 'row' ? '行' : '列'
-    if (action === 'delete' && !window.confirm(`删除选中的 ${count} ${label}及其内容？可从历史修订恢复。`)) return
+    if (action === 'delete' && !await confirmDeletion(`删除选中的 ${count} ${label}及其内容？可从历史修订恢复。`)) return
     gridBusy.current = true
     if (axis === 'row') setRowBusy(true)
     else setColumnBusy(true)
@@ -373,13 +389,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        // Insertion keeps the selected grid coordinate and viewport in place.
-        // focusCell calls scrollToCell, which jumps a scrolled worksheet to the new range.
-        if (action !== 'insert') {
-          await current.adapter.focusCell(sheet.getSheetId(),
-            axis === 'row' ? Math.max(0, start - 1) : range.getRow(),
-            axis === 'column' ? Math.max(0, start - 1) : range.getColumn())
-        }
+        // Keep the selected grid coordinate and viewport in place. focusCell
+        // changes a row/column selection into a cell and scrolls the sheet.
         setStatus(`revision ${saved.revision} · 已${action === 'insert' ? '插入' : '删除'} ${count} ${label}`)
       } catch (syncError) {
         setError(`${count} ${label}已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
@@ -496,7 +507,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       }
       const column = (range?.getColumn() ?? -1) + 1
       if (!range || column < 1) throw new Error('请先选中要删除的列')
-      if (!window.confirm(`删除第 ${column} 列及其中所有内容？可从历史修订恢复。`)) return
+      if (!await confirmDeletion(`删除第 ${column} 列及其中所有内容？可从历史修订恢复。`)) return
       setColumnBusy(true)
       setStatus('正在删除列…')
       const response = await api(session, '/node-patch', {
@@ -511,7 +522,6 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        await current.adapter.focusCell(sheet.getSheetId(), range.getRow(), Math.max(0, column - 2))
         setStatus(`revision ${saved.revision} · 已删除第 ${column} 列`)
       } catch (syncError) {
         setError(`第 ${column} 列已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
@@ -534,7 +544,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       }
       const row = (range?.getRow() ?? -1) + 1
       if (!range || row < 1) throw new Error('请先选中要删除的行')
-      if (!window.confirm(`删除第 ${row} 行及其中所有内容？可从历史修订恢复。`)) return
+      if (!await confirmDeletion(`删除第 ${row} 行及其中所有内容？可从历史修订恢复。`)) return
       setRowBusy(true)
       setStatus('正在删除行…')
       const response = await api(session, '/node-patch', {
@@ -549,7 +559,6 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        await current.adapter.focusCell(sheet.getSheetId(), Math.max(0, row - 1), 0)
         setStatus(`revision ${saved.revision} · 已删除第 ${row} 行`)
       } catch (syncError) {
         setError(`第 ${row} 行已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
@@ -737,6 +746,12 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
 
   const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
+    {deletionPrompt && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) answerDeletion(false) }}>
+      <div className="hcd-dialog" role="dialog" aria-modal="true" aria-label="确认删除" onKeyDown={event => { if (event.key === 'Escape') answerDeletion(false) }}>
+        <h2>确认删除</h2><p>{deletionPrompt}</p>
+        <div className="hcd-dialog-actions"><button autoFocus onClick={() => answerDeletion(false)}>取消</button><button className="primary" onClick={() => answerDeletion(true)}>删除</button></div>
+      </div>
+    </div>}
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
       onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
