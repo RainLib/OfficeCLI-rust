@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { api, type Session } from './api.ts'
 
-const formats = ['docx', 'xlsx', 'pptx', 'pdf', 'html', 'md', 'txt'] as const
+const formats = ['docx', 'xlsx', 'pptx', 'pdf', 'html', 'md', 'txt', 'hcd'] as const
 
 export function ExportControl({ session, revision, beforeExport }: {
   session: Session

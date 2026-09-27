@@ -80,7 +80,20 @@ officecli hdoc list-revisions report.hcd --json
 
 # Rebuild through the in-process Rust handler, or provide --source for supported source-backed edits.
 officecli hdoc export report.hcd --revision 1 --output report-revision-1.docx --json
+
+# Save the complete revision history as one portable file, then reopen it for editing.
+officecli hdoc pack report.hcd --output report-portable.hcd --json
+officecli hdoc unpack report-portable.hcd --output reopened.hcd --json
+officecli hdoc validate reopened.hcd --json
 ```
+
+`report.hcd` above is the editable directory; `report-portable.hcd` is a ZIP-based single file.
+The archive includes the HCD/2 manifest, IR chunks, source maps, assets, and every referenced
+revision. It does not include the original Office/PDF source. The core API accepts `.hcd`
+uploads and offers `hcd` as a download format. Its 256 MiB HTTP download cap still applies.
+
+![Reference editor offering a portable HCD download](docs/assets/hcd/hcd-portable-download.png)
+![Reference editor reopened from an uploaded HCD file](docs/assets/hcd/hcd-portable-reopen.png)
 
 The standalone lazy-loading frontend is in [`examples/hdoc/lazy-viewer`](examples/hdoc/lazy-viewer).
 It fetches index pages and chunks independently, verifies hashes, and preserves `nodeId` across DOM

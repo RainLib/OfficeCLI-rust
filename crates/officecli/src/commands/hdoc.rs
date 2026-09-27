@@ -24,6 +24,10 @@ pub struct HdocCommand {
 pub enum HdocSubcommand {
     /// Stream a DOCX/XLSX/PPTX/PDF/HTML/Markdown/TXT into an immutable, chunked HCD directory
     Import(HdocImportCommand),
+    /// Pack a validated HCD directory and its revision history into one portable .hcd file
+    Pack(HdocPackCommand),
+    /// Validate and unpack a portable .hcd file into an editable HCD directory
+    Unpack(HdocUnpackCommand),
     /// Validate an HCD bundle and all content hashes
     Validate(HdocValidateCommand),
     /// Measure HCD storage, compression, revision growth and unreferenced objects
@@ -96,6 +100,24 @@ pub struct HdocImportCommand {
     /// JPEG quality for PDF auto/lossy raster modes (70-100)
     #[arg(long, default_value_t = 92, value_parser = clap::value_parser!(u8).range(70..=100))]
     pub pdf_raster_quality: u8,
+}
+
+#[derive(Args)]
+pub struct HdocPackCommand {
+    /// HCD working directory to snapshot
+    pub bundle: String,
+    /// New portable .hcd file; must not already exist
+    #[arg(short, long)]
+    pub output: PathBuf,
+}
+
+#[derive(Args)]
+pub struct HdocUnpackCommand {
+    /// Portable .hcd file to open
+    pub archive: PathBuf,
+    /// New editable HCD directory; must not already exist
+    #[arg(short, long)]
+    pub output: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -364,6 +386,34 @@ pub fn handle_hdoc(
 ) -> Result<(String, bool), HandlerError> {
     match command.command {
         HdocSubcommand::Import(command) => import(command, format),
+        HdocSubcommand::Pack(command) => {
+            let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+            let report = hcd_core::pack_archive(&bundle, &command.output).map_err(handler_error)?;
+            render(
+                &report,
+                format,
+                format!(
+                    "Packed {} revision(s) into {} ({} bytes)",
+                    report.revision + 1,
+                    command.output.display(),
+                    report.archive_bytes
+                ),
+            )
+        }
+        HdocSubcommand::Unpack(command) => {
+            let report = hcd_core::unpack_archive(&command.archive, &command.output)
+                .map_err(handler_error)?;
+            render(
+                &report,
+                format,
+                format!(
+                    "Opened {} at revision {} in {}",
+                    report.document_id,
+                    report.revision,
+                    command.output.display()
+                ),
+            )
+        }
         HdocSubcommand::Validate(command) => validate(command, format),
         HdocSubcommand::Stats(command) => stats(command, format),
         HdocSubcommand::Gc(command) => gc(command, format),

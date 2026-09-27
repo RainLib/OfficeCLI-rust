@@ -36,7 +36,7 @@ impl RemoteStore {
         db.batch_execute("CREATE TABLE IF NOT EXISTS hcd_documents (
             document_id text PRIMARY KEY, head_revision bigint NOT NULL, root_hash text NOT NULL,
             head_key text NOT NULL,
-            source_key text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
+            source_key text, updated_at timestamptz NOT NULL DEFAULT now());
             CREATE TABLE IF NOT EXISTS hcd_objects (
             document_id text NOT NULL, relative_path text NOT NULL, object_key text NOT NULL,
             PRIMARY KEY(document_id, relative_path));
@@ -45,7 +45,8 @@ impl RemoteStore {
             CREATE TABLE IF NOT EXISTS hcd_collaboration (
             document_id text PRIMARY KEY, state bytea NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
             CREATE TABLE IF NOT EXISTS hcd_collaboration_meta (
-            document_id text PRIMARY KEY, epoch bigint NOT NULL DEFAULT 0);")
+            document_id text PRIMARY KEY, epoch bigint NOT NULL DEFAULT 0);
+            ALTER TABLE hcd_documents ALTER COLUMN source_key DROP NOT NULL;")
             .await.context("initialize HCD PostgreSQL schema")?;
         let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
         if let Some(endpoint) = endpoint {
@@ -145,7 +146,7 @@ impl RemoteStore {
             {
                 created_keys.push(key.clone());
             }
-            key
+            Some(key)
         } else {
             self.db
                 .lock()
@@ -155,8 +156,7 @@ impl RemoteStore {
                     &[&id],
                 )
                 .await?
-                .map(|row| row.get(0))
-                .ok_or_else(|| anyhow!("remote document has no immutable source"))?
+                .and_then(|row| row.get::<_, Option<String>>(0))
         };
         let head_bytes = tokio::fs::read(bundle_path.join("manifest.json")).await?;
         let head_key = format!("hcd/{id}/manifests/{}.json", hash_bytes(&head_bytes));
@@ -241,8 +241,8 @@ impl RemoteStore {
             let id: String = row.get(0);
             let revision: i64 = row.get(1);
             let head_key: String = row.get(2);
-            let source_key: String = row.get(3);
-            self.hydrate(&id, revision as u64, &head_key, &source_key)
+            let source_key: Option<String> = row.get(3);
+            self.hydrate(&id, revision as u64, &head_key, source_key.as_deref())
                 .await?;
         }
         Ok(())
@@ -261,8 +261,8 @@ impl RemoteStore {
             .ok_or_else(|| anyhow!("remote document missing"))?;
         let revision: i64 = row.get(0);
         let head_key: String = row.get(1);
-        let source_key: String = row.get(2);
-        self.hydrate(id, revision as u64, &head_key, &source_key)
+        let source_key: Option<String> = row.get(2);
+        self.hydrate(id, revision as u64, &head_key, source_key.as_deref())
             .await
     }
 
@@ -271,7 +271,7 @@ impl RemoteStore {
         id: &str,
         revision: u64,
         head_key: &str,
-        source_key: &str,
+        source_key: Option<&str>,
     ) -> Result<()> {
         let destination = self.root.join(format!("{id}.hcd"));
         if destination.join("manifest.json").is_file() {
@@ -320,21 +320,23 @@ impl RemoteStore {
         let temporary = destination.join("manifest.json.remote.tmp");
         tokio::fs::write(&temporary, manifest).await?;
         tokio::fs::rename(&temporary, destination.join("manifest.json")).await?;
-        let source_name = source_key
-            .rsplit('/')
-            .next()
-            .ok_or_else(|| anyhow!("invalid source key"))?;
-        let extension = source_name.rsplit('.').next().unwrap_or("bin");
-        let source_path = self.root.join("sources").join(format!("{id}.{extension}"));
-        if !source_path.is_file() {
-            let bytes = self
-                .objects
-                .get(&ObjectPath::from(source_key))
-                .await?
-                .bytes()
-                .await?;
-            tokio::fs::create_dir_all(source_path.parent().expect("source parent")).await?;
-            tokio::fs::write(source_path, bytes).await?;
+        if let Some(source_key) = source_key {
+            let source_name = source_key
+                .rsplit('/')
+                .next()
+                .ok_or_else(|| anyhow!("invalid source key"))?;
+            let extension = source_name.rsplit('.').next().unwrap_or("bin");
+            let source_path = self.root.join("sources").join(format!("{id}.{extension}"));
+            if !source_path.is_file() {
+                let bytes = self
+                    .objects
+                    .get(&ObjectPath::from(source_key))
+                    .await?
+                    .bytes()
+                    .await?;
+                tokio::fs::create_dir_all(source_path.parent().expect("source parent")).await?;
+                tokio::fs::write(source_path, bytes).await?;
+            }
         }
         let hydrated = Bundle::open(destination)?.manifest()?;
         if hydrated.document_id != id || hydrated.revision != revision {

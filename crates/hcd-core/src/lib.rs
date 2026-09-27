@@ -1,3 +1,4 @@
+mod archive;
 mod bundle;
 mod error;
 mod hash;
@@ -12,6 +13,7 @@ mod types;
 mod validate;
 mod xlsx_formula;
 
+pub use archive::{inspect_archive, pack_archive, unpack_archive, ArchiveReport};
 pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
 pub use error::HcdError;
 pub use hash::{
