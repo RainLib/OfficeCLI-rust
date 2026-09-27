@@ -286,6 +286,31 @@ PY
 
 The **插入 → 撤销末尾空行** action uses `hcd-patch/10` to remove the final row only when HCD appended it after the original source range and it remains empty. It does not delete source rows or rows containing cells or formatting. The preceding revision remains readable and exportable; the new revision's source-backed XLSX export omits the removed row. To verify, append row 16 after editing A15 in the Settings sheet, leave row 16 empty, then undo it. Attempting to undo row 15 must fail because A15 contains text. The reference screenshot is `docs/screenshots/hcd-xlsx-remove-empty-tail.png`.
 
+The **插入 → 在选中行后插入 1 行** and cell right-click **在下方插入 1 行** actions insert below the selected row (or below the bottom row of a selection). They use `xlsx.row.insert` within the materialized worksheet and `xlsx.row.append` at its tail. Inserting above or below keeps the current cell selection and scroll position instead of scrolling the inserted row to the top. A selection beyond the last stored row is already an editable blank grid, so select the last stored row to append there. For a real workbook check:
+
+```bash
+mkdir -p /tmp/hcd-xlsx-insert-below/sources
+target/debug/officecli hdoc import assets/showcase/budget-tracker.xlsx \
+  --output /tmp/hcd-xlsx-insert-below/accept-xlsx.hcd --document-id accept-xlsx
+cp assets/showcase/budget-tracker.xlsx /tmp/hcd-xlsx-insert-below/sources/accept-xlsx.xlsx
+# Start the core API and Vite gallery with HCD_DEMO_ROOT=/tmp/hcd-xlsx-insert-below as shown above.
+# In Overview, scroll until row 8 is in the middle, select A8, then right-click > 在下方插入 1 行.
+# Check A8 remains selected at the same screen position, A9 is blank, and the old row 9 is now row 10.
+target/debug/officecli hdoc validate /tmp/hcd-xlsx-insert-below/accept-xlsx.hcd
+target/debug/officecli hdoc export /tmp/hcd-xlsx-insert-below/accept-xlsx.hcd \
+  --source assets/showcase/budget-tracker.xlsx --output /tmp/hcd-xlsx-insert-below/exported.xlsx
+python3 - <<'PY'
+from zipfile import ZipFile
+from xml.etree import ElementTree as ET
+with ZipFile('/tmp/hcd-xlsx-insert-below/exported.xlsx') as archive:
+    root = ET.fromstring(archive.read('xl/worksheets/sheet1.xml'))
+    ns = {'x': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+    assert root.find(".//x:c[@r='A9']", ns) is None
+    assert root.find(".//x:c[@r='A10']", ns) is not None
+    assert any(name.startswith('xl/charts/chart') and name.endswith('.xml') for name in archive.namelist())
+PY
+```
+
 The **开始 → 列宽 → 设置列宽** action uses `hcd-patch/9` for the selected column (1–255 Excel width units, two decimal places). The HCD grid updates every window of that worksheet, while source-backed XLSX export splits any covering `<col>` range so neighboring columns retain their widths. On the real `assets/showcase/budget-tracker.xlsx` Settings sheet, select B1 and set its width to `28`. The reference screenshots are `docs/screenshots/hcd-xlsx-column-width-before.png` and `docs/screenshots/hcd-xlsx-column-width-after.png`. After export, `xl/worksheets/sheet3.xml` must include `<col min="2" max="2" width="28.00" customWidth="1"/>` while A and C remain at width 18. This adjusts layout without moving cell addresses; inserting and deleting columns remain separate work.
 
 The **开始 → 行高 → 设置行高** action uses `hcd-patch/18` for one materialized row (1–409 points, two decimal places). It updates the HCD grid and source-backed XLSX row height; source-free semantic XLSX export does not yet preserve this physical dimension. Browser and real-data validation are in [the row-height acceptance](../../../docs/acceptance/hcd-xlsx-row-height.md).
