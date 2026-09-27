@@ -9,6 +9,12 @@ pub enum FormulaDeletion {
     Column(u32),
 }
 
+#[derive(Clone, Copy)]
+pub enum FormulaInsertion {
+    Row(u32),
+    Column(u32),
+}
+
 #[derive(Clone)]
 struct Reference {
     end: usize,
@@ -142,6 +148,109 @@ fn shift_range(
     Some((first, last))
 }
 
+pub fn insert_formula_references(
+    formula: &str,
+    insertion: FormulaInsertion,
+) -> Result<String, HcdError> {
+    if formula.len() > 8191
+        || !formula.is_ascii()
+        || formula
+            .replace("#REF!", "")
+            .bytes()
+            .any(|byte| matches!(byte, b'!' | b'[' | b']' | b'\'' | b'@' | b';'))
+    {
+        return Err(HcdError::Unsupported(
+            "XLSX formula uses references that structural insertion cannot safely update"
+                .to_string(),
+        ));
+    }
+    let bytes = formula.as_bytes();
+    let mut output = String::with_capacity(formula.len());
+    let mut offset = 0;
+    let mut quoted = false;
+    while offset < bytes.len() {
+        let byte = bytes[offset];
+        if byte == b'"' {
+            if quoted && bytes.get(offset + 1) == Some(&b'"') {
+                output.push_str("\"\"");
+                offset += 2;
+                continue;
+            }
+            quoted = !quoted;
+            output.push('"');
+            offset += 1;
+            continue;
+        }
+        if !quoted
+            && (byte == b'$' || byte.is_ascii_alphabetic())
+            && (offset == 0
+                || !matches!(bytes[offset - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.'))
+        {
+            if let Some(mut first) = parse_reference(bytes, offset) {
+                if bytes.get(first.end) == Some(&b':') {
+                    if let Some(mut last) = parse_reference(bytes, first.end + 1) {
+                        if first.row > last.row || first.column > last.column {
+                            return Err(HcdError::Unsupported(
+                                "XLSX formula has a reversed A1 range".to_string(),
+                            ));
+                        }
+                        match insertion {
+                            FormulaInsertion::Row(at) => {
+                                if first.row >= at {
+                                    first.row += 1;
+                                }
+                                if last.row >= at {
+                                    last.row += 1;
+                                }
+                            }
+                            FormulaInsertion::Column(at) => {
+                                if first.column >= at {
+                                    first.column += 1;
+                                }
+                                if last.column >= at {
+                                    last.column += 1;
+                                }
+                            }
+                        }
+                        if last.row > 1_048_576 || last.column > 16_384 {
+                            return Err(HcdError::ResourceLimit(
+                                "XLSX formula reference exceeds the worksheet limit".to_string(),
+                            ));
+                        }
+                        output.push_str(&render(&first));
+                        output.push(':');
+                        output.push_str(&render(&last));
+                        offset = last.end;
+                        continue;
+                    }
+                }
+                match insertion {
+                    FormulaInsertion::Row(at) if first.row >= at => first.row += 1,
+                    FormulaInsertion::Column(at) if first.column >= at => first.column += 1,
+                    _ => {}
+                }
+                if first.row > 1_048_576 || first.column > 16_384 {
+                    return Err(HcdError::ResourceLimit(
+                        "XLSX formula reference exceeds the worksheet limit".to_string(),
+                    ));
+                }
+                let end = first.end;
+                output.push_str(&render(&first));
+                offset = end;
+                continue;
+            }
+        }
+        output.push(byte as char);
+        offset += 1;
+    }
+    if quoted {
+        return Err(HcdError::Unsupported(
+            "XLSX formula has an unterminated string".to_string(),
+        ));
+    }
+    Ok(output)
+}
+
 pub fn delete_formula_references(
     formula: &str,
     deletion: FormulaDeletion,
@@ -223,6 +332,20 @@ pub fn delete_formula_references(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insertion_updates_scalar_absolute_and_range_references() {
+        assert_eq!(
+            insert_formula_references("=SUM(C8:F8)+G8/$B$8+\"A8\"", FormulaInsertion::Row(8))
+                .unwrap(),
+            "=SUM(C9:F9)+G9/$B$9+\"A8\""
+        );
+        assert_eq!(
+            insert_formula_references("=SUM(B8:B14)", FormulaInsertion::Row(9)).unwrap(),
+            "=SUM(B8:B15)"
+        );
+        assert!(insert_formula_references("=Other!A1", FormulaInsertion::Row(1)).is_err());
+    }
 
     #[test]
     fn deletion_updates_scalar_and_range_references() {

@@ -6284,10 +6284,8 @@ fn rewrite_grid_formula(
             RowShift::Delete(row) => {
                 hcd_core::delete_formula_references(&result, hcd_core::FormulaDeletion::Row(*row))?
             }
-            RowShift::Insert(_) => {
-                return Err(HcdError::Unsupported(
-                    "XLSX conditional formula insertion is not supported".to_string(),
-                ))
+            RowShift::Insert(row) => {
+                hcd_core::insert_formula_references(&result, hcd_core::FormulaInsertion::Row(*row))?
             }
         };
     }
@@ -10331,6 +10329,53 @@ mod tests {
         assert!(xml.contains("<row r=\"128\"/>"));
         assert!(xml.contains("<c r=\"A129\" t=\"inlineStr\"><is><t>Row 128</t>"));
         assert!(xml.contains("<c r=\"A131\" t=\"inlineStr\"><is><t>Row 130</t>"));
+    }
+
+    #[test]
+    fn budget_workbook_row_insertion_preserves_formulas_merges_and_chart() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("budget-insert"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_14.to_string(),
+            document_id: "budget-insert".to_string(),
+            patch_id: "insert-row".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id,
+                before_row: 9,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<row r=\"9\""), "{sheet}");
+        assert!(sheet.contains("<c r=\"G10\""), "{sheet}");
+        assert!(sheet.contains("<f>SUM(C10:F10)</f>"), "{sheet}");
+        assert!(sheet.contains("mergeCell ref=\"A1:H1\""), "{sheet}");
+        assert!(sheet.contains("sqref=\"H8:H15\""), "{sheet}");
+        let drawing = read_zip_entry(&exported, "xl/drawings/drawing1.xml");
+        assert!(drawing.contains("<xdr:row>18</xdr:row>"), "{drawing}");
+        assert!(drawing.contains("<xdr:row>36</xdr:row>"), "{drawing}");
     }
 
     #[test]
