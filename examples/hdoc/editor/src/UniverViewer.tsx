@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { BooleanNumber, createUniver, defaultTheme, LocaleType, RANGE_TYPE, type IWorkbookData } from '@univerjs/presets'
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
 import zhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
@@ -17,6 +17,8 @@ import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
 
 type GridSelectionKind = 'cell' | 'row' | 'column' | 'all'
+type EditStep = { revision: number; label: string }
+type EditHistory = { head: number | null; past: EditStep[]; future: EditStep[] }
 
 function selectionKind(sheet: ReturnType<HcdUniverAdapter['workbook']['getActiveSheet']>): GridSelectionKind {
   const range = sheet.getActiveRange()
@@ -36,6 +38,9 @@ function selectionKind(sheet: ReturnType<HcdUniverAdapter['workbook']['getActive
 export function UniverViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
   const [status, setStatus] = useState('正在加载工作簿')
   const [revision, setRevision] = useState<number | null>(null)
+  const [history, setHistory] = useState<EditHistory>({ head: null, past: [], future: [] })
+  const [historyBusy, setHistoryBusy] = useState(false)
+  const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState(session.scope === 'write')
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout('xlsx'))
@@ -59,11 +64,84 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [formulaDirty, setFormulaDirty] = useState(false)
   const [gridSelectionKind, setGridSelectionKind] = useState<GridSelectionKind>('cell')
   const formulaInput = useRef<HTMLInputElement>(null)
+  const updateFormulaBarRef = useRef<() => void>(() => {})
   const host = useRef<HTMLDivElement>(null)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
   const syncing = useRef(false)
   const gridBusy = useRef(false)
-  const collaboration = useFixedCollaboration(session, revision, next => setRemoteRevision(previous => Math.max(previous ?? 0, next)))
+  const collaborationSession = useMemo(() => ({ ...session, collaborationEpoch }), [session, collaborationEpoch])
+  const collaboration = useFixedCollaboration(collaborationSession, revision, next => setRemoteRevision(previous => Math.max(previous ?? 0, next)))
+  const announceRevision = useRef(collaboration.announceRevision)
+  announceRevision.current = collaboration.announceRevision
+  function recordEdit(nextRevision: number, label: string) {
+    setHistory(previous => ({ head: nextRevision,
+      past: [...(previous.head === nextRevision - 1 ? previous.past : []), { revision: nextRevision - 1, label }],
+      future: [] }))
+  }
+  function resetHistory(nextRevision: number) {
+    setHistory({ head: nextRevision, past: [], future: [] })
+  }
+  const historyLocked = historyBusy || mergeBusy || rowBusy || columnBusy || columnWidthBusy || rowHeightBusy
+    || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
+  async function travelHistory(direction: 'undo' | 'redo') {
+    const current = runtime.current
+    const steps = direction === 'undo' ? history.past : history.future
+    if (!current || !editing || session.scope !== 'write' || historyLocked || gridBusy.current || !steps.length) return
+    const target = steps[steps.length - 1]
+    const head = current.client.manifest.revision
+    if (history.head !== head) {
+      resetHistory(head)
+      setError('其他协作者已更新工作簿；已同步新修订，请重新操作')
+      return
+    }
+    setHistoryBusy(true)
+    setStatus(direction === 'undo' ? '正在撤销…' : '正在重做…')
+    try {
+      const response = await api(session, `/restore/${target.revision}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedRevision: head }),
+      })
+      const saved = await response.json() as { revision: number }
+      setHistory(previous => direction === 'undo'
+        ? { head: saved.revision, past: previous.past.slice(0, -1),
+          future: [...previous.future, { revision: head, label: target.label }] }
+        : { head: saved.revision, past: [...previous.past, { revision: head, label: target.label }],
+          future: previous.future.slice(0, -1) })
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setRemoteRevision(null)
+      setError('')
+      await current.adapter.refreshFromServer()
+      updateFormulaBarRef.current()
+      const auth = await (await api(session, '/auth')).json() as { collaborationEpoch: number }
+      setCollaborationEpoch(auth.collaborationEpoch)
+      setStatus(`revision ${saved.revision} · 已${direction === 'undo' ? '撤销' : '重做'}：${target.label}`)
+    } catch (cause) {
+      setError(`${direction === 'undo' ? '撤销' : '重做'}失败：${String(cause)}`)
+      try {
+        if (await current.adapter.refreshFromServer()) {
+          const actual = current.client.manifest.revision
+          setRevision(actual)
+          resetHistory(actual)
+        }
+      } catch { /* Keep the error visible until a later sync succeeds. */ }
+    } finally { setHistoryBusy(false) }
+  }
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+      const target = event.target
+      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return
+      const key = event.key.toLowerCase()
+      const direction = key === 'z' ? (event.shiftKey ? 'redo' : 'undo')
+        : key === 'y' && !event.shiftKey ? 'redo' : null
+      if (!direction || !editing || !runtime.current) return
+      event.preventDefault()
+      void travelHistory(direction)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
   useEffect(() => () => { deletionResolver.current?.(false); deletionResolver.current = null }, [])
   useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
   function confirmDeletion(message: string): Promise<boolean> {
@@ -84,17 +162,22 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   }
   useEffect(() => {
     const current = runtime.current
-    if (!current || remoteRevision === null || syncing.current || gridBusy.current) return
+    if (!current || remoteRevision === null || syncing.current || gridBusy.current || historyBusy) return
     if (remoteRevision <= current.client.manifest.revision) { setRemoteRevision(null); return }
     if (current.adapter.hasPendingPatch()) return
     syncing.current = true
     void current.adapter.refreshFromServer().then(refreshed => {
       if (!refreshed || runtime.current !== current) return
       setRevision(current.client.manifest.revision)
+      updateFormulaBarRef.current()
+      resetHistory(current.client.manifest.revision)
       setRemoteRevision(null)
       setError('')
+      void api(session, '/auth').then(response => response.json())
+        .then((auth: { collaborationEpoch: number }) => setCollaborationEpoch(auth.collaborationEpoch))
+        .catch(() => {})
     }).catch(cause => setError(`协作修订同步失败：${String(cause)}`)).finally(() => { syncing.current = false })
-  }, [remoteRevision, revision, status])
+  }, [remoteRevision, revision, status, historyBusy, session])
 
   async function searchContent(query: string): Promise<SearchResult> {
     const params = new URLSearchParams({ q: query })
@@ -165,6 +248,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         setFormulaText(String(cell.getFormulas?.()[0]?.[0] || (cell.getValue() ?? '')))
         setFormulaDirty(false)
       }
+      updateFormulaBarRef.current = updateFormulaBar
       univerAPI.addEvent(univerAPI.Event.SelectionChanged, updateFormulaBar)
       univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, updateFormulaBar)
       const adapter = new HcdUniverAdapter(client, univerAPI, workbook, editing ? 'editable' : 'readonly', message => {
@@ -197,7 +281,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
               hashes[operation.nodeId] = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
             }
             adapter.acknowledgePatch(patch.patchId, result.revision, hashes)
-            collaboration.announceRevision(result.revision)
+            if (alive) recordEdit(result.revision, '编辑单元格')
+            announceRevision.current(result.revision)
             if (alive) { setRevision(result.revision); setError('') }
             try {
               await adapter.refreshChangedCells(detail.changes)
@@ -215,11 +300,16 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       await adapter.start()
       updateFormulaBar()
       runtime.current = { client, adapter }
-      if (alive) { setRevision(client.manifest.revision); setStatus(`revision ${client.manifest.revision} · Canvas 按视口加载`) }
+      if (alive) {
+        setRevision(client.manifest.revision)
+        setHistory(previous => previous.head === client.manifest.revision ? previous
+          : { head: client.manifest.revision, past: [], future: [] })
+        setStatus(`revision ${client.manifest.revision} · Canvas 按视口加载`)
+      }
     }
     void boot().catch(cause => { if (alive) setError(String(cause)) })
-    return () => { alive = false; runtime.current = null; removePatchListener?.(); disposeUniver?.(); client.dispose() }
-  }, [session, editing, collaboration.announceRevision])
+    return () => { alive = false; runtime.current = null; updateFormulaBarRef.current = () => {}; removePatchListener?.(); disposeUniver?.(); client.dispose() }
+  }, [session, editing])
 
   async function mergeSelection() {
     const current = runtime.current
@@ -266,6 +356,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             : { op: 'xlsx.merge.blank', ...coordinates }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '合并单元格')
       collaboration.announceRevision(saved.revision)
       await current.adapter.refreshFromServer()
       setRevision(saved.revision)
@@ -306,6 +397,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             precondition: { nodeHash: anchor.nodeHash } }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '拆分单元格')
       collaboration.announceRevision(saved.revision)
       await current.adapter.refreshFromServer()
       setRevision(saved.revision)
@@ -344,6 +436,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
           operations: [{ op: 'xlsx.row.append', sheetId, afterRow }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '新增行')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -384,6 +477,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
           operations: [{ op: 'xlsx.grid.range', sheetId: sheet.getSheetId(), axis, action, start, count }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '插入或删除多行列')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -437,6 +531,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             : { op: 'xlsx.row.insert', sheetId, beforeRow }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '插入行')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -480,6 +575,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
           operations: [{ op: 'xlsx.column.insert', sheetId, beforeColumn }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '插入列')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -517,6 +613,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
           operations: [{ op: 'xlsx.column.delete', sheetId: sheet.getSheetId(), column }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '删除列')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -554,6 +651,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
           operations: [{ op: 'xlsx.row.delete', sheetId: sheet.getSheetId(), row }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '删除行')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -588,6 +686,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
           operations: [{ op: 'xlsx.row.remove-last', sheetId, row }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '删除末尾空行')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -628,6 +727,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             column, widthChars: Math.round(widthChars * 100) / 100 }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '设置列宽')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -668,6 +768,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
             row, heightPoints: Math.round(heightPoints * 100) / 100 }] }),
       })
       const saved = await response.json() as { revision: number }
+      recordEdit(saved.revision, '设置行高')
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
       setError('')
@@ -757,7 +858,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setSettingsOpen(true)}>⚙ 界面设置</button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
-      {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · 右键显示操作菜单 · {status}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button title="撤销上一步（⌘/Ctrl+Z）" disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}>↶ 撤销</button><button title="重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）" disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}>↷ 重做</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · 右键显示操作菜单 · {status}</span></>}
       {activeTab === 'insert' && <><div className="tool-group">
         {gridSelectionKind !== 'column' && gridSelectionKind !== 'all' && <>
           <label className="xlsx-insert-count">插入行数 <input aria-label="插入行数" type="number" min="1" max="100" step="1" value={rowInsertCount} disabled={!editing || rowBusy} onChange={event => { setRowInsertCount(event.target.value); if (error.includes('插入行数必须')) setError('') }} /></label>
@@ -775,7 +876,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         {gridSelectionKind === 'cell' && <button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button>}
       </div><span className="ribbon-note">整行只显示行操作，整列只显示列操作；普通单元格可选择两种操作 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
-      {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
+      {activeTab === 'revisions' && <><div className="tool-group"><button disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}>撤销 {history.past.length} 步</button><button disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}>重做 {history.future.length} 步</button></div><span className="ribbon-note">当前修订 r{revision ?? '…'} · {history.past.length ? `下一步可撤销：${history.past.at(-1)?.label}` : '当前会话无可撤销步骤'} · 协作者更新后将清空本地步骤</span></>}
     </nav>}
     <form className="xlsx-formula-bar" aria-label="公式栏" onSubmit={event => { event.preventDefault(); applyFormulaBarInput() }}>
       <span className="xlsx-formula-address" aria-label="选中单元格">{formulaAddress}</span>
@@ -796,6 +897,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     </form>
     <div className="univer-editor-area" onContextMenu={openGridContextMenu} onMouseDownCapture={() => setContextMenu(null)} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" />
       {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
+      {activeTab === 'revisions' && !settingsOpen && <aside className="workspace-sidebar xlsx-history-sidebar" aria-label="编辑步骤"><div className="panel-head"><h2>编辑步骤</h2><button className="panel-close" aria-label="关闭编辑步骤" onClick={() => setActiveTab('home')}>×</button></div><p>本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。</p>
+        {history.past.length ? <ol className="xlsx-edit-steps">{history.past.map((step, index) => <li key={`${index}-${step.revision}`}><span>{index + 1}</span><strong>{step.label}</strong><small>保存前 r{step.revision}</small></li>).reverse()}</ol> : <p>暂无可撤销步骤</p>}
+        {history.future.length > 0 && <><h3>可重做</h3><ol className="xlsx-edit-steps">{history.future.slice().reverse().map((step, index) => <li key={`${index}-${step.revision}`}><span>↷</span><strong>{step.label}</strong></li>)}</ol></>}
+      </aside>}
     </div>
     {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions}
       count={showRowContext ? { label: '插入行数', value: rowInsertCount, onChange: value => { setRowInsertCount(value); if (error.includes('插入行数必须')) setError('') } } : undefined}
