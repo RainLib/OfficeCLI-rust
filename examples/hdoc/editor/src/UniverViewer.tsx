@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent } from 'react'
-import { BooleanNumber, createUniver, defaultTheme, LocaleType, type IWorkbookData } from '@univerjs/presets'
+import { BooleanNumber, createUniver, defaultTheme, LocaleType, RANGE_TYPE, type IWorkbookData } from '@univerjs/presets'
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
 import zhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import { UniverSheetsDrawingPreset } from '@univerjs/preset-sheets-drawing'
@@ -15,6 +15,23 @@ import { api, type Session } from './api.ts'
 import { ErrorToast } from './ErrorToast.tsx'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
+
+type GridSelectionKind = 'cell' | 'row' | 'column' | 'all'
+
+function selectionKind(sheet: ReturnType<HcdUniverAdapter['workbook']['getActiveSheet']>): GridSelectionKind {
+  const range = sheet.getActiveRange()
+  if (!range) return 'cell'
+  const kind = range.getRange().rangeType
+  if (kind === RANGE_TYPE.ROW) return 'row'
+  if (kind === RANGE_TYPE.COLUMN) return 'column'
+  if (kind === RANGE_TYPE.ALL) return 'all'
+  const allRows = range.getRow() === 0 && range.getHeight() >= sheet.getMaxRows()
+  const allColumns = range.getColumn() === 0 && range.getWidth() >= sheet.getMaxColumns()
+  if (allRows && allColumns) return 'all'
+  if (allColumns) return 'row'
+  if (allRows) return 'column'
+  return 'cell'
+}
 
 export function UniverViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
   const [status, setStatus] = useState('正在加载工作簿')
@@ -37,6 +54,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [formulaAddress, setFormulaAddress] = useState('A1')
   const [formulaText, setFormulaText] = useState('')
   const [formulaDirty, setFormulaDirty] = useState(false)
+  const [gridSelectionKind, setGridSelectionKind] = useState<GridSelectionKind>('cell')
   const formulaInput = useRef<HTMLInputElement>(null)
   const host = useRef<HTMLDivElement>(null)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
@@ -124,6 +142,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         const sheet = workbook.getActiveSheet()
         const selection = sheet.getActiveRange()
         if (!selection || !alive) return
+        setGridSelectionKind(selectionKind(sheet))
         const cell = sheet.getRange(selection.getRow(), selection.getColumn())
         setFormulaAddress(cell.getA1Notation())
         setFormulaText(String(cell.getFormulas?.()[0]?.[0] || (cell.getValue() ?? '')))
@@ -319,13 +338,13 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
   }
 
-  async function applySelectedGridRange(axis: 'row' | 'column', action: 'insert' | 'delete') {
+  async function applySelectedGridRange(axis: 'row' | 'column', action: 'insert' | 'delete', startOverride?: number) {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || gridBusy.current) return
     const sheet = current.adapter.workbook.getActiveSheet()
     const range = sheet.getActiveRange()
     if (!range) { setError('请先选中行或列'); return }
-    const start = (axis === 'row' ? range.getRow() : range.getColumn()) + 1
+    const start = startOverride ?? (axis === 'row' ? range.getRow() : range.getColumn()) + 1
     const count = axis === 'row' ? range.getHeight() : range.getWidth()
     if (count < 2 || count > 100) { setError('一次请选择 2 到 100 行或列'); return }
     const label = axis === 'row' ? '行' : '列'
@@ -348,9 +367,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        // Row insertion keeps the selected grid coordinate and viewport in place.
-        // focusCell calls scrollToCell, which jumps a scrolled worksheet to the new row.
-        if (axis !== 'row' || action !== 'insert') {
+        // Insertion keeps the selected grid coordinate and viewport in place.
+        // focusCell calls scrollToCell, which jumps a scrolled worksheet to the new range.
+        if (action !== 'insert') {
           await current.adapter.focusCell(sheet.getSheetId(),
             axis === 'row' ? Math.max(0, start - 1) : range.getRow(),
             axis === 'column' ? Math.max(0, start - 1) : range.getColumn())
@@ -413,26 +432,33 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     } finally { setRowBusy(false) }
   }
 
-  async function insertColumnBeforeSelection() {
+  async function insertColumnNearSelection(position: 'left' | 'right') {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write' || rowBusy || columnBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
-      if ((range?.getWidth() ?? 0) > 1) {
-        await applySelectedGridRange('column', 'insert')
+      if (!range) throw new Error('请先选中目标列中的单元格')
+      const beforeColumn = range.getColumn() + (position === 'right' ? range.getWidth() + 1 : 1)
+      if (range.getWidth() > 1) {
+        await applySelectedGridRange('column', 'insert', beforeColumn)
         return
       }
-      const beforeColumn = (range?.getColumn() ?? -1) + 1
-      if (!range || beforeColumn < 1) throw new Error('请先选中目标列中的单元格')
+      const sheetId = sheet.getSheetId()
+      const lastColumn = Math.max(0, ...current.client.descriptors
+        .filter(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)
+        .map(({ grid }) => grid?.columnEnd ?? 0))
+      if (beforeColumn > lastColumn + 1 || beforeColumn > 16_384) {
+        throw new Error('选中位置已在存储的最后一列之外；空白网格可直接编辑，需新增列请先选中最后一条已有列')
+      }
       setColumnBusy(true)
-      setStatus('正在插入列…')
+      setStatus(position === 'right' ? '正在右侧插入列…' : '正在左侧插入列…')
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ schemaVersion: 'hcd-patch/13', documentId: session.documentId,
           patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
-          operations: [{ op: 'xlsx.column.insert', sheetId: sheet.getSheetId(), beforeColumn }] }),
+          operations: [{ op: 'xlsx.column.insert', sheetId, beforeColumn }] }),
       })
       const saved = await response.json() as { revision: number }
       collaboration.announceRevision(saved.revision)
@@ -440,13 +466,12 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       setError('')
       try {
         await current.adapter.refreshFromServer()
-        await current.adapter.focusCell(sheet.getSheetId(), range.getRow(), beforeColumn - 1)
-        setStatus(`revision ${saved.revision} · 已在第 ${beforeColumn} 列前插入空列`)
+        setStatus(`revision ${saved.revision} · 已在第 ${position === 'right' ? beforeColumn - 1 : beforeColumn} 列${position === 'right' ? '后' : '前'}插入空列`)
       } catch (syncError) {
         setError(`第 ${beforeColumn} 列已保存为 r${saved.revision}，视图同步失败：${String(syncError)}`)
       }
     } catch (cause) {
-      setError(`插入列失败：${String(cause)}`)
+      setError(`${position === 'right' ? '右侧' : '左侧'}插入列失败：${String(cause)}`)
     } finally { setColumnBusy(false) }
   }
 
@@ -673,6 +698,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
 
   const activeSheet = contextMenu && runtime.current?.adapter.workbook.getActiveSheet()
   const activeRange = activeSheet?.getActiveRange()
+  const contextSelectionKind = activeSheet ? selectionKind(activeSheet) : 'cell'
+  const showRowContext = contextSelectionKind === 'cell' || contextSelectionKind === 'row'
+  const showColumnContext = contextSelectionKind === 'cell' || contextSelectionKind === 'column'
   const selectedMerge = activeRange && activeSheet?.getMergeData().some(range =>
     activeRange.getRow() >= range.getRow()
     && activeRange.getRow() < range.getRow() + range.getHeight()
@@ -681,14 +709,20 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const gridActionDisabled = !editing || session.scope !== 'write' || mergeBusy || rowBusy || columnBusy
     || !!runtime.current?.adapter.hasPendingPatch()
   const contextActions: MenuAction[] = [
-    { label: '合并单元格', action: () => void mergeSelection(),
+    ...(contextSelectionKind === 'cell' ? [{ label: '合并单元格', action: () => void mergeSelection(),
       disabled: gridActionDisabled || !activeRange || !!selectedMerge || activeRange.getHeight() * activeRange.getWidth() < 2 },
-    { label: '拆分单元格', action: () => void unmergeSelection(), disabled: gridActionDisabled || !selectedMerge },
-    { label: '在上方插入行', action: () => void insertRowNearSelection('above'), disabled: gridActionDisabled || !activeRange, separated: true },
-    { label: '在下方插入 1 行', action: () => void insertRowNearSelection('below'), disabled: gridActionDisabled || !activeRange },
-    { label: '删除选中行', action: () => void deleteSelectedRow(), disabled: gridActionDisabled || !activeRange },
-    { label: '在左侧插入列', action: () => void insertColumnBeforeSelection(), disabled: gridActionDisabled || !activeRange, separated: true },
-    { label: '删除选中列', action: () => void deleteSelectedColumn(), disabled: gridActionDisabled || !activeRange },
+    { label: '拆分单元格', action: () => void unmergeSelection(), disabled: gridActionDisabled || !selectedMerge }] : []),
+    ...(showRowContext ? [
+      { label: '在上方插入行', action: () => void insertRowNearSelection('above'), disabled: gridActionDisabled || !activeRange, separated: true },
+      { label: '在下方插入 1 行', action: () => void insertRowNearSelection('below'), disabled: gridActionDisabled || !activeRange },
+      { label: '删除选中行', action: () => void deleteSelectedRow(), disabled: gridActionDisabled || !activeRange },
+    ] : []),
+    ...(showColumnContext ? [
+      { label: '在左侧插入列', action: () => void insertColumnNearSelection('left'), disabled: gridActionDisabled || !activeRange, separated: true },
+      { label: '在右侧插入列', action: () => void insertColumnNearSelection('right'), disabled: gridActionDisabled || !activeRange },
+      { label: '删除选中列', action: () => void deleteSelectedColumn(), disabled: gridActionDisabled || !activeRange },
+    ] : []),
+    ...(!showRowContext && !showColumnContext ? [{ label: '请选中行、列或单元格', action: () => {}, disabled: true }] : []),
   ]
 
   const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
@@ -699,7 +733,21 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="工作簿工具栏">
       {activeTab === 'home' && <><div className="tool-group"><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并单元格</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}>拆分单元格</button><label>列宽 <input aria-label="选中列宽度" type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}>设置列宽</button><label>行高 <input aria-label="选中行高度" type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}>设置行高</button></div><span className="ribbon-note">双击单元格或按 F2 编辑 · 右键显示操作菜单 · {status}</span></>}
-      {activeTab === 'insert' && <><div className="tool-group"><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('above')}>在选中行前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('below')}>在选中行后插入 1 行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnBeforeSelection()}>在选中列前插入</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button><button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button></div><span className="ribbon-note">上方插入与删除支持一次选择 2–100 行或列；合并区域可整体移动 · {status}</span></>}
+      {activeTab === 'insert' && <><div className="tool-group">
+        {gridSelectionKind !== 'column' && gridSelectionKind !== 'all' && <>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('above')}>在选中行前插入</button>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertRowNearSelection('below')}>在选中行后插入 1 行</button>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedRow()}>删除选中行</button>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void appendRow()}>在末尾新增行</button>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void removeEmptyTailRow()}>撤销末尾空行</button>
+        </>}
+        {gridSelectionKind !== 'row' && gridSelectionKind !== 'all' && <>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnNearSelection('left')}>在选中列左侧插入</button>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void insertColumnNearSelection('right')}>在选中列右侧插入</button>
+          <button disabled={!editing || rowBusy || columnBusy} onClick={() => void deleteSelectedColumn()}>删除选中列</button>
+        </>}
+        {gridSelectionKind === 'cell' && <button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}>合并选中单元格</button>}
+      </div><span className="ribbon-note">整行只显示行操作，整列只显示列操作；普通单元格可选择两种操作 · {status}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}
@@ -720,7 +768,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       </select>
       <button type="submit" disabled={!editing}>应用内容</button>
     </form>
-    <div className="univer-editor-area" onContextMenu={openGridContextMenu} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" />
+    <div className="univer-editor-area" onContextMenu={openGridContextMenu} onMouseDownCapture={() => setContextMenu(null)} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" />
       {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
     </div>
     {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions} onClose={() => setContextMenu(null)} />}
