@@ -234,6 +234,40 @@ export class HcdUniverAdapter {
     return this.linksByCell.get(cellKey(sheetId, row, column));
   }
 
+  applyCellInput(sheetId: string, row: number, column: number, input: string): void {
+    if (this.mode !== 'editable' || this.hasPendingPatch()) {
+      throw new Error('当前单元格不可编辑或仍在保存');
+    }
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    if (!sheet) throw new Error('工作表不存在');
+    const link = this.getNodeAt(sheetId, row, column);
+    if (!(link?.editable || link?.formulaEditable || (!link && this.canEditBlankCell(sheetId, row, column)))) {
+      throw new Error('当前单元格不可编辑');
+    }
+    const range = sheet.getRange(row, column);
+    const formula = input.trim();
+    const existingFormula = String(range.getFormulas?.()[0]?.[0] ?? '');
+    if (formula.startsWith('=')) {
+      if (formula.length < 2) throw new Error('公式必须包含 = 后面的表达式');
+      if (formula !== existingFormula) range.setFormula(formula);
+      return;
+    }
+    if (!existingFormula && String(range.getValue() ?? '') === input) return;
+    const literal = numericLiteral(input);
+    const formatted = (link?.rawValue !== undefined || link?.formulaEditable)
+      ? displayedNumber(input) : undefined;
+    const numericText = literal ?? (formatted === undefined ? undefined : String(formatted));
+    if (numericText === undefined && /^[-+]?(?:\d|\.\d)/.test(formula)
+      && (link?.rawValue !== undefined || link?.formulaEditable)) {
+      throw new Error('请输入有效的数字');
+    }
+    // Programmatic writes do not emit BeforeSheetEditEnd. Preserve the raw
+    // formula-bar text so captureChanges can distinguish a literal from a
+    // formatted display value and create the correct HCD operation.
+    this.editInputs.set(cellKey(sheetId, row, column), numericText ?? input);
+    range.setValue(numericText === undefined ? input : Number(numericText));
+  }
+
   async focusCell(sheetId: string, row: number, column: number): Promise<void> {
     const sheet = this.workbook.getSheetBySheetId(sheetId);
     if (!sheet) throw new Error('工作表不存在');

@@ -35,6 +35,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [rowHeightPoints, setRowHeightPoints] = useState('30')
   const [formulaAddress, setFormulaAddress] = useState('A1')
   const [formulaText, setFormulaText] = useState('')
+  const [formulaDirty, setFormulaDirty] = useState(false)
   const formulaInput = useRef<HTMLInputElement>(null)
   const host = useRef<HTMLDivElement>(null)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
@@ -125,6 +126,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         const cell = sheet.getRange(selection.getRow(), selection.getColumn())
         setFormulaAddress(cell.getA1Notation())
         setFormulaText(String(cell.getFormulas?.()[0]?.[0] || (cell.getValue() ?? '')))
+        setFormulaDirty(false)
       }
       univerAPI.addEvent(univerAPI.Event.SelectionChanged, updateFormulaBar)
       univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, updateFormulaBar)
@@ -639,20 +641,20 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     requestAnimationFrame(() => setContextMenu({ x: clientX, y: clientY }))
   }
 
-  function applyFormula() {
+  function applyFormulaBarInput() {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write') return
+    if (!formulaDirty) return
     if (current.adapter.hasPendingPatch()) { setError('请等待当前单元格保存完成'); return }
     const sheet = current.adapter.workbook.getActiveSheet()
     const selection = sheet.getActiveRange()
     if (!selection) { setError('请先选择一个单元格'); return }
-    const formula = formulaText.trim()
-    if (!formula.startsWith('=') || formula.length < 2) {
-      setError('公式必须以 = 开头，例如 =SUM(C8:F8)')
-      return
+    try {
+      current.adapter.applyCellInput(sheet.getSheetId(), selection.getRow(), selection.getColumn(), formulaText)
+      setError('')
+    } catch (cause) {
+      setError(String(cause))
     }
-    setError('')
-    sheet.getRange(selection.getRow(), selection.getColumn()).setFormula(formula)
   }
 
   const activeSheet = contextMenu && runtime.current?.adapter.workbook.getActiveSheet()
@@ -686,21 +688,22 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} />只读模式</label><button onClick={() => setSettingsOpen(true)}>界面设置</button></>}
       {activeTab === 'revisions' && <span className="ribbon-note">当前修订 r{revision ?? '…'} · 每次单元格保存生成 HCD 修订</span>}
     </nav>}
-    <form className="xlsx-formula-bar" aria-label="公式栏" onSubmit={event => { event.preventDefault(); applyFormula() }}>
+    <form className="xlsx-formula-bar" aria-label="公式栏" onSubmit={event => { event.preventDefault(); applyFormulaBarInput() }}>
       <span className="xlsx-formula-address" aria-label="选中单元格">{formulaAddress}</span>
       <label htmlFor="xlsx-formula-expression">ƒx</label>
-      <input id="xlsx-formula-expression" ref={formulaInput} aria-label="公式表达式" value={formulaText}
-        disabled={!editing} placeholder="输入 =SUM(A1:A10)、=AVERAGE(A1:A10) 等公式"
-        onChange={event => setFormulaText(event.target.value)} />
+      <input id="xlsx-formula-expression" ref={formulaInput} aria-label="单元格内容或公式" value={formulaText}
+        disabled={!editing} placeholder="输入文字、数字或 =SUM(A1:A10)"
+        onChange={event => { setFormulaText(event.target.value); setFormulaDirty(true) }} />
       <select aria-label="插入常用函数" disabled={!editing} value="" onChange={event => {
         if (!event.target.value) return
         setFormulaText(`=${event.target.value}(`)
+        setFormulaDirty(true)
         formulaInput.current?.focus()
       }}>
         <option value="">常用函数</option>
         {['SUM', 'AVERAGE', 'COUNT', 'MIN', 'MAX', 'IF'].map(name => <option key={name} value={name}>{name}</option>)}
       </select>
-      <button type="submit" disabled={!editing}>应用公式</button>
+      <button type="submit" disabled={!editing}>应用内容</button>
     </form>
     <div className="univer-editor-area" onContextMenu={openGridContextMenu} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" />
       {settingsOpen && <aside className="workspace-sidebar" aria-label="界面设置"><section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setSettingsOpen(false)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset></section></aside>}
