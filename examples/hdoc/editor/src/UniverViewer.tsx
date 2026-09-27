@@ -12,6 +12,7 @@ import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSea
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { api, type Session } from './api.ts'
+import { ErrorToast } from './ErrorToast.tsx'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
 
@@ -710,6 +711,6 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     </div>
     {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions} onClose={() => setContextMenu(null)} />}
     <EditorStatusbar mode="工作簿视图" format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
-    {error && <div className="toast error">{error}</div>}
+    {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>
 }

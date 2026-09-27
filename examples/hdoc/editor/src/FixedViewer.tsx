@@ -8,6 +8,7 @@ import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.ts
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
+import { ErrorToast } from './ErrorToast.tsx'
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
@@ -366,7 +367,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       </aside>}
     </div>
     <EditorStatusbar mode="页面视图" format={session.format} revision={displayedRevision} readOnly={readOnly || historical} status={status} />
-    {error && <div className="toast error">{error}</div>}
+    {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>
 }
 
