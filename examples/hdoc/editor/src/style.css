@@ -82,6 +82,12 @@
 .hcd-surface .univer-workspace .univer-editor-area{display:flex;flex:1;min-height:0;overflow:hidden}
 .hcd-surface .univer-workspace .hcd-univer-host{flex:1;min-width:0;min-height:0;height:auto}
 .hcd-surface .univer-workspace .workspace-sidebar{flex:0 0 280px;min-height:0;overflow-y:auto}
+.hcd-surface .univer-workspace .xlsx-history-sidebar p{font-size:12px;line-height:1.5;color:#66758c}
+.hcd-surface .univer-workspace .xlsx-history-sidebar h3{margin:18px 0 8px;font-size:13px;color:#304b7a}
+.hcd-surface .univer-workspace .xlsx-edit-steps{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}
+.hcd-surface .univer-workspace .xlsx-edit-steps li{display:grid;grid-template-columns:24px 1fr;column-gap:8px;padding:9px 8px;border:1px solid #e4eaf3;border-radius:7px;font-size:12px}
+.hcd-surface .univer-workspace .xlsx-edit-steps li span{grid-row:span 2;color:#4c70ac}
+.hcd-surface .univer-workspace .xlsx-edit-steps li small{color:#75849b}
 .hcd-surface .univer-workspace .ribbon{min-height:54px}
 .hcd-surface .univer-workspace .ribbon-note+ .ribbon-note{margin-left:auto}
 .hcd-surface .xlsx-formula-bar{display:flex;align-items:center;gap:8px;min-height:40px;padding:5px 12px;border-bottom:1px solid #dbe3e7;background:#fff;color:#46586b}

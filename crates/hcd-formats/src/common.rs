@@ -243,10 +243,51 @@ pub(crate) fn dirty_state_through(
     bundle: &Bundle,
     revision: u64,
 ) -> Result<(HashSet<String>, HashSet<String>), HcdError> {
+    dirty_state_for_revisions(bundle, revision, 1..=revision)
+}
+
+pub(crate) fn effective_source_revisions(
+    bundle: &Bundle,
+    revision: u64,
+) -> Result<Vec<u64>, HcdError> {
+    let mut current = revision;
+    let mut revisions = Vec::new();
+    while current > 0 {
+        let record = bundle.revision(current)?;
+        if record.structural_change {
+            let suffix = format!("-{current}");
+            let target = record
+                .patch_id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("restore-"))
+                .and_then(|id| id.strip_suffix(&suffix))
+                .and_then(|id| id.parse::<u64>().ok())
+                .filter(|target| *target < current)
+                .ok_or_else(|| {
+                    HcdError::Unsupported(
+                    "structural HCD revision requires source-free semantic export; omit --source"
+                        .to_string(),
+                )
+                })?;
+            current = target;
+        } else {
+            revisions.push(current);
+            current -= 1;
+        }
+    }
+    revisions.reverse();
+    Ok(revisions)
+}
+
+pub(crate) fn dirty_state_for_revisions(
+    bundle: &Bundle,
+    revision: u64,
+    revisions: impl IntoIterator<Item = u64>,
+) -> Result<(HashSet<String>, HashSet<String>), HcdError> {
     let mut dirty_parts = HashSet::new();
     let mut dirty_nodes = HashSet::new();
     let mut removed_nodes = HashSet::new();
-    for current in 1..=revision {
+    for current in revisions {
         let record = bundle.revision(current)?;
         if record.structural_change {
             return Err(HcdError::Unsupported(
@@ -404,6 +445,43 @@ pub(crate) fn checked_export_state(
     reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes)?;
     reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
     Ok((manifest, revision, dirty_parts, dirty_nodes))
+}
+
+pub(crate) type RestoredExportState = (HcdManifest, HashSet<String>, HashSet<String>, Vec<u64>);
+
+pub(crate) fn checked_export_state_with_restores(
+    bundle: &Bundle,
+    source: &Path,
+    options: &ExportOptions,
+) -> Result<RestoredExportState, HcdError> {
+    let head = bundle.manifest()?;
+    if head.revision > MAX_REVISION {
+        return Err(HcdError::ResourceLimit(format!(
+            "manifest revision {} exceeds the maximum {MAX_REVISION}",
+            head.revision
+        )));
+    }
+    let revision = options.revision.unwrap_or(head.revision);
+    if revision > head.revision {
+        return Err(HcdError::RevisionConflict(format!(
+            "requested revision {revision} is ahead of head {}",
+            head.revision
+        )));
+    }
+    let actual = hash_file(source)?;
+    if actual != head.source.sha256 {
+        return Err(HcdError::SourceMismatch(format!(
+            "expected source {}, actual {actual}",
+            head.source.sha256
+        )));
+    }
+    let manifest = manifest_at_revision(bundle, &head, revision)?;
+    let revisions = effective_source_revisions(bundle, revision)?;
+    let (dirty_parts, dirty_nodes) =
+        dirty_state_for_revisions(bundle, revision, revisions.iter().copied())?;
+    reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes)?;
+    reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
+    Ok((manifest, dirty_parts, dirty_nodes, revisions))
 }
 
 fn reject_image_source_export(

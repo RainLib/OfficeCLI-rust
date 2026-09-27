@@ -1,7 +1,7 @@
 use crate::common::{
-    base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
-    escape_attribute, escape_text, finish_import, source_identity, write_fidelity_report,
-    ExportOptions, ImportOptions, XmlBudget,
+    base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
+    emit_started, escape_attribute, escape_text, finish_import, source_identity,
+    write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
 };
 use hcd_core::{
     hash_bytes, node_bloom_might_contain, stable_node_id, Bundle, BundleWriter, ChunkSourceMap,
@@ -4715,10 +4715,11 @@ pub(crate) fn export_xlsx(
     target: &Path,
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
-    let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
+    let (manifest, dirty_parts, dirty_node_ids, revisions) =
+        checked_export_state_with_restores(bundle, source, options)?;
     let mut dirty_node_ids = dirty_node_ids;
     let mut deleted_nodes = std::collections::HashSet::new();
-    for revision in 1..=manifest.revision {
+    for &revision in &revisions {
         let record = bundle.revision(revision)?;
         for deletion in record.grid_row_deletions {
             deleted_nodes.extend(deletion.removed_node_ids);
@@ -4745,7 +4746,7 @@ pub(crate) fn export_xlsx(
     let mut converted_formula_cells: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
     let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
-    for revision in 1..=manifest.revision {
+    for &revision in &revisions {
         let record = bundle.revision(revision)?;
         formula_converted_to_value |= !record.converted_formula_node_ids.is_empty();
         converted_formula_node_ids.extend(record.converted_formula_node_ids);
@@ -9729,6 +9730,75 @@ mod tests {
                 read_zip_entry(&source, "xl/worksheets/sheet1.xml")
             );
         }
+    }
+
+    #[test]
+    fn restored_grid_revisions_export_source_backed_undo_and_redo() {
+        use hcd_core::{XlsxGridAction, XlsxGridAxis};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("undo.hcd");
+        let edited = temp.path().join("edited.xlsx");
+        let undone = temp.path().join("undone.xlsx");
+        let redone = temp.path().join("redone.xlsx");
+        create_plain_rows_fixture(&source, 6);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("undo-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let sheet_id = descriptor.grid.as_ref().unwrap().sheet_id.clone();
+        for (revision, axis) in [XlsxGridAxis::Row, XlsxGridAxis::Column]
+            .into_iter()
+            .enumerate()
+        {
+            let patch = PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_25.to_string(),
+                document_id: "undo-doc".to_string(),
+                patch_id: format!("undo-setup-{revision}"),
+                base_revision: revision as u64,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::XlsxGridRange {
+                    sheet_id: sheet_id.clone(),
+                    axis,
+                    action: XlsxGridAction::Delete,
+                    start: 2,
+                    count: 2,
+                }],
+                metadata: BTreeMap::new(),
+            };
+            assert_eq!(
+                hcd_core::apply_patch(&bundle, &patch, revision as u64)
+                    .unwrap()
+                    .revision,
+                revision as u64 + 1
+            );
+        }
+        export_xlsx(&bundle, &source, &edited, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            hcd_core::restore_revision(&bundle, 0, 2).unwrap().revision,
+            3
+        );
+        export_xlsx(&bundle, &source, &undone, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&undone, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+        );
+        assert_eq!(
+            hcd_core::restore_revision(&bundle, 2, 3).unwrap().revision,
+            4
+        );
+        export_xlsx(&bundle, &source, &redone, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&redone, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&edited, "xl/worksheets/sheet1.xml")
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
     }
 
     #[test]
