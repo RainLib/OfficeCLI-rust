@@ -29,6 +29,15 @@ pub struct BundleStats {
     pub orphan_hrefs: Vec<String>,
 }
 
+pub(crate) fn referenced_hrefs(bundle: &Bundle) -> Result<HashSet<String>, HcdError> {
+    let head = bundle.manifest()?;
+    let mut referenced = HashSet::from(["manifest.json".to_string(), head.styles_href.clone()]);
+    for revision in 0..=head.revision {
+        collect_revision_references(bundle, &head, revision, &mut referenced)?;
+    }
+    Ok(referenced)
+}
+
 pub fn bundle_stats(bundle: &Bundle) -> Result<BundleStats, HcdError> {
     let head = bundle.manifest()?;
     let mut referenced = HashSet::from(["manifest.json".to_string(), "styles.css".to_string()]);

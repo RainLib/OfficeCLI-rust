@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use std::io::{Read, Write};
 use std::path::Path;
 
 fn officecli() -> Command {
@@ -266,6 +267,85 @@ fn hdoc_cli_import_patch_validate_export_roundtrip() {
         .unwrap()
         .iter()
         .all(|entry| entry.get("text").is_none()));
+
+    let archive = temp.path().join("portable.hcd");
+    let reopened = temp.path().join("reopened.hcd");
+    std::fs::write(bundle.join("orphan-after-crash.tmp"), b"unreferenced").unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "pack",
+            bundle_arg.as_ref(),
+            "--output",
+            archive.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""revision": 1"#));
+    assert!(archive.is_file());
+    let corrupted = temp.path().join("corrupted.hcd");
+    let mut source_zip = zip::ZipArchive::new(std::fs::File::open(&archive).unwrap()).unwrap();
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&corrupted).unwrap());
+    for index in 0..source_zip.len() {
+        let mut entry = source_zip.by_index(index).unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        if entry.name() == "manifest.json" {
+            let mut changed: Value = serde_json::from_slice(&bytes).unwrap();
+            changed["rootHash"] = Value::String("0".repeat(64));
+            bytes = serde_json::to_vec(&changed).unwrap();
+        }
+        writer
+            .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&bytes).unwrap();
+    }
+    writer.finish().unwrap();
+    let rejected = temp.path().join("rejected.hcd");
+    assert!(hcd_core::unpack_archive(&corrupted, &rejected).is_err());
+    assert!(!rejected.exists());
+    officecli()
+        .args([
+            "hdoc",
+            "unpack",
+            archive.to_string_lossy().as_ref(),
+            "--output",
+            reopened.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(manifest(&bundle), manifest(&reopened));
+    assert_eq!(bundle_node_ids(&bundle), bundle_node_ids(&reopened));
+    assert!(!reopened.join("orphan-after-crash.tmp").exists());
+    officecli()
+        .args([
+            "hdoc",
+            "validate",
+            reopened.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""valid": true"#));
+    officecli()
+        .args([
+            "hdoc",
+            "get-node",
+            reopened.to_string_lossy().as_ref(),
+            node_id,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Secret ***"));
+    let reopened_bundle = hcd_core::Bundle::open(&reopened).unwrap();
+    for revision in 0..=1 {
+        assert_eq!(
+            serde_json::to_value(opened.revision(revision).unwrap()).unwrap(),
+            serde_json::to_value(reopened_bundle.revision(revision).unwrap()).unwrap()
+        );
+    }
 }
 
 #[test]

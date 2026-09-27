@@ -221,7 +221,7 @@ async fn import_document(
         .to_ascii_lowercase();
     if !matches!(
         extension.as_str(),
-        "docx" | "html" | "htm" | "md" | "markdown" | "txt" | "pdf" | "pptx" | "xlsx"
+        "docx" | "html" | "htm" | "md" | "markdown" | "txt" | "pdf" | "pptx" | "xlsx" | "hcd"
     ) {
         return Err(bad("unsupported import extension"));
     }
@@ -250,6 +250,9 @@ async fn import_document(
     drop(file);
     if size == 0 {
         return Err(bad("empty upload"));
+    }
+    if extension == "hcd" {
+        return import_hcd_archive(state, temporary, job_id).await;
     }
     let hash = hash_file(&temporary).map_err(internal)?;
     let document_id = format!("doc-{}", &hash[..32]);
@@ -332,6 +335,89 @@ async fn import_document(
             Result::<()>::Ok(())
         }
         .await;
+        let (status, error) = match run {
+            Ok(()) => ("completed", None),
+            Err(error) => ("failed", Some(error.to_string())),
+        };
+        let _ = write_job(&job_path, remote.as_ref(), &spawned_job_id,
+            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error})).await;
+    });
+    Ok(Json(
+        json!({"jobId": job_id, "documentId": document_id, "state": "queued"}),
+    ))
+}
+
+async fn import_hcd_archive(
+    state: ServerState,
+    archive: PathBuf,
+    job_id: String,
+) -> Result<Json<Value>, ApiError> {
+    let inspected = match hcd_core::inspect_archive(&archive) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&archive).await;
+            return Err(bad(error));
+        }
+    };
+    if !valid_id(&inspected.document_id) {
+        tokio::fs::remove_file(&archive).await.map_err(internal)?;
+        return Err(bad("invalid HCD document ID"));
+    }
+    let document_id = inspected.document_id;
+    let destination = state.root.join(format!("{document_id}.hcd"));
+    let jobs = state.root.join("jobs");
+    tokio::fs::create_dir_all(&jobs).await.map_err(internal)?;
+    let job_path = jobs.join(format!("{job_id}.json"));
+    if destination.exists() {
+        tokio::fs::remove_file(&archive).await.map_err(internal)?;
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("document {document_id} already exists"),
+        ));
+    }
+    write_job(
+        &job_path,
+        state.remote.as_ref(),
+        &job_id,
+        json!({"jobId": job_id, "documentId": document_id, "state": "queued"}),
+    )
+    .await
+    .map_err(internal)?;
+    let remote = state.remote.clone();
+    let spawned_job_id = job_id.clone();
+    let job_document_id = document_id.clone();
+    tokio::spawn(async move {
+        let run = async {
+            write_job(
+                &job_path,
+                remote.as_ref(),
+                &spawned_job_id,
+                json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": "running"}),
+            )
+            .await?;
+            let output = tokio::process::Command::new(std::env::current_exe()?)
+                .arg("hdoc")
+                .arg("unpack")
+                .arg(&archive)
+                .arg("--output")
+                .arg(&destination)
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "HCD archive import failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            if let Some(remote) = &remote {
+                remote
+                    .publish(&job_document_id, &destination, None, None)
+                    .await?;
+            }
+            Result::<()>::Ok(())
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&archive).await;
         let (status, error) = match run {
             Ok(()) => ("completed", None),
             Err(error) => ("failed", Some(error.to_string())),
@@ -1221,9 +1307,14 @@ async fn prepare_download(
     if revision > head.revision {
         return Err(bad("revision ahead of head"));
     }
+    if format == "hcd" && revision != head.revision {
+        return Err(bad(
+            "portable HCD includes history through the current revision",
+        ));
+    }
     if !matches!(
         format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
     ) {
         return Err(bad("unsupported export format"));
     }
@@ -1328,9 +1419,14 @@ async fn export_document_inner(
     if requested > head.revision {
         return Err(bad("revision ahead of head"));
     }
+    if format == "hcd" && requested != head.revision {
+        return Err(bad(
+            "portable HCD includes history through the current revision",
+        ));
+    }
     if !matches!(
         format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
     ) {
         return Err(bad("unsupported export format"));
     }
@@ -1339,11 +1435,28 @@ async fn export_document_inner(
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "pdf" => "application/pdf",
+        "hcd" => "application/zip",
         "html" => "text/html; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
         _ => "text/plain; charset=utf-8",
     };
-    let bytes = if format == "html" {
+    let bytes = if format == "hcd" {
+        let temp = tempfile::tempdir().map_err(internal)?;
+        let output = temp.path().join("document.hcd");
+        let bundle_path = bundle.root().to_path_buf();
+        let archive_path = output.clone();
+        tokio::task::spawn_blocking(move || {
+            let snapshot = Bundle::open(bundle_path)?;
+            hcd_core::pack_archive(&snapshot, archive_path)
+        })
+        .await
+        .map_err(internal)?
+        .map_err(bad)?;
+        if tokio::fs::metadata(&output).await.map_err(internal)?.len() > 256 * 1024 * 1024 {
+            return Err(bad("HCD archive exceeds 256 MiB HTTP limit"));
+        }
+        tokio::fs::read(output).await.map_err(internal)?
+    } else if format == "html" {
         let mut output = Vec::new();
         let assets = bundle
             .read_asset_index_for_revision(requested)

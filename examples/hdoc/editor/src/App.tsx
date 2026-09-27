@@ -42,6 +42,9 @@ export function App() {
   const [error, setError] = useState('')
   const [samples, setSamples] = useState<Array<{ id: string; title: string; format: string; mode: string }>>([])
   const [openingSample, setOpeningSample] = useState<string | null>(null)
+  const [portableFile, setPortableFile] = useState<File | null>(null)
+  const [uploadToken, setUploadToken] = useState('')
+  const [uploadState, setUploadState] = useState('')
   useEffect(() => {
     if (!import.meta.env.DEV) return
     let active = true
@@ -81,6 +84,34 @@ export function App() {
     } catch (cause) { setError(String(cause)) }
     finally { setOpeningSample(null) }
   }
+  async function uploadPortable() {
+    if (!portableFile || !uploadToken.trim()) return
+    setError('')
+    setUploadState('上传中…')
+    try {
+      if (!portableFile.name.toLowerCase().endsWith('.hcd')) throw new Error('请选择 .hcd 文件')
+      const headers = { Authorization: `Bearer ${uploadToken.trim()}` }
+      const response = await fetch(`/v1/import?filename=${encodeURIComponent(portableFile.name)}`, {
+        method: 'POST', headers, body: portableFile,
+      })
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`)
+      const job = await response.json() as { jobId: string; documentId: string; state: string; error?: string }
+      let current = job
+      for (let attempt = 0; current.state !== 'completed' && current.state !== 'failed' && attempt < 600; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        const status = await fetch(`/v1/jobs/${encodeURIComponent(job.jobId)}`, { headers })
+        if (!status.ok) throw new Error(`${status.status}: ${await status.text()}`)
+        current = await status.json() as typeof job
+      }
+      if (current.state !== 'completed') throw new Error(current.state === 'failed' ? current.error || 'HCD 校验或导入失败' : `导入仍在进行，任务 ID：${job.jobId}`)
+      setDocumentId(current.documentId)
+      setUploadToken('')
+      setUploadState(`已导入 ${current.documentId}。输入该文档的访问令牌后打开。`)
+    } catch (cause) {
+      setUploadState('')
+      setError(`HCD 导入失败：${String(cause)}`)
+    }
+  }
   if (session) return <div className="hcd-surface"><Workspace key={`${session.documentId}:${session.collaborationEpoch ?? 0}`} session={session} onClose={() => setSession(null)} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} /></div>
   return <div className="hcd-surface"><main className="login"><div className={`login-card ${samples.length ? 'login-card-with-samples' : ''}`}>
     <div className="eyebrow">OfficeCLI / HCD</div><h1>文档编辑工作台</h1>
@@ -91,6 +122,7 @@ export function App() {
       </button>)}</div>
     </section>}
     <section className="manual-access"><p>输入文档 ID 和短期访问令牌。只读令牌无法提交修改。</p><label>文档 ID<input value={documentId} onChange={event => setDocumentId(event.target.value)} placeholder="doc-…" /></label><label>访问令牌<textarea rows={4} value={token} onChange={event => setToken(event.target.value)} placeholder="粘贴短期令牌" /></label><button onClick={() => void open(documentId, token)} disabled={!documentId || !token}>打开文档</button></section>
+    <section className="manual-access portable-import"><p>重新打开单文件 HCD。上传令牌用于导入，文档访问令牌用于打开。</p><label>HCD 文件<input type="file" accept=".hcd" onChange={event => setPortableFile(event.target.files?.[0] ?? null)} /></label><label>上传令牌<textarea rows={2} value={uploadToken} onChange={event => setUploadToken(event.target.value)} placeholder="粘贴短期上传令牌" /></label><button onClick={() => void uploadPortable()} disabled={!portableFile || !uploadToken.trim() || uploadState === '上传中…'}>导入 HCD</button>{uploadState && <p role="status">{uploadState}</p>}</section>
     {error && <p className="error">{error}</p>}
   </div></main></div>
 }

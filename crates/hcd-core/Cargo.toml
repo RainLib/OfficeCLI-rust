@@ -11,3 +11,4 @@ sha2 = { workspace = true }
 quick-xml = { workspace = true }
 tempfile = { workspace = true }
 flate2 = "1"
+zip = { workspace = true }

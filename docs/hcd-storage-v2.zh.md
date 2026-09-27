@@ -6,6 +6,12 @@
 
 source map 的逻辑格式继续使用 JSON。对 20 个 XLSX map 的列式 JSON 试算，gzip 后仅从 149.5 KB 降到 139.5 KB；额外约 9.9 KB 的收益不足以抵消 schema、随机访问和跨语言解析复杂度。后续若 map 成为主要占用，可再评估二进制编码；当前优先优化 HTML、图片和 revision 增量。
 
+可编辑的 `.hcd` 仍是目录；`hdoc pack` 生成同后缀的单文件 ZIP 快照，`hdoc unpack` 完整校验后重新建立可编辑目录。快照只收录当前及历史 revision 引用的对象，包括 HTML IR、source map、索引、annotation 与图片，不收录未引用的断电残留对象，也不复制源 Office/PDF 文件。ZIP 内已经 gzip 压缩的对象与图片原字节存放，manifest、revision 等小型 JSON 再用 ZIP deflate。解包拒绝路径穿越、重复条目、软链接、超限和校验失败，且不会覆盖已有目录。
+
+核心服务 `/v1/import?filename=…hcd` 接受持有上传令牌的单文件，任务完成后按原 documentId 作为新文档打开；参考编辑器入口页可选择文件并输入上传令牌，随后还需文档级访问令牌。下载菜单新增 HCD 选项，下载票据与其他格式一样有有效期；HCD 下载始终包含当前 head 及全部历史，不能只下载旧 revision。远端 PostgreSQL/S3 允许无源 HCD，原文件继续由外部保存；要求有源导出时仍会校验原件 SHA-256。
+
+HCD source map 保留 `nodeId`、节点 hash 和原文件定位信息，`extract-text` 可读取当前修订的规范文本。它不同于各格式 handler 的全文件 `TextOffsetMap`：后者是源文件读取层生成的全局字符偏移映射，并未作为第二份文本写入 HCD。重新打开单文件后，HCD 的 IR 与节点映射可继续用于 patch、预览和导出；source-backed 导出仍需另行提供原文件。
+
 索引由每页 128 个 descriptor 的内容寻址页和 128 路索引树组成。revision 只写发生变化的页及通向根节点的路径，历史 revision 继续引用原来的不可变对象。`indexRootHref` 是当前 revision 的索引根；`indexPrefix` 保留给旧包读取器。Java 服务可按 revision 调用 `hdoc get-index-page` 和 `hdoc get-chunk --json`，只读取所需页与分片；两个命令返回解压后数据，并检查所访问对象的长度与 hash。静态参考 viewer 可直接解压 `.gz` 对象并校验内容地址。客户端不得把 `.gz` 原始字节当作 HTML 或 JSON。
 
 PDF 页面视觉层使用 `--pdf-raster-mode auto|lossless|lossy`：`lossless` 保留 PNG；`lossy` 总是编码 JPEG；默认 `auto` 在 JPEG 至少节省 15% 且整页 PSNR 不低于 35 dB 时使用 JPEG，否则使用 PNG。`--pdf-raster-quality` 范围为 70–100，默认 92。页图是只读预览资产，有损页数会写入 fidelity warning；源 PDF 仍由外部保存，source-backed 导出继续核对源文件 SHA-256。PDF 文字 patch 在预览中显示覆盖层，属于近似排版，patch 结果会明确给出 warning。
