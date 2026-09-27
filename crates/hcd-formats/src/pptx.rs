@@ -1,7 +1,7 @@
 use crate::common::{
-    base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
-    escape_attribute, escape_text, finish_import, source_identity, write_fidelity_report,
-    ExportOptions, ImportOptions, XmlBudget,
+    base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
+    emit_started, escape_attribute, escape_text, finish_import, source_identity,
+    write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
@@ -3020,7 +3020,8 @@ pub(crate) fn export_pptx(
     target: &Path,
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
-    let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
+    let (manifest, dirty_parts, dirty_node_ids, _) =
+        checked_export_state_with_restores(bundle, source, options)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<u64, String>> = HashMap::new();
     let mut insertions: HashMap<String, Vec<InsertedPptxShape>> = HashMap::new();
@@ -3607,6 +3608,71 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn restored_slide_text_exports_the_selected_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("document.hcd");
+        let edited = temp.path().join("edited.pptx");
+        let undone = temp.path().join("undone.pptx");
+        let redone = temp.path().join("redone.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("pptx-undo"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "样式 😀")
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "pptx-text-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: node.node_id,
+                start: 0,
+                delete_count: node.text.chars().count(),
+                insert_text: "已编辑".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &patch, 0).unwrap().revision, 1);
+        export_pptx(&bundle, &source, &edited, &ExportOptions::default()).unwrap();
+        let slide_part = "ppt/slides/slide2.xml";
+        assert!(read_zip_entry(&edited, slide_part).contains("已编辑"));
+        assert_eq!(
+            hcd_core::restore_revision(&bundle, 0, 1).unwrap().revision,
+            2
+        );
+        export_pptx(&bundle, &source, &undone, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&undone, slide_part),
+            read_zip_entry(&source, slide_part)
+        );
+        assert_eq!(
+            hcd_core::restore_revision(&bundle, 1, 2).unwrap().revision,
+            3
+        );
+        export_pptx(&bundle, &source, &redone, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&redone, slide_part),
+            read_zip_entry(&edited, slide_part)
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
 
     #[test]
     fn inserted_slide_text_box_is_valid_and_exports_as_native_shape() {

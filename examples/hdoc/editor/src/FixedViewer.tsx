@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { Editor } from '@tiptap/core'
-import { redo, undo } from '@tiptap/pm/history'
+import { redo, redoDepth, undo, undoDepth } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
@@ -35,6 +35,8 @@ type NewTextBox = (
   | { format: 'pptx'; chunkId: string; slidePart: string; xEmu: number; yEmu: number; widthEmu: number; heightEmu: number; fontSizePt: number }
 ) & { left: string; top: string; width: string; height: string }
 type Revision = { revision: number; patchId?: string; authorName?: string; createdAtEpochMs?: number }
+type EditStep = { revision: number; label: string }
+type EditHistory = { head: number | null; past: EditStep[]; future: EditStep[] }
 
 function mergeDescriptors(previous: Descriptor[], incoming: Descriptor[]): Descriptor[] {
   return Array.from(new Map([...previous, ...incoming].map(item => [item.sequence, item])).values())
@@ -43,6 +45,9 @@ function mergeDescriptors(previous: Descriptor[], incoming: Descriptor[]): Descr
 
 export function FixedViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
   const [manifest, setManifest] = useState<Manifest | null>(null)
+  const [editHistory, setEditHistory] = useState<EditHistory>({ head: null, past: [], future: [] })
+  const [historyBusy, setHistoryBusy] = useState(false)
+  const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
   const [descriptors, setDescriptors] = useState<Descriptor[]>([])
   const [style, setStyle] = useState('')
   const [loadedPages, setLoadedPages] = useState(0)
@@ -69,6 +74,15 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [searchTarget, setSearchTarget] = useState<SearchHit | null>(null)
   const tail = useRef<HTMLDivElement>(null)
   const pagesRef = useRef<HTMLElement>(null)
+  const collaborationSession = useMemo(() => ({ ...session, collaborationEpoch }), [session, collaborationEpoch])
+  function recordEdit(nextRevision: number, label: string) {
+    setEditHistory(previous => ({ head: nextRevision,
+      past: [...(previous.head === nextRevision - 1 ? previous.past : []), { revision: nextRevision - 1, label }],
+      future: [] }))
+  }
+  function resetEditHistory(nextRevision: number) {
+    setEditHistory({ head: nextRevision, past: [], future: [] })
+  }
   useEffect(() => {
     const pages = pagesRef.current
     if (!pages) return
@@ -80,27 +94,98 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   }, [])
   function showRemoteRevision(next: number) {
     if (next <= (manifest?.revision ?? -1)) return
-    if (saving || selected || newBox || viewRevision !== null) {
+    if (saving || historyBusy || selected || newBox || viewRevision !== null) {
       setRemoteRevision(previous => Math.max(previous ?? 0, next))
       return
     }
+    resetEditHistory(next)
     setManifest(previous => previous && ({ ...previous, revision: next }))
     setRefresh(previous => previous + 1)
   }
-  const collaboration = useFixedCollaboration(session, manifest?.revision ?? null, showRemoteRevision)
+  const collaboration = useFixedCollaboration(collaborationSession, manifest?.revision ?? null, showRemoteRevision)
   useEffect(() => {
-    if (remoteRevision === null || saving || selected || newBox || viewRevision !== null) return
+    if (remoteRevision === null || saving || historyBusy || selected || newBox || viewRevision !== null) return
     if (remoteRevision > (manifest?.revision ?? -1)) showRemoteRevision(remoteRevision)
     setRemoteRevision(null)
-  }, [remoteRevision, saving, selected, newBox, viewRevision, manifest?.revision])
+  }, [remoteRevision, saving, historyBusy, selected, newBox, viewRevision, manifest?.revision])
   useEffect(() => { saveLayout(layout, layoutScope) }, [layout, layoutScope])
   const displayedRevision = viewRevision ?? manifest?.revision ?? null
   const historical = viewRevision !== null && viewRevision !== manifest?.revision
-  const status = saving ? '保存中' : historical ? '历史只读' : remoteRevision ? '有新修订' : readOnly ? '只读' : (selected && draft !== selected.node.text) || (newBox && newDraft) ? '编辑中' : '已保存'
+  const draftDirty = (selected && draft !== selected.node.text) || (newBox && !!newDraft.trim())
+  const status = saving || historyBusy ? '保存中' : historical ? '历史只读' : remoteRevision ? '有新修订' : readOnly ? '只读' : draftDirty ? '编辑中' : '已保存'
+  const canUndoDraft = !!activeEditor && undoDepth(activeEditor.state) > 0
+  const canRedoDraft = !!activeEditor && redoDepth(activeEditor.state) > 0
+  const canUndoSaved = !draftDirty && editHistory.head === manifest?.revision && editHistory.past.length > 0
+  const canRedoSaved = !draftDirty && editHistory.head === manifest?.revision && editHistory.future.length > 0
+  const historyLocked = readOnly || historical || saving || historyBusy
+  async function travelHistory(direction: 'undo' | 'redo') {
+    const steps = direction === 'undo' ? editHistory.past : editHistory.future
+    const head = manifest?.revision
+    if (historyLocked || draftDirty || head === undefined || !steps.length) return
+    if (editHistory.head !== head) {
+      resetEditHistory(head)
+      setError('其他协作者已更新文档，请重新操作')
+      return
+    }
+    const target = steps[steps.length - 1]
+    setHistoryBusy(true)
+    setError('')
+    try {
+      const response = await api(session, `/restore/${target.revision}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedRevision: head }),
+      })
+      const saved = await response.json() as { revision: number }
+      setEditHistory(previous => direction === 'undo'
+        ? { head: saved.revision, past: previous.past.slice(0, -1),
+          future: [...previous.future, { revision: head, label: target.label }] }
+        : { head: saved.revision, past: [...previous.past, { revision: head, label: target.label }],
+          future: previous.future.slice(0, -1) })
+      setManifest(previous => previous && ({ ...previous, revision: saved.revision }))
+      setSelected(null)
+      setNewBox(null)
+      setRefresh(previous => previous + 1)
+      setRemoteRevision(null)
+      collaboration.announceRevision(saved.revision)
+      const auth = await (await api(session, '/auth')).json() as { collaborationEpoch: number }
+      setCollaborationEpoch(auth.collaborationEpoch)
+    } catch (cause) {
+      setError(`${direction === 'undo' ? '撤销' : '重做'}失败：${String(cause)}`)
+      try {
+        const current = await (await api(session, '')).json() as Manifest
+        if (current.revision !== head) {
+          setManifest(current)
+          resetEditHistory(current.revision)
+          setRefresh(previous => previous + 1)
+        }
+      } catch { /* The next collaboration poll will retry. */ }
+    } finally { setHistoryBusy(false) }
+  }
+  function travel(direction: 'undo' | 'redo') {
+    if (historyLocked) return
+    if (direction === 'undo' && canUndoDraft) { undo(activeEditor!.state, activeEditor!.view.dispatch); return }
+    if (direction === 'redo' && canRedoDraft) { redo(activeEditor!.state, activeEditor!.view.dispatch); return }
+    void travelHistory(direction)
+  }
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]')) return
+      const key = event.key.toLowerCase()
+      const direction = key === 'z' ? (event.shiftKey ? 'redo' : 'undo')
+        : key === 'y' && !event.shiftKey ? 'redo' : null
+      if (!direction) return
+      event.preventDefault()
+      travel(direction)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
   async function select(selection: Selection) {
+    if (historyBusy) return
     if (selected?.node.nodeId === selection.node.nodeId) return
     if (newBox && newDraft.trim()) {
       const revision = await saveNewBox(newBox, newDraft)
@@ -119,7 +204,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   useEffect(() => {
     let live = true
     Promise.all([api(session, '').then(response => response.json()), api(session, '/styles').then(response => response.text())])
-      .then(([info, css]) => { if (live) { setManifest(info as Manifest); setStyle(css) } })
+      .then(([info, css]) => { if (live) { setManifest(info as Manifest); setEditHistory(previous => previous.head === (info as Manifest).revision ? previous : { head: (info as Manifest).revision, past: [], future: [] }); setStyle(css) } })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
   }, [session])
@@ -183,7 +268,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     }
   }
   async function saveText(node: TextNode, value: string): Promise<number | null> {
-    if (readOnly || historical || !node.editable || saving) return null
+    if (readOnly || historical || !node.editable || saving || historyBusy) return null
     setSaving(true)
     setError('')
     try {
@@ -197,6 +282,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
             precondition: { nodeHash: node.nodeHash } }] }),
       })
       const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '编辑文字')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
       setRefresh(previous => previous + 1)
@@ -206,7 +292,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     finally { setSaving(false) }
   }
   async function saveGeometry(node: TextNode, geometry: PptxGeometry): Promise<number | null> {
-    if (session.format !== 'pptx' || readOnly || historical || saving || !node.geometry || draft !== node.text) return null
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || !node.geometry || draft !== node.text) return null
     setSaving(true)
     setError('')
     try {
@@ -219,6 +305,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
             precondition: { nodeHash: node.nodeHash, geometry: node.geometry } }] }),
       })
       const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '调整文字框位置')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
       setSelected(null)
@@ -228,7 +315,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     finally { setSaving(false) }
   }
   async function savePdfGeometry(node: TextNode, geometry: PdfGeometry): Promise<number | null> {
-    if (session.format !== 'pdf' || readOnly || historical || saving || !node.pdfGeometry || draft !== node.text) return null
+    if (session.format !== 'pdf' || readOnly || historical || saving || historyBusy || !node.pdfGeometry || draft !== node.text) return null
     setSaving(true)
     setError('')
     try {
@@ -241,6 +328,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
             precondition: { nodeHash: node.nodeHash, geometry: node.pdfGeometry } }] }),
       })
       const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '调整 PDF 文字框位置')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
       setSelected(null)
@@ -250,7 +338,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     finally { setSaving(false) }
   }
   async function deletePdfText(node: TextNode): Promise<number | null> {
-    if (session.format !== 'pdf' || readOnly || historical || saving || !node.pdfGeometry || draft !== node.text) return null
+    if (session.format !== 'pdf' || readOnly || historical || saving || historyBusy || !node.pdfGeometry || draft !== node.text) return null
     setSaving(true)
     setError('')
     try {
@@ -263,6 +351,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
             precondition: { nodeHash: node.nodeHash } }] }),
       })
       const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '删除 PDF 文字框')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
       setSelected(null)
@@ -272,7 +361,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     finally { setSaving(false) }
   }
   async function deletePptxText(node: TextNode): Promise<number | null> {
-    if (session.format !== 'pptx' || readOnly || historical || saving || !node.createdInHcd || draft !== node.text) return null
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || !node.createdInHcd || draft !== node.text) return null
     setSaving(true)
     setError('')
     try {
@@ -285,6 +374,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
             precondition: { nodeHash: node.nodeHash } }] }),
       })
       const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '删除 PPTX 文字框')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
       setSelected(null)
@@ -303,7 +393,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     onClose()
   }
   async function saveNewBox(box: NewTextBox, value: string): Promise<number | null> {
-    if (!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || !value.trim()) return null
+    if (!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy || !value.trim()) return null
     setSaving(true)
     setError('')
     try {
@@ -319,6 +409,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
               yEmu: box.yEmu, widthEmu: box.widthEmu, heightEmu: box.heightEmu, fontSizePt: box.fontSizePt, text: value }] }),
       })
       const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '新增文字框')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
       setRefresh(previous => previous + 1)
@@ -349,10 +440,10 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     {!layout.showHeader && <button className="floating-settings" aria-label="界面设置" onClick={() => setRightPanel('settings')}>⚙ 界面设置</button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={displayedRevision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label="编辑工具栏">
-      {activeTab === 'home' && <><div className="tool-group"><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && undo(activeEditor.state, activeEditor.view.dispatch)}>↶ 撤销</button><button disabled={!activeEditor || readOnly || historical} onClick={() => activeEditor && redo(activeEditor.state, activeEditor.view.dispatch)}>↷ 重做</button></div><span className="ribbon-note">{session.format === 'pptx' ? '点击文字原位编辑 · 选中后拖动顶部把手移动、右下角调整尺寸' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消'}</span></>}
-      {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button title="撤销（⌘/Ctrl+Z）" disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}>↶ 撤销</button><button title="重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）" disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}>↷ 重做</button></div><span className="ribbon-note">{session.format === 'pptx' ? '点击文字原位编辑 · 选中后拖动顶部把手移动、右下角调整尺寸' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消'}</span></>}
+      {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} />显示页面目录</label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} />只读模式</label><button onClick={() => setRightPanel('settings')}>界面设置</button></>}
-      {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}>查看修订历史</button><span className="ribbon-note">当前版本 r{manifest?.revision ?? '…'}</span></>}
+      {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}>查看修订历史</button><button disabled={historyLocked || !canUndoSaved} onClick={() => travel('undo')}>撤销 {editHistory.past.length} 步</button><button disabled={historyLocked || !canRedoSaved} onClick={() => travel('redo')}>重做 {editHistory.future.length} 步</button><span className="ribbon-note">当前版本 r{manifest?.revision ?? '…'} · {editHistory.past.length ? `下一步可撤销：${editHistory.past.at(-1)?.label}` : '当前会话无已保存的可撤销步骤'}</span></>}
       {selected && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}>保存修改</button>}
       {selected?.node.pdfGeometry && !readOnly && !historical && <button disabled={saving || draft !== selected.node.text} onClick={() => void deletePdfText(selected.node)}>删除文字框</button>}
       {session.format === 'pptx' && selected?.node.createdInHcd && !readOnly && !historical && <button disabled={saving || draft !== selected.node.text} onClick={() => void deletePptxText(selected.node)}>删除文字框</button>}
@@ -363,7 +454,12 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={rightPanel === 'settings' ? '界面设置' : '修订历史'}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2>界面设置</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div><label>显示顶部栏<input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label>显示操作栏<input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label>显示协作者<input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label>显示页面目录<input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend>头部布局</legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} />紧凑</label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} />标准</label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}>查看修订历史</button></section>}
-        {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>{historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}<div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
+        {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2>◷ 修订历史</h2><button className="panel-close" aria-label="隐藏右侧栏" onClick={() => setRightPanel(null)}>×</button></div>
+          {historical && <button onClick={() => setViewRevision(null)}>返回当前版本</button>}
+          <h3>本次编辑步骤</h3><p>保存后的撤销和重做会生成新的修订。协作者更新后，本地步骤会清空。</p>
+          {editHistory.past.length ? <ol className="fixed-edit-steps">{editHistory.past.map((step, index) => <li key={`${step.revision}-${index}`}><strong>{index + 1}. {step.label}</strong><small>保存前 r{step.revision}</small></li>).reverse()}</ol> : <p>暂无可撤销步骤</p>}
+          {editHistory.future.length > 0 && <><h3>可重做</h3><ol className="fixed-edit-steps">{editHistory.future.slice().reverse().map((step, index) => <li key={`${step.revision}-${index}`}>{step.label}</li>)}</ol></>}
+          <h3>全部修订</h3><div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? '导' : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (item.revision === 0 ? '初始导入' : '作者未记录')}</small><span>查看版本</span></span></button>)}</div></section>}
       </aside>}
     </div>
     <EditorStatusbar mode="页面视图" format={session.format} revision={displayedRevision} readOnly={readOnly || historical} status={status} />

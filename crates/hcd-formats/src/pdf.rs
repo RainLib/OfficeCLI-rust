@@ -1,7 +1,7 @@
 use crate::common::{
-    base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
-    escape_attribute, escape_text, finish_import, source_identity, write_fidelity_report,
-    ExportOptions, ImportOptions, PdfRasterMode,
+    base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
+    emit_started, escape_attribute, escape_text, finish_import, source_identity,
+    write_fidelity_report, ExportOptions, ImportOptions, PdfRasterMode,
 };
 use handler_common::{DocumentHandler, InsertPosition};
 use hayro::hayro_interpret::InterpreterSettings;
@@ -1070,7 +1070,8 @@ pub(crate) fn export_pdf(
             target.display()
         )));
     }
-    let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
+    let (manifest, dirty_parts, dirty_node_ids, _) =
+        checked_export_state_with_restores(bundle, source, options)?;
     let mut nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     nodes.sort_by(|left, right| {
         let left_page = page_number(&left.source.part);
@@ -1231,6 +1232,10 @@ mod tests {
     use super::*;
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
+    use hcd_core::{
+        apply_patch, extract_text_page, NodePrecondition, PatchBatch, PatchOperation,
+        HCD_PATCH_SCHEMA_VERSION,
+    };
     use lopdf::{dictionary, Document, Object, Stream};
     use std::fs;
     use std::io::Write as IoWrite;
@@ -1394,6 +1399,76 @@ mod tests {
             Some("/page[1]/image[1]")
         );
         assert!(image_entry.source.editable);
+    }
+
+    #[test]
+    fn restored_pdf_text_exports_the_selected_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pdf");
+        let bundle_path = temp.path().join("document.hcd");
+        let edited = temp.path().join("edited.pdf");
+        let undone = temp.path().join("undone.pdf");
+        let redone = temp.path().join("redone.pdf");
+        write_simple_visual_pdf(&source);
+        let manifest = import_pdf(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("pdf-undo"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text.contains("Hello HCD"))
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "pdf-text-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: node.node_id,
+                start: 0,
+                delete_count: node.text.chars().count(),
+                insert_text: "World HCD".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &patch, 0).unwrap().revision, 1);
+        export_pdf(&bundle, &source, &edited, &ExportOptions::default()).unwrap();
+        assert!(Document::load(&edited)
+            .unwrap()
+            .extract_text(&[1])
+            .unwrap()
+            .contains("World HCD"));
+        assert_eq!(
+            hcd_core::restore_revision(&bundle, 0, 1).unwrap().revision,
+            2
+        );
+        export_pdf(&bundle, &source, &undone, &ExportOptions::default()).unwrap();
+        assert!(Document::load(&undone)
+            .unwrap()
+            .extract_text(&[1])
+            .unwrap()
+            .contains("Hello HCD"));
+        assert_eq!(
+            hcd_core::restore_revision(&bundle, 1, 2).unwrap().revision,
+            3
+        );
+        export_pdf(&bundle, &source, &redone, &ExportOptions::default()).unwrap();
+        assert!(Document::load(&redone)
+            .unwrap()
+            .extract_text(&[1])
+            .unwrap()
+            .contains("World HCD"));
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
     }
 
     #[test]
