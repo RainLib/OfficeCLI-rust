@@ -243,6 +243,10 @@
 .hcd-surface .semantic-workspace .appearance-panel legend{padding-right:8px;color:#667999}
 .hcd-surface .semantic-workspace .appearance-panel fieldset label{display:flex;align-items:center;gap:4px;white-space:nowrap}
 .hcd-surface .semantic-workspace .revision-panel{padding-top:20px}
+.hcd-surface .fixed-workspace .fixed-edit-steps{list-style:none;display:grid;gap:8px;margin:8px 0 18px;padding:0}
+.hcd-surface .fixed-workspace .fixed-edit-steps li{display:grid;gap:3px;padding:9px;border:1px solid #e4eaf3;border-radius:7px;font-size:12px}
+.hcd-surface .fixed-workspace .fixed-edit-steps small{color:#75849b}
+.hcd-surface .fixed-workspace .revision-panel h3{margin:18px 0 8px;font-size:13px;color:#304b7a}
 .hcd-surface .semantic-workspace .revision-panel p{margin-top:-10px}
 .hcd-surface .semantic-workspace .history{gap:8px;margin-top:14px}
 .hcd-surface .semantic-workspace .history button{border:0;background:transparent;align-items:flex-start;padding:8px 2px}
