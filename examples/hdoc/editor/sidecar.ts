@@ -21,7 +21,7 @@ function serviceToken(documentId: string): string {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
   // A checkpoint may contain updates from several people. Attribute it to the
   // collaboration service rather than claiming a single person authored it.
-  const payload = Buffer.from(JSON.stringify({ doc: documentId, scope: 'write', sub: 'hcd-collaboration', name: '协作自动保存', aud: 'hcd-core', iat: now, exp: now + 60 })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({ doc: documentId, scope: 'write', sub: 'hcd-collaboration', name: 'Collaboration autosave', aud: 'hcd-core', iat: now, exp: now + 60 })).toString('base64url')
   const signed = `${header}.${payload}`
   return `${signed}.${createHmac('sha256', secret).update(signed).digest('base64url')}`
 }

@@ -398,3 +398,9 @@ For fixed-format collaboration, open the same PDF, PPTX, or XLSX document in two
 For rich-text acceptance, select paragraph text, apply an `https://` link from the toolbar, undo and redo it, and save. Export HTML and confirm the link and text survive. Right-click the same selection, choose **复制选中内容**, and verify the clipboard contains the complete selected text. The link dialog accepts `http://`, `https://`, and `mailto:` URLs, matching server validation.
 
 Markdown documents with quotes, fenced code, tables, or other unsupported structure retain those regions as read-only blocks in the editor. Their ordinary headings, paragraphs, and lists remain editable in the same document. Export keeps the read-only regions intact.
+
+## Editor language
+
+The UI defaults to English (`en-US`). Open the standalone editor with `?locale=zh-CN` (or `?lang=zh-CN`) to set the initial locale. Its language selector is available on the login page, in the semantic editor's Settings panel, and in fixed-layout/workbook previews; a manual choice is saved in browser storage. Supported locales are `en-US`, `en-GB`, `zh-CN`, `zh-TW`, and `zh-HK`. The corresponding regional date formatting and Univer workbook locale follow the selected value. Source document content is never translated.
+
+For an embedded editor, pass `locale="zh-CN"` and optionally `onLocaleChange={setLocale}` to synchronize the host's language selector. The embedded editor defaults to `en-US` when the prop is omitted and does not write a browser-wide preference. Its locale selector remains available inside the editor.

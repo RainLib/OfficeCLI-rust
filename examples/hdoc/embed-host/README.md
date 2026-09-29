@@ -11,3 +11,5 @@ From the repository root, start the Rust API and collaboration sidecar as descri
 ```
 
 Open `http://127.0.0.1:8771/`, enter a document ID and a short-lived read or write token from `hdoc issue-token`, and verify that the editor fits the host panel. Editing, revision history, exports, and collaboration remain available inside the panel. A read token must stay read-only.
+
+The host's **Editor locale** selector passes the `locale` prop to `EmbeddedHcdEditor`; the embedded selector calls `onLocaleChange` so both controls stay in sync. English (US) is the default.

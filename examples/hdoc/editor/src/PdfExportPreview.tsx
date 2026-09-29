@@ -1,7 +1,10 @@
+import { LocalText, localizeDynamic } from './sourceLocale.tsx'
+import { LocaleSelect, useI18n } from './i18n.tsx'
 import { useEffect, useRef, useState } from 'react'
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 
 export function PdfExportPreview({ sourcePath }: { sourcePath: string }) {
+  const { locale } = useI18n()
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null)
   const [pageNumber, setPageNumber] = useState(1)
   const [error, setError] = useState('')
@@ -51,18 +54,19 @@ export function PdfExportPreview({ sourcePath }: { sourcePath: string }) {
 
   return <main className="pdf-export-preview">
     <header>
-      <div><small>OFFICECLI / HCD</small><h1>导出 PDF 预览</h1><span>显示实际导出的打印版式</span></div>
+      <div><small>OFFICECLI / HCD</small><h1><LocalText source={"导出 PDF 预览"} /></h1><span><LocalText source={"显示实际导出的打印版式"} /></span></div>
       <div className="pdf-export-preview-actions">
-        <button onClick={() => window.history.back()}>返回工作台</button>
-        <button disabled={!document || pageNumber <= 1} onClick={() => setPageNumber(page => page - 1)}>上一页</button>
-        <span>{document ? `${pageNumber} / ${document.numPages}` : '加载中…'}</span>
-        <button disabled={!document || pageNumber >= document.numPages} onClick={() => setPageNumber(page => page + 1)}>下一页</button>
-        <a href={downloadPath} download>下载此 PDF</a>
+        <button onClick={() => window.history.back()}><LocalText source={"返回工作台"} /></button>
+        <button disabled={!document || pageNumber <= 1} onClick={() => setPageNumber(page => page - 1)}><LocalText source={"上一页"} /></button>
+        <span>{document ? `${pageNumber} / ${document.numPages}` : localizeDynamic(locale, '加载中…')}</span>
+        <button disabled={!document || pageNumber >= document.numPages} onClick={() => setPageNumber(page => page + 1)}><LocalText source={"下一页"} /></button>
+        <a href={downloadPath} download><LocalText source={"下载此 PDF"} /></a>
+        <LocaleSelect />
       </div>
     </header>
-    {error && <p role="alert" className="pdf-export-preview-error">{error}</p>}
+    {error && <p role="alert" className="pdf-export-preview-error">{localizeDynamic(locale, error)}</p>}
     <div className="pdf-export-preview-page" aria-busy={rendering}>
-      <canvas ref={canvasRef} aria-label={`导出 PDF 第 ${pageNumber} 页`} />
+      <canvas ref={canvasRef} aria-label={localizeDynamic(locale, `导出 PDF 第 ${pageNumber} 页`)} />
     </div>
   </main>
 }

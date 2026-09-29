@@ -32,7 +32,7 @@ export const HcdOpaque = Node.create({
     }
   },
   parseHTML() { return [{ tag: 'div[data-hcd-opaque]' }] },
-  renderHTML({ node }) { return ['div', { 'data-hcd-opaque': '', 'data-hcd-block-id': node.attrs.hcdBlockId, contenteditable: 'false', class: 'hcd-opaque' }, node.attrs.preview || '只读复杂内容'] },
+  renderHTML({ node }) { return ['div', { 'data-hcd-opaque': '', 'data-hcd-block-id': node.attrs.hcdBlockId, contenteditable: 'false', class: 'hcd-opaque' }, node.attrs.preview || '▣'] },
 })
 
 export const schemaExtensions = [StarterKit.configure({ undoRedo: false, link: { openOnClick: false } }), HcdIdentity, HcdOpaque]
@@ -63,7 +63,7 @@ function inlineJson(inline: Inline): JSONContent {
 
 function blockJson(block: Block): JSONContent {
   if (block.readOnly || block.content.kind === 'opaque') {
-    return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '只读复杂内容' } }
+    return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '▣' } }
   }
   const content = block.content.inlines.filter(part => part.text.length > 0).map(inlineJson)
   const attrs = { hcdBlockId: block.blockId }
