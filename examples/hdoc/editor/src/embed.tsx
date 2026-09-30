@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Workspace } from './App.tsx'
 import type { Session } from './api.ts'
+import { I18nProvider, useI18n, type EditorLocale } from './i18n.tsx'
 import './style.css'
 
 export type EmbeddedHcdEditorProps = {
@@ -8,12 +9,19 @@ export type EmbeddedHcdEditorProps = {
   token: string
   apiUrl: string
   collabUrl: string
+  locale?: string
+  onLocaleChange?: (locale: EditorLocale) => void
   onClose?: () => void
   onError?: (error: Error) => void
 }
 
 /** Mount this component inside an existing React product without an iframe. */
-export function EmbeddedHcdEditor({ documentId, token, apiUrl, collabUrl, onClose, onError }: EmbeddedHcdEditorProps) {
+export function EmbeddedHcdEditor(props: EmbeddedHcdEditorProps) {
+  return <I18nProvider initialLocale={props.locale} onLocaleChange={props.onLocaleChange}><EmbeddedContent {...props} /></I18nProvider>
+}
+
+function EmbeddedContent({ documentId, token, apiUrl, collabUrl, onClose, onError }: EmbeddedHcdEditorProps) {
+  const { locale, t } = useI18n()
   const [session, setSession] = useState<Session | null>(null)
   const [error, setError] = useState('')
   useEffect(() => {
@@ -34,7 +42,7 @@ export function EmbeddedHcdEditor({ documentId, token, apiUrl, collabUrl, onClos
     })
     return () => { active = false }
   }, [documentId, token, apiUrl, collabUrl, onError])
-  return <div className="hcd-surface hcd-embedded">
-    {session ? <Workspace key={`${session.documentId}:${session.collaborationEpoch ?? 0}`} session={session} onClose={() => onClose?.()} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} embedded /> : <div className="embedded-loading">{error || '正在打开 HCD 文档…'}</div>}
+  return <div className="hcd-surface hcd-embedded" lang={locale}>
+    {session ? <Workspace key={`${session.documentId}:${session.collaborationEpoch ?? 0}`} session={session} onClose={() => onClose?.()} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} embedded /> : <div className="embedded-loading">{error || t('openingDocument')}</div>}
   </div>
 }

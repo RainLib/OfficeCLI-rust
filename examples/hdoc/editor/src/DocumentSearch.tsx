@@ -1,3 +1,5 @@
+import { useI18n } from './i18n.tsx'
+import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import { useEffect, useRef, useState } from 'react'
 
 export type SearchHit = {
@@ -22,6 +24,7 @@ export function DocumentSearch({ open, onOpen, onClose, search, onSelect, refres
   onSelect: (hit: SearchHit) => Promise<void> | void
   refreshKey: number | string | null
 }) {
+  const { locale } = useI18n()
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<SearchResult | null>(null)
   const [active, setActive] = useState(-1)
@@ -73,23 +76,23 @@ export function DocumentSearch({ open, onOpen, onClose, search, onSelect, refres
     catch (cause) { setError(String(cause)) }
   }
   if (!open) return null
-  return <section className="document-search" aria-label="文档内容搜索">
+  return <section className="document-search" aria-label={localizeSource(locale, "文档内容搜索")}>
     <div className="document-search-controls">
-      <label>查找全文 <input ref={input} type="search" value={query} maxLength={128} placeholder="输入文字，搜索所有页面或工作表"
+      <label><LocalText source={"查找全文 "} /><input ref={input} type="search" value={query} maxLength={128} placeholder={localizeSource(locale, "输入文字，搜索所有页面或工作表")}
         onChange={event => setQuery(event.target.value)} onKeyDown={event => {
           if (event.key === 'Enter') { event.preventDefault(); void select((active + (event.shiftKey ? -1 : 1) + (result?.hits.length || 0)) % (result?.hits.length || 1)) }
         }} /></label>
-      <span role="status">{loading ? '搜索中…' : result ? `${result.hits.length}${result.truncated ? '+' : ''} 处结果` : ''}</span>
-      <button onClick={() => void select((active - 1 + (result?.hits.length || 0)) % (result?.hits.length || 1))} disabled={!result?.hits.length}>上一个</button>
-      <button onClick={() => void select((active + 1) % (result?.hits.length || 1))} disabled={!result?.hits.length}>下一个</button>
-      <button aria-label="关闭搜索" onClick={onClose}>×</button>
+      <span role="status">{localizeDynamic(locale, loading ? '搜索中…' : result ? `${result.hits.length}${result.truncated ? '+' : ''} 处结果` : '')}</span>
+      <button onClick={() => void select((active - 1 + (result?.hits.length || 0)) % (result?.hits.length || 1))} disabled={!result?.hits.length}><LocalText source={"上一个"} /></button>
+      <button onClick={() => void select((active + 1) % (result?.hits.length || 1))} disabled={!result?.hits.length}><LocalText source={"下一个"} /></button>
+      <button aria-label={localizeSource(locale, "关闭搜索")} onClick={onClose}>×</button>
     </div>
-    {error && <p className="document-search-error">{error}</p>}
-    {result && <div className="document-search-results" role="list" aria-label="搜索结果">
+    {error && <p className="document-search-error">{localizeDynamic(locale, error)}</p>}
+    {result && <div className="document-search-results" role="list" aria-label={localizeSource(locale, "搜索结果")}>
       {result.hits.length ? result.hits.map((hit, index) => <button role="listitem" key={`${hit.chunkSequence}:${hit.nodeId}:${hit.offset}`} className={active === index ? 'active' : ''} onClick={() => void select(index)}>
-        <strong>{hit.sheetName || (hit.position !== undefined ? '正文' : hit.region === 'slide' ? `幻灯片 ${hit.chunkSequence + 1}` : `第 ${hit.chunkSequence + 1} 页`)}</strong><span>{hit.preview}</span>
-      </button>) : <p>没有找到匹配内容</p>}
-      {result.truncated && <p>最多显示前 200 处结果，请缩小关键词范围。</p>}
+        <strong>{hit.sheetName || localizeDynamic(locale, hit.position !== undefined ? '正文' : hit.region === 'slide' ? `幻灯片 ${hit.chunkSequence + 1}` : `第 ${hit.chunkSequence + 1} 页`)}</strong><span>{hit.preview}</span>
+      </button>) : <p><LocalText source={"没有找到匹配内容"} /></p>}
+      {result.truncated && <p><LocalText source={"最多显示前 200 处结果，请缩小关键词范围。"} /></p>}
     </div>}
   </section>
 }

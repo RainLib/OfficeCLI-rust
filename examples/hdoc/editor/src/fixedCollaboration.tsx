@@ -1,3 +1,5 @@
+import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
+import { useI18n } from './i18n.tsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HocuspocusProvider } from '@hocuspocus/provider'
 import * as Y from 'yjs'
@@ -25,6 +27,7 @@ function browserUserId(): string {
 
 /** Fixed-layout clients share presence and committed revisions, not uncommitted keystrokes. */
 export function useFixedCollaboration(session: Session, revision: number | null, onRemoteRevision: (revision: number) => void) {
+  const { locale } = useI18n()
   const [presence, setPresence] = useState<Person[]>([])
   const [connection, setConnection] = useState('连接中')
   const revisionRef = useRef(revision)
@@ -40,7 +43,7 @@ export function useFixedCollaboration(session: Session, revision: number | null,
   }), [session.documentId, session.collaborationEpoch, session.collabUrl, session.token, ydoc])
   const user = useMemo(() => {
     const id = session.userId || browserUserId()
-    return { id, clientId: ydoc.clientID, name: session.displayName?.trim() || `协作者 ${id.slice(0, 4)}`, color: colorFor(id) }
+    return { id, clientId: ydoc.clientID, name: session.displayName?.trim() || `User ${id.slice(0, 4)}`, color: colorFor(id) }
   }, [session.userId, session.displayName, ydoc])
 
   useEffect(() => {
@@ -100,6 +103,6 @@ export function useFixedCollaboration(session: Session, revision: number | null,
       provider.sendStateless(JSON.stringify({ type: 'hcd-fixed-revision', revision: next }))
     }
   }, [provider])
-  const avatars = <details className="presence"><summary aria-label={`在线协作者，${presence.length} 人`}><span className="presence-avatars">{presence.slice(0, 3).map(person => <span key={person.id} className="avatar" title={person.name} style={{ background: person.color }}>{person.name.slice(0, 1)}</span>)}</span><span>{presence.length} 人在线</span></summary><div className="presence-menu"><strong>在线协作者 · {connection}</strong>{presence.map(person => <div key={person.id} className="presence-person"><span className="avatar" style={{ background: person.color }}>{person.name.slice(0, 1)}</span><span>{person.name}{person.id === user.id ? '（你）' : ''}</span>{person.connections > 1 && <small>{person.connections} 个窗口</small>}</div>)}</div></details>
+  const avatars = <details className="presence"><summary aria-label={`${localizeSource(locale, "在线协作者")} · ${presence.length}`}><span className="presence-avatars">{presence.slice(0, 3).map(person => <span key={person.id} className="avatar" title={person.name} style={{ background: person.color }}>{person.name.slice(0, 1)}</span>)}</span><span>{presence.length} <LocalText source={" 人在线"} /></span></summary><div className="presence-menu"><strong><LocalText source={"在线协作者 · "} />{localizeDynamic(locale, connection)}</strong>{presence.map(person => <div key={person.id} className="presence-person"><span className="avatar" style={{ background: person.color }}>{person.name.slice(0, 1)}</span><span>{person.name}{person.id === user.id ? localizeSource(locale, '（你）') : ''}</span>{person.connections > 1 && <small>{person.connections} <LocalText source={" 个窗口"} /></small>}</div>)}</div></details>
   return { avatars, announceRevision, connection }
 }

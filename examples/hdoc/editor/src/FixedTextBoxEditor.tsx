@@ -4,6 +4,8 @@ import { EditorContent, useEditor } from '@tiptap/react'
 import { history, redo, undo } from '@tiptap/pm/history'
 import { keymap } from '@tiptap/pm/keymap'
 import { Plugin } from '@tiptap/pm/state'
+import { useI18n } from './i18n.tsx'
+import { localizeDynamic } from './sourceLocale.tsx'
 
 const limit = 10_000
 
@@ -34,13 +36,14 @@ export function FixedTextBoxEditor({ text, disabled, onChange, onReady, autoFocu
   onSave?: (value: string) => void
   onCancel?: () => void
 }) {
+  const { locale } = useI18n()
   const editor = useEditor({
     extensions: fixedTextExtensions,
     content: { type: 'doc', content: [{ type: 'paragraph', content: text ? [{ type: 'text', text }] : [] }] },
     editable: !disabled,
     autofocus: autoFocus === true ? 'end' : autoFocus,
     editorProps: {
-      attributes: { class: 'fixed-tiptap-text', role: 'textbox', 'aria-label': '编辑文字', 'aria-multiline': 'false' },
+      attributes: { class: 'fixed-tiptap-text', role: 'textbox', 'aria-label': localizeDynamic(locale, '编辑文字'), 'aria-multiline': 'false' },
       handleKeyDown: (view, event) => {
         if (event.key === 'Escape') { onCancel?.(); return true }
         if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -54,6 +57,7 @@ export function FixedTextBoxEditor({ text, disabled, onChange, onReady, autoFocu
     onUpdate: ({ editor: changed }) => onChange(changed.state.doc.textContent),
   })
   useEffect(() => { editor?.setEditable(!disabled) }, [editor, disabled])
+  useEffect(() => { editor?.view.dom.setAttribute('aria-label', localizeDynamic(locale, '编辑文字')) }, [editor, locale])
   useEffect(() => {
     onReady?.(editor)
     return () => onReady?.(null)
