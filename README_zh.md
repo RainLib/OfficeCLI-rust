@@ -521,3 +521,8 @@ platforms: macos, linux, windows
 license: Apache-2.0
 skill-file: SKILL.md
 -->
+
+PDF image encoding and rasterization settings are owned by the installed pdf2docx
+implementation. RainLib/pdf2docx supports PDF2DOCX_IMAGE_FORMAT,
+PDF2DOCX_IMAGE_JPEG_QUALITY and PDF2DOCX_IMAGE_MAX_DPI. OfficeCLI invokes
+this converter without re-encoding the resulting DOCX images.
