@@ -5,6 +5,8 @@
 )]
 
 mod commands;
+mod hdoc_remote;
+mod hdoc_server;
 mod mcp;
 #[cfg(unix)]
 mod resident;

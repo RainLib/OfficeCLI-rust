@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
+pub const FONT_METADATA_CSS_MARKER: &str = "/* hcd-font-slots/1 */";
+
 const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_XML_ELEMENTS: usize = 3_000_000;
 const MAX_XML_DEPTH: usize = 256;
@@ -69,6 +71,7 @@ struct ParagraphBuilder {
     format: ParagraphFormat,
     html: String,
     entries: Vec<NodeMapEntry>,
+    text_identity_counts: HashMap<String, usize>,
     nested: Vec<RenderedBlock>,
     ordinal: u64,
     run_ordinal: usize,
@@ -676,13 +679,63 @@ fn finish_theme_element(
     }
 }
 
+/// Recover only language-font metadata from a verified immutable DOCX. This
+/// does not change text, CSS layout declarations or historical bundle objects.
+pub fn source_typography_styles(
+    source: impl AsRef<Path>,
+    expected_hash: &str,
+) -> Result<String, HcdError> {
+    let source = source.as_ref();
+    if std::fs::metadata(source)?.len() > MAX_SOURCE_BYTES {
+        return Err(HcdError::ResourceLimit(
+            "font source exceeds DOCX source limit".into(),
+        ));
+    }
+    if hash_file(source)? != expected_hash {
+        return Err(HcdError::SourceMismatch(
+            "font source does not match immutable DOCX".into(),
+        ));
+    }
+    let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let theme = load_word_theme(&mut archive)?;
+    let rendered = load_word_styles(&mut archive, &theme)?;
+    let sheet = simplecss::StyleSheet::parse(&rendered.css);
+    let mut output = String::new();
+    use std::fmt::Write as _;
+    for rule in sheet.rules {
+        let declarations: Vec<_> = rule
+            .declarations
+            .iter()
+            .filter(|declaration| {
+                matches!(
+                    declaration.name,
+                    "-hcd-font-latin" | "-hcd-font-east-asia" | "-hcd-font-bidi"
+                )
+            })
+            .collect();
+        if !declarations.is_empty() {
+            write!(output, "{}{{", rule.selector).expect("string");
+            for declaration in declarations {
+                write!(output, "{}:{};", declaration.name, declaration.value).expect("string");
+            }
+            output.push('}');
+        }
+    }
+    if output.len() as u64 > MAX_CONTROL_PART_BYTES {
+        return Err(HcdError::ResourceLimit(
+            "font source metadata exceeds control-part limit".into(),
+        ));
+    }
+    Ok(output)
+}
+
 fn load_word_styles(
     archive: &mut StreamingOxmlArchive,
     theme: &WordTheme,
 ) -> Result<RenderedWordStyles, HcdError> {
     if !archive.contains("word/styles.xml") {
         return Ok(RenderedWordStyles {
-            css: default_styles().to_string(),
+            css: format!("{FONT_METADATA_CSS_MARKER}{}", default_styles()),
             table_bands: BTreeMap::new(),
             paragraph_numbering: BTreeMap::new(),
         });
@@ -829,7 +882,7 @@ fn load_word_styles(
 
     parse_table_style_layers(&xml, theme, &mut styles)?;
 
-    let mut css = default_styles().to_string();
+    let mut css = format!("{FONT_METADATA_CSS_MARKER}{}", default_styles());
     css.push_str(".hcd-empty-paragraph{min-height:1lh}");
     css.push_str(".hcd-list-marker{box-sizing:border-box;text-indent:0}");
     let default_run_css = run_css_declarations(&default_run);
@@ -4244,7 +4297,25 @@ fn append_text_node(
         .as_deref()
         .map(|id| format!("{paragraph_id}:{id}"))
         .unwrap_or_else(|| format!("{paragraph_id}:{local_ordinal}"));
-    let node_id = stable_node_id(&[document_id, part, "text", &source_identity]);
+    let occurrence = paragraph
+        .text_identity_counts
+        .entry(source_identity.clone())
+        .or_default();
+    *occurrence += 1;
+    let node_id = if *occurrence == 1 {
+        stable_node_id(&[document_id, part, "text", &source_identity])
+    } else {
+        // A run may contain several w:t children with the same original textId.
+        // Keep existing IDs for unique identities; disambiguate only repeats.
+        stable_node_id(&[
+            document_id,
+            part,
+            "text",
+            &source_identity,
+            "occurrence",
+            &occurrence.to_string(),
+        ])
+    };
     let (canonical_text, rendered_text) =
         render_legacy_hyperlink_text(&text).unwrap_or_else(|| (text.clone(), escape_text(&text)));
     let node_hash = hash_bytes(canonical_text.as_bytes());
@@ -4482,10 +4553,13 @@ fn run_html_start(format: &RunFormat, ordinal: usize) -> String {
         format.underline.as_deref(),
     );
 
-    let css = run_css_declarations(format);
+    let css: Vec<_> = run_css_declarations(format)
+        .into_iter()
+        .filter(|declaration| !declaration.starts_with("-hcd-font-"))
+        .collect();
     if !css.is_empty() {
         attributes.push_str(" style=\"");
-        attributes.push_str(&css.join(";"));
+        attributes.push_str(&escape_attribute(&css.join(";")));
         attributes.push('"');
     }
     format!("<span{attributes}>")
@@ -4620,7 +4694,7 @@ fn paragraph_html_attributes(format: &ParagraphFormat) -> String {
     let css = paragraph_css_declarations(format);
     if !css.is_empty() {
         attributes.push_str(" style=\"");
-        attributes.push_str(&css.join(";"));
+        attributes.push_str(&escape_attribute(&css.join(";")));
         attributes.push('"');
     }
     attributes
@@ -4655,6 +4729,19 @@ fn run_css_declarations(format: &RunFormat) -> Vec<String> {
         .filter(|size| (2..=3276).contains(size))
     {
         css.push(format!("font-size:{:.1}pt", size as f64 / 2.0));
+    }
+    for (property, font) in [
+        ("-hcd-font-latin", &format.resolved_latin_font),
+        ("-hcd-font-east-asia", &format.resolved_east_asia_font),
+        ("-hcd-font-bidi", &format.resolved_bidi_font),
+    ] {
+        if let Some(font) = font.as_deref().and_then(safe_font_family) {
+            // JSON strings are also safe quoted CSS values for these validated names.
+            css.push(format!(
+                "{property}:{}",
+                serde_json::to_string(font).expect("font string")
+            ));
+        }
     }
     let fonts = run_font_families(format);
     if !fonts.is_empty() {
@@ -7089,6 +7176,39 @@ mod tests {
     }
 
     #[test]
+    fn repeated_text_ids_within_a_run_keep_distinct_stable_source_nodes() {
+        let xml = r#"<w:document xmlns:w="w" xmlns:w14="w14"><w:body><w:p w14:paraId="P1"><w:r w14:textId="R1"><w:t>A中😀 B</w:t><w:tab/><w:t>after</w:t><w:t/></w:r></w:p></w:body></w:document>"#;
+        let (html, map) = render_test_part(xml, &WordTheme::default(), None);
+        let (_, repeated) = render_test_part(xml, &WordTheme::default(), None);
+        assert_eq!(map.entries.len(), 3);
+        assert_eq!(
+            map.entries
+                .iter()
+                .map(|entry| &entry.node_id)
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(map.entries, repeated.entries);
+        assert_eq!(
+            map.entries
+                .iter()
+                .map(|entry| entry.source.text_ordinal)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(map
+            .entries
+            .iter()
+            .all(|entry| entry.source.text_id.as_deref() == Some("R1")));
+        let canonical = hcd_core::extract_html_text_nodes(&html).unwrap();
+        assert_eq!(canonical.len(), 3);
+        assert_eq!(canonical[&map.entries[0].node_id], "A中😀 B");
+        assert_eq!(canonical[&map.entries[1].node_id], "after");
+        assert_eq!(canonical[&map.entries[2].node_id], "");
+    }
+
+    #[test]
     fn tracked_revisions_preserve_current_semantics_and_keep_deletions_read_only() {
         let xml = r#"<w:document xmlns:w="w" xmlns:w14="w14"><w:body><w:p w14:paraId="P1">
           <w:ins w:id="7" w:author="Alice" w:date="2026-08-30T12:00:00Z"><w:r w14:textId="I1"><w:t>added</w:t></w:r></w:ins>
@@ -7324,7 +7444,19 @@ mod tests {
         let (html, _) = render_test_part(xml, &theme, None);
         assert!(html.contains("data-hcd-font=\"等线\""));
         assert!(html.contains("data-hcd-font-east-asia=\"等线\""));
-        assert!(html.contains("font-family:'等线','Aptos Display'"));
+        let mut reader = Reader::from_str(&html);
+        let mut found_stack = false;
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Start(element) | Event::Empty(element) => {
+                    found_stack |= attribute_by_local_name(&element, "style")
+                        .is_some_and(|style| style.contains("font-family:'等线','Aptos Display'"));
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        assert!(found_stack);
         assert!(html.contains("data-hcd-font=\"Noto Naskh Arabic\""));
         assert!(html.contains("data-hcd-font-bidi=\"Noto Naskh Arabic\""));
         assert!(html.contains("direction:rtl"));

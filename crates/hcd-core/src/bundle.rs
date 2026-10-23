@@ -96,7 +96,7 @@ impl Bundle {
         Ok(serde_json::from_slice(&decoded)?)
     }
 
-    fn index_page_href(&self, root: &str, page: usize) -> Result<String, HcdError> {
+    pub(crate) fn index_page_href(&self, root: &str, page: usize) -> Result<String, HcdError> {
         let mut href = root.to_string();
         for _ in 0..12 {
             let node: IndexTreeNode = self.read_index_object(&href)?;
@@ -269,6 +269,9 @@ impl Bundle {
         extension: &str,
         reader: &mut (impl std::io::Read + ?Sized),
     ) -> Result<AssetDescriptor, HcdError> {
+        // The descriptor pins a resource for drafts before it is indexed by a
+        // canonical revision. GC must not observe the payload without its pin.
+        let _guard = self.acquire_write_lock()?;
         let (href, hash, byte_length) =
             write_asset_payload(&self.root, extension, reader, crate::MAX_STAGED_ASSET_BYTES)?;
         let source_part = format!("html/uploads/{hash}");
@@ -283,7 +286,7 @@ impl Bundle {
         Ok(descriptor)
     }
 
-    pub(crate) fn staged_asset(&self, hash: &str) -> Result<AssetDescriptor, HcdError> {
+    pub fn staged_asset(&self, hash: &str) -> Result<AssetDescriptor, HcdError> {
         read_json_bounded(
             &self.resolve_href(&format!("assets/staged/{hash}.json"))?,
             MAX_CONTROL_PART_BYTES,
@@ -697,11 +700,17 @@ impl BundleWriter {
             annotation_root_hash: manifest.annotation_root_hash.clone(),
             index_prefix: manifest.index_prefix.clone(),
             index_root_href: manifest.index_root_href.clone(),
+            index_page_count: Some(manifest.index_page_count),
+            chunk_count: Some(manifest.chunk_count),
             asset_index_href: "assets/index.json".to_string(),
             created_at_epoch_ms: now_epoch_ms(),
             dirty_node_ids: Vec::new(),
             dirty_chunk_ids: Vec::new(),
             dirty_source_parts: Vec::new(),
+            structural_change: false,
+            layout_upgrade: false,
+            author_id: None,
+            author_name: None,
         };
         atomic_write_json(
             &self.root.join("revisions/00000000000000000000.json"),
@@ -1230,6 +1239,10 @@ mod tests {
         let bundle = Bundle::open(&root).unwrap();
 
         let first = bundle.acquire_write_lock().unwrap();
+        assert!(matches!(
+            bundle.stage_asset_from_reader("png", &mut std::io::Cursor::new(b"pending upload")),
+            Err(HcdError::RevisionConflict(_))
+        ));
         assert!(matches!(
             bundle.acquire_write_lock(),
             Err(HcdError::RevisionConflict(_))

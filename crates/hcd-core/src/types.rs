@@ -9,6 +9,24 @@ pub struct SourceDescriptor {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PdfRasterPlan {
+    pub rasters: Vec<PdfPageRaster>,
+    pub skipped: Vec<FidelityWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfPageRaster {
+    /// The raster was rendered from a source candidate including all page objects.
+    pub source_composited: bool,
+    /// Known fallback raster dependencies, including inherited background fonts.
+    /// Each identity is a source font SHA-256 plus collection face index.
+    /// Native source rendering leaves this empty; it is not a complete font inventory.
+    pub font_ids: Vec<String>,
+    pub page: u32,
+    pub asset: AssetDescriptor,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssetDescriptor {
@@ -228,6 +246,15 @@ pub struct PatchBatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum PatchOperation {
+    /// Replace one canonical text body and its font-size partitions while
+    /// retaining the original run/paragraph wrappers and source anchor.
+    #[serde(rename = "text.runs", rename_all = "camelCase")]
+    TextRuns {
+        node_id: String,
+        text: String,
+        runs: Vec<crate::FontSizeRun>,
+        precondition: crate::TextRunsPrecondition,
+    },
     #[serde(rename = "text.splice", rename_all = "camelCase")]
     TextSplice {
         node_id: String,
@@ -254,6 +281,13 @@ pub enum PatchOperation {
         asset_hash: String,
         precondition: VisualPrecondition,
     },
+    /// Remove the replacement payload of an original source-only PDF placement.
+    /// Geometry is unchanged; the immutable source XObject supplies its content.
+    #[serde(rename = "image.restoreSource", rename_all = "camelCase")]
+    ImageRestoreSource {
+        node_id: String,
+        precondition: VisualPrecondition,
+    },
     /// Replace the complete image rectangle in its declared coordinate unit.
     #[serde(rename = "image.geometry", rename_all = "camelCase")]
     ImageGeometry {
@@ -271,8 +305,10 @@ impl PatchOperation {
     pub fn node_id(&self) -> Option<&str> {
         match self {
             Self::TextSplice { node_id, .. }
+            | Self::TextRuns { node_id, .. }
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
+            | Self::ImageRestoreSource { node_id, .. }
             | Self::ImageGeometry { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. } => None,
@@ -283,8 +319,10 @@ impl PatchOperation {
         matches!(
             self,
             Self::TextSplice { .. }
+                | Self::TextRuns { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
+                | Self::ImageRestoreSource { .. }
                 | Self::ImageGeometry { .. }
         )
     }
@@ -395,6 +433,10 @@ pub struct RevisionRecord {
     pub index_prefix: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_root_href: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_page_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<usize>,
     /// Immutable asset index used by this revision. Older bundles omit this
     /// field and resolve to the original `assets/index.json`.
     #[serde(default = "default_asset_index_href")]
@@ -406,6 +448,57 @@ pub struct RevisionRecord {
     pub dirty_chunk_ids: Vec<String>,
     #[serde(default)]
     pub dirty_source_parts: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub structural_change: bool,
+    /// Renderer-only PDF coordinate upgrade; canonical content stays unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub layout_upgrade: bool,
+    /// Caller identity copied from patch actor keys `userId` and `displayName`.
+    /// Older revisions omit both fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
+}
+
+pub fn revision_author(
+    actor: &BTreeMap<String, String>,
+) -> Result<(Option<String>, Option<String>), crate::HcdError> {
+    let author_id = match actor.get("userId") {
+        Some(id)
+            if !id.is_empty()
+                && id.len() <= 128
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') =>
+        {
+            Some(id.clone())
+        }
+        Some(_) => {
+            return Err(crate::HcdError::InvalidPatch(
+                "actor.userId must be 1-128 ASCII letters, digits, _ or -".to_string(),
+            ))
+        }
+        None => None,
+    };
+    let author_name = match actor.get("displayName") {
+        Some(name)
+            if !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control) =>
+        {
+            Some(name.clone())
+        }
+        Some(_) => {
+            return Err(crate::HcdError::InvalidPatch(
+                "actor.displayName must be 1-256 characters without control characters".to_string(),
+            ))
+        }
+        None => None,
+    };
+    Ok((author_id, author_name))
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn default_asset_index_href() -> String {
@@ -481,6 +574,10 @@ pub struct TextExtractEntry {
 pub struct TextNodeLookup {
     pub document_id: String,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_runs: Option<Vec<crate::FontSizeRun>>,
     #[serde(flatten)]
     pub node: TextExtractEntry,
 }

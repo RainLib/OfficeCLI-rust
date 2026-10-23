@@ -1,0 +1,48 @@
+{
+  "documentId": "source-size-workbench",
+  "revision": 2,
+  "schema": "hcd-patch/5",
+  "saveMode": "source-runs",
+  "structuralChange": false,
+  "sourceAnchor": {
+    "editable": true,
+    "nodeKind": "text",
+    "paragraphId": "A001",
+    "part": "word/document.xml",
+    "textId": "B001",
+    "textOrdinal": 2
+  },
+  "fontSizeRuns": [
+    {
+      "chars": 1
+    },
+    {
+      "chars": 2,
+      "sizePt": 28.5
+    },
+    {
+      "chars": 2
+    }
+  ],
+  "nativeFidelity": "HIGH",
+  "unchangedParts": [
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "word/_rels/document.xml.rels",
+    "word/styles.xml"
+  ],
+  "collaboratingWindows": 2,
+  "peerReopened": true,
+  "cliChecks": [
+    "partial Unicode size",
+    "format CAS",
+    "text edit after size",
+    "HCD validation",
+    "native and semantic size export",
+    "unmodified ZIP entries",
+    "named styles and spacing",
+    "nontext children once",
+    "immutable history"
+  ],
+  "scope": "local fixture; no production acceptance; compound text/format edits across indistinguishable source runs still need origin identity marks"
+}

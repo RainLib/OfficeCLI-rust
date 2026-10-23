@@ -1,0 +1,189 @@
+{
+  "passed": true,
+  "coordinatorVersion": 3,
+  "modes": [
+    {
+      "documentId": "atomic-word-0",
+      "replacement": false,
+      "mode": "source-runs",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_120997cbbd5bc5ee32c91b926f0ba7ef",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-1",
+      "replacement": true,
+      "mode": "source-runs",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "6c54d5b23a761aa92da26a45323650a806dee032e1670974e7d48bb0d3c2832a",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_5a405d6d01c07c025344bc6208ee0951",
+        "visualHash": "19da411617243c4219177e1b846694b469e15e3795533bf569dc2dbb0722f656"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-2",
+      "replacement": false,
+      "mode": "presentation-style",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_5cc662602f3def6d1e76d6e96544c409",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-3",
+      "replacement": true,
+      "mode": "presentation-style",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "6c54d5b23a761aa92da26a45323650a806dee032e1670974e7d48bb0d3c2832a",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_9cb983e472adff3bb8bf04852981a897",
+        "visualHash": "19da411617243c4219177e1b846694b469e15e3795533bf569dc2dbb0722f656"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-4",
+      "replacement": false,
+      "mode": "semantic-structure",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_f874bc07ccc17b455c83b4a77a48b27b",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-5",
+      "replacement": true,
+      "mode": "semantic-structure",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "6c54d5b23a761aa92da26a45323650a806dee032e1670974e7d48bb0d3c2832a",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_2ecc757970c14613b4f944b07fbf4e8a",
+        "visualHash": "19da411617243c4219177e1b846694b469e15e3795533bf569dc2dbb0722f656"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-6",
+      "replacement": false,
+      "mode": "source-text",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_8780b13e2109c11355f443a36588ae1e",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-7",
+      "replacement": true,
+      "mode": "source-text",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "6c54d5b23a761aa92da26a45323650a806dee032e1670974e7d48bb0d3c2832a",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_4b468361137d3f266e7d827ee6f3b8af",
+        "visualHash": "19da411617243c4219177e1b846694b469e15e3795533bf569dc2dbb0722f656"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    }
+  ],
+  "checks": [
+    "real loopback HTTP",
+    "read-only rejection",
+    "invalid image rolls back body",
+    "one revision per combined save",
+    "source text and size",
+    "color with retained image block",
+    "structure with image",
+    "immutable image replay",
+    "signed body binds geometry and asset",
+    "corrupt staged asset rolls back body",
+    "historical revision keeps original asset",
+    "semantic DOCX contains saved image bytes and width",
+    "native image export refuses stale output"
+  ]
+}

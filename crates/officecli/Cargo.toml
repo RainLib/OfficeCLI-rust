@@ -15,14 +15,16 @@ xlsx-handler = { path = "../xlsx-handler" }
 pptx-handler = { path = "../pptx-handler" }
 pdf-handler = { path = "../pdf-handler" }
 hcd-core = { path = "../hcd-core" }
+hcd-docx = { path = "../hcd-docx" }
 hcd-formats = { path = "../hcd-formats" }
+simplecss = "0.2.2"
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 colored = { workspace = true }
 tokio = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 lopdf = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = { workspace = true }
@@ -34,8 +36,18 @@ office_oxide = { workspace = true }
 tempfile = { workspace = true }
 ironpress = { version = "=1.6.0", default-features = false }
 unicode-segmentation = { workspace = true }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+quick-xml = { workspace = true }
+zip = { workspace = true }
+jsonwebtoken = "9.3"
+sha2 = { workspace = true }
+base64 = "0.22"
+regex = "1"
+object_store = { version = "0.12", features = ["aws"] }
+tokio-postgres = "0.7"
 
 [dev-dependencies]
+roxmltree = { workspace = true }
+tokio-tungstenite = "0.28"
 assert_cmd = "2"
 predicates = "3"
-zip = { workspace = true }

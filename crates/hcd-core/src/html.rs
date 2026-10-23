@@ -11,7 +11,8 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
     let mut reader = Reader::from_str(html);
     reader.config_mut().check_end_names = true;
     let mut buffer = Vec::with_capacity(16 * 1024);
-    let mut current: Option<(String, Vec<u8>, String)> = None;
+    let mut current: Option<(String, usize, String)> = None;
+    let mut depth = 0usize;
     let mut nodes = BTreeMap::new();
 
     loop {
@@ -20,6 +21,7 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
             .map_err(|error| HcdError::InvalidBundle(format!("HTML XML parse error: {error}")))?;
         match event {
             Event::Start(start) => {
+                depth += 1;
                 let (node_id, has_node_hash) = node_attributes(&reader, &start)?;
                 if has_node_hash {
                     let node_id = node_id.ok_or_else(|| {
@@ -32,12 +34,17 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
                             "nested canonical text nodes are forbidden".to_string(),
                         ));
                     }
-                    current = Some((node_id, start.name().as_ref().to_vec(), String::new()));
+                    current = Some((node_id, depth, String::new()));
                 }
             }
             Event::Empty(empty) => {
                 let (node_id, has_node_hash) = node_attributes(&reader, &empty)?;
                 if has_node_hash {
+                    if current.is_some() {
+                        return Err(HcdError::InvalidBundle(
+                            "nested canonical text nodes are forbidden".into(),
+                        ));
+                    }
                     insert_unique(
                         &mut nodes,
                         node_id.ok_or_else(|| {
@@ -63,14 +70,15 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
                     })?);
                 }
             }
-            Event::End(end) => {
+            Event::End(_) => {
                 if current
                     .as_ref()
-                    .is_some_and(|(_, name, _)| name.as_slice() == end.name().as_ref())
+                    .is_some_and(|(_, start_depth, _)| *start_depth == depth)
                 {
                     let (node_id, _, text) = current.take().expect("checked current text node");
                     insert_unique(&mut nodes, node_id, text)?;
                 }
+                depth = depth.saturating_sub(1);
             }
             Event::Eof => break,
             _ => {}
@@ -350,6 +358,7 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "font-size"
                 | "font-family"
                 | "text-decoration"
+                | "white-space"
                 | "color"
                 | "background-color"
                 | "vertical-align"
@@ -415,6 +424,16 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
             )));
         }
         let normalized_value = value.to_ascii_lowercase();
+        if property == "white-space"
+            && !matches!(
+                normalized_value.as_str(),
+                "normal" | "pre" | "pre-wrap" | "pre-line" | "nowrap" | "break-spaces"
+            )
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS white-space {value} is not allowed"
+            )));
+        }
         if normalized_value.contains("url(") {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS value for {property} is unsafe"

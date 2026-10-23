@@ -1,0 +1,160 @@
+[
+  {
+    "sourceRestoreReceiptVerified": false,
+    "documentId": "history-pptx",
+    "format": "pptx",
+    "originalText": "Original",
+    "editedText": "自己的编辑 中文😀",
+    "originalAsset": "fce481932ea5d07a91c7991c09fdadb4bf78f9b4cc8f927188384231f9d12679",
+    "editedAsset": "b1ff9c8ea3a780bad09b346c423d2d0e46815926879b18e841d928376a946640",
+    "originalGeometry": {
+      "height": 635000,
+      "unit": "emu",
+      "width": 1270000,
+      "x": 127000,
+      "y": 1270000
+    },
+    "peerHeight": 952500,
+    "steps": [
+      {
+        "direction": "undo",
+        "revision": 3,
+        "type": "image"
+      },
+      {
+        "direction": "undo",
+        "revision": 4,
+        "type": "image"
+      },
+      {
+        "direction": "undo",
+        "revision": 5,
+        "type": "text"
+      },
+      {
+        "direction": "redo",
+        "revision": 6,
+        "type": "text"
+      },
+      {
+        "direction": "redo",
+        "revision": 7,
+        "type": "image"
+      },
+      {
+        "direction": "redo",
+        "revision": 8,
+        "type": "image"
+      }
+    ],
+    "undoRevision": 5,
+    "redoRevision": 8,
+    "independentFileVerification": true,
+    "geometryInverseHasNoResourceOperation": true
+  },
+  {
+    "sourceRestoreReceiptVerified": true,
+    "documentId": "history-pdf",
+    "format": "pdf",
+    "originalText": "Original",
+    "editedText": "Own undo text",
+    "editedAsset": "b1ff9c8ea3a780bad09b346c423d2d0e46815926879b18e841d928376a946640",
+    "originalGeometry": {
+      "height": 30,
+      "unit": "pt",
+      "width": 40,
+      "x": 50,
+      "y": 100
+    },
+    "peerHeight": 45,
+    "steps": [
+      {
+        "direction": "undo",
+        "revision": 3,
+        "type": "image"
+      },
+      {
+        "direction": "undo",
+        "revision": 4,
+        "type": "image"
+      },
+      {
+        "direction": "undo",
+        "revision": 5,
+        "type": "text"
+      },
+      {
+        "direction": "redo",
+        "revision": 6,
+        "type": "text"
+      },
+      {
+        "direction": "redo",
+        "revision": 7,
+        "type": "image"
+      },
+      {
+        "direction": "redo",
+        "revision": 8,
+        "type": "image"
+      }
+    ],
+    "undoRevision": 5,
+    "redoRevision": 8,
+    "independentFileVerification": true,
+    "geometryInverseHasNoResourceOperation": true
+  },
+  {
+    "sourceRestoreReceiptVerified": false,
+    "documentId": "history-docx",
+    "format": "docx",
+    "originalText": "Original",
+    "editedText": "自己的编辑 中文😀",
+    "originalAsset": "fce481932ea5d07a91c7991c09fdadb4bf78f9b4cc8f927188384231f9d12679",
+    "editedAsset": "b1ff9c8ea3a780bad09b346c423d2d0e46815926879b18e841d928376a946640",
+    "originalGeometry": {
+      "height": 635000,
+      "unit": "emu",
+      "width": 1270000,
+      "x": 0,
+      "y": 0
+    },
+    "peerHeight": 952500,
+    "steps": [
+      {
+        "direction": "undo",
+        "revision": 3,
+        "type": "image"
+      },
+      {
+        "direction": "undo",
+        "revision": 4,
+        "type": "image"
+      },
+      {
+        "direction": "undo",
+        "revision": 5,
+        "type": "text"
+      },
+      {
+        "direction": "redo",
+        "revision": 6,
+        "type": "text"
+      },
+      {
+        "direction": "redo",
+        "revision": 7,
+        "type": "image"
+      },
+      {
+        "direction": "redo",
+        "revision": 8,
+        "type": "image"
+      }
+    ],
+    "undoRevision": 5,
+    "redoRevision": 8,
+    "independentFileVerification": true,
+    "geometryInverseHasNoResourceOperation": true
+  }
+]

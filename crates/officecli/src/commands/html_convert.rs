@@ -1,3 +1,5 @@
+mod rich;
+
 use docx_handler::WordHandler;
 use handler_common::{DocumentHandler, HandlerError, InsertPosition};
 use ironpress::{HtmlConverter, Margin, PageSize};
@@ -150,6 +152,8 @@ struct SemanticHtml {
     blocks: Vec<HtmlBlock>,
     links: Vec<SemanticLink>,
     table_links: Vec<SemanticTableLink>,
+    styles: Vec<rich::BlockStyle>,
+    table_styles: Vec<rich::TableBlockStyle>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
 }
@@ -204,6 +208,9 @@ struct PdfLineBuilder {
 }
 
 struct PendingBlock {
+    styles: Vec<rich::StyleRange>,
+    preserve_edges: bool,
+    preserve_empty: bool,
     kind: PendingKind,
     text: String,
     links: Vec<PendingLink>,
@@ -230,6 +237,10 @@ struct TableBuilder {
     cell_count: usize,
     links: Vec<TablePendingLink>,
     fragment: Option<HcdTableFragment>,
+    styles: Vec<rich::TableStyle>,
+    cell_styles: Vec<rich::StyleRange>,
+    cell_preserve: bool,
+    cell_link_start: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +272,7 @@ struct LogicalTableBuilder {
     rows: Vec<Vec<String>>,
     cell_count: usize,
     links: Vec<TablePendingLink>,
+    styles: Vec<rich::TableStyle>,
 }
 
 #[derive(Default)]
@@ -281,6 +293,7 @@ struct HtmlParser {
     pdf_line: Option<PdfLineBuilder>,
     in_title: bool,
     suppressed_tag: Option<String>,
+    text_styles: Vec<(String, std::sync::Arc<rich::RunStyle>)>,
 }
 
 fn pdf_text_geometry(attributes: &HashMap<String, String>) -> Option<PdfTextGeometry> {
@@ -514,6 +527,24 @@ pub(crate) fn convert_html_with_assets(
         ));
     }
 
+    if output_format == "docx"
+        && document
+            .styles
+            .iter()
+            .map(|style| &style.range)
+            .chain(document.table_styles.iter().map(|style| &style.style.range))
+            .any(|range| {
+                range
+                    .style
+                    .font
+                    .size_pt
+                    .is_some_and(|size| (size * 2.0 - (size * 2.0).round()).abs() > 0.0001)
+            })
+    {
+        document
+            .warnings
+            .insert("DOCX font sizes were rounded to the nearest half point".into());
+    }
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -915,9 +946,13 @@ impl HtmlParser {
             append_normalized(&mut self.document.title, &decoded, false);
             return Ok(());
         }
-        if let Some(table) = &mut self.table {
-            if let Some(cell) = &mut table.cell {
-                append_normalized(cell, &decoded, false);
+        if self.table.is_some() {
+            if self
+                .table
+                .as_ref()
+                .is_some_and(|table| table.cell.is_some())
+            {
+                self.append_active(&decoded, false)?;
             }
             return Ok(());
         }
@@ -926,12 +961,17 @@ impl HtmlParser {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
                 links: Vec::new(),
+                styles: Vec::new(),
+                preserve_edges: false,
+                preserve_empty: false,
             });
         }
-        if let Some(pending) = &mut self.pending {
-            let preserve = matches!(pending.kind, PendingKind::Preformatted);
-            append_normalized(&mut pending.text, &decoded, preserve);
-            ensure_text_limit(&pending.text)?;
+        if self.pending.is_some() {
+            let preserve = self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| matches!(pending.kind, PendingKind::Preformatted));
+            self.append_active(&decoded, preserve)?;
         }
         Ok(())
     }
@@ -953,14 +993,18 @@ impl HtmlParser {
         if tag.attributes.contains_key("style") {
             self.document
                 .warnings
-                .insert("inline CSS was ignored".to_string());
+                .insert("inline CSS layout may change in semantic exports".to_string());
         }
         if tag.closing {
-            self.end_tag(&tag.name)
+            self.end_tag(&tag.name)?;
+            self.leave_style(&tag.name);
+            Ok(())
         } else {
+            self.enter_style(&tag)?;
             self.start_tag(&tag)?;
             if tag.self_closing || is_void_element(&tag.name) {
                 self.end_tag(&tag.name)?;
+                self.leave_style(&tag.name);
             }
             Ok(())
         }
@@ -1066,6 +1110,9 @@ impl HtmlParser {
                     }
                     table.cell_count += 1;
                     table.cell = Some(String::new());
+                    table.cell_preserve = false;
+                    table.cell_styles.clear();
+                    table.cell_link_start = table.links.len();
                 }
             }
             "a" => {
@@ -1118,6 +1165,16 @@ impl HtmlParser {
                 }
             }
             _ => {}
+        }
+        if matches!(
+            tag.name.as_str(),
+            "p" | "pre" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+        ) && (tag.attributes.contains_key("data-hcd-id")
+            || tag.attributes.contains_key("data-hcd-editor-kind"))
+        {
+            if let Some(pending) = &mut self.pending {
+                pending.preserve_empty = true;
+            }
         }
         Ok(())
     }
@@ -1192,6 +1249,7 @@ impl HtmlParser {
             cell_count,
             links,
             fragment,
+            styles,
             ..
         } = table;
         let Some(fragment) = fragment else {
@@ -1204,6 +1262,11 @@ impl HtmlParser {
             if !rows.is_empty() {
                 let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(rows))?;
+                self.document.table_styles.extend(
+                    styles
+                        .into_iter()
+                        .map(|style| rich::TableBlockStyle { block_index, style }),
+                );
                 self.document
                     .table_links
                     .extend(links.into_iter().map(|link| SemanticTableLink {
@@ -1254,6 +1317,7 @@ impl HtmlParser {
                 rows: Vec::new(),
                 cell_count: 0,
                 links: Vec::new(),
+                styles: Vec::new(),
             });
         }
 
@@ -1290,6 +1354,10 @@ impl HtmlParser {
         }
         let row_offset = logical.rows.len();
         logical.rows.extend(rows);
+        logical.styles.extend(styles.into_iter().map(|mut style| {
+            style.row += row_offset;
+            style
+        }));
         logical.links.extend(links.into_iter().map(|mut link| {
             link.row = link.row.saturating_add(row_offset);
             link
@@ -1315,6 +1383,12 @@ impl HtmlParser {
             if !logical.rows.is_empty() {
                 let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(logical.rows))?;
+                self.document.table_styles.extend(
+                    logical
+                        .styles
+                        .into_iter()
+                        .map(|style| rich::TableBlockStyle { block_index, style }),
+                );
                 self.document
                     .table_links
                     .extend(logical.links.into_iter().map(|link| SemanticTableLink {
@@ -1331,6 +1405,21 @@ impl HtmlParser {
     }
 
     fn start_pending(&mut self, kind: PendingKind) -> Result<(), HandlerError> {
+        if self
+            .table
+            .as_ref()
+            .is_some_and(|table| table.cell.is_some())
+        {
+            let needs_break = self
+                .table
+                .as_ref()
+                .and_then(|table| table.cell.as_ref())
+                .is_some_and(|cell| !cell.is_empty() && !cell.ends_with('\n'));
+            if needs_break {
+                self.append_active("\n", true)?;
+            }
+            return Ok(());
+        }
         self.flush_pending()?;
         if !matches!(kind, PendingKind::PdfText(_)) {
             self.flush_pdf_line()?;
@@ -1339,6 +1428,9 @@ impl HtmlParser {
             kind,
             text: String::new(),
             links: Vec::new(),
+            styles: Vec::new(),
+            preserve_edges: false,
+            preserve_empty: false,
         });
         Ok(())
     }
@@ -1353,9 +1445,13 @@ impl HtmlParser {
     }
 
     fn append_active(&mut self, value: &str, preserve: bool) -> Result<(), HandlerError> {
+        let style = self.current_style();
         if let Some(table) = &mut self.table {
             if let Some(cell) = &mut table.cell {
-                append_normalized(cell, value, preserve);
+                let start = cell.len();
+                append_normalized(cell, value, preserve || style.preserve);
+                table.cell_preserve |= style.preserve;
+                rich::record(&mut table.cell_styles, start, cell.len(), &style);
                 ensure_text_limit(cell)?;
                 return Ok(());
             }
@@ -1365,10 +1461,16 @@ impl HtmlParser {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
                 links: Vec::new(),
+                styles: Vec::new(),
+                preserve_edges: false,
+                preserve_empty: false,
             });
         }
         let pending = self.pending.as_mut().expect("created pending block");
-        append_normalized(&mut pending.text, value, preserve);
+        let start = pending.text.len();
+        append_normalized(&mut pending.text, value, preserve || style.preserve);
+        pending.preserve_edges |= style.preserve;
+        rich::record(&mut pending.styles, start, pending.text.len(), &style);
         ensure_text_limit(&pending.text)
     }
 
@@ -1376,7 +1478,9 @@ impl HtmlParser {
         let Some(pending) = self.pending.take() else {
             return Ok(());
         };
-        let trimmed = if matches!(pending.kind, PendingKind::Preformatted) {
+        let trimmed = if pending.preserve_edges {
+            pending.text.as_str()
+        } else if matches!(pending.kind, PendingKind::Preformatted) {
             pending.text.trim_matches('\n')
         } else {
             pending.text.trim()
@@ -1384,7 +1488,7 @@ impl HtmlParser {
         let trim_start = trimmed.as_ptr() as usize - pending.text.as_ptr() as usize;
         let trim_end = trim_start + trimmed.len();
         let text = trimmed.to_string();
-        if text.is_empty() {
+        if text.is_empty() && !pending.preserve_empty {
             return Ok(());
         }
         let block = match pending.kind {
@@ -1401,6 +1505,12 @@ impl HtmlParser {
         };
         let block_index = self.document.blocks.len();
         self.push_block(block)?;
+        self.document
+            .styles
+            .extend(pending.styles.into_iter().filter_map(|range| {
+                rich::trimmed_range(range, trim_start, trim_end)
+                    .map(|range| rich::BlockStyle { block_index, range })
+            }));
         self.document
             .links
             .extend(pending.links.into_iter().filter_map(|link| {
@@ -1528,78 +1638,7 @@ impl HtmlParser {
 }
 
 fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
-    let output = output.to_string_lossy();
-    super::create::create_blank_docx(&output)?;
-    let handler = WordHandler::open(&output, true)?;
-    let _ = handler.remove("/body/p[1]")?;
-    let mut pending = Vec::new();
-    let mut embedded = 0usize;
-    for (block_index, block) in document.blocks.iter().enumerate() {
-        if let HtmlBlock::Image {
-            source,
-            alt,
-            geometry,
-        } = block
-        {
-            if let Some(asset) = resolved_image(document, source, ImageTarget::Office) {
-                flush_docx_markdown(
-                    &handler,
-                    &mut pending,
-                    &document.links,
-                    &document.table_links,
-                )?;
-                let mut properties = HashMap::new();
-                properties.insert("src".to_string(), asset.path.to_string_lossy().into_owned());
-                properties.insert("format".to_string(), asset.format.clone());
-                properties.insert("alt".to_string(), alt.clone());
-                properties.insert("width".to_string(), geometry.width().to_string());
-                properties.insert("height".to_string(), geometry.height().to_string());
-                handler.add("/body", "image", InsertPosition::Append, &properties, None)?;
-                embedded += 1;
-                continue;
-            }
-        }
-        pending.push((block_index, block.clone()));
-    }
-    flush_docx_markdown(
-        &handler,
-        &mut pending,
-        &document.links,
-        &document.table_links,
-    )?;
-    handler.save()?;
-    Ok(embedded)
-}
-
-fn flush_docx_markdown(
-    handler: &WordHandler,
-    pending: &mut Vec<(usize, HtmlBlock)>,
-    links: &[SemanticLink],
-    table_links: &[SemanticTableLink],
-) -> Result<(), HandlerError> {
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let mut properties = HashMap::new();
-    properties.insert(
-        "markdown".to_string(),
-        to_markdown_blocks(
-            pending
-                .iter()
-                .map(|(block_index, block)| (*block_index, block)),
-            links,
-            table_links,
-        ),
-    );
-    handler.add(
-        "/body",
-        "markdown",
-        InsertPosition::Append,
-        &properties,
-        None,
-    )?;
-    pending.clear();
-    Ok(())
+    rich::export_docx(document, output)
 }
 
 fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
@@ -2847,7 +2886,37 @@ fn column_letters(mut column: usize) -> String {
 
 fn finish_table_cell(table: &mut TableBuilder) {
     if let Some(cell) = table.cell.take() {
-        table.row.push(cell.trim().to_string());
+        let trimmed = if table.cell_preserve {
+            cell.as_str()
+        } else {
+            cell.trim()
+        };
+        let start = trimmed.as_ptr() as usize - cell.as_ptr() as usize;
+        let end = start + trimmed.len();
+        let (row, column) = (table.rows.len(), table.row.len());
+        table.styles.extend(
+            std::mem::take(&mut table.cell_styles)
+                .into_iter()
+                .filter_map(|range| {
+                    rich::trimmed_range(range, start, end).map(|range| rich::TableStyle {
+                        row,
+                        column,
+                        range,
+                    })
+                }),
+        );
+        let links = table.links.split_off(table.cell_link_start);
+        table.links.extend(links.into_iter().filter_map(|mut link| {
+            link.start = link.start.max(start);
+            link.end = link.end.min(end);
+            if link.end <= link.start {
+                return None;
+            }
+            link.start -= start;
+            link.end -= start;
+            Some(link)
+        }));
+        table.row.push(trimmed.to_string());
     }
 }
 

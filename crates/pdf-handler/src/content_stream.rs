@@ -32,6 +32,13 @@ fn decoded_stream_content(stream: &lopdf::Stream) -> Cow<'_, [u8]> {
     }
 }
 
+/// A ligature/cluster mapping cannot encode each of its scalars separately.
+pub(crate) fn single_unicode_scalar(value: &str) -> Option<char> {
+    let mut characters = value.chars();
+    let first = characters.next()?;
+    characters.next().is_none().then_some(first)
+}
+
 fn cached_reverse_cmap(object_id: ObjectId, stream: &lopdf::Stream) -> Rc<HashMap<char, u32>> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     stream.content.hash(&mut hasher);
@@ -45,8 +52,19 @@ fn cached_reverse_cmap(object_id: ObjectId, stream: &lopdf::Stream) -> Rc<HashMa
         let cmap = parse_to_unicode_cmap(&content);
         let reverse = Rc::new(
             cmap.iter()
-                .flat_map(|(cid, value)| value.chars().map(move |character| (character, *cid)))
-                .collect(),
+                .filter_map(|(cid, value)| {
+                    single_unicode_scalar(value).map(|character| (character, *cid))
+                })
+                .fold(
+                    HashMap::<char, u32>::new(),
+                    |mut reverse, (character, cid)| {
+                        reverse
+                            .entry(character)
+                            .and_modify(|previous| *previous = (*previous).min(cid))
+                            .or_insert(cid);
+                        reverse
+                    },
+                ),
         );
         let mut cache = cache.borrow_mut();
         if cache.len() >= 64 {
@@ -296,6 +314,27 @@ fn standard_font_avg_width(font_name: &str) -> f32 {
     }
 }
 
+fn decode_resource_name(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'#' && at + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[at + 1] as char).to_digit(16),
+                (bytes[at + 2] as char).to_digit(16),
+            ) {
+                decoded.push((hi * 16 + lo) as u8);
+                at += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 fn page_resource_dictionaries(doc: &LopdfDocument, page_id: ObjectId) -> Vec<&Dictionary> {
     let Ok((inline, resource_ids)) = doc.get_page_resources(page_id) else {
         return Vec::new();
@@ -380,8 +419,13 @@ fn build_font_info(
                 let content = String::from_utf8_lossy(&bytes);
                 let cmap = parse_to_unicode_cmap(&content);
                 for (cid, unicode_str) in cmap {
+                    // This map is used only for legacy width estimation. The
+                    // writer uses the stricter single-scalar reverse mapping.
                     if let Some(ch) = unicode_str.chars().next() {
-                        unicode_to_cid.insert(ch as u32, cid);
+                        unicode_to_cid
+                            .entry(ch as u32)
+                            .and_modify(|previous: &mut u32| *previous = (*previous).min(cid))
+                            .or_insert(cid);
                     }
                 }
             }
@@ -878,11 +922,9 @@ fn build_unicode_to_cid_map(encoding: &lopdf::Encoding) -> Option<HashMap<u32, u
     let mut unicode_to_cid = HashMap::new();
     for cid in 0u16..=65535 {
         if let Some(unicode_vec) = cmap.get(cid) {
-            if unicode_vec.len() == 1 {
-                unicode_to_cid.entry(unicode_vec[0] as u32).or_insert(cid);
-            } else if !unicode_vec.is_empty() {
-                for ch in String::from_utf16_lossy(&unicode_vec).chars() {
-                    unicode_to_cid.entry(ch as u32).or_insert(cid);
+            if let Ok(value) = String::from_utf16(&unicode_vec) {
+                if let Some(character) = single_unicode_scalar(&value) {
+                    unicode_to_cid.entry(character as u32).or_insert(cid);
                 }
             }
         }
@@ -911,6 +953,31 @@ pub struct FontSegment {
     pub font_name: String,
     pub text: String,
     pub encoded_operand: String,
+}
+
+fn append_font_code(
+    bytes: &mut Vec<u8>,
+    font: &lopdf::Dictionary,
+    code: u32,
+) -> Result<(), HandlerError> {
+    let composite = font
+        .get(b"Subtype")
+        .ok()
+        .and_then(|value| value.as_name().ok())
+        == Some(b"Type0".as_slice());
+    if composite {
+        let code = u16::try_from(code).map_err(|_| {
+            HandlerError::OperationFailed(
+                "composite font code exceeds the supported 16-bit range".into(),
+            )
+        })?;
+        bytes.extend_from_slice(&code.to_be_bytes());
+    } else {
+        bytes.push(u8::try_from(code).map_err(|_| {
+            HandlerError::OperationFailed("simple font code exceeds the 8-bit range".into())
+        })?);
+    }
+    Ok(())
 }
 
 /// Encode a single text chunk using a specific font and return the proper PDF operand
@@ -955,8 +1022,7 @@ pub fn encode_chunk_with_font(
             let mut missing = String::new();
             for ch in text.chars() {
                 if let Some(cid) = unicode_to_cid.get(&ch).copied() {
-                    bytes.push((cid >> 8) as u8);
-                    bytes.push((cid & 0xFF) as u8);
+                    append_font_code(&mut bytes, font, cid)?;
                 } else {
                     missing.push(ch);
                 }
@@ -970,6 +1036,12 @@ pub fn encode_chunk_with_font(
             return Ok(format_pdf_hex_bytes(&bytes));
         }
 
+        if !font.type_is(b"Font") {
+            return Err(HandlerError::OperationFailed(format!(
+                "font '{}' has no Type=Font dictionary",
+                font_name
+            )));
+        }
         let encoding = font.get_font_encoding(doc).map_err(|e| {
             HandlerError::OperationFailed(format!(
                 "failed to resolve encoding for '{}': {:?}",
@@ -982,8 +1054,7 @@ pub fn encode_chunk_with_font(
             let mut missing = String::new();
             for ch in text.chars() {
                 if let Some(&cid) = map.get(&(ch as u32)) {
-                    bytes.push((cid >> 8) as u8);
-                    bytes.push((cid & 0xFF) as u8);
+                    append_font_code(&mut bytes, font, u32::from(cid))?;
                 } else {
                     missing.push(ch);
                 }
@@ -1085,10 +1156,9 @@ pub fn pick_fonts_for_text(
     let font_supports_char = |font_name: &str, ch: char| -> bool {
         // 1. Check custom ToUnicode CMap if present
         if let Some(cmap) = custom_to_unicode.get(font_name) {
-            let found_cid = cmap.iter().find(|(_, val)| val.contains(ch));
-            if found_cid.is_some() {
-                return true;
-            }
+            return cmap
+                .values()
+                .any(|value| single_unicode_scalar(value) == Some(ch));
         }
 
         // 2. If the font is subsetted, it only supports the character if it was originally in the original characters
@@ -1104,9 +1174,11 @@ pub fn pick_fonts_for_text(
 
         // 3. If not subsetted, check via standard encoding
         if let Some(font_dict) = page_fonts.get(font_name) {
-            if let Ok(encoding) = font_dict.get_font_encoding(doc) {
-                if font_supports_char_via_encoding(&encoding, ch) {
-                    return true;
+            if font_dict.type_is(b"Font") {
+                if let Ok(encoding) = font_dict.get_font_encoding(doc) {
+                    if font_supports_char_via_encoding(&encoding, ch) {
+                        return true;
+                    }
                 }
             }
         }
@@ -2385,8 +2457,10 @@ fn parse_page_content_stream_inner(
     if let Ok(fonts) = doc.get_page_fonts(page_id) {
         for (name, font) in fonts {
             let font_name = String::from_utf8_lossy(&name).to_string();
-            if let Ok(encoding) = font.get_font_encoding(doc) {
-                encodings.insert(font_name.clone(), encoding);
+            if font.type_is(b"Font") {
+                if let Ok(encoding) = font.get_font_encoding(doc) {
+                    encodings.insert(font_name.clone(), encoding);
+                }
             }
             if let Ok(to_unicode) = font.get(b"ToUnicode") {
                 if let Ok(ref_id) = to_unicode.as_reference() {
@@ -2744,11 +2818,8 @@ fn parse_page_content_stream_inner(
                     }
                     "Do" => {
                         if let Some(operand) = operands.last() {
-                            let xobject_name = if operand.starts_with('/') {
-                                operand[1..].to_string()
-                            } else {
-                                operand.to_string()
-                            };
+                            let xobject_name =
+                                decode_resource_name(operand.strip_prefix('/').unwrap_or(operand));
 
                             if let Some(geometry) = xobject_geometry.get(&xobject_name) {
                                 image_counter += 1;
@@ -2943,6 +3014,36 @@ fn effective_vertical_metrics(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn font_code_width_matches_simple_and_composite_fonts_without_truncation() {
+        let simple = lopdf::dictionary! { "Subtype"=>"TrueType" };
+        let composite = lopdf::dictionary! { "Subtype"=>"Type0" };
+        let mut bytes = Vec::new();
+        super::append_font_code(&mut bytes, &simple, 0x41).unwrap();
+        assert_eq!(bytes, [0x41]);
+        assert!(super::append_font_code(&mut bytes, &simple, 0x141).is_err());
+        assert_eq!(bytes, [0x41]);
+        bytes.clear();
+        super::append_font_code(&mut bytes, &composite, 0x141).unwrap();
+        assert_eq!(bytes, [0x01, 0x41]);
+        assert!(super::append_font_code(&mut bytes, &composite, 0x10141).is_err());
+        assert_eq!(bytes, [0x01, 0x41]);
+    }
+
+    #[test]
+    fn reverse_cmap_preserves_scalars_and_does_not_split_ligature_sequences() {
+        let stream = lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"3 beginbfchar\n<0001> <00660069>\n<0002> <0041>\n<0003> <D83DDE00>\nendbfchar\n"
+                .to_vec(),
+        );
+        let reverse = super::cached_reverse_cmap((999, 0), &stream);
+        assert!(!reverse.contains_key(&'f'));
+        assert!(!reverse.contains_key(&'i'));
+        assert_eq!(reverse.get(&'A'), Some(&2));
+        assert_eq!(reverse.get(&'😀'), Some(&3));
+    }
+
     use super::*;
     use lopdf::dictionary;
 

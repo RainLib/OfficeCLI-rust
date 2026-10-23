@@ -1,0 +1,214 @@
+{
+  "passed": true,
+  "documentId": "atomic-word-workbench",
+  "revision": 5,
+  "text": [
+    {
+      "chunkId": "c_02ac4369624b156bbcf11b535e930122",
+      "nodeHash": "5bc43b3df1c3531c211e1ae81241d66cd841ae347763b3114b53953c967f40ea",
+      "nodeId": "n_d1ffac708291509f90d4f787a6bef8a6",
+      "source": {
+        "editable": true,
+        "nodeKind": "text",
+        "part": "word/document.xml",
+        "textOrdinal": 1
+      },
+      "text": "联合保存正文 中文😀"
+    },
+    {
+      "chunkId": "c_02ac4369624b156bbcf11b535e930122",
+      "nodeHash": "79282307a2fd4a47dd7f24723f56f519e8bcd5bce5c0cd21616e7844bf2989ad",
+      "nodeId": "n_350d470be4861de9f1bfaac5e1601dae",
+      "source": {
+        "editable": true,
+        "nodeKind": "text",
+        "part": "word/document.xml",
+        "textOrdinal": 2
+      },
+      "text": "图片尺寸验证期间的正文"
+    }
+  ],
+  "images": [
+    {
+      "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "chunkId": "c_02ac4369624b156bbcf11b535e930122",
+      "geometry": {
+        "height": 635000,
+        "unit": "emu",
+        "width": 1524000,
+        "x": 177800,
+        "y": 254000
+      },
+      "nodeId": "n_5651aacffe96b1df0047fc6dcd9d8415",
+      "source": {
+        "editable": true,
+        "nodeKind": "image",
+        "paragraphId": "/drawing[1]",
+        "part": "word/document.xml",
+        "textId": "word/media/image.png",
+        "textOrdinal": 1
+      },
+      "visualHash": "f242545e1becb0ef8500c4fc5d48bfa3b3e9f68c22508fba2fe871d7361c36be"
+    }
+  ],
+  "imageHistory": {
+    "2": {
+      "height": 635000,
+      "unit": "emu",
+      "width": 1397000,
+      "x": 152400,
+      "y": 254000
+    },
+    "3": {
+      "height": 635000,
+      "unit": "emu",
+      "width": 1524000,
+      "x": 152400,
+      "y": 254000
+    },
+    "4": {
+      "height": 635000,
+      "unit": "emu",
+      "width": 1524000,
+      "x": 165100,
+      "y": 254000
+    },
+    "5": {
+      "height": 635000,
+      "unit": "emu",
+      "width": 1524000,
+      "x": 177800,
+      "y": 254000
+    }
+  },
+  "revisions": [
+    {
+      "revision": 1,
+      "parentRevision": 0,
+      "patchPrefix": "editor-projection",
+      "authorName": null,
+      "dirtyNodeIds": []
+    },
+    {
+      "revision": 2,
+      "parentRevision": 1,
+      "patchPrefix": "hcdsave3",
+      "authorName": "联合保存writer, 联合保存peer",
+      "dirtyNodeIds": [
+        "n_5651aacffe96b1df0047fc6dcd9d8415",
+        "n_d1ffac708291509f90d4f787a6bef8a6"
+      ]
+    },
+    {
+      "revision": 3,
+      "parentRevision": 2,
+      "patchPrefix": "hcdsave3",
+      "authorName": "联合保存writer",
+      "dirtyNodeIds": [
+        "n_350d470be4861de9f1bfaac5e1601dae",
+        "n_5651aacffe96b1df0047fc6dcd9d8415"
+      ]
+    },
+    {
+      "revision": 4,
+      "parentRevision": 3,
+      "patchPrefix": "hcdsave3",
+      "authorName": "联合保存writer",
+      "dirtyNodeIds": [
+        "n_5651aacffe96b1df0047fc6dcd9d8415"
+      ]
+    },
+    {
+      "revision": 5,
+      "parentRevision": 4,
+      "patchPrefix": "hcdsave3",
+      "authorName": "联合保存writer",
+      "dirtyNodeIds": [
+        "n_5651aacffe96b1df0047fc6dcd9d8415"
+      ]
+    }
+  ],
+  "semanticExport": {
+    "dropped": [],
+    "flattened": [
+      "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+      "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+    ],
+    "level": "SEMANTIC",
+    "preserved": [
+      "canonical HCD revision 5 text in chunk sequence order",
+      "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+      "in-process Rust output generation and target structure validation",
+      "1 of 1 content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
+    ],
+    "schemaVersion": "hcd/2",
+    "warnings": [
+      {
+        "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+        "message": "revision 5 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+      },
+      {
+        "code": "RUST_HTML_SEMANTIC_WARNING",
+        "message": "CSS layout is not reproduced; output uses semantic document defaults"
+      },
+      {
+        "code": "RUST_HTML_SEMANTIC_WARNING",
+        "message": "ignored unsafe or non-semantic <script> content"
+      },
+      {
+        "code": "RUST_HTML_SEMANTIC_WARNING",
+        "message": "ignored unsafe or non-semantic <style> content"
+      },
+      {
+        "code": "RUST_HTML_SEMANTIC_WARNING",
+        "message": "inline CSS layout may change in semantic exports"
+      },
+      {
+        "code": "RUST_HTML_SEMANTIC_WARNING",
+        "message": "inline images were reflowed as standalone semantic blocks"
+      }
+    ]
+  },
+  "semanticImageExtents": [
+    {
+      "cx": "1524000",
+      "cy": "635000"
+    }
+  ],
+  "browserChecks": [
+    "body and two users image fields in r2",
+    "invalid width blocks body and geometry at r2",
+    "fix commits both as r3",
+    "reader cannot discard shared drafts",
+    "both writers reopen r3",
+    "ordinary sidecar restart reconnects",
+    "late offline value 14 compared with committed 13 at r4",
+    "explicit choice resolves to 14 at r5",
+    "scrollable image property sidebar"
+  ],
+  "unitOnlyChecks": [
+    "lost post-commit response restart",
+    "three simultaneous writers retain all alternatives",
+    "causal newer input and reversion during capture",
+    "offline disjoint field rebase"
+  ],
+  "limitations": [
+    "DOCX semantic export checks text and image dimensions, not floating x/y fidelity",
+    "native DOCX image rewrite unsupported",
+    "image replacement still uses separate transaction"
+  ],
+  "signedDraftState": {
+    "version": 3,
+    "revision": 5,
+    "epoch": 0,
+    "imageIntents": 0,
+    "pendingAttempt": false
+  },
+  "migration": {
+    "from": 2,
+    "to": 3,
+    "revision": 4,
+    "epoch": 0,
+    "rootHashUnchanged": true
+  }
+}

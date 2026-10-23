@@ -9,6 +9,7 @@ hcd-docx = { path = "../hcd-docx" }
 oxml = { path = "../oxml" }
 pdf-handler = { path = "../pdf-handler" }
 hayro = { workspace = true }
+lopdf = { workspace = true }
 handler-common = { path = "../handler-common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,9 +17,8 @@ quick-xml = { workspace = true }
 tempfile = { workspace = true }
 time = { workspace = true }
 pulldown-cmark = { version = "0.13.4", default-features = false }
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 
 [dev-dependencies]
 zip = { workspace = true }
-lopdf = { workspace = true }
 flate2 = "1"

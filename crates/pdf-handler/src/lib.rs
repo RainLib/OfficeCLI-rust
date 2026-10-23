@@ -1,7 +1,9 @@
 pub mod content_stream;
 pub mod font_embedder;
+pub mod fonts;
 pub mod handler;
 pub mod html_preview;
+pub mod image_edit;
 pub mod modifier;
 pub mod navigation;
 pub mod reader;

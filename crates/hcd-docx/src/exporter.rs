@@ -15,6 +15,28 @@ pub struct ExportOptions {
     pub fidelity_report: Option<PathBuf>,
 }
 
+/// Checks whether this revision's edits need semantic rebuilding. This is an
+/// eligibility check; export still verifies the immutable source and package.
+pub fn requires_semantic_rebuild(bundle: &Bundle, revision: u64) -> Result<bool, HcdError> {
+    let head = bundle.manifest()?;
+    if revision > head.revision || revision > MAX_REVISION {
+        return Err(HcdError::RevisionConflict(
+            "export revision is ahead of head".into(),
+        ));
+    }
+    let check = || {
+        let manifest = manifest_at_revision(bundle, &head, revision)?;
+        let (_, nodes) = dirty_state_through(bundle, revision)?;
+        reject_image_source_export(bundle, &manifest, &nodes)?;
+        reject_presentation_style_source_export(bundle, &manifest, &nodes)
+    };
+    match check() {
+        Ok(()) => Ok(false),
+        Err(HcdError::Unsupported(_)) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn export_docx(
     bundle_path: impl AsRef<Path>,
     source: impl AsRef<Path>,
@@ -49,8 +71,10 @@ pub fn export_docx(
     let revision_manifest = manifest_at_revision(&bundle, &head, revision)?;
     let (dirty_parts, dirty_node_ids) = dirty_state_through(&bundle, revision)?;
     reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
+    reject_presentation_style_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
     let text_by_part =
         collect_text_by_part(&bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
+    let sizes_by_part = collect_sizes_by_part(&bundle, &revision_manifest, &dirty_node_ids)?;
 
     let temp_dir = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
@@ -66,8 +90,17 @@ pub fn export_docx(
             let output = std::fs::File::create(&replacement_path)?;
             archive
                 .with_part(part, |reader| {
-                    rewrite_text_part(reader, BufWriter::new(output), replacements)
-                        .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    let result = if let Some(sizes) = sizes_by_part.get(part) {
+                        crate::source_runs::rewrite_formatted_part(
+                            reader,
+                            BufWriter::new(output),
+                            replacements,
+                            sizes,
+                        )
+                    } else {
+                        rewrite_text_part(reader, BufWriter::new(output), replacements)
+                    };
+                    result.map_err(|error| PackageError::ReadPartError(error.to_string()))
                 })
                 .map_err(package_error)?;
             replacement_paths.insert(part.clone(), replacement_path);
@@ -108,6 +141,9 @@ fn reject_image_source_export(
     manifest: &HcdManifest,
     dirty_node_ids: &HashSet<String>,
 ) -> Result<(), HcdError> {
+    if dirty_node_ids.is_empty() {
+        return Ok(());
+    }
     for page_number in 0..manifest.index_page_count {
         let page = bundle.read_index_page(manifest, page_number)?;
         for descriptor in page.chunks {
@@ -119,6 +155,37 @@ fn reject_image_source_export(
                     "revision changes image node {}; source-backed DOCX image rewrite is not implemented and export was stopped before writing output; omit --source to use the pure-Rust semantic rebuild",
                     entry.node_id
                 )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_presentation_style_source_export(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_nodes: &HashSet<String>,
+) -> Result<(), HcdError> {
+    if dirty_nodes.is_empty() {
+        return Ok(());
+    }
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in page.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            if !source_map
+                .entries
+                .iter()
+                .any(|entry| dirty_nodes.contains(&entry.node_id))
+            {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            if html.contains("data-hcd-style-patched=\"true\"") {
+                return Err(HcdError::Unsupported(
+                    "this revision contains node.style presentation changes; source-backed DOCX export cannot preserve those changes and was stopped before writing output"
+                        .to_string(),
+                ));
             }
         }
     }
@@ -138,9 +205,16 @@ fn manifest_at_revision(
     manifest.revision = revision;
     manifest.root_hash = record.root_hash;
     manifest.annotation_root_hash = record.annotation_root_hash;
-    manifest.annotation_href = (manifest.annotation_root_hash != hcd_core::hash_bytes(b"[]"))
-        .then(|| format!("annotations/sha256/{}.json", manifest.annotation_root_hash));
+    manifest.annotation_href =
+        (manifest.annotation_root_hash != hcd_core::hash_bytes(b"[]")).then(|| {
+            format!(
+                "annotations/sha256/{}.json{}",
+                manifest.annotation_root_hash,
+                manifest.storage_codec.suffix()
+            )
+        });
     manifest.index_prefix = record.index_prefix;
+    manifest.index_root_href = record.index_root_href;
     Ok(manifest)
 }
 
@@ -152,6 +226,12 @@ fn dirty_state_through(
     let mut dirty_nodes = HashSet::new();
     for current in 1..=revision {
         let record = bundle.revision(current)?;
+        if record.structural_change {
+            return Err(HcdError::Unsupported(
+                "structural HCD revision requires source-free semantic DOCX rebuild; omit --source"
+                    .to_string(),
+            ));
+        }
         dirty_parts.extend(record.dirty_source_parts);
         dirty_nodes.extend(record.dirty_node_ids);
     }
@@ -232,6 +312,46 @@ fn collect_text_by_part(
             return Err(HcdError::InvalidBundle(format!(
                 "dirty source part {part} has no HCD text map"
             )));
+        }
+    }
+    Ok(output)
+}
+
+fn collect_sizes_by_part(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_nodes: &HashSet<String>,
+) -> Result<HashMap<String, BTreeMap<u64, Vec<hcd_core::FontSizeRun>>>, HcdError> {
+    let mut output: HashMap<String, BTreeMap<u64, Vec<hcd_core::FontSizeRun>>> = HashMap::new();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let map = bundle.read_map_verified(&descriptor)?;
+            if !map
+                .entries
+                .iter()
+                .any(|entry| dirty_nodes.contains(&entry.node_id))
+            {
+                continue;
+            }
+            let html = bundle.read_chunk_verified(&descriptor)?;
+            let sizes = hcd_core::extract_text_run_sizes(&html)?;
+            for entry in map
+                .entries
+                .iter()
+                .filter(|entry| dirty_nodes.contains(&entry.node_id))
+            {
+                if let Some(runs) = sizes.get(&entry.node_id) {
+                    let previous = output
+                        .entry(entry.source.part.clone())
+                        .or_default()
+                        .insert(entry.source.text_ordinal, runs.clone());
+                    if previous.as_ref().is_some_and(|previous| previous != runs) {
+                        return Err(HcdError::InvalidBundle(
+                            "source ordinal maps to conflicting font sizes".into(),
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(output)

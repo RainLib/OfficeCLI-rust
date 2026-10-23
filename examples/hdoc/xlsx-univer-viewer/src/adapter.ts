@@ -170,6 +170,18 @@ export class HcdUniverAdapter {
     this.evictOutsideWindow(sheetId, keep);
   }
 
+  applyRemoteText(nodeId: string, text: string, nodeHash: string, revision: number): boolean {
+    this.client.manifest.revision = Math.max(this.client.manifest.revision, revision);
+    const link = this.linksByNode.get(nodeId);
+    if (!link || [...this.pending.values()].some(({ links }) => links.includes(link))) return false;
+    this.withApplying(() => {
+      this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column).setValue(text);
+    });
+    link.text = text;
+    link.nodeHash = nodeHash;
+    return true;
+  }
+
   acknowledgePatch(patchId: string, revision: number, nodeHashes: Record<string, string>): void {
     const pending = this.pending.get(patchId);
     if (!pending) return;

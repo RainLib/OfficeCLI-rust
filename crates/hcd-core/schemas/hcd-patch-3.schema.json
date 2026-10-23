@@ -33,7 +33,8 @@
           { "$ref": "#/$defs/imageReplace" },
           { "$ref": "#/$defs/imageGeometry" },
           { "$ref": "#/$defs/annotationUpsert" },
-          { "$ref": "#/$defs/annotationRemove" }
+          { "$ref": "#/$defs/annotationRemove" },
+          { "$ref": "#/$defs/imageRestoreSource" }
         ]
       }
     }
@@ -106,6 +107,26 @@
         "nodeId": { "$ref": "#/$defs/nodeId" },
         "assetHash": { "$ref": "#/$defs/sha256" },
         "precondition": { "$ref": "#/$defs/visualPrecondition" }
+      }
+    },
+    "imageRestoreSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "image.restoreSource"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "precondition": {
+          "$ref": "#/$defs/visualPrecondition"
+        }
       }
     },
     "geometry": {

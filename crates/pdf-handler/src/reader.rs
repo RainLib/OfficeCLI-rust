@@ -792,6 +792,12 @@ impl PdfReader {
     pub fn page_count(&self) -> usize {
         self.page_count
     }
+    /// Transfer the already parsed object graph to a format-specific writer.
+    /// This avoids loading a second complete copy for candidate reconstruction.
+    pub fn into_document(self) -> LopdfDocument {
+        self.doc
+    }
+
     pub fn document(&self) -> &LopdfDocument {
         &self.doc
     }
@@ -940,7 +946,7 @@ pub(crate) fn text_block_separator(
     }
 }
 
-fn page_content_bounded(
+pub(crate) fn page_content_bounded(
     doc: &LopdfDocument,
     page_id: ObjectId,
     maximum: usize,

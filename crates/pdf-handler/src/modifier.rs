@@ -151,6 +151,108 @@ pub fn replace_text_at_path(
     Ok(())
 }
 
+/// Rewrite several `/page[n]/text[m]` blocks, then save a new PDF.
+/// Each page is parsed once. Replacements on the same content line are applied
+/// from right to left so earlier token indexes stay valid.
+pub fn rewrite_pdf_text_blocks(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    edits: &[(usize, usize, String)],
+) -> Result<(), HandlerError> {
+    let mut document = LopdfDocument::load(source).map_err(|error| {
+        HandlerError::OperationFailed(format!(
+            "failed to open PDF for page recomposition: {error}"
+        ))
+    })?;
+    let mut by_page: std::collections::BTreeMap<usize, Vec<(usize, String)>> =
+        std::collections::BTreeMap::new();
+    for (page, text_index, text) in edits {
+        by_page
+            .entry(*page)
+            .or_default()
+            .push((*text_index, text.clone()));
+    }
+    for (page, replacements) in by_page {
+        replace_page_text_blocks(&mut document, page, &replacements)?;
+    }
+    document.save(destination).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to save recomposed PDF: {error}"))
+    })?;
+    Ok(())
+}
+
+fn replace_page_text_blocks(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    replacements: &[(usize, String)],
+) -> Result<(), HandlerError> {
+    let pages = doc.get_pages();
+    let page_id = *pages
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
+    let content = doc.get_page_content(page_id).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to get page content: {error}"))
+    })?;
+    let parsed = parse_page_content_stream(&content, page_id, doc).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to parse content stream: {error}"))
+    })?;
+    let mut lines = parsed.lines.clone();
+    let mut by_line: std::collections::BTreeMap<usize, Vec<(usize, Vec<String>)>> =
+        std::collections::BTreeMap::new();
+    for (text_index, text) in replacements {
+        let block = parsed
+            .text_blocks
+            .iter()
+            .find(|block| block.index == *text_index)
+            .ok_or_else(|| {
+                HandlerError::PathNotFound(format!(
+                    "text[{text_index}] not found on page {page_num}"
+                ))
+            })?;
+        let orig_font = block.style.font_name.clone();
+        let orig_size = block
+            .style
+            .raw_font_size
+            .or(block.style.font_size)
+            .unwrap_or(1.0);
+        let mut missing = Vec::new();
+        let segments = pick_fonts_for_text(doc, page_id, orig_font.as_deref(), text, &mut missing)?;
+        if !missing.is_empty() {
+            return Err(HandlerError::OperationFailed(format!(
+                "characters not encodable in any page font: {}",
+                missing.iter().collect::<String>()
+            )));
+        }
+        by_line.entry(block.text_line_index).or_default().push((
+            block.line_token_index,
+            build_segment_tokens(&segments, orig_font.as_deref(), orig_size),
+        ));
+    }
+    for (line_index, mut edits) in by_line {
+        edits.sort_by(|left, right| right.0.cmp(&left.0));
+        let mut line_tokens = crate::content_stream::tokenize_pdf_line(&lines[line_index]);
+        for (op_idx, new_tokens) in edits {
+            if op_idx < line_tokens.len() {
+                let consume_extra = matches!(
+                    line_tokens.get(op_idx + 1).map(String::as_str),
+                    Some("Tj") | Some("TJ")
+                );
+                let end = if consume_extra {
+                    op_idx + 2
+                } else {
+                    op_idx + 1
+                };
+                line_tokens.splice(op_idx..end, new_tokens);
+            } else {
+                line_tokens = new_tokens;
+            }
+        }
+        lines[line_index] = line_tokens.join(" ");
+    }
+    write_content_to_page(doc, page_id, lines.join("\n").as_bytes())?;
+    Ok(())
+}
+
 /// Replace text at a specific path with style modifications.
 /// After changing the target block's style, restores the original style for subsequent blocks
 /// in the same BT section so they don't inherit the changed style.

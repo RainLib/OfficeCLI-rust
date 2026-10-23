@@ -1,0 +1,156 @@
+[
+  {
+    "format": "pptx",
+    "documentId": "history-pptx",
+    "uploadOnlyTrackingVerified": true,
+    "mergedRevision": 10,
+    "choiceRevision": 12,
+    "expectedText": "字段合并 中文😀",
+    "merged": {
+      "geometry": {
+        "height": 1143000,
+        "unit": "emu",
+        "width": 1905000,
+        "x": 127000,
+        "y": 1270000
+      },
+      "assetHash": "64abf93fb4c16b4258aa6eff5660a6b97b013a1b9c0cc877fcceb14c6764680f",
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "choice": {
+      "geometry": {
+        "height": 1270000,
+        "unit": "emu",
+        "width": 2222500,
+        "x": 254000,
+        "y": 1397000
+      },
+      "assetHash": "fce481932ea5d07a91c7991c09fdadb4bf78f9b4cc8f927188384231f9d12679",
+      "rgb": [
+        0,
+        0,
+        255
+      ]
+    },
+    "conflicts": [
+      "width",
+      "assetHash"
+    ],
+    "remoteChoiceRetainsLocalX": true,
+    "independentFileVerification": true,
+    "exportVerifiedFields": [
+      "text",
+      "activeImage",
+      "width",
+      "height",
+      "x",
+      "y"
+    ]
+  },
+  {
+    "format": "pdf",
+    "documentId": "history-pdf",
+    "uploadOnlyTrackingVerified": true,
+    "mergedRevision": 10,
+    "choiceRevision": 12,
+    "expectedText": "Field merge",
+    "merged": {
+      "geometry": {
+        "height": 54,
+        "unit": "pt",
+        "width": 60,
+        "x": 50,
+        "y": 100
+      },
+      "assetHash": "64abf93fb4c16b4258aa6eff5660a6b97b013a1b9c0cc877fcceb14c6764680f",
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "choice": {
+      "geometry": {
+        "height": 60,
+        "unit": "pt",
+        "width": 70,
+        "x": 54,
+        "y": 104
+      },
+      "assetHash": "fce481932ea5d07a91c7991c09fdadb4bf78f9b4cc8f927188384231f9d12679",
+      "rgb": [
+        0,
+        0,
+        255
+      ]
+    },
+    "conflicts": [
+      "width",
+      "assetHash"
+    ],
+    "remoteChoiceRetainsLocalX": true,
+    "independentFileVerification": true,
+    "exportVerifiedFields": [
+      "text",
+      "activeImage",
+      "width",
+      "height",
+      "x",
+      "y"
+    ]
+  },
+  {
+    "format": "docx",
+    "documentId": "history-docx",
+    "uploadOnlyTrackingVerified": true,
+    "mergedRevision": 10,
+    "choiceRevision": 12,
+    "expectedText": "字段合并 中文😀",
+    "merged": {
+      "geometry": {
+        "height": 1143000,
+        "unit": "emu",
+        "width": 1905000,
+        "x": 0,
+        "y": 0
+      },
+      "assetHash": "64abf93fb4c16b4258aa6eff5660a6b97b013a1b9c0cc877fcceb14c6764680f",
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "choice": {
+      "geometry": {
+        "height": 1270000,
+        "unit": "emu",
+        "width": 2222500,
+        "x": 127000,
+        "y": 127000
+      },
+      "assetHash": "fce481932ea5d07a91c7991c09fdadb4bf78f9b4cc8f927188384231f9d12679",
+      "rgb": [
+        0,
+        0,
+        255
+      ]
+    },
+    "conflicts": [
+      "width",
+      "assetHash"
+    ],
+    "remoteChoiceRetainsLocalX": true,
+    "independentFileVerification": true,
+    "exportVerifiedFields": [
+      "text",
+      "activeImage",
+      "width",
+      "height"
+    ]
+  }
+]

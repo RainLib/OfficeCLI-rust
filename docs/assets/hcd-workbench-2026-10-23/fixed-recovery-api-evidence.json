@@ -1,0 +1,35 @@
+{
+  "scope": "isolated real HTTP and actual DOCX/PPTX/PDF files",
+  "cases": [
+    {
+      "format": "docx",
+      "atomicRevision": 1,
+      "laterHead": 2,
+      "immutableResourceReceipt": true,
+      "readOnlyReceiptQueryVerified": true,
+      "actualFileExported": true,
+      "officeReferencedMediaBytesAndWidthChecked": true,
+      "pdfNativeTextActiveImageAndTransformChecked": false
+    },
+    {
+      "format": "pptx",
+      "atomicRevision": 1,
+      "laterHead": 2,
+      "immutableResourceReceipt": true,
+      "readOnlyReceiptQueryVerified": true,
+      "actualFileExported": true,
+      "officeReferencedMediaBytesAndWidthChecked": true,
+      "pdfNativeTextActiveImageAndTransformChecked": false
+    },
+    {
+      "format": "pdf",
+      "atomicRevision": 1,
+      "laterHead": 2,
+      "immutableResourceReceipt": true,
+      "readOnlyReceiptQueryVerified": true,
+      "actualFileExported": true,
+      "officeReferencedMediaBytesAndWidthChecked": false,
+      "pdfNativeTextActiveImageAndTransformChecked": true
+    }
+  ]
+}

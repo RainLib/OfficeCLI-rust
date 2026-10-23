@@ -1,0 +1,153 @@
+{
+  "scope": "local browser, HTTP and filesystem",
+  "migration": {
+    "from": 3,
+    "to": 4,
+    "epoch": 0,
+    "initialRevision": 1,
+    "initialRootRetained": true,
+    "pendingBodyRecovered": true,
+    "pendingWidthRecovered": true,
+    "autosavedRevision": 2
+  },
+  "jointCommit": {
+    "revision": 4,
+    "previousRevision": 3,
+    "dirtyNodeCount": 2,
+    "image": {
+      "assetHash": "45e11ae664117af941c3c65866ff105e7bea47f693b5ccf1e0f56588f0a0d1bd",
+      "chunkId": "c_e5f6a15da9b4f913e5f327445e855ab1",
+      "geometry": {
+        "height": 698500,
+        "unit": "emu",
+        "width": 1397000,
+        "x": 127000,
+        "y": 254000
+      },
+      "nodeId": "n_c2e6d394abf2fe2dd93e109b5825bcaa",
+      "source": {
+        "editable": true,
+        "nodeKind": "image",
+        "paragraphId": "/drawing[1]",
+        "part": "word/document.xml",
+        "textId": "word/media/image.png",
+        "textOrdinal": 1
+      },
+      "visualHash": "0353d609f8a1531175d8640dcfb04105288061d38e7f463622f4636bc3ef79eb"
+    },
+    "previousImage": {
+      "assetHash": "727857858f48983d21e5b895ec1345232204f5f75f4cb8c8780ba2eb5107a785",
+      "geometry": {
+        "height": 635000,
+        "unit": "emu",
+        "width": 1397000,
+        "x": 127000,
+        "y": 254000
+      },
+      "nodeId": "n_c2e6d394abf2fe2dd93e109b5825bcaa",
+      "source": {
+        "editable": true,
+        "nodeKind": "image",
+        "paragraphId": "/drawing[1]",
+        "part": "word/document.xml",
+        "textId": "word/media/image.png",
+        "textOrdinal": 1
+      },
+      "visualHash": "c6ffcb1117d784516a705f187e4f0c852aa245240fb6d87625eed45de5ddfabc"
+    },
+    "body": [
+      "联合换图正文 中文😀",
+      "",
+      "Neighbor"
+    ],
+    "previousBody": [
+      "旧版待保存正文 中文😀",
+      "",
+      "Neighbor"
+    ],
+    "protocol": 4,
+    "pendingIntents": 0
+  },
+  "offlineConflict": {
+    "revision": 4,
+    "canonicalImage": {
+      "assetHash": "45e11ae664117af941c3c65866ff105e7bea47f693b5ccf1e0f56588f0a0d1bd",
+      "chunkId": "c_e5f6a15da9b4f913e5f327445e855ab1",
+      "geometry": {
+        "height": 698500,
+        "unit": "emu",
+        "width": 1397000,
+        "x": 127000,
+        "y": 254000
+      },
+      "nodeId": "n_c2e6d394abf2fe2dd93e109b5825bcaa",
+      "source": {
+        "editable": true,
+        "nodeKind": "image",
+        "paragraphId": "/drawing[1]",
+        "part": "word/document.xml",
+        "textId": "word/media/image.png",
+        "textOrdinal": 1
+      },
+      "visualHash": "0353d609f8a1531175d8640dcfb04105288061d38e7f463622f4636bc3ef79eb"
+    },
+    "pendingAssets": [
+      "580b24b6cc890d587c624b58e711beef161b2317073bbc73e4154b85747bf1b9",
+      "727857858f48983d21e5b895ec1345232204f5f75f4cb8c8780ba2eb5107a785"
+    ],
+    "bothPersisted": true,
+    "explicitChoiceRequired": true
+  },
+  "export": {
+    "revision": 5,
+    "source": "actual browser download",
+    "imageReferencedViaRelationship": true,
+    "assetHash": "580b24b6cc890d587c624b58e711beef161b2317073bbc73e4154b85747bf1b9",
+    "geometryPt": {
+      "width": 110,
+      "height": 55
+    },
+    "bodyPreserved": true,
+    "mode": "semantic, original floating layout not verified"
+  },
+  "resolution": {
+    "revision": 5,
+    "explicitSelection": "green candidate 1 in peer window",
+    "image": {
+      "assetHash": "580b24b6cc890d587c624b58e711beef161b2317073bbc73e4154b85747bf1b9",
+      "chunkId": "c_e5f6a15da9b4f913e5f327445e855ab1",
+      "geometry": {
+        "height": 698500,
+        "unit": "emu",
+        "width": 1397000,
+        "x": 127000,
+        "y": 254000
+      },
+      "nodeId": "n_c2e6d394abf2fe2dd93e109b5825bcaa",
+      "source": {
+        "editable": true,
+        "nodeKind": "image",
+        "paragraphId": "/drawing[1]",
+        "part": "word/document.xml",
+        "textId": "word/media/image.png",
+        "textOrdinal": 1
+      },
+      "visualHash": "7438cb63c06b154cfe1ab5f8b7b7bcd83d6b31b39703779c2ebcb62983e7f344"
+    },
+    "bodyRetained": true,
+    "readOnlyAdoptionAndDiscardDisabled": true,
+    "reopenedRevision": 5,
+    "pendingIntents": 0,
+    "pendingAttempt": false,
+    "receiptVersion": 4,
+    "receiptSignatureVerified": true,
+    "epoch": 0,
+    "author": "writer, peer"
+  },
+  "stagedGCRegression": {
+    "beforeFix": "unindexed staged payload deleted; authenticated preview returned 500",
+    "afterFix": "eight isolated HTTP/CLI cases stage, GC, read preview, commit and export successfully",
+    "currentRuntimeUpdated": true,
+    "canonicalRevisionAfterRuntimeUpdate": 5
+  }
+}

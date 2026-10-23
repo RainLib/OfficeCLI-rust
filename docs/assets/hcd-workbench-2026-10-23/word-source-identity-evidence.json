@@ -1,0 +1,239 @@
+{
+  "passed": true,
+  "revision": 4,
+  "sourceNodes": [
+    {
+      "chunkId": "c_e2382d624daad8df4fd65615d8f0d273",
+      "documentId": "source-size-workbench",
+      "fontSizeRuns": [
+        {
+          "chars": 1
+        },
+        {
+          "chars": 3,
+          "sizePt": 32
+        },
+        {
+          "chars": 2
+        }
+      ],
+      "formatHash": "2a0100797f6d2074b2f0a22c64ef38043c5a9372b2949fb9d54bcd122b4446aa",
+      "nodeHash": "c6c663bc51d0c10d201ca96c137fd3e851a26c0ac81687511663a7dbcd38624b",
+      "nodeId": "n_e4013ac9e693be49f12b0fd2364bc37b",
+      "revision": 4,
+      "source": {
+        "editable": true,
+        "nodeKind": "text",
+        "paragraphId": "A001",
+        "part": "word/document.xml",
+        "textId": "B001",
+        "textOrdinal": 2
+      },
+      "text": "A中文😀 B"
+    },
+    {
+      "chunkId": "c_e2382d624daad8df4fd65615d8f0d273",
+      "documentId": "source-size-workbench",
+      "fontSizeRuns": [
+        {
+          "chars": 12,
+          "sizePt": 18
+        }
+      ],
+      "formatHash": "0609ef3a43935e10de0459e393bc2d543b37a642cbdf3b5afde03e69ba79c40d",
+      "nodeHash": "00e712a8fc73dd97d1bba4a66c5b60238b8f9ede9b1fd68efc46560a211c01d4",
+      "nodeId": "n_fbd73ca3cc8b86fed4903fb526d71169",
+      "revision": 4,
+      "source": {
+        "editable": true,
+        "nodeKind": "text",
+        "paragraphId": "A001",
+        "part": "word/document.xml",
+        "textId": "B001",
+        "textOrdinal": 3
+      },
+      "text": "after edited"
+    }
+  ],
+  "unchangedParts": [
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "word/_rels/document.xml.rels",
+    "word/styles.xml"
+  ],
+  "nativeReport": {
+    "dropped": [
+      "HCD recognition annotations are not exported to DOCX"
+    ],
+    "flattened": [],
+    "level": "HIGH",
+    "preserved": [
+      "unmodified OOXML entries copied as raw compressed payloads",
+      "paragraph and run formatting",
+      "relationships, media, numbering, headers and footers"
+    ],
+    "schemaVersion": "hcd/2",
+    "warnings": [
+      {
+        "code": "OPAQUE_OFFICE_OBJECTS_PRESERVED",
+        "message": "Fields, macros, OLE and unsupported DrawingML remain in the immutable source and are not editable in HCD v1",
+        "sourcePart": "word/document.xml"
+      }
+    ]
+  },
+  "runs": [
+    {
+      "text": "A",
+      "props": {
+        "rStyle": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "AuditRun"
+        },
+        "rFonts": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii": "Arial",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "Noto Sans CJK SC"
+        },
+        "b": {},
+        "sz": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "28"
+        },
+        "szCs": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "32"
+        },
+        "spacing": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "20"
+        },
+        "lang": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "en-US",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "zh-CN"
+        }
+      }
+    },
+    {
+      "text": "中文😀",
+      "props": {
+        "rStyle": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "AuditRun"
+        },
+        "rFonts": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii": "Arial",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "Noto Sans CJK SC"
+        },
+        "b": {},
+        "spacing": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "20"
+        },
+        "sz": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "64"
+        },
+        "szCs": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "64"
+        },
+        "lang": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "en-US",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "zh-CN"
+        }
+      }
+    },
+    {
+      "text": " B",
+      "props": {
+        "rStyle": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "AuditRun"
+        },
+        "rFonts": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii": "Arial",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "Noto Sans CJK SC"
+        },
+        "b": {},
+        "sz": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "28"
+        },
+        "szCs": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "32"
+        },
+        "spacing": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "20"
+        },
+        "lang": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "en-US",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "zh-CN"
+        }
+      }
+    },
+    {
+      "text": "after edited",
+      "props": {
+        "rStyle": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "AuditRun"
+        },
+        "rFonts": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii": "Arial",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "Noto Sans CJK SC"
+        },
+        "b": {},
+        "spacing": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "20"
+        },
+        "sz": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "36"
+        },
+        "szCs": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "36"
+        },
+        "lang": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "en-US",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "zh-CN"
+        }
+      }
+    },
+    {
+      "text": "",
+      "props": {
+        "rStyle": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "AuditRun"
+        },
+        "rFonts": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii": "Arial",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "Noto Sans CJK SC"
+        },
+        "b": {},
+        "sz": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "28"
+        },
+        "szCs": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "32"
+        },
+        "spacing": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "20"
+        },
+        "lang": {
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val": "en-US",
+          "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia": "zh-CN"
+        }
+      }
+    }
+  ],
+  "twoBrowserWindows": true,
+  "legacyReceiptMigration": {
+    "from": 1,
+    "to": 2,
+    "originalRevision": 2,
+    "epochUnchanged": true
+  },
+  "signedReceipts": [
+    {
+      "file": "source-size-before-identity.bin",
+      "version": 1,
+      "revision": 2,
+      "epoch": 0,
+      "sourceIdentity": null
+    },
+    {
+      "file": "collaboration/source-size-workbench.epoch-0.bin",
+      "version": 2,
+      "revision": 4,
+      "epoch": 0,
+      "sourceIdentity": 1
+    }
+  ]
+}

@@ -93,6 +93,113 @@ impl WordHandler {
         Ok(())
     }
 
+    /// Append typed text blocks in one DOM pass, including native hyperlinks.
+    /// Validation/building happens before mutating the package.
+    pub fn append_rich_blocks(&self, blocks: &[crate::RichBlock]) -> Result<(), HandlerError> {
+        if !self.editable {
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".into(),
+            ));
+        }
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        let mut dom = self.parse_dom()?;
+        let existing = self
+            .package
+            .borrow()
+            .part_rels(DOCUMENT_PART)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let mut used: HashSet<String> = existing.all().keys().cloned().collect();
+        let mut targets = HashMap::new();
+        for relationship in existing.all().values() {
+            if relationship.type_uri.ends_with("/hyperlink")
+                && relationship.target_mode.eq_ignore_ascii_case("external")
+            {
+                targets.insert(relationship.target.clone(), relationship.id.clone());
+            }
+        }
+        let mut next = 1u64;
+        let mut additions = Vec::new();
+        let nodes = crate::rich_text::build_blocks(blocks, &mut |target| {
+            handler_common::hyperlink_validator::require_safe_scheme(target, "hyperlink")
+                .map_err(HandlerError::InvalidArgument)?;
+            if let Some(id) = targets.get(target) {
+                return Ok(id.clone());
+            }
+            loop {
+                let id = format!("rId{next}");
+                next += 1;
+                if used.insert(id.clone()) {
+                    additions.push((id.clone(), target.to_string()));
+                    targets.insert(target.to_string(), id.clone());
+                    return Ok(id);
+                }
+            }
+        })?;
+        let body = dom
+            .body_mut()
+            .ok_or_else(|| HandlerError::OperationFailed("body element not found".into()))?;
+        let position = body
+            .children
+            .iter()
+            .position(|node| node.element_type == WordElementType::SectionProperties)
+            .unwrap_or(body.children.len());
+        body.children.splice(position..position, nodes);
+        if !additions.is_empty() {
+            // Preserve all existing relationship nodes, attributes and namespace prefixes.
+            let mut package = self.package.borrow_mut();
+            let part = "word/_rels/document.xml.rels";
+            let source = if package.has_part(part) {
+                package
+                    .read_part_xml(part)
+                    .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+            } else {
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>".into()
+            };
+            let mut reader = quick_xml::Reader::from_str(&source);
+            reader.config_mut().expand_empty_elements = true;
+            let mut writer = quick_xml::Writer::new(Vec::new());
+            let mut depth = 0usize;
+            loop {
+                let event = reader
+                    .read_event()
+                    .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+                if matches!(&event, quick_xml::events::Event::End(_) if depth == 1) {
+                    for (id, target) in &additions {
+                        let mut relation = quick_xml::events::BytesStart::new("Relationship");
+                        relation.push_attribute((
+                            "xmlns",
+                            "http://schemas.openxmlformats.org/package/2006/relationships",
+                        ));
+                        relation.push_attribute(("Id", id.as_str()));
+                        relation.push_attribute(("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"));
+                        relation.push_attribute(("Target", target.as_str()));
+                        relation.push_attribute(("TargetMode", "External"));
+                        writer
+                            .write_event(quick_xml::events::Event::Empty(relation))
+                            .map_err(HandlerError::IoError)?;
+                    }
+                }
+                match &event {
+                    quick_xml::events::Event::Start(_) => depth += 1,
+                    quick_xml::events::Event::End(_) => depth -= 1,
+                    quick_xml::events::Event::Eof => break,
+                    _ => {}
+                }
+                writer
+                    .write_event(event.into_owned())
+                    .map_err(HandlerError::IoError)?;
+            }
+            let xml = String::from_utf8(writer.into_inner())
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            package
+                .write_part_xml(part, &xml)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        }
+        self.write_dom(&dom)
+    }
+
     pub fn add_batch(
         &self,
         items: &[AddBatchItem],

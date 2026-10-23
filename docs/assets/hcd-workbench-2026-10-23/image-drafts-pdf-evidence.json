@@ -1,0 +1,50 @@
+{
+  "documentId": "geometry-pdf-workbench",
+  "revision": 1,
+  "scope": "local API and native PDF export/reimport",
+  "text": "Atomic PDF save",
+  "imageCount": 2,
+  "images": [
+    {
+      "height": 50.0,
+      "unit": "pt",
+      "width": 80.0,
+      "x": 52.0,
+      "y": 120.0
+    },
+    {
+      "height": 50.0,
+      "unit": "pt",
+      "width": 80.0,
+      "x": 40.0,
+      "y": 200.0
+    }
+  ],
+  "reimportedImages": [
+    {
+      "height": 50.0,
+      "unit": "pt",
+      "width": 80.0,
+      "x": 52.0,
+      "y": 120.0
+    },
+    {
+      "height": 50.0,
+      "unit": "pt",
+      "width": 80.0,
+      "x": 40.0,
+      "y": 200.0
+    }
+  ],
+  "fidelity": "SEMANTIC",
+  "unchangedNeighbors": true,
+  "validation": {
+    "data": {
+      "documentId": "geometry-pdf-workbench",
+      "issues": [],
+      "revision": 1,
+      "valid": true
+    },
+    "success": true
+  }
+}

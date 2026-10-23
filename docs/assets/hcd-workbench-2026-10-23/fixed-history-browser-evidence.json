@@ -1,0 +1,31 @@
+{
+  "evidence": "actual browser and downloaded semantic PPTX",
+  "documentId": "history-pptx-1792729276",
+  "textSavedAt": 9,
+  "textUndoSavedAt": 10,
+  "keyboardUndoRedoSavedAt": 11,
+  "ownWidthSavedAt": 12,
+  "peerHeightSavedAt": 13,
+  "ownWidthUndoSavedAt": 14,
+  "finalWidthPt": 125,
+  "peerHeightPt": 90,
+  "actualActiveMediaVerified": true,
+  "unicodeTextVerified": true,
+  "downloadSha256": "10093a90b793fc3cc450781a8ea1e2fa1742dfd70d428f5fa4cdb82b4cb76076",
+  "limitations": [
+    "Session-local history; reload does not restore undo stacks",
+    "Word full Yjs unified image/text history remains pending"
+  ],
+  "conflictRecovery": {
+    "ownBatchRevision": 15,
+    "peerSameFieldRevision": 16,
+    "undoRejectedWithoutPublishing": true,
+    "explicitSkipDoesNotModifyContent": true,
+    "earlierTextUndoSavedAt": 17,
+    "finalPeerWidthPt": 175,
+    "preservedHeightPt": 90,
+    "actualExportedTextAndGeometryVerified": true,
+    "exportSha256": "dc31465d363704483f91f8912e8e1d3a300f2850c5da045eb912f7cceba95cdf"
+  },
+  "paneRetentionAfterPdfPptSwitchVerified": true
+}

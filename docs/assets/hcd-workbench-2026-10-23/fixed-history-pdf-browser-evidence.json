@@ -1,0 +1,16 @@
+{
+  "documentId": "history-pdf-source-1792730376",
+  "evidence": "actual browser source-only image replacement save and undo, downloaded PDF",
+  "replacementRevision": 1,
+  "sourceRestoreRevision": 2,
+  "activeXObject": "/Im1",
+  "sourceImageRgb": [
+    0,
+    0,
+    255
+  ],
+  "selectableText": "Original",
+  "downloadSha256": "e4abc4ed8a76def6fd76486009c2fc318e2a12d27dec7942c7df28f462bb08e9",
+  "exportUiReportedFidelity": "SEMANTIC",
+  "note": "Independent PDF reader confirms original active XObject, pixels and selectable text; UI fidelity label is separate from source pipeline."
+}

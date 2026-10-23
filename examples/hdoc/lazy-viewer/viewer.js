@@ -8,6 +8,9 @@ const frame = document.querySelector('#viewer');
 const INDEX_PAGE_SIZE = 128;
 const MAX_INDEX_PAGES = 10_000;
 const MAX_RESIDENT_CHUNKS = 64;
+const MAX_CHUNK_BYTES = 2 * 1024 * 1024;
+const MAX_CONTROL_BYTES = 16 * 1024 * 1024;
+const decoder = new TextDecoder('utf-8', { fatal: true });
 
 function normalizedBase(value) {
   const url = new URL(value, window.location.href);
@@ -21,12 +24,62 @@ async function fetchChecked(url, kind) {
   return response;
 }
 
+async function readBounded(response, limit, kind) {
+  if (!response.body) throw new Error(`${kind}: 响应没有 body`);
+  const reader = response.body.getReader();
+  const parts = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > limit) {
+      await reader.cancel();
+      throw new Error(`${kind}: 超过 ${limit} 字节上限`);
+    }
+    parts.push(value);
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.byteLength;
+  }
+  return result;
+}
+
+async function fetchDecoded(url, limit, kind, expectedHash, expectedLength) {
+  const storedLimit = limit + Math.floor(limit / 16) + 64 * 1024;
+  let bytes = await readBounded(await fetchChecked(url, kind), storedLimit, kind);
+  if (url.pathname.endsWith('.gz')) {
+    if (typeof DecompressionStream === 'undefined') throw new Error('浏览器不支持 gzip 解压');
+    if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) throw new Error(`${kind}: gzip 文件头无效`);
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    bytes = await readBounded(new Response(stream), limit, `${kind} 解压内容`);
+  }
+  if (bytes.byteLength > limit) throw new Error(`${kind}: 解压内容过大`);
+  if (expectedLength !== undefined && bytes.byteLength !== expectedLength) {
+    throw new Error(`${kind}: 长度不匹配`);
+  }
+  if (expectedHash && await sha256Bytes(bytes) !== expectedHash) throw new Error(`${kind}: SHA-256 不匹配`);
+  return bytes;
+}
+
+async function sha256Bytes(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function addressedHash(href) {
+  return href.match(/\/sha256\/([0-9a-f]{64})\.json(?:\.gz)?$/)?.[1];
+}
+
 function revisionHref(revision) {
   return `revisions/${String(revision).padStart(20, '0')}.json`;
 }
 
-function indexHref(prefix, page) {
-  return `${prefix}/${String(page).padStart(6, '0')}.json`;
+function indexHref(prefix, page, codec) {
+  return `${prefix}/${String(page).padStart(6, '0')}.json${codec === 'gzip' ? '.gz' : ''}`;
 }
 
 function escapeCss(value) {
@@ -42,8 +95,7 @@ function escapeAttribute(value) {
 }
 
 async function sha256(value) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return sha256Bytes(new TextEncoder().encode(value));
 }
 
 class LazyHcdViewer {
@@ -54,6 +106,8 @@ class LazyHcdViewer {
     this.assets = new Map();
     this.slots = new Map();
     this.loadedIndexPages = new Set();
+    this.loadingIndexPages = new Map();
+    this.indexNodes = new Map();
     this.resident = 0;
     this.generation = crypto.randomUUID();
   }
@@ -62,22 +116,52 @@ class LazyHcdViewer {
     return new URL(href, this.base);
   }
 
+  async readText(href, limit, kind, hash, length) {
+    return decoder.decode(await fetchDecoded(this.resolve(href), limit, kind, hash, length));
+  }
+
+  async readJson(href, kind, hash) {
+    return JSON.parse(await this.readText(href, MAX_CONTROL_BYTES, kind, hash ?? addressedHash(href)));
+  }
+
+  async indexPageHref(page) {
+    if (!this.indexRootHref) return indexHref(this.indexPrefix, page, this.manifest.storageCodec);
+    let href = this.indexRootHref;
+    for (let depth = 0; depth < 12; depth += 1) {
+      let node = this.indexNodes.get(href);
+      if (!node) {
+        node = await this.readJson(href, 'index tree');
+        if (!Number.isSafeInteger(node.firstPage) || !Number.isSafeInteger(node.childSpan)
+          || node.childSpan < 1 || !Array.isArray(node.children) || node.children.length < 1
+          || node.children.length > INDEX_PAGE_SIZE || page < node.firstPage) {
+          throw new Error(`index tree ${href} 无效`);
+        }
+        this.indexNodes.set(href, node);
+      }
+      const child = Math.floor((page - node.firstPage) / node.childSpan);
+      const next = node.children[child];
+      if (!next) throw new Error(`index tree 缺少第 ${page} 页`);
+      if (node.childSpan === 1) return next;
+      href = next;
+    }
+    throw new Error('index tree 深度超过 12');
+  }
+
   async open() {
-    this.manifest = await (await fetchChecked(this.resolve('manifest.json'), 'manifest')).json();
-    if (this.manifest.schemaVersion !== 'hcd/1') throw new Error(`不支持 ${this.manifest.schemaVersion}`);
+    this.manifest = await this.readJson('manifest.json', 'manifest');
+    if (!['hcd/1', 'hcd/2'].includes(this.manifest.schemaVersion)) throw new Error(`不支持 ${this.manifest.schemaVersion}`);
     if (this.manifest.indexPageCount > MAX_INDEX_PAGES) throw new Error('indexPageCount 超过前端安全上限');
     this.revision = this.requestedRevision ?? this.manifest.revision;
     if (this.revision > this.manifest.revision) throw new Error(`revision ${this.revision} 超过 head ${this.manifest.revision}`);
     this.indexPrefix = this.manifest.indexPrefix;
-    let assetIndexHref = 'assets/index.json';
-    const record = await (await fetchChecked(this.resolve(revisionHref(this.revision)), 'revision')).json();
-    assetIndexHref = record.assetIndexHref || assetIndexHref;
-    if (this.revision !== this.manifest.revision) {
-      this.indexPrefix = record.indexPrefix;
-    }
+    const record = await this.readJson(revisionHref(this.revision), 'revision');
+    if (record.revision !== this.revision || record.documentId !== this.manifest.documentId) throw new Error('revision 记录不匹配');
+    const assetIndexHref = record.assetIndexHref || 'assets/index.json';
+    this.indexPrefix = record.indexPrefix;
+    this.indexRootHref = record.indexRootHref;
     const [styles, assets] = await Promise.all([
-      fetchChecked(this.resolve(this.manifest.stylesHref), 'styles').then((response) => response.text()),
-      fetchChecked(this.resolve(assetIndexHref), 'assets').then((response) => response.json()),
+      this.readText(this.manifest.stylesHref, MAX_CONTROL_BYTES, 'styles'),
+      this.readJson(assetIndexHref, 'assets'),
     ]);
     for (const asset of assets) this.assets.set(asset.hash, this.resolve(asset.href).toString());
     this.createDocument(styles);
@@ -108,27 +192,36 @@ class LazyHcdViewer {
 
   async loadIndexPage(pageNumber) {
     if (pageNumber >= this.manifest.indexPageCount || this.loadedIndexPages.has(pageNumber)) return;
-    this.loadedIndexPages.add(pageNumber);
-    const page = await (await fetchChecked(this.resolve(indexHref(this.indexPrefix, pageNumber)), `index page ${pageNumber}`)).json();
-    if (page.revision !== this.revision || page.page !== pageNumber) throw new Error(`index page ${pageNumber} revision 不匹配`);
-    for (const descriptor of page.chunks) {
-      const placeholder = this.doc.createElement('section');
-      placeholder.className = 'hcd-lazy-placeholder';
-      placeholder.dataset.hcdSequence = String(descriptor.sequence);
-      placeholder.dataset.hcdChunkId = descriptor.chunkId;
-      placeholder.setAttribute('aria-label', `HCD chunk ${descriptor.sequence}`);
-      this.doc.body.insertBefore(placeholder, this.tail);
-      this.slots.set(descriptor.sequence, {
-        descriptor,
-        node: placeholder,
-        height: 480,
-        loaded: false,
-        visible: false,
-        touched: 0,
-      });
-      this.observer.observe(placeholder);
-    }
-    this.nextIndexPage = pageNumber + 1;
+    if (this.loadingIndexPages.has(pageNumber)) return this.loadingIndexPages.get(pageNumber);
+    const task = (async () => {
+      const href = await this.indexPageHref(pageNumber);
+      const page = await this.readJson(href, `index page ${pageNumber}`);
+      if (page.revision > this.revision || page.page !== pageNumber || !Array.isArray(page.chunks)
+        || page.chunks.some((descriptor, offset) => descriptor.sequence !== pageNumber * INDEX_PAGE_SIZE + offset)) {
+        throw new Error(`index page ${pageNumber} 无效`);
+      }
+      for (const descriptor of page.chunks) {
+        const placeholder = this.doc.createElement('section');
+        placeholder.className = 'hcd-lazy-placeholder';
+        placeholder.dataset.hcdSequence = String(descriptor.sequence);
+        placeholder.dataset.hcdChunkId = descriptor.chunkId;
+        placeholder.setAttribute('aria-label', `HCD chunk ${descriptor.sequence}`);
+        this.doc.body.insertBefore(placeholder, this.tail);
+        this.slots.set(descriptor.sequence, {
+          descriptor,
+          node: placeholder,
+          height: 480,
+          loaded: false,
+          visible: false,
+          touched: 0,
+        });
+        this.observer.observe(placeholder);
+      }
+      this.loadedIndexPages.add(pageNumber);
+      this.nextIndexPage = pageNumber + 1;
+    })().finally(() => this.loadingIndexPages.delete(pageNumber));
+    this.loadingIndexPages.set(pageNumber, task);
+    return task;
   }
 
   observeSentinel() {
@@ -165,17 +258,12 @@ class LazyHcdViewer {
     const generation = this.generation;
     slot.loading = (async () => {
       const [html, mapText] = await Promise.all([
-        fetchChecked(this.resolve(slot.descriptor.htmlHref), `chunk ${slot.descriptor.sequence}`).then((response) => response.text()),
-        fetchChecked(this.resolve(slot.descriptor.mapHref), `map ${slot.descriptor.sequence}`).then((response) => response.text()),
+        this.readText(slot.descriptor.htmlHref, MAX_CHUNK_BYTES, `chunk ${slot.descriptor.sequence}`,
+          slot.descriptor.htmlHash, slot.descriptor.byteLength),
+        this.readText(slot.descriptor.mapHref, MAX_CONTROL_BYTES, `map ${slot.descriptor.sequence}`,
+          slot.descriptor.mapHash),
       ]);
       if (generation !== this.generation) return;
-      const [actualHash, actualMapHash] = await Promise.all([sha256(html), sha256(mapText)]);
-      if (actualHash !== slot.descriptor.htmlHash) {
-        throw new Error(`chunk ${slot.descriptor.sequence} hash 不匹配`);
-      }
-      if (actualMapHash !== slot.descriptor.mapHash) {
-        throw new Error(`map ${slot.descriptor.sequence} hash 不匹配`);
-      }
       const sourceMap = JSON.parse(mapText);
       if (sourceMap.chunkId !== slot.descriptor.chunkId) {
         throw new Error(`map ${slot.descriptor.sequence} chunkId 不匹配`);

@@ -1,0 +1,487 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:4",
+  "title": "HCD semantic block and mapped image patch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/4"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 16,
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/insert"
+          },
+          {
+            "$ref": "#/$defs/delete"
+          },
+          {
+            "$ref": "#/$defs/move"
+          },
+          {
+            "$ref": "#/$defs/replace"
+          },
+          {
+            "$ref": "#/$defs/imageGeometry"
+          },
+          {
+            "$ref": "#/$defs/imageReplace"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "nodeId": {
+      "type": "string",
+      "pattern": "^n_[0-9a-f]{32}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "precondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blockHash"
+      ],
+      "properties": {
+        "blockHash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "inline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "bold": {
+          "type": "boolean"
+        },
+        "italic": {
+          "type": "boolean"
+        },
+        "link": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^(https?://|mailto:)"
+        },
+        "textColor": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "backgroundColor": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "border": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "color",
+            "widthPt",
+            "style"
+          ],
+          "properties": {
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9A-Fa-f]{6}$"
+            },
+            "widthPt": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 12
+            },
+            "style": {
+              "enum": [
+                "solid",
+                "dashed",
+                "dotted",
+                "double"
+              ]
+            }
+          }
+        },
+        "underline": {
+          "type": "boolean"
+        },
+        "strike": {
+          "type": "boolean"
+        },
+        "code": {
+          "type": "boolean"
+        },
+        "hardBreak": {
+          "type": "boolean"
+        },
+        "typography": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "family": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "sizePt": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "exclusiveMinimum": 0,
+              "maximum": 4096
+            },
+            "latin": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 256
+            },
+            "eastAsia": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 256
+            },
+            "bidi": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 256
+            }
+          }
+        },
+        "fontSizeExplicit": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "inlines"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "paragraph",
+            "heading",
+            "list_item",
+            "code_block",
+            "blockquote",
+            "bullet_list",
+            "ordered_list",
+            "horizontal_rule"
+          ]
+        },
+        "level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6
+        },
+        "inlines": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/inline"
+          }
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/block"
+          }
+        },
+        "language": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_+#.\\-]*$"
+        },
+        "listStart": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      }
+    },
+    "insert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "block",
+        "afterBlockId"
+      ],
+      "properties": {
+        "op": {
+          "const": "block.insert"
+        },
+        "afterBlockId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "block": {
+          "$ref": "#/$defs/block"
+        }
+      }
+    },
+    "delete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "blockId",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "block.delete"
+        },
+        "blockId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "precondition": {
+          "$ref": "#/$defs/precondition"
+        }
+      }
+    },
+    "move": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "blockId",
+        "afterBlockId",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "block.move"
+        },
+        "blockId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "afterBlockId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precondition": {
+          "$ref": "#/$defs/precondition"
+        }
+      }
+    },
+    "replace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "blockId",
+        "block",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "block.replace"
+        },
+        "blockId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "block": {
+          "$ref": "#/$defs/block"
+        },
+        "precondition": {
+          "$ref": "#/$defs/precondition"
+        }
+      }
+    },
+    "imageGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "geometry",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "image.geometry"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "geometry": {
+          "$ref": "#/$defs/geometry"
+        },
+        "precondition": {
+          "$ref": "#/$defs/visualPrecondition"
+        }
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height",
+        "unit"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": -1000000000000,
+          "maximum": 1000000000000
+        },
+        "y": {
+          "type": "number",
+          "minimum": -1000000000000,
+          "maximum": 1000000000000
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000000000
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000000000
+        },
+        "unit": {
+          "enum": [
+            "emu",
+            "pt"
+          ]
+        }
+      }
+    },
+    "visualPrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "visualHash"
+      ],
+      "properties": {
+        "visualHash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "imageReplace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "nodeId",
+        "assetHash",
+        "precondition"
+      ],
+      "properties": {
+        "op": {
+          "const": "image.replace"
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "assetHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "geometry": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/geometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precondition": {
+          "$ref": "#/$defs/visualPrecondition"
+        }
+      }
+    }
+  }
+}

@@ -9,7 +9,10 @@ pub mod para_id;
 pub mod query;
 pub mod raw;
 pub mod revision;
+pub mod rich_text;
 pub mod text_offset;
 pub mod view;
 
 pub use handler::{AddBatchItem, SetRangeBatchItem, WordHandler};
+
+pub use rich_text::{RichBlock, RichBorder, RichFont, RichParagraph, RichRun};

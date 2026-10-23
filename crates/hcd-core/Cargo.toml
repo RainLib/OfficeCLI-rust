@@ -9,5 +9,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 quick-xml = { workspace = true }
+roxmltree = { workspace = true }
+simplecss = "0.2.2"
+unicode-segmentation = { workspace = true }
 tempfile = { workspace = true }
 flate2 = "1"

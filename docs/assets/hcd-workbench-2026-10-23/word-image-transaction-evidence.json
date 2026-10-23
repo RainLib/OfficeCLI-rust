@@ -1,0 +1,98 @@
+{
+  "passed": true,
+  "modes": [
+    {
+      "documentId": "atomic-word-0",
+      "mode": "source-runs",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_120997cbbd5bc5ee32c91b926f0ba7ef",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-1",
+      "mode": "presentation-style",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_5a405d6d01c07c025344bc6208ee0951",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-2",
+      "mode": "semantic-structure",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_5cc662602f3def6d1e76d6e96544c409",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    },
+    {
+      "documentId": "atomic-word-3",
+      "mode": "source-text",
+      "savedRevision": 2,
+      "imageReceipt": {
+        "assetHash": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        "geometry": {
+          "height": 635000.0,
+          "unit": "emu",
+          "width": 1397000.0,
+          "x": 139700.0,
+          "y": 254000.0
+        },
+        "nodeId": "n_9cb983e472adff3bb8bf04852981a897",
+        "visualHash": "af356553c90170727b8662e13d156a8f48bcc56f1912f2d5720cfb0b46e419e3"
+      },
+      "laterRevision": 3,
+      "replayRevision": 2,
+      "invalidBatchesKeptHead": true
+    }
+  ],
+  "checks": [
+    "real loopback HTTP",
+    "read-only rejection",
+    "invalid image rolls back body",
+    "one revision per combined save",
+    "source text and size",
+    "color with retained image block",
+    "structure with image",
+    "immutable image replay",
+    "signed body binds geometry",
+    "native image export refuses stale output"
+  ],
+  "coordinatorVersion": 3
+}

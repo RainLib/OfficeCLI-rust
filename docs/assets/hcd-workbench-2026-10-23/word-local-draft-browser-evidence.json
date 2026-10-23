@@ -1,0 +1,99 @@
+{
+  "documentId": "offline-word-workbench",
+  "evidenceScope": "local real browser IndexedDB and authenticated HTTP/actual DOCX",
+  "pageClosedAndReopened": true,
+  "rendererCrashTested": false,
+  "restoreRefetchedNewerPeerRevision": true,
+  "currentRevision": 3,
+  "versions": [
+    {
+      "revision": 1,
+      "text": "Original 中😀\n\nNeighbor",
+      "image": {
+        "assetHash": "727857858f48983d21e5b895ec1345232204f5f75f4cb8c8780ba2eb5107a785",
+        "chunkId": "c_2c1a301c1fdbb0944587fadb3650702b",
+        "geometry": {
+          "height": 635000,
+          "unit": "emu",
+          "width": 1587500,
+          "x": 127000,
+          "y": 254000
+        },
+        "nodeId": "n_f42f7e60c85a3fe1fe455edaa28e9ea9",
+        "source": {
+          "editable": true,
+          "nodeKind": "image",
+          "paragraphId": "/drawing[1]",
+          "part": "word/document.xml",
+          "textId": "word/media/image.png",
+          "textOrdinal": 1
+        },
+        "visualHash": "7d0bf275e3dc22e3c78b4136519159c3cbdc163a75ffd584480caaa65086cf1e"
+      }
+    },
+    {
+      "revision": 2,
+      "text": "Original 中😀\n\n另一位协作者的新内容",
+      "image": {
+        "assetHash": "727857858f48983d21e5b895ec1345232204f5f75f4cb8c8780ba2eb5107a785",
+        "chunkId": "c_2c1a301c1fdbb0944587fadb3650702b",
+        "geometry": {
+          "height": 635000,
+          "unit": "emu",
+          "width": 1587500,
+          "x": 127000,
+          "y": 254000
+        },
+        "nodeId": "n_f42f7e60c85a3fe1fe455edaa28e9ea9",
+        "source": {
+          "editable": true,
+          "nodeKind": "image",
+          "paragraphId": "/drawing[1]",
+          "part": "word/document.xml",
+          "textId": "word/media/image.png",
+          "textOrdinal": 1
+        },
+        "visualHash": "7d0bf275e3dc22e3c78b4136519159c3cbdc163a75ffd584480caaa65086cf1e"
+      }
+    },
+    {
+      "revision": 3,
+      "text": "断线后保留的正文 中文😀\n\n另一位协作者的新内容",
+      "image": {
+        "assetHash": "727857858f48983d21e5b895ec1345232204f5f75f4cb8c8780ba2eb5107a785",
+        "chunkId": "c_2c1a301c1fdbb0944587fadb3650702b",
+        "geometry": {
+          "height": 635000,
+          "unit": "emu",
+          "width": 1587500,
+          "x": 127000,
+          "y": 254000
+        },
+        "nodeId": "n_f42f7e60c85a3fe1fe455edaa28e9ea9",
+        "source": {
+          "editable": true,
+          "nodeKind": "image",
+          "paragraphId": "/drawing[1]",
+          "part": "word/document.xml",
+          "textId": "word/media/image.png",
+          "textOrdinal": 1
+        },
+        "visualHash": "7d0bf275e3dc22e3c78b4136519159c3cbdc163a75ffd584480caaa65086cf1e"
+      }
+    }
+  ],
+  "docx": {
+    "revision": 3,
+    "sha256": "5baa9715bc7eb56dd4386f01cad69395e3acd8d8cb79693f1ad8dc7e2cc8877f",
+    "referencedRedAssetMatches": true,
+    "widthPt": 125,
+    "heightPt": 50
+  },
+  "productionValidated": false,
+  "collaboration": {
+    "receiptVersion": 4,
+    "revision": 3,
+    "imageIntents": 0,
+    "pendingAttempt": false
+  }
+}

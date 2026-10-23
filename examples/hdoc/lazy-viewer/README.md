@@ -1,11 +1,14 @@
 # HCD lazy viewer
 
-This dependency-free viewer demonstrates the generic HCD random-access contract for DOCX, PPTX,
-PDF, HTML, Markdown and TXT bundles. It fetches index pages progressively, downloads only chunks
+This dependency-free viewer demonstrates the generic HCD random-access contract for `hcd/1` and
+`hcd/2` DOCX, PPTX, PDF, HTML, Markdown and TXT bundles. It resolves the content-addressed
+`hcd/2` index tree, decompresses gzip objects in the browser, fetches index pages progressively, downloads only chunks
 near the viewport, preserves canonical `data-hcd-id` attributes, rewrites content-addressed assets,
 and evicts off-screen chunks after the configurable resident limit is reached.
 Mapped image nodes are also verified against their `visualHash`; historical revisions resolve their
-own immutable asset index rather than borrowing the current head's images.
+own immutable asset index rather than borrowing the current head's images. The viewer checks stored
+and decoded size limits, decoded SHA-256 hashes and declared chunk lengths before inserting HTML.
+It requires browser support for `DecompressionStream` when opening gzip bundles.
 
 XLSX should use `examples/hdoc/xlsx-univer-viewer`, which maps grid windows to Univer's Canvas
 renderer and supports cell editing. This generic viewer is read-only and virtualizes HCD chunks;
@@ -16,6 +19,7 @@ From the repository root, first create a bundle under a path served by the same 
 ```bash
 target/debug/officecli hdoc import examples/word/numbering-showcase.docx \
   --output examples/hdoc/lazy-viewer/demo.hcd \
+  --storage-codec gzip \
   --events ndjson
 
 python3 -m http.server 4175

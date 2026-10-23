@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+simplecss = "0.2.2"
 hcd-core = { path = "../hcd-core" }
 oxml = { path = "../oxml" }
 serde = { workspace = true }

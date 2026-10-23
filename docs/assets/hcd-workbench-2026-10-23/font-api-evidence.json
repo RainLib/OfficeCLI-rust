@@ -1,0 +1,24 @@
+{
+  "documentId": "font-fallback-workbench",
+  "revisions": [
+    1,
+    2
+  ],
+  "fontIds": [
+    "sha256:4af1d7615a0258e692383e359799c79d2635e51705241126052063ffeb200ab7#0",
+    "sha256:024df8ff55012979732a941bef01b19b92d9ed47391114a85ab06e841a3cba01#0"
+  ],
+  "mixedExportLevel": "VISUAL",
+  "multilineExportLevel": "HIGH",
+  "mixedWarningCodes": [
+    "PDF_EDITED_TEXT_PAGE_RECOMPOSED",
+    "PDF_RASTER_FALLBACK_FONTS"
+  ],
+  "multilineWarningCodes": [
+    "PDF_EDITED_TEXT_OVERLAY_APPROXIMATE",
+    "PDF_PAGE_RECOMPOSITION_SKIPPED"
+  ],
+  "historicalChunkUnchanged": true,
+  "multilineExportContainsBothLines": true,
+  "bundleValid": true
+}

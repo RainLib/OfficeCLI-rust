@@ -1,0 +1,34 @@
+{
+  "scope": "isolated real browser + IndexedDB + injected local proxy response loss + authenticated API + actual download",
+  "documentId": "fixed-pptx",
+  "committedResponseDropped": true,
+  "canonicalCommittedRevision": 4,
+  "canonicalAfterResolution": 4,
+  "newerInputSavedRevision": 5,
+  "finalHead": 5,
+  "originalRequestId": "edits-01e7aa98-c687-4110-821e-583433e89587",
+  "diskAttemptReconstructedAndServerReceiptVerified": true,
+  "textsByRevision": {
+    "3": "浏览器联合保存 中文😀",
+    "4": "提交后丢响应 中文😀",
+    "5": "丢响应后继续输入 中文😀"
+  },
+  "devicePageClosedAndReopened": true,
+  "rendererOrSystemCrashTested": false,
+  "retainedBackups": {
+    "count": 2,
+    "unsubmittedYellowBackupDownloadedAndVerified": true,
+    "originalUnknownAttemptBackupDownloadedAndVerified": true,
+    "sourceHashIncluded": true,
+    "tokensExcluded": true,
+    "reopenDidNotReapplyRetainedDrafts": true
+  },
+  "download": {
+    "fidelity": "SEMANTIC",
+    "sha256": "63d59b3a3462059c987bd5116889d74ef98d35b37b63edb52a03e4d65d43c483",
+    "activeGreenAssetVerified": true,
+    "widthPt": 135,
+    "newerTextVerified": true
+  },
+  "productionValidated": false
+}

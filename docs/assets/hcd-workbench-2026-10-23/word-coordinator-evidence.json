@@ -1,0 +1,198 @@
+{
+  "documentId": "coordinator-word-workbench",
+  "scope": "local API, browser and source-backed DOCX export; restart/crash cases additionally covered by isolated coordinator unit tests",
+  "manualRevision": 2,
+  "autoRevision": 3,
+  "savedProjection": {
+    "blocks": [
+      {
+        "blockHash": "db09326239c38cf44601f4515a6237ad275f18e253477b5dace86bd15afd1e6d",
+        "blockId": "n_c8326148dc3409761b821e08dae87ae5",
+        "content": {
+          "inlines": [
+            {
+              "bold": false,
+              "code": false,
+              "hardBreak": false,
+              "italic": false,
+              "nodeId": "n_3d14668c355f3a1e48b276b3f57c7f69",
+              "strike": false,
+              "text": "中文字体 Manual saved",
+              "typography": {
+                "eastAsia": "宋体",
+                "family": "'Times New Roman','宋体',Georgia,serif",
+                "latin": "Times New Roman",
+                "sizePt": 14
+              },
+              "underline": false
+            },
+            {
+              "bold": false,
+              "code": false,
+              "hardBreak": false,
+              "italic": false,
+              "nodeId": "n_403dd808aa8a2b348eb0a766b62decb7",
+              "strike": false,
+              "text": " Auto saved",
+              "typography": {
+                "eastAsia": "黑体",
+                "family": "'Arial','黑体',-apple-system,sans-serif",
+                "latin": "Arial",
+                "sizePt": 20
+              },
+              "underline": false
+            }
+          ],
+          "kind": "paragraph"
+        },
+        "readOnly": false,
+        "region": "body"
+      },
+      {
+        "blockHash": "281dbac8f5615a7707ff8e5cd7701e1c5498584b1d07735998b801bb7909908a",
+        "blockId": "n_b1172ae365593be8a2f9c632ea58347e",
+        "content": {
+          "inlines": [
+            {
+              "bold": false,
+              "code": false,
+              "hardBreak": false,
+              "italic": false,
+              "nodeId": "n_e5c9b341ad9f4fff2f4882c95937e068",
+              "strike": false,
+              "text": "相邻段落保持原样。",
+              "typography": {
+                "eastAsia": "等线",
+                "family": "'Times New Roman','等线',Georgia,serif",
+                "latin": "Times New Roman"
+              },
+              "underline": false
+            }
+          ],
+          "kind": "paragraph"
+        },
+        "readOnly": false,
+        "region": "body"
+      }
+    ],
+    "documentId": "coordinator-word-workbench",
+    "revision": 3
+  },
+  "rejections": {
+    "oldBrowserCheckpoint": 426,
+    "oldSidecarCheckpoint": 426,
+    "readerCheckpoint": 403,
+    "oldStateWriter": 426,
+    "staleStateHash": 412
+  },
+  "rejectionsKeepRoot": true,
+  "sourceDocxTextVerified": true,
+  "sourceStylesUnchanged": true,
+  "signedRevisionIdsVerified": true,
+  "externalRevision": 4,
+  "localDraftRetainedInRecovery": 3,
+  "browserLatestOpenedAfterBackup": true,
+  "finalRevision": 5,
+  "finalEpoch": 2,
+  "finalProjection": {
+    "blocks": [
+      {
+        "blockHash": "e5c05b388c8b73a412ec2c8dda622493ac42d0819a14ae4fee7b09184912f4ea",
+        "blockId": "n_c8326148dc3409761b821e08dae87ae5",
+        "content": {
+          "inlines": [
+            {
+              "bold": false,
+              "code": false,
+              "hardBreak": false,
+              "italic": false,
+              "nodeId": "n_3d14668c355f3a1e48b276b3f57c7f69",
+              "strike": false,
+              "text": "External latest five",
+              "typography": {
+                "eastAsia": "宋体",
+                "family": "'Times New Roman','宋体',Georgia,serif",
+                "latin": "Times New Roman",
+                "sizePt": 14.0
+              },
+              "underline": false
+            },
+            {
+              "bold": false,
+              "code": false,
+              "hardBreak": false,
+              "italic": false,
+              "nodeId": "n_403dd808aa8a2b348eb0a766b62decb7",
+              "strike": false,
+              "text": " Auto saved",
+              "typography": {
+                "eastAsia": "黑体",
+                "family": "'Arial','黑体',-apple-system,sans-serif",
+                "latin": "Arial",
+                "sizePt": 20.0
+              },
+              "underline": false
+            }
+          ],
+          "kind": "paragraph"
+        },
+        "readOnly": false,
+        "region": "body"
+      },
+      {
+        "blockHash": "281dbac8f5615a7707ff8e5cd7701e1c5498584b1d07735998b801bb7909908a",
+        "blockId": "n_b1172ae365593be8a2f9c632ea58347e",
+        "content": {
+          "inlines": [
+            {
+              "bold": false,
+              "code": false,
+              "hardBreak": false,
+              "italic": false,
+              "nodeId": "n_e5c9b341ad9f4fff2f4882c95937e068",
+              "strike": false,
+              "text": "相邻段落保持原样。",
+              "typography": {
+                "eastAsia": "等线",
+                "family": "'Times New Roman','等线',Georgia,serif",
+                "latin": "Times New Roman"
+              },
+              "underline": false
+            }
+          ],
+          "kind": "paragraph"
+        },
+        "readOnly": false,
+        "region": "body"
+      }
+    ],
+    "documentId": "coordinator-word-workbench",
+    "revision": 5
+  },
+  "recoveryCopies": [
+    "e1-1792702181399-352bf109c2fd43a1ad3ce445e57ca710",
+    "e1-1792702158823-b01268a6615740dd8c6424ce120308fb",
+    "e0-1792701710111-3f9a7ff6fbc04bd0be1827acc1be94ff",
+    "e0-1792701703763-a04da0459f284fdcbddece771932304e",
+    "e0-1792701677650-1b0f6859c5ba4d478215f81f2f2c24ad",
+    "e0-1792701489879-219644ca69164f52850b0dbd133aefb5",
+    "e0-1792701435799-b859f9d7b752443b9632e922b5a641cf"
+  ],
+  "validation": {
+    "data": {
+      "documentId": "coordinator-word-workbench",
+      "issues": [],
+      "revision": 5,
+      "valid": true
+    },
+    "success": true
+  },
+  "canonicalExternalTextPreserved": true,
+  "offlineExternalRevision": 5,
+  "offlineDraftRetainedInRecovery": 1,
+  "offlineRecoveryWithoutSidecar": true,
+  "normalSidecarRestartRevision": 4,
+  "finalSourceDocxTextVerified": true,
+  "finalSourceStylesUnchanged": true,
+  "finalBrowserVersion": 5
+}

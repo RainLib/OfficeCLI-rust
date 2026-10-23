@@ -2,9 +2,12 @@
 
 mod exporter;
 mod importer;
+mod source_runs;
 
-pub use exporter::{export_docx, ExportOptions};
-pub use importer::{import_docx, ImportOptions};
+pub use exporter::{export_docx, requires_semantic_rebuild, ExportOptions};
+pub use importer::{
+    import_docx, source_typography_styles, ImportOptions, FONT_METADATA_CSS_MARKER,
+};
 
 #[cfg(test)]
 mod tests {
@@ -15,6 +18,225 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn source_size_partitions_survive_text_edits_annotations_history_and_native_export() {
+        use hcd_core::{FontSizeRun, TextRunsPrecondition};
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let path = temp.path().join("formatted.hcd");
+        create_fixture(&source);
+        import_docx(&source, &path, &ImportOptions::new("sizes"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let first = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "Hello 😀 World")
+            .unwrap();
+        let original_map = first.source.clone();
+        let batch = |id: &str, base, operations| PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_5.into(),
+            document_id: "sizes".into(),
+            patch_id: id.into(),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            operations,
+            metadata: BTreeMap::new(),
+        };
+        let annotation = |id: &str, start, end| PatchOperation::AnnotationUpsert {
+            annotation: Annotation {
+                annotation_id: id.into(),
+                node_id: first.node_id.clone(),
+                start,
+                end,
+                kind: "recognition".into(),
+                rule_id: None,
+                confidence: None,
+                ignored: false,
+            },
+        };
+        hcd_core::apply_patch(
+            &bundle,
+            &batch(
+                "annotations",
+                0,
+                vec![annotation("prefix", 0, 5), annotation("glyph", 6, 7)],
+            ),
+            0,
+        )
+        .unwrap();
+        let annotation_root = bundle.manifest().unwrap().annotation_root_hash;
+        let lookup = hcd_core::get_text_node(&bundle, &first.node_id).unwrap();
+        let original_format = lookup.format_hash.clone().unwrap();
+        let runs = vec![
+            FontSizeRun {
+                chars: 6,
+                size_pt: None,
+            },
+            FontSizeRun {
+                chars: 1,
+                size_pt: Some(28.5),
+            },
+            FontSizeRun {
+                chars: 6,
+                size_pt: None,
+            },
+        ];
+        let rich = batch(
+            "partial-size",
+            1,
+            vec![PatchOperation::TextRuns {
+                node_id: first.node_id.clone(),
+                text: first.text.clone(),
+                runs: runs.clone(),
+                precondition: TextRunsPrecondition {
+                    node_hash: first.node_hash.clone(),
+                    format_hash: original_format.clone(),
+                },
+            }],
+        );
+        let saved = hcd_core::apply_patch(&bundle, &rich, 1).unwrap();
+        assert_eq!(saved.revision, 2);
+        assert!(
+            hcd_core::apply_patch(&bundle, &rich, 1)
+                .unwrap()
+                .idempotent_replay
+        );
+        assert_eq!(
+            bundle.manifest().unwrap().annotation_root_hash,
+            annotation_root
+        );
+        assert!(!bundle.revision(2).unwrap().structural_change);
+        let lookup = hcd_core::get_text_node(&bundle, &first.node_id).unwrap();
+        assert_eq!(lookup.node.source, original_map);
+        assert_eq!(lookup.node.node_hash, first.node_hash);
+        assert_eq!(lookup.font_size_runs, Some(runs.clone()));
+        assert_ne!(lookup.format_hash.as_ref().unwrap(), &original_format);
+        let mut stale = rich.clone();
+        stale.patch_id = "stale-format".into();
+        stale.base_revision = 2;
+        assert!(matches!(
+            hcd_core::apply_patch(&bundle, &stale, 2),
+            Err(hcd_core::HcdError::PreconditionFailed(_))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let parts: Vec<_> = projection
+            .blocks
+            .iter()
+            .flat_map(|block| &block.content.inlines)
+            .filter(|inline| inline.node_id.as_deref() == Some(&first.node_id))
+            .collect();
+        assert_eq!(
+            parts
+                .iter()
+                .map(|inline| inline.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Hello ", "😀", " World"]
+        );
+        assert_eq!(parts[1].typography.as_ref().unwrap().size_pt, Some(28.5));
+
+        let output = temp.path().join("native.docx");
+        let report = export_docx(&path, &source, &output, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, hcd_core::FidelityLevel::High);
+        for part in [
+            "word/styles.xml",
+            "word/_rels/document.xml.rels",
+            "word/theme/custom-theme.xml",
+            "word/header1.xml",
+            "word/comments.xml",
+            "word/media/image1.png",
+        ] {
+            assert_eq!(
+                read_zip_bytes(&source, part),
+                read_zip_bytes(&output, part),
+                "{part}"
+            );
+        }
+        let xml = read_zip_entry(&output, "word/document.xml");
+        assert_eq!(xml.matches("asciiTheme=\"minorHAnsi\"").count(), 3);
+        assert_eq!(xml.matches("w:themeTint=\"80\"").count(), 3);
+        assert_eq!(xml.matches("w14:textId=\"B1\"").count(), 1);
+        assert!(xml.contains("<w:pStyle w:val=\"Heading1\"/>"));
+        assert!(xml.contains("hcdr:val=\"57\""));
+        assert!(xml.contains("Historical deletion"));
+        let reimported = temp.path().join("reimported.hcd");
+        import_docx(
+            &output,
+            &reimported,
+            &ImportOptions::new("reimported"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reprojection =
+            hcd_core::editor_projection(&Bundle::open(&reimported).unwrap(), None).unwrap();
+        assert!(reprojection
+            .blocks
+            .iter()
+            .flat_map(|block| &block.content.inlines)
+            .any(|inline| inline.text == "😀"
+                && inline.typography.as_ref().and_then(|font| font.size_pt) == Some(28.5)));
+
+        hcd_core::apply_patch(
+            &bundle,
+            &batch(
+                "after-size-text",
+                2,
+                vec![PatchOperation::TextSplice {
+                    node_id: first.node_id.clone(),
+                    start: 6,
+                    delete_count: 1,
+                    insert_text: "中😀".into(),
+                    precondition: NodePrecondition {
+                        node_hash: first.node_hash.clone(),
+                    },
+                }],
+            ),
+            2,
+        )
+        .unwrap();
+        let after = hcd_core::get_text_node(&bundle, &first.node_id).unwrap();
+        assert_eq!(after.node.text, "Hello 中😀 World");
+        assert_eq!(
+            after.font_size_runs.unwrap()[1],
+            FontSizeRun {
+                chars: 2,
+                size_pt: Some(28.5)
+            }
+        );
+        let validation = hcd_core::validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let old = hcd_core::editor_projection(&bundle, Some(2)).unwrap();
+        assert!(old
+            .blocks
+            .iter()
+            .flat_map(|block| &block.content.inlines)
+            .any(|inline| inline.text == "😀"));
+        let old_manifest =
+            hcd_core::manifest_at_revision(&bundle, &bundle.manifest().unwrap(), Some(2))
+                .unwrap()
+                .0;
+        assert_eq!(
+            hcd_core::get_text_node_in_manifest(&bundle, &first.node_id, &old_manifest)
+                .unwrap()
+                .node
+                .text,
+            first.text
+        );
+        let PatchOperation::AnnotationUpsert { annotation: prefix } = annotation("prefix", 0, 5)
+        else {
+            unreachable!()
+        };
+        let expected = hcd_core::AnnotationSet {
+            schema_version: hcd_core::HCD_SCHEMA_VERSION.into(),
+            annotations: vec![prefix],
+        };
+        assert_eq!(
+            bundle.manifest().unwrap().annotation_root_hash,
+            hcd_core::hash_bytes(&serde_json::to_vec(&expected).unwrap())
+        );
+    }
 
     #[test]
     fn docx_hcd_patch_export_roundtrip() {

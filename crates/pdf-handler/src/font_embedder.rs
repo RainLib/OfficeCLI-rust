@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 
 use handler_common::HandlerError;
@@ -16,6 +17,26 @@ const BUNDLED_NOTO: &[u8] = include_bytes!("../assets/NotoSansSC-Regular.ttf");
 /// so the in-process PDF engine can subset/embed it without relying on a
 /// platform color-font implementation.
 const BUNDLED_NOTO_EMOJI: &[u8] = include_bytes!("../assets/NotoEmoji-Regular.ttf");
+
+fn read_font_file(path: &Path) -> Result<Vec<u8>, HandlerError> {
+    const LIMIT: u64 = 64 * 1024 * 1024;
+    let file = std::fs::File::open(path).map_err(HandlerError::IoError)?;
+    if file.metadata().map_err(HandlerError::IoError)?.len() > LIMIT {
+        return Err(HandlerError::OperationFailed(
+            "font file exceeds 64 MiB".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(HandlerError::IoError)?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(HandlerError::OperationFailed(
+            "font file exceeds 64 MiB".into(),
+        ));
+    }
+    Ok(bytes)
+}
 
 /// Return the bundled Noto Sans SC bytes for another in-process renderer.
 ///
@@ -45,12 +66,7 @@ pub fn font_file_missing_chars(
     path: &Path,
     chars_needed: &HashSet<char>,
 ) -> Result<HashSet<char>, HandlerError> {
-    let font_bytes = std::fs::read(path).map_err(|error| {
-        HandlerError::OperationFailed(format!(
-            "failed to read font file '{}': {error}",
-            path.display()
-        ))
-    })?;
+    let font_bytes = read_font_file(path)?;
     font_bytes_missing_chars(&font_bytes, chars_needed).map_err(|error| {
         HandlerError::OperationFailed(format!(
             "failed to parse font file '{}': {error}",
@@ -65,6 +81,199 @@ pub fn bundled_font_missing_chars(
 ) -> Result<HashSet<char>, HandlerError> {
     font_bytes_missing_chars(BUNDLED_NOTO, chars_needed)
         .map_err(|error| HandlerError::OperationFailed(format!("bundled font: {error}")))
+}
+
+/// Rasterize one complete line with deterministic bundled font fallback.
+/// Missing glyphs, line breaks and oversized masks are errors, never blanks.
+pub fn rasterize_bundled_text(text: &str, pixel_size: f32) -> Result<TextMask, HandlerError> {
+    use crate::fonts::{bundled_font_runs, BuiltinFont};
+    let fail = |message: &str| HandlerError::OperationFailed(message.to_string());
+    if !pixel_size.is_finite() || !(1.0..=256.0).contains(&pixel_size) {
+        return Err(fail(
+            "fallback font size must be finite and between 1 and 256 pixels",
+        ));
+    }
+    let runs = bundled_font_runs(text)?;
+    let faces = [
+        Face::parse(BUNDLED_NOTO, 0),
+        Face::parse(BUNDLED_NOTO_EMOJI, 0),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|_| fail("invalid bundled font"))?;
+    let slot = |font: BuiltinFont| match font {
+        BuiltinFont::SansSc => 0,
+        BuiltinFont::Emoji => 1,
+    };
+    let mut positioned = Vec::new();
+    let mut fonts = Vec::new();
+    let (mut pen_x, mut pen_y) = (0f32, 0f32);
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (0f32, 0f32, 0f32, 0f32);
+    for run in runs {
+        let face = rustybuzz::Face::from_slice(run.font.bytes(), 0)
+            .ok_or_else(|| fail("invalid bundled font"))?;
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(run.text);
+        buffer.guess_segment_properties();
+        if buffer.direction() != rustybuzz::Direction::LeftToRight {
+            return Err(fail(
+                "fallback painter requires a paragraph renderer for RTL or vertical layout",
+            ));
+        }
+        let shaped = rustybuzz::shape(&face, &[], buffer);
+        if positioned.len() + shaped.len() > 16_384 {
+            return Err(fail("fallback glyph count exceeds limit"));
+        }
+        let scale = pixel_size / faces[slot(run.font)].units_per_em() as f32;
+        if !fonts.contains(run.font.identity()) {
+            fonts.push(run.font.identity().clone());
+        }
+        for (info, position) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+            if info.glyph_id == 0 {
+                return Err(fail("font shaping produced a missing glyph"));
+            }
+            let id = GlyphId(
+                info.glyph_id
+                    .try_into()
+                    .map_err(|_| fail("invalid shaped glyph"))?,
+            );
+            let x = pen_x + position.x_offset as f32 * scale;
+            let y = pen_y + position.y_offset as f32 * scale;
+            if let Some(bbox) = faces[slot(run.font)].glyph_bounding_box(id) {
+                min_x = min_x.min(x + bbox.x_min as f32 * scale);
+                max_x = max_x.max(x + bbox.x_max as f32 * scale);
+                min_y = min_y.min(y + bbox.y_min as f32 * scale);
+                max_y = max_y.max(y + bbox.y_max as f32 * scale);
+                positioned.push((slot(run.font), id, x, y, scale));
+            } else {
+                let character = run
+                    .text
+                    .get(info.cluster as usize..)
+                    .and_then(|value| value.chars().next());
+                if character.is_some_and(|c| !c.is_whitespace() && !matches!(c as u32, 0x200C..=0x200D | 0xFE00..=0xFE0F | 0xE0020..=0xE007F | 0xE0100..=0xE01EF)) {
+                    return Err(fail("font shaping produced a visible character without an outline"));
+                }
+            }
+            pen_x += position.x_advance as f32 * scale;
+            pen_y += position.y_advance as f32 * scale;
+            max_x = max_x.max(pen_x);
+        }
+    }
+    let (min_x, max_y) = (min_x.floor(), max_y.ceil());
+    let width = (max_x.ceil() - min_x).max(1.0) as usize;
+    let height = (max_y - min_y.floor()).max(1.0) as usize;
+    if width > 8192
+        || height > 8192
+        || width
+            .checked_mul(height)
+            .is_none_or(|pixels| pixels > 4 * 1024 * 1024)
+    {
+        return Err(fail("fallback mask exceeds the 8192-pixel/4M-pixel limit"));
+    }
+    let mut glyphs = Vec::new();
+    let mut edge_count = 0usize;
+    for (font, id, x, y, scale) in positioned {
+        let mut recorder = OutlineRecorder::default();
+        if faces[font].outline_glyph(id, &mut recorder).is_none() {
+            return Err(fail("bundled font glyph has no supported outline"));
+        }
+        edge_count += recorder.edges.len();
+        if edge_count.saturating_mul(height) > 32_000_000 {
+            return Err(fail("fallback outline work exceeds limit"));
+        }
+        glyphs.push((x, y, scale, recorder.edges));
+    }
+    let mut alpha = vec![0u8; width * height];
+    for (origin_x, origin_y, scale, edges) in glyphs {
+        for row in 0..height {
+            let y_font = (max_y - (row as f32 + 0.5) - origin_y) / scale;
+            let mut hits = Vec::new();
+            for (start, end) in &edges {
+                if (start.1 > y_font) == (end.1 > y_font) || (end.1 - start.1).abs() < f32::EPSILON
+                {
+                    continue;
+                }
+                let t = (y_font - start.1) / (end.1 - start.1);
+                hits.push(origin_x - min_x + (start.0 + t * (end.0 - start.0)) * scale);
+            }
+            hits.sort_by(|left, right| left.total_cmp(right));
+            for pair in hits.chunks_exact(2) {
+                let from = pair[0].floor().max(0.0) as usize;
+                let to = pair[1].ceil().max(0.0) as usize;
+                for column in from..to.min(width) {
+                    alpha[row * width + column] = 255;
+                }
+            }
+        }
+    }
+    Ok(TextMask {
+        width,
+        height,
+        alpha,
+        fonts,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct TextMask {
+    pub width: usize,
+    pub height: usize,
+    pub alpha: Vec<u8>,
+    pub fonts: Vec<crate::fonts::FontIdentity>,
+}
+
+#[derive(Default)]
+struct OutlineRecorder {
+    pen: (f32, f32),
+    start: (f32, f32),
+    edges: Vec<((f32, f32), (f32, f32))>,
+}
+
+impl OutlineRecorder {
+    fn edge_to(&mut self, x: f32, y: f32) {
+        self.edges.push((self.pen, (x, y)));
+        self.pen = (x, y);
+    }
+}
+
+impl ttf_parser::OutlineBuilder for OutlineRecorder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.pen = (x, y);
+        self.start = (x, y);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.edge_to(x, y);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (x0, y0) = self.pen;
+        for step in 1..=4 {
+            let t = step as f32 / 4.0;
+            let u = 1.0 - t;
+            self.edge_to(
+                u * u * x0 + 2.0 * u * t * x1 + t * t * x,
+                u * u * y0 + 2.0 * u * t * y1 + t * t * y,
+            );
+        }
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (x0, y0) = self.pen;
+        for step in 1..=6 {
+            let t = step as f32 / 6.0;
+            let u = 1.0 - t;
+            self.edge_to(
+                u * u * u * x0 + 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t * x,
+                u * u * u * y0 + 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t * y,
+            );
+        }
+    }
+
+    fn close(&mut self) {
+        let start = self.start;
+        self.edge_to(start.0, start.1);
+    }
 }
 
 fn font_bytes_missing_chars(
@@ -101,16 +310,28 @@ pub fn ensure_cjk_font_for_chars(
         .get(&(page_num as u32))
         .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
+    let custom_bytes = user_font_file
+        .map(|path| read_font_file(Path::new(path)))
+        .transpose()?;
+    let font_bytes = custom_bytes.as_deref().unwrap_or(BUNDLED_NOTO);
+    let identity = if custom_bytes.is_some() {
+        crate::fonts::font_identity(font_bytes, 0)?
+    } else {
+        crate::fonts::bundled_font_catalog()[0].clone()
+    };
     // A semantic export supplies the same complete character set for the first
     // text block on every page. Reuse an already embedded Type0 font object
     // instead of subsetting and embedding the same font once per page.
     if force_embed {
-        if let Some(preferred_name) = preferred_name {
-            if let Some(font_id) = find_embedded_font_covering_chars(doc, chars_needed) {
-                let page_font_name = choose_pdf_font_name(doc, page_id, Some(preferred_name));
-                register_font_on_page(doc, page_id, &page_font_name, font_id)?;
-                return Ok(Some(page_font_name));
-            }
+        if let Some(font_id) = find_embedded_font_covering_chars(
+            doc,
+            chars_needed,
+            &identity.sha256,
+            identity.face_index,
+        ) {
+            let page_font_name = choose_pdf_font_name(doc, page_id, preferred_name);
+            register_font_on_page(doc, page_id, &page_font_name, font_id)?;
+            return Ok(Some(page_font_name));
         }
     }
 
@@ -130,15 +351,7 @@ pub fn ensure_cjk_font_for_chars(
         return Ok(None);
     }
 
-    let font_bytes: Vec<u8> = if let Some(path) = user_font_file {
-        std::fs::read(Path::new(path)).map_err(|e| {
-            HandlerError::OperationFailed(format!("failed to read font file '{}': {}", path, e))
-        })?
-    } else {
-        BUNDLED_NOTO.to_vec()
-    };
-
-    let face = Face::parse(&font_bytes, 0)
+    let face = Face::parse(font_bytes, 0)
         .map_err(|e| HandlerError::OperationFailed(format!("failed to parse font: {:?}", e)))?;
 
     let mut char_to_gid: Vec<(char, u16)> = Vec::new();
@@ -169,7 +382,7 @@ pub fn ensure_cjk_font_for_chars(
     };
 
     let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(&unique_gids);
-    let subset_bytes = subsetter::subset(&font_bytes, 0, &remapper)
+    let subset_bytes = subsetter::subset(font_bytes, 0, &remapper)
         .map_err(|e| HandlerError::OperationFailed(format!("failed to subset font: {:?}", e)))?;
 
     let units_per_em = face.units_per_em() as f32;
@@ -180,19 +393,26 @@ pub fn ensure_cjk_font_for_chars(
     }
     let scale = 1000.0 / units_per_em;
 
-    let mut new_gid_to_unicodes: HashMap<u16, Vec<char>> = HashMap::new();
-    for (ch, old_gid) in &char_to_gid {
-        if let Some(new_gid) = remapper.get(*old_gid) {
-            new_gid_to_unicodes.entry(new_gid).or_default().push(*ch);
-        }
+    // CID represents a Unicode scalar, not a glyph. Several scalars can share
+    // one outline; mapping that GID to their concatenation corrupts extraction.
+    if char_to_gid.len() > u16::MAX as usize {
+        return Err(HandlerError::OperationFailed(
+            "font subset exceeds the 65535-character CID limit".into(),
+        ));
     }
-
-    // Old GIDs in new-order (new_gid 0 → first item, 1 → second, ...).
-    let old_gids_in_new_order: Vec<u16> = remapper.remapped_gids().collect();
-    let mut widths: Vec<i64> = Vec::with_capacity(old_gids_in_new_order.len());
-    for old_gid in &old_gids_in_new_order {
-        let w = face.glyph_hor_advance(GlyphId(*old_gid)).unwrap_or(0) as f32;
-        widths.push((w * scale).round() as i64);
+    char_to_gid.sort_by_key(|(character, _)| *character);
+    let mut cid_to_unicode = BTreeMap::new();
+    let mut cid_to_gid = vec![0u8, 0u8]; // CID 0 is .notdef.
+    let mut widths = vec![0i64];
+    for (index, (character, old_gid)) in char_to_gid.iter().enumerate() {
+        let cid = (index + 1) as u16;
+        let gid = remapper.get(*old_gid).ok_or_else(|| {
+            HandlerError::OperationFailed("missing subset glyph remapping".into())
+        })?;
+        cid_to_unicode.insert(cid, *character);
+        cid_to_gid.extend_from_slice(&gid.to_be_bytes());
+        let width = face.glyph_hor_advance(GlyphId(*old_gid)).unwrap_or(0) as f32;
+        widths.push((width * scale).round() as i64);
     }
 
     let bbox = face.global_bounding_box();
@@ -205,7 +425,31 @@ pub fn ensure_cjk_font_for_chars(
     let italic_angle: f32 = face.italic_angle().unwrap_or(0.0);
 
     let pdf_font_name = choose_pdf_font_name(doc, page_id, preferred_name);
-    let postscript_name = format!("{}+NotoSansSC", subset_prefix());
+    if face.tables().glyf.is_none() {
+        return Err(HandlerError::OperationFailed(
+            "font embedding requires TrueType glyf outlines".into(),
+        ));
+    }
+    let source_name = face
+        .names()
+        .into_iter()
+        .filter(|name| name.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+        .find_map(|name| name.to_string())
+        .unwrap_or_else(|| "OfficeCLIFont".into());
+    let source_name: String = source_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(48)
+        .collect();
+    let postscript_name = format!(
+        "{}+{}",
+        subset_prefix(),
+        if source_name.is_empty() {
+            "OfficeCLIFont"
+        } else {
+            &source_name
+        }
+    );
 
     let length1 = subset_bytes.len() as i64;
     let mut fontfile_stream = Stream::new(
@@ -237,6 +481,9 @@ pub fn ensure_cjk_font_for_chars(
     let inner: Vec<Object> = widths.iter().map(|&w| Object::Integer(w)).collect();
     let w_array = vec![Object::Integer(0), Object::Array(inner)];
 
+    let mut cid_map_stream = Stream::new(Dictionary::new(), cid_to_gid);
+    let _ = cid_map_stream.compress();
+    let cid_map_id = doc.add_object(Object::Stream(cid_map_stream));
     let cidfont_id = doc.add_object(dictionary! {
         "Type" => Object::Name(b"Font".to_vec()),
         "Subtype" => Object::Name(b"CIDFontType2".to_vec()),
@@ -247,11 +494,11 @@ pub fn ensure_cjk_font_for_chars(
             "Supplement" => Object::Integer(0),
         }),
         "FontDescriptor" => Object::Reference(fd_id),
-        "CIDToGIDMap" => Object::Name(b"Identity".to_vec()),
+        "CIDToGIDMap" => Object::Reference(cid_map_id),
         "W" => Object::Array(w_array),
     });
 
-    let tounicode_bytes = build_tounicode_cmap(&new_gid_to_unicodes);
+    let tounicode_bytes = build_tounicode_cmap(&cid_to_unicode);
     let mut tu_stream = Stream::new(Dictionary::new(), tounicode_bytes);
     let _ = tu_stream.compress();
     let tu_id = doc.add_object(Object::Stream(tu_stream));
@@ -260,6 +507,9 @@ pub fn ensure_cjk_font_for_chars(
         "Type" => Object::Name(b"Font".to_vec()),
         "Subtype" => Object::Name(b"Type0".to_vec()),
         "BaseFont" => Object::Name(postscript_name.into_bytes()),
+        "OfficeCLISourceFontSHA256" => Object::string_literal(identity.sha256),
+        "OfficeCLISourceFontFaceIndex" => Object::Integer(i64::from(identity.face_index)),
+        "OfficeCLICidMappingVersion" => Object::Integer(1),
         "Encoding" => Object::Name(b"Identity-H".to_vec()),
         "DescendantFonts" => Object::Array(vec![Object::Reference(cidfont_id)]),
         "ToUnicode" => Object::Reference(tu_id),
@@ -273,9 +523,35 @@ pub fn ensure_cjk_font_for_chars(
 fn find_embedded_font_covering_chars(
     doc: &LopdfDocument,
     chars_needed: &HashSet<char>,
+    source_hash: &str,
+    face_index: u32,
 ) -> Option<ObjectId> {
     doc.objects.iter().find_map(|(object_id, object)| {
         let dictionary = object.as_dict().ok()?;
+        if dictionary
+            .get(b"OfficeCLICidMappingVersion")
+            .ok()?
+            .as_i64()
+            .ok()?
+            != 1
+        {
+            return None;
+        }
+        if dictionary
+            .get(b"OfficeCLISourceFontSHA256")
+            .ok()?
+            .as_str()
+            .ok()?
+            != source_hash.as_bytes()
+            || dictionary
+                .get(b"OfficeCLISourceFontFaceIndex")
+                .ok()?
+                .as_i64()
+                .ok()?
+                != i64::from(face_index)
+        {
+            return None;
+        }
         if dictionary
             .get(b"Subtype")
             .ok()
@@ -291,7 +567,10 @@ fn find_embedded_font_covering_chars(
             .unwrap_or_else(|_| stream.content.clone());
         let content = String::from_utf8_lossy(&bytes);
         let cmap = crate::content_stream::parse_to_unicode_cmap(&content);
-        let covered: HashSet<char> = cmap.values().flat_map(|value| value.chars()).collect();
+        let covered: HashSet<char> = cmap
+            .values()
+            .filter_map(|value| crate::content_stream::single_unicode_scalar(value))
+            .collect();
         chars_needed
             .iter()
             .all(|character| covered.contains(character))
@@ -362,10 +641,13 @@ fn collect_supported_chars(
 
             // 1. Check custom ToUnicode CMap
             if let Some(ref cmap) = custom_cmap {
-                if cmap.values().any(|s| s.contains(ch)) {
+                if cmap
+                    .values()
+                    .any(|value| crate::content_stream::single_unicode_scalar(value) == Some(ch))
+                {
                     supported.insert(ch);
-                    continue;
                 }
+                continue;
             }
 
             // 2. If subsetted, check if the character was originally used on the page by this font
@@ -377,9 +659,11 @@ fn collect_supported_chars(
                 }
             } else {
                 // 3. If not subsetted, check standard encoding
-                if let Ok(encoding) = font.get_font_encoding(doc) {
-                    if char_renders_via_encoding(&encoding, ch) {
-                        supported.insert(ch);
+                if font.type_is(b"Font") {
+                    if let Ok(encoding) = font.get_font_encoding(doc) {
+                        if char_renders_via_encoding(&encoding, ch) {
+                            supported.insert(ch);
+                        }
                     }
                 }
             }
@@ -462,11 +746,13 @@ fn subset_prefix() -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Build a ToUnicode CMap stream body that maps each new CID to its Unicode code point(s).
+/// Build a ToUnicode CMap mapping each character CID to exactly one scalar.
 /// Standard Adobe Identity-UCS format.
-fn build_tounicode_cmap(map: &HashMap<u16, Vec<char>>) -> Vec<u8> {
-    let mut entries: Vec<(u16, Vec<char>)> = map.iter().map(|(k, v)| (*k, v.clone())).collect();
-    entries.sort_by_key(|(k, _)| *k);
+fn build_tounicode_cmap(map: &BTreeMap<u16, char>) -> Vec<u8> {
+    let entries: Vec<(u16, char)> = map
+        .iter()
+        .map(|(cid, character)| (*cid, *character))
+        .collect();
 
     let mut s = String::new();
     s.push_str("/CIDInit /ProcSet findresource begin\n");
@@ -482,20 +768,13 @@ fn build_tounicode_cmap(map: &HashMap<u16, Vec<char>>) -> Vec<u8> {
     // Each chunk allows max 100 entries per beginbfchar.
     for chunk in entries.chunks(100) {
         s.push_str(&format!("{} beginbfchar\n", chunk.len()));
-        for (cid, chars) in chunk {
-            let mut hex_unicode = String::new();
-            for ch in chars {
-                let cp = *ch as u32;
-                if cp <= 0xFFFF {
-                    hex_unicode.push_str(&format!("{:04X}", cp));
-                } else {
-                    // UTF-16 surrogate pair
-                    let cp_adj = cp - 0x10000;
-                    let hi = 0xD800 + (cp_adj >> 10);
-                    let lo = 0xDC00 + (cp_adj & 0x3FF);
-                    hex_unicode.push_str(&format!("{:04X}{:04X}", hi, lo));
-                }
-            }
+        for (cid, character) in chunk {
+            let mut units = [0u16; 2];
+            let hex_unicode = character
+                .encode_utf16(&mut units)
+                .iter()
+                .map(|unit| format!("{unit:04X}"))
+                .collect::<String>();
             s.push_str(&format!("<{:04X}> <{}>\n", cid, hex_unicode));
         }
         s.push_str("endbfchar\n");
@@ -563,6 +842,326 @@ fn ensure_font_in_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_font_rasterizes_visible_latin_text() {
+        let mask = rasterize_bundled_text("PDF", 18.0).unwrap();
+        assert!(mask.alpha.iter().any(|pixel| *pixel > 0));
+    }
+
+    #[test]
+    fn mixed_fallback_text_paints_emoji_and_tracks_both_font_identities() {
+        let mixed = rasterize_bundled_text("中文A😀B", 32.0).unwrap();
+        assert_eq!(mixed.fonts.len(), 2);
+        assert!(mixed.fonts.iter().any(|font| font.family == "Noto Emoji"));
+        let emoji = rasterize_bundled_text("😀", 32.0).unwrap();
+        assert!(emoji.alpha.iter().filter(|pixel| **pixel > 0).count() > 100);
+        let family = rasterize_bundled_text("👨‍👩‍👧‍👦", 32.0).unwrap();
+        assert!(family.alpha.iter().any(|pixel| *pixel > 0));
+        assert!(
+            family.width < emoji.width * 2,
+            "family emoji must be shaped as a cluster"
+        );
+        assert_eq!(family.fonts.len(), 1);
+        let descenders = rasterize_bundled_text("gy", 32.0).unwrap();
+        assert!(
+            descenders.alpha[(descenders.height - 1) * descenders.width..]
+                .iter()
+                .any(|pixel| *pixel > 0)
+        );
+    }
+
+    #[test]
+    fn fallback_painter_refuses_to_drop_text_or_allocate_unbounded_masks() {
+        for text in ["A\nB", "A\r\nB", "əʊ", "a\u{10FFFF}"] {
+            assert!(rasterize_bundled_text(text, 18.0).is_err(), "{text:?}");
+        }
+        for size in [f32::NAN, f32::INFINITY, 0.0, -1.0, 257.0] {
+            assert!(rasterize_bundled_text("text", size).is_err());
+        }
+        assert!(rasterize_bundled_text(&"W".repeat(4096), 256.0).is_err());
+        assert_eq!(rasterize_bundled_text("", 18.0).unwrap().alpha, [0]);
+    }
+
+    fn empty_two_page_document() -> LopdfDocument {
+        let mut doc = LopdfDocument::with_version("1.7");
+        let pages = doc.new_object_id();
+        let children: Vec<_> = (0..2).map(|_| Object::Reference(doc.add_object(dictionary! {
+            "Type"=>"Page", "Parent"=>pages, "MediaBox"=>vec![0.into(),0.into(),200.into(),200.into()],
+            "Resources"=>dictionary!{"Font"=>Dictionary::new()}
+        }))).collect();
+        doc.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {"Type"=>"Pages", "Count"=>2, "Kids"=>children}),
+        );
+        let catalog = doc.add_object(dictionary! {"Type"=>"Catalog", "Pages"=>pages});
+        doc.trailer.set("Root", catalog);
+        doc
+    }
+
+    #[test]
+    fn embedded_font_reuse_requires_the_requested_file_identity_and_character_coverage() {
+        let mut doc = empty_two_page_document();
+        let sans = Face::parse(BUNDLED_NOTO, 0).unwrap();
+        let emoji = Face::parse(BUNDLED_NOTO_EMOJI, 0).unwrap();
+        let character = ['©', '1', '0', ' ']
+            .into_iter()
+            .find(|c| sans.glyph_index(*c).is_some() && emoji.glyph_index(*c).is_some())
+            .unwrap();
+        let chars = HashSet::from([character]);
+        ensure_cjk_font_for_chars(&mut doc, 1, &chars, Some("First"), None, true).unwrap();
+        let sans_id = find_embedded_font_covering_chars(
+            &doc,
+            &chars,
+            &crate::fonts::bundled_font_catalog()[0].sha256,
+            0,
+        )
+        .unwrap();
+        let before = doc.objects.len();
+        ensure_cjk_font_for_chars(&mut doc, 2, &chars, Some("Same"), None, true).unwrap();
+        assert_eq!(
+            doc.objects.len(),
+            before,
+            "the same face should be reused across pages"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("custom.ttf");
+        std::fs::write(&path, BUNDLED_NOTO_EMOJI).unwrap();
+        ensure_cjk_font_for_chars(&mut doc, 1, &chars, Some("Custom"), path.to_str(), true)
+            .unwrap();
+        let emoji_id = find_embedded_font_covering_chars(
+            &doc,
+            &chars,
+            &crate::fonts::bundled_font_catalog()[1].sha256,
+            0,
+        )
+        .unwrap();
+        assert_ne!(
+            sans_id, emoji_id,
+            "coverage alone must not override the requested font"
+        );
+        let embedded = doc.get_object(emoji_id).unwrap().as_dict().unwrap();
+        let name = embedded.get(b"BaseFont").unwrap().as_name_str().unwrap();
+        assert!(
+            name.contains("NotoEmoji"),
+            "actual PostScript name should be retained: {name}"
+        );
+        let before = doc.objects.len();
+        ensure_cjk_font_for_chars(&mut doc, 2, &chars, None, path.to_str(), true).unwrap();
+        assert_eq!(doc.objects.len(), before);
+        std::fs::write(&path, b"not a font").unwrap();
+        assert!(ensure_cjk_font_for_chars(
+            &mut doc,
+            1,
+            &chars,
+            Some("Invalid"),
+            path.to_str(),
+            true
+        )
+        .is_err());
+        assert_eq!(
+            doc.objects.len(),
+            before,
+            "an invalid file must not use an unrelated cached font"
+        );
+        let font = std::fs::File::create(&path).unwrap();
+        font.set_len(64 * 1024 * 1024 + 1).unwrap();
+        assert!(font_file_covers_chars(&path, &chars).is_err());
+    }
+
+    fn attach_text(doc: &mut LopdfDocument, page_id: ObjectId, font: &str, operand: &str) {
+        let stream = doc.add_object(Stream::new(
+            Dictionary::new(),
+            format!("BT /{font} 12 Tf 10 100 Td {operand} Tj ET").into_bytes(),
+        ));
+        doc.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Contents", stream);
+    }
+
+    #[test]
+    fn unicode_aliases_of_one_glyph_have_distinct_cids_and_roundtrip_exactly() {
+        let face = Face::parse(BUNDLED_NOTO, 0).unwrap();
+        let mut seen = HashMap::new();
+        let aliases = (0x20..=0xffff)
+            .filter_map(char::from_u32)
+            .filter(|c| !c.is_control())
+            .find_map(|character| {
+                let gid = face.glyph_index(character)?;
+                if gid.0 == 0 {
+                    return None;
+                }
+                seen.insert(gid.0, character)
+                    .map(|previous| (previous, character))
+            })
+            .expect("bundled face contains Unicode aliases for an outline");
+        let text = format!("A{}{}{}Z", aliases.0, aliases.1, aliases.0);
+        let chars = text.chars().collect();
+        let mut doc = empty_two_page_document();
+        let name = ensure_cjk_font_for_chars(&mut doc, 1, &chars, Some("Aliases"), None, true)
+            .unwrap()
+            .unwrap();
+        let font_id = find_embedded_font_covering_chars(
+            &doc,
+            &chars,
+            &crate::fonts::bundled_font_catalog()[0].sha256,
+            0,
+        )
+        .unwrap();
+        let font = doc.get_dictionary(font_id).unwrap();
+        let unicode = doc
+            .get_object(font.get(b"ToUnicode").unwrap().as_reference().unwrap())
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .get_plain_content()
+            .unwrap();
+        let cmap =
+            crate::content_stream::parse_to_unicode_cmap(std::str::from_utf8(&unicode).unwrap());
+        assert!(cmap.values().all(|text| text.chars().count() == 1));
+        let alias_cids: Vec<_> = [aliases.0, aliases.1]
+            .into_iter()
+            .map(|character| {
+                *cmap
+                    .iter()
+                    .find(|(_, text)| **text == character.to_string())
+                    .unwrap()
+                    .0 as usize
+            })
+            .collect();
+        assert_ne!(alias_cids[0], alias_cids[1]);
+        let cid_font = doc
+            .get_dictionary(
+                font.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        let map = doc
+            .get_object(
+                cid_font
+                    .get(b"CIDToGIDMap")
+                    .unwrap()
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .get_plain_content()
+            .unwrap();
+        assert_eq!(
+            &map[alias_cids[0] * 2..alias_cids[0] * 2 + 2],
+            &map[alias_cids[1] * 2..alias_cids[1] * 2 + 2]
+        );
+        let page_id = doc.get_pages()[&1];
+        let operand =
+            crate::content_stream::encode_chunk_with_font(&doc, page_id, &name, &text).unwrap();
+        attach_text(&mut doc, page_id, &name, &operand);
+        let parsed = crate::content_stream::parse_page_content_stream(
+            &doc.get_page_content(page_id).unwrap(),
+            page_id,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<String>(),
+            text
+        );
+    }
+
+    #[test]
+    fn a_legacy_ligature_mapping_cannot_encode_each_letter_and_uses_a_safe_fallback() {
+        let mut doc = empty_two_page_document();
+        let chars = HashSet::from(['f', 'i']);
+        let original = ensure_cjk_font_for_chars(&mut doc, 1, &chars, Some("Original"), None, true)
+            .unwrap()
+            .unwrap();
+        let font_id = find_embedded_font_covering_chars(
+            &doc,
+            &chars,
+            &crate::fonts::bundled_font_catalog()[0].sha256,
+            0,
+        )
+        .unwrap();
+        let font = doc.get_dictionary(font_id).unwrap();
+        let unicode_id = font.get(b"ToUnicode").unwrap().as_reference().unwrap();
+        let cmap=b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n1 beginbfchar\n<0001> <00660069>\nendbfchar\n";
+        doc.objects.insert(
+            unicode_id,
+            Object::Stream(Stream::new(Dictionary::new(), cmap.to_vec())),
+        );
+        doc.get_object_mut(font_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"OfficeCLICidMappingVersion");
+        let page = doc.get_pages()[&1];
+        attach_text(&mut doc, page, &original, "<0001>");
+        assert!(crate::content_stream::encode_chunk_with_font(&doc, page, &original, "f").is_err());
+        let fallback = ensure_cjk_font_for_chars(&mut doc, 1, &chars, None, None, false)
+            .unwrap()
+            .expect("individual letters require a different mapping");
+        assert_ne!(original, fallback);
+        crate::modifier::replace_text_at_path(&mut doc, 1, 1, "if", Some(&fallback)).unwrap();
+        let parsed = crate::content_stream::parse_page_content_stream(
+            &doc.get_page_content(page).unwrap(),
+            page,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<String>(),
+            "if"
+        );
+    }
+
+    #[test]
+    fn a_simple_font_with_tounicode_saves_one_byte_codes_without_extra_nuls() {
+        let mut doc = empty_two_page_document();
+        let cmap=b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n1 beginbfchar\n<41> <0041>\nendbfchar\n";
+        let unicode = doc.add_object(Stream::new(Dictionary::new(), cmap.to_vec()));
+        let font=doc.add_object(dictionary! { "Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>"Helvetica", "Encoding"=>"WinAnsiEncoding", "ToUnicode"=>unicode });
+        let page = doc.get_pages()[&1];
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                dictionary! {"Font"=>dictionary!{"Simple"=>font}},
+            );
+        attach_text(&mut doc, page, "Simple", "<41>");
+        assert_eq!(
+            crate::content_stream::encode_chunk_with_font(&doc, page, "Simple", "AA").unwrap(),
+            "<4141>"
+        );
+        crate::modifier::replace_text_at_path(&mut doc, 1, 1, "AA", Some("Simple")).unwrap();
+        let parsed = crate::content_stream::parse_page_content_stream(
+            &doc.get_page_content(page).unwrap(),
+            page,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<String>(),
+            "AA"
+        );
+    }
 
     #[test]
     fn bundled_cjk_font_coverage_is_reported_exactly() {

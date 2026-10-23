@@ -362,6 +362,13 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     Default::default()
                 }
             };
+            if let Err(error) = crate::extract_text_run_sizes(&html) {
+                issues.push(issue(
+                    "TEXT_RUNS_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                ));
+            }
             let actual_text_chars: usize = canonical_nodes
                 .values()
                 .map(|text| text.chars().count())
@@ -473,6 +480,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                             &entry,
                             &descriptor.map_href,
                             &manifest.source,
+                            manifest.capabilities.structure_patch,
                             &mut textual_range_end,
                             &mut issues,
                         );
@@ -755,6 +763,7 @@ fn validate_revision_chain(
                 || !record.dirty_node_ids.is_empty()
                 || !record.dirty_chunk_ids.is_empty()
                 || !record.dirty_source_parts.is_empty()
+                || record.layout_upgrade
                 || record.index_prefix != "indexes/rev-00000000000000000000"
             {
                 issues.push(issue(
@@ -766,6 +775,50 @@ fn validate_revision_chain(
             }
         } else {
             validate_patch_revision(&record, previous.as_ref(), &mut patch_ids, &path, issues);
+            if record.layout_upgrade {
+                if manifest.source.format != "pdf" || manifest.profile != "fixed-layout" {
+                    issues.push(issue(
+                        "REVISION_LAYOUT_FORMAT_INVALID",
+                        "layout upgrade requires a fixed-layout PDF".into(),
+                        &path,
+                    ));
+                } else if let Err(error) =
+                    crate::pdf_layout::validate_layout_history(bundle, manifest, &record)
+                {
+                    issues.push(issue(
+                        "REVISION_LAYOUT_CONTENT_CHANGED",
+                        error.to_string(),
+                        &path,
+                    ));
+                }
+            }
+
+            if let Some(patch_id) = record
+                .patch_id
+                .as_deref()
+                .filter(|id| id.starts_with("restore-"))
+            {
+                let target = patch_id
+                    .strip_prefix("restore-")
+                    .and_then(|value| value.split_once('-'))
+                    .and_then(|(target, suffix)| {
+                        let target = target.parse::<u64>().ok()?;
+                        (suffix == revision.to_string() && target < revision).then_some(target)
+                    });
+                match target.and_then(|target| bundle.revision(target).ok()) {
+                    Some(historical) if record.structural_change
+                        && record.root_hash == historical.root_hash
+                        && record.annotation_root_hash == historical.annotation_root_hash
+                        && record.index_root_href == historical.index_root_href
+                        && record.index_prefix == historical.index_prefix
+                        && record.asset_index_href == historical.asset_index_href => {},
+                    _ => issues.push(issue(
+                        "REVISION_RESTORE_TARGET_INVALID",
+                        "restore revision must reference the exact roots and indexes of an earlier revision".to_string(),
+                        &path,
+                    )),
+                }
+            }
         }
 
         if revision == manifest.revision
@@ -841,7 +894,11 @@ fn validate_patch_revision(
     );
     validate_revision_dirty_set(
         &record.dirty_chunk_ids,
-        "chunk",
+        if record.layout_upgrade {
+            "layout chunk"
+        } else {
+            "chunk"
+        },
         |value| valid_prefixed_id(value, "c_", 32),
         path,
         issues,
@@ -854,9 +911,28 @@ fn validate_patch_revision(
         issues,
     );
 
+    let restore = record
+        .patch_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("restore-"));
     let content_changed = !record.dirty_node_ids.is_empty();
-    if content_changed == record.dirty_chunk_ids.is_empty()
-        || content_changed == record.dirty_source_parts.is_empty()
+    if record.layout_upgrade
+        && (restore
+            || record.structural_change
+            || content_changed
+            || record.dirty_chunk_ids.is_empty()
+            || !record.dirty_source_parts.is_empty())
+    {
+        issues.push(issue(
+            "REVISION_LAYOUT_DIRTY_SET_INVALID",
+            "layout upgrades must only change presentation chunks".into(),
+            path,
+        ));
+    }
+    if !restore
+        && !record.layout_upgrade
+        && (content_changed == record.dirty_chunk_ids.is_empty()
+            || content_changed == record.dirty_source_parts.is_empty())
     {
         issues.push(issue(
             "REVISION_DIRTY_SET_INCONSISTENT",
@@ -866,10 +942,32 @@ fn validate_patch_revision(
         ));
     }
     if let Some(previous) = previous {
+        if restore {
+            if !record.structural_change
+                || content_changed
+                || !record.dirty_chunk_ids.is_empty()
+                || !record.dirty_source_parts.is_empty()
+            {
+                issues.push(issue(
+                    "REVISION_RESTORE_DIRTY_SET_INVALID",
+                    "restore revision must be structural and reuse existing immutable objects without dirty sets".to_string(),
+                    path,
+                ));
+            }
+            return;
+        }
+        let presentation_changed = content_changed || record.layout_upgrade;
+        if record.layout_upgrade && record.annotation_root_hash != previous.annotation_root_hash {
+            issues.push(issue(
+                "REVISION_LAYOUT_ANNOTATIONS_CHANGED",
+                "layout upgrade changed recognition annotations".into(),
+                path,
+            ));
+        }
         if record.index_root_href.is_some() || previous.index_root_href.is_some() {
             if record.index_prefix != previous.index_prefix
-                || (content_changed && record.index_root_href == previous.index_root_href)
-                || (!content_changed && record.index_root_href != previous.index_root_href)
+                || (presentation_changed && record.index_root_href == previous.index_root_href)
+                || (!presentation_changed && record.index_root_href != previous.index_root_href)
             {
                 issues.push(issue(
                     "REVISION_INDEX_TRANSITION_INVALID",
@@ -878,7 +976,7 @@ fn validate_patch_revision(
                 ));
             }
         } else {
-            let expected_index = if content_changed {
+            let expected_index = if presentation_changed {
                 format!("indexes/rev-{:020}", record.revision)
             } else {
                 previous.index_prefix.clone()
@@ -894,7 +992,7 @@ fn validate_patch_revision(
                 ));
             }
         }
-        if !content_changed && record.root_hash != previous.root_hash {
+        if !presentation_changed && record.root_hash != previous.root_hash {
             issues.push(issue(
                 "ANNOTATION_REVISION_CHANGED_BODY_ROOT",
                 "annotation-only revision changed the body root hash".to_string(),
@@ -921,10 +1019,15 @@ fn validate_revision_dirty_set(
     path: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    if values.len() > 10_000 {
+    let maximum = if kind == "layout chunk" {
+        (crate::MAX_CONTROL_PART_BYTES / 36) as usize
+    } else {
+        10_000
+    };
+    if values.len() > maximum {
         issues.push(issue(
             "REVISION_DIRTY_SET_TOO_LARGE",
-            format!("revision contains more than 10,000 dirty {kind} entries"),
+            format!("revision contains more than {maximum} dirty {kind} entries"),
             path,
         ));
     }
@@ -1091,6 +1194,7 @@ fn validate_map_entry(
     entry: &crate::NodeMapEntry,
     path: &str,
     source: &crate::SourceDescriptor,
+    structure_patch: bool,
     textual_range_end: &mut u64,
     issues: &mut Vec<ValidationIssue>,
 ) {
@@ -1138,13 +1242,21 @@ fn validate_map_entry(
         }
     }
     if matches!(source.format.as_str(), "html" | "md" | "txt") {
-        validate_textual_source_range(entry, source, textual_range_end, path, issues);
+        validate_textual_source_range(
+            entry,
+            source,
+            structure_patch,
+            textual_range_end,
+            path,
+            issues,
+        );
     }
 }
 
 fn validate_textual_source_range(
     entry: &crate::NodeMapEntry,
     source: &crate::SourceDescriptor,
+    structure_patch: bool,
     previous_end: &mut u64,
     path: &str,
     issues: &mut Vec<ValidationIssue>,
@@ -1172,6 +1284,15 @@ fn validate_textual_source_range(
         ));
         return;
     };
+    if structure_patch
+        && value.starts_with("editor:")
+        && matches!(
+            entry.source.node_kind.as_str(),
+            "editor-text" | "editor-hard-break" | "editor-decoration"
+        )
+    {
+        return;
+    }
     let parsed = value
         .strip_prefix("bytes:")
         .and_then(|range| range.split_once(':'))
@@ -1187,7 +1308,7 @@ fn validate_textual_source_range(
         ));
         return;
     };
-    if start > end || end > source.size_bytes || start < *previous_end {
+    if start > end || end > source.size_bytes || (!structure_patch && start < *previous_end) {
         issues.push(issue(
             "TEXTUAL_SOURCE_RANGE_INVALID",
             format!(
@@ -1198,7 +1319,9 @@ fn validate_textual_source_range(
         ));
         return;
     }
-    *previous_end = end;
+    if !structure_patch {
+        *previous_end = end;
+    }
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -1630,6 +1753,13 @@ fn validate_html_fragment(
     asset_hashes: &HashSet<String>,
 ) -> Result<Vec<HcdTableFragment>, HcdError> {
     validate_html_fragment_bytes(&fs::read(path)?, asset_hashes)
+}
+
+pub(crate) fn validate_rewritten_html(
+    html: &str,
+    assets: &HashSet<String>,
+) -> Result<(), HcdError> {
+    validate_html_fragment_bytes(html.as_bytes(), assets).map(|_| ())
 }
 
 fn validate_html_fragment_bytes(

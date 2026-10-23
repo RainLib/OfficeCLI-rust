@@ -227,9 +227,15 @@ pub(crate) fn manifest_at_revision(
     manifest.revision = revision;
     manifest.root_hash = record.root_hash;
     manifest.annotation_root_hash = record.annotation_root_hash;
-    manifest.annotation_href = (manifest.annotation_root_hash != hash_bytes(b"[]"))
-        .then(|| format!("annotations/sha256/{}.json", manifest.annotation_root_hash));
+    manifest.annotation_href = (manifest.annotation_root_hash != hash_bytes(b"[]")).then(|| {
+        format!(
+            "annotations/sha256/{}.json{}",
+            manifest.annotation_root_hash,
+            manifest.storage_codec.suffix()
+        )
+    });
     manifest.index_prefix = record.index_prefix;
+    manifest.index_root_href = record.index_root_href;
     Ok(manifest)
 }
 
@@ -241,6 +247,12 @@ pub(crate) fn dirty_state_through(
     let mut dirty_nodes = HashSet::new();
     for current in 1..=revision {
         let record = bundle.revision(current)?;
+        if record.structural_change {
+            return Err(HcdError::Unsupported(
+                "structural HCD revision requires source-free semantic export; omit --source"
+                    .to_string(),
+            ));
+        }
         dirty_parts.extend(record.dirty_source_parts);
         dirty_nodes.extend(record.dirty_node_ids);
     }
@@ -360,7 +372,9 @@ pub(crate) fn checked_export_state(
     let manifest = manifest_at_revision(bundle, &head, revision)?;
     let (dirty_parts, dirty_nodes) = dirty_state_through(bundle, revision)?;
     reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes)?;
-    reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
+    if manifest.source.format != "pdf" {
+        reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
+    }
     Ok((manifest, revision, dirty_parts, dirty_nodes))
 }
 

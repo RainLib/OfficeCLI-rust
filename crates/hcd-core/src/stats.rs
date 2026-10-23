@@ -43,6 +43,7 @@ pub fn bundle_stats(bundle: &Bundle) -> Result<BundleStats, HcdError> {
     let mut categories = BTreeMap::<String, StorageCategory>::new();
     let mut all_files = Vec::new();
     collect_files(bundle.root(), bundle.root(), &mut all_files)?;
+    let staged = staged_references(bundle, &all_files)?;
     let mut total_stored_bytes = 0u64;
     let mut referenced_stored_bytes = 0u64;
     let mut orphan_stored_bytes = 0u64;
@@ -67,9 +68,9 @@ pub fn bundle_stats(bundle: &Bundle) -> Result<BundleStats, HcdError> {
         group.files += 1;
         group.stored_bytes = group.stored_bytes.saturating_add(stored);
         group.decoded_bytes = group.decoded_bytes.saturating_add(logical);
-        if referenced.contains(&href) {
+        if referenced.contains(&href) || staged.contains(&href) {
             referenced_stored_bytes = referenced_stored_bytes.saturating_add(stored);
-            if !previous_references.contains(&href) {
+            if referenced.contains(&href) && !previous_references.contains(&href) {
                 latest_revision_added_bytes = latest_revision_added_bytes.saturating_add(stored);
             }
         } else if eligible_for_gc(&href) {
@@ -94,6 +95,48 @@ pub fn bundle_stats(bundle: &Bundle) -> Result<BundleStats, HcdError> {
         categories,
         orphan_hrefs,
     })
+}
+
+/// Staging descriptors are durable pins for uploads and shared/recovery
+/// drafts. They are not canonical revision content. Do not infer that a
+/// resource is unused from the current HTML or revision indexes alone.
+fn staged_references(
+    bundle: &Bundle,
+    files: &[(String, std::path::PathBuf)],
+) -> Result<HashSet<String>, HcdError> {
+    let mut pinned = HashSet::new();
+    for (href, path) in files {
+        let Some(name) = href.strip_prefix("assets/staged/") else {
+            continue;
+        };
+        let Some(hash) = name.strip_suffix(".json") else {
+            return Err(HcdError::InvalidBundle(
+                "unexpected staged asset descriptor".into(),
+            ));
+        };
+        crate::patch::validate_sha256("staged asset hash", hash)
+            .map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+        let asset: AssetDescriptor = crate::bundle::read_json_bounded(
+            path,
+            MAX_CONTROL_PART_BYTES,
+            "staged asset descriptor",
+        )?;
+        let prefix = format!("assets/sha256/{hash}.");
+        let extension = asset.href.strip_prefix(&prefix).unwrap_or_default();
+        if asset.hash != hash
+            || extension.is_empty()
+            || extension.len() > 16
+            || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(HcdError::InvalidBundle(
+                "invalid staged asset identity or href".into(),
+            ));
+        }
+        bundle.resolve_href(&asset.href)?;
+        pinned.insert(href.clone());
+        pinned.insert(asset.href);
+    }
+    Ok(pinned)
 }
 
 pub fn remove_orphan_objects(bundle: &Bundle) -> Result<BundleStats, HcdError> {

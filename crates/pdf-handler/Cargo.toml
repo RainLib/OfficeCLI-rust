@@ -14,6 +14,9 @@ jpeg-decoder = "0.3"
 flate2 = "1"
 weezl = "0.1"
 ttf-parser = "0.21"
+rustybuzz = "0.20.1"
+sha2 = { workspace = true }
+unicode-segmentation = { workspace = true }
 subsetter = "0.2"
 
 [dev-dependencies]

@@ -822,6 +822,72 @@ fn pdf_hcd_page_patch_roundtrip() {
 }
 
 #[test]
+fn source_free_pdf_font_fallback_never_exports_a_partial_page_raster() {
+    for (case, text, visual) in [
+        ("mixed", "中文😀", true),
+        ("multiline", "FIRST\nSECOND", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("input.pdf");
+        std::fs::copy(workspace_root().join("examples/test.pdf"), &source).unwrap();
+        let bundle = temp.path().join("bundle");
+        let id = format!("font-fallback-{case}");
+        let extracted = import_and_extract(&source, &bundle, &id);
+        let entry = extracted["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["text"] == "Hello World from OfficeCLI")
+            .unwrap();
+        std::fs::remove_file(source).unwrap();
+        apply_text_patch(
+            temp.path(),
+            &bundle,
+            &id,
+            entry,
+            0,
+            "Hello World from OfficeCLI".chars().count(),
+            text,
+        );
+        let opened = hcd_core::Bundle::open(&bundle).unwrap();
+        assert_eq!(
+            hcd_core::get_text_node(&opened, entry["nodeId"].as_str().unwrap())
+                .unwrap()
+                .node
+                .text,
+            text
+        );
+        let output = temp.path().join("export.pdf");
+        let report = temp.path().join("fidelity.json");
+        officecli()
+            .args([
+                "hdoc",
+                "export",
+                bundle.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--fidelity-report",
+                report.to_str().unwrap(),
+                "--json",
+            ])
+            .assert()
+            .success();
+        let fidelity: Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+        assert_eq!(fidelity["level"] == "VISUAL", visual, "{fidelity}");
+        if visual {
+            assert!(pdf_contains_image_xobject(&output));
+        } else {
+            officecli()
+                .args(["view", output.to_str().unwrap()])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("FIRST"))
+                .stdout(predicate::str::contains("SECOND"));
+        }
+    }
+}
+
+#[test]
 fn html_hcd_patch_roundtrip_is_source_backed_and_rust_only() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.html");
@@ -1583,4 +1649,246 @@ fn supported_hcd_adapters_repeat_stable_ids_and_body_roots() {
                 .unwrap();
         assert_eq!(first_manifest["rootHash"], second_manifest["rootHash"]);
     }
+}
+
+#[test]
+fn word_partial_size_edits_survive_hcd_and_semantic_docx_export() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("font-source.docx");
+    officecli()
+        .args(["create", source.to_str().unwrap()])
+        .assert()
+        .success();
+    let mut package = oxml::OxmlPackage::open(source.to_str().unwrap(), true).unwrap();
+    let styles = package.read_part_xml("word/styles.xml").unwrap().replace("</w:styles>", r#"<w:style w:type="paragraph" w:styleId="TypographyDemo"><w:name w:val="Typography Demo"/><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#);
+    package.write_part_xml("word/styles.xml", &styles).unwrap();
+    package.write_part_xml("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="TypographyDemo"/></w:pPr><w:r><w:t>中文Alpha</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="黑体"/><w:sz w:val="40"/></w:rPr><w:t>Beta😀</w:t></w:r></w:p><w:p><w:r><w:t>Neighbor unchanged</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#).unwrap();
+    package.save().unwrap();
+    let bundle_path = temp.path().join("font.hcd");
+    import_and_extract(&source, &bundle_path, "font-structure");
+    // Simulate an older, valid bundle whose stylesheet predates language slots.
+    let imported = hcd_core::Bundle::open(&bundle_path).unwrap();
+    let manifest = imported.manifest().unwrap();
+    let legacy_path = temp.path().join("legacy-font.hcd");
+    let mut writer =
+        hcd_core::BundleWriter::create_with_codec(&legacy_path, manifest.storage_codec).unwrap();
+    let styles =
+        std::fs::read_to_string(imported.resolve_href(&manifest.styles_href).unwrap()).unwrap();
+    let legacy_styles = regex::Regex::new(r"-hcd-font-(?:latin|east-asia|bidi):[^;}]*;?")
+        .unwrap()
+        .replace_all(
+            styles.trim_start_matches(hcd_docx::FONT_METADATA_CSS_MARKER),
+            "",
+        )
+        .into_owned();
+    writer.write_styles(&legacy_styles).unwrap();
+    for page in 0..manifest.index_page_count {
+        for chunk in imported.read_index_page(&manifest, page).unwrap().chunks {
+            writer
+                .write_chunk(
+                    chunk.chunk_id.clone(),
+                    chunk.region.clone(),
+                    imported.read_chunk(&chunk).unwrap(),
+                    imported.read_map(&chunk).unwrap(),
+                    chunk.block_count,
+                    chunk.continuation,
+                )
+                .unwrap();
+        }
+    }
+    writer.finish(manifest.clone()).unwrap();
+    let legacy = hcd_core::Bundle::open(&legacy_path).unwrap();
+    let unchanged_root = legacy.manifest().unwrap().root_hash;
+    let raw = hcd_core::editor_projection(&legacy, None).unwrap();
+    assert!(raw.blocks[0].content.inlines[0]
+        .typography
+        .as_ref()
+        .unwrap()
+        .east_asia
+        .is_none());
+    let supplement = hcd_docx::source_typography_styles(&source, &manifest.source.sha256).unwrap();
+    let recovered =
+        hcd_core::editor_projection_with_typography_styles(&legacy, None, &supplement).unwrap();
+    assert_eq!(
+        recovered.blocks[0].content.inlines[0]
+            .typography
+            .as_ref()
+            .unwrap()
+            .east_asia
+            .as_deref(),
+        Some("宋体")
+    );
+    assert_eq!(legacy.manifest().unwrap().root_hash, unchanged_root);
+    assert!(hcd_docx::source_typography_styles(&source, &"0".repeat(64)).is_err());
+    let legacy_output = temp.path().join("legacy-font-export.docx");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            legacy_path.to_str().unwrap(),
+            "--typography-source",
+            source.to_str().unwrap(),
+            "--output",
+            legacy_output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let legacy_package = oxml::OxmlPackage::open(legacy_output.to_str().unwrap(), false).unwrap();
+    let legacy_xml = legacy_package.read_part_xml("word/document.xml").unwrap();
+    assert!(legacy_xml.contains("w:eastAsia=\"宋体\""));
+    let json = |args: &[&str]| -> Value {
+        let output = officecli()
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()["data"].clone()
+    };
+    json(&[
+        "hdoc",
+        "project-editor",
+        bundle_path.to_str().unwrap(),
+        "--expected-revision",
+        "0",
+        "--json",
+    ]);
+    let before = json(&[
+        "hdoc",
+        "editor-state",
+        bundle_path.to_str().unwrap(),
+        "--json",
+    ]);
+    let bundle = hcd_core::Bundle::open(&bundle_path).unwrap();
+    assert!(!hcd_docx::requires_semantic_rebuild(&bundle, 1).unwrap());
+    let original = &before["blocks"][0];
+    let first = &original["content"]["inlines"][0];
+    let second = &original["content"]["inlines"][1];
+    assert_eq!(first["typography"]["sizePt"].as_f64(), Some(14.0));
+    assert_eq!(second["typography"]["sizePt"].as_f64(), Some(20.0));
+    let span = |original: &Value, text: &str, size| {
+        let mut inline = original.clone();
+        inline.as_object_mut().unwrap().remove("nodeId");
+        inline["text"] = text.into();
+        inline["typography"]["sizePt"] = serde_json::json!(size);
+        inline
+    };
+    let mut content = original["content"].clone();
+    content["inlines"] = serde_json::json!([
+        span(first, "中文", 14.0),
+        span(first, "Alpha", 28.5),
+        span(second, "Beta", 28.5),
+        span(second, "😀", 20.0)
+    ]);
+    let patch = temp.path().join("size.json");
+    std::fs::write(&patch, serde_json::to_vec(&serde_json::json!({"schemaVersion":"hcd-patch/4","documentId":"font-structure","patchId":"partial-size","baseRevision":1,"operations":[{"op":"block.replace","blockId":original["blockId"],"precondition":{"blockHash":original["blockHash"]},"block":content}]})).unwrap()).unwrap();
+    json(&[
+        "hdoc",
+        "apply",
+        bundle_path.to_str().unwrap(),
+        "--patch",
+        patch.to_str().unwrap(),
+        "--expected-revision",
+        "1",
+        "--json",
+    ]);
+    let after = json(&[
+        "hdoc",
+        "editor-state",
+        bundle_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        after["blocks"][1]["content"],
+        before["blocks"][1]["content"]
+    );
+    let historical = json(&[
+        "hdoc",
+        "editor-state",
+        bundle_path.to_str().unwrap(),
+        "--revision",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(historical["blocks"][0], before["blocks"][0]);
+    assert!(hcd_docx::requires_semantic_rebuild(&bundle, 2).unwrap());
+    assert!(!hcd_docx::requires_semantic_rebuild(&bundle, 1).unwrap());
+    let rejected = temp.path().join("native-rejected.docx");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle_path.to_str().unwrap(),
+            "--source",
+            source.to_str().unwrap(),
+            "--output",
+            rejected.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert!(!rejected.exists());
+    let exported = temp.path().join("font-export.docx");
+    let report = json(&[
+        "hdoc",
+        "export",
+        bundle_path.to_str().unwrap(),
+        "--output",
+        exported.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(report["level"], "SEMANTIC");
+    let output = oxml::OxmlPackage::open(exported.to_str().unwrap(), false).unwrap();
+    let xml = output.read_part_xml("word/document.xml").unwrap();
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for (text, size, latin, east_asia) in [
+        ("中文", "28", "Times New Roman", "宋体"),
+        ("Alpha", "57", "Times New Roman", "宋体"),
+        ("Beta", "57", "Arial", "黑体"),
+        ("😀", "40", "Arial", "黑体"),
+    ] {
+        let run = parsed
+            .descendants()
+            .find(|node| {
+                node.has_tag_name((namespace, "r"))
+                    && node.descendants().any(|child| {
+                        child.has_tag_name((namespace, "t")) && child.text() == Some(text)
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            run.descendants()
+                .find(|node| node.has_tag_name((namespace, "sz")))
+                .unwrap()
+                .attribute((namespace, "val")),
+            Some(size)
+        );
+        let fonts = run
+            .descendants()
+            .find(|node| node.has_tag_name((namespace, "rFonts")))
+            .unwrap();
+        assert_eq!(fonts.attribute((namespace, "ascii")), Some(latin));
+        assert_eq!(fonts.attribute((namespace, "eastAsia")), Some(east_asia));
+    }
+    officecli()
+        .args(["validate", exported.to_str().unwrap()])
+        .assert()
+        .success();
+    let reimported = temp.path().join("reimport.hcd");
+    import_and_extract(&exported, &reimported, "font-reimport");
+    let reopened = json(&[
+        "hdoc",
+        "editor-state",
+        reimported.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        reopened["blocks"][0]["content"]["inlines"][1]["typography"]["sizePt"],
+        28.5
+    );
+    assert_eq!(
+        reopened["blocks"][0]["content"]["inlines"][2]["typography"]["eastAsia"],
+        "黑体"
+    );
 }

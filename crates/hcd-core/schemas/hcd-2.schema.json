@@ -149,10 +149,10 @@
           "const": true
         },
         "structurePatch": {
-          "const": false
+          "type": "boolean"
         },
         "stylePatch": {
-          "const": false
+          "type": "boolean"
         },
         "exactPagination": {
           "const": false

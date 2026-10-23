@@ -165,8 +165,18 @@ pub fn manifest_at_revision(
     manifest.revision = revision;
     manifest.root_hash = record.root_hash;
     manifest.annotation_root_hash = record.annotation_root_hash;
+    manifest.annotation_href =
+        (manifest.annotation_root_hash != crate::hash_bytes(b"[]")).then(|| {
+            format!(
+                "annotations/sha256/{}.json{}",
+                manifest.annotation_root_hash,
+                manifest.storage_codec.suffix()
+            )
+        });
     manifest.index_prefix = record.index_prefix;
     manifest.index_root_href = record.index_root_href;
+    manifest.index_page_count = record.index_page_count.unwrap_or(manifest.index_page_count);
+    manifest.chunk_count = record.chunk_count.unwrap_or(manifest.chunk_count);
     Ok((manifest, revision))
 }
 

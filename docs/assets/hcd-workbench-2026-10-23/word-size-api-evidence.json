@@ -1,0 +1,75 @@
+{
+  "documentId": "word-size-workbench",
+  "revision": 4,
+  "selectedText": "Text",
+  "selectedSizePt": 28.5,
+  "otherSizesPt": [
+    14,
+    20
+  ],
+  "eastAsiaFonts": [
+    "宋体",
+    "宋体",
+    "黑体"
+  ],
+  "history": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "neighborUnchanged": true,
+  "textUnchanged": true,
+  "oldProtocolRejected": 426,
+  "readOnlyRejected": 403,
+  "sourceEditOptions": {
+    "1": {
+      "reasonCode": null,
+      "revision": 1,
+      "sourceAvailable": true,
+      "sourceEditsSupported": true
+    },
+    "4": {
+      "reasonCode": "DOCX_REBUILD_REQUIRED",
+      "revision": 4,
+      "sourceAvailable": true,
+      "sourceEditsSupported": false
+    }
+  },
+  "docxNativeRunSizesHalfPoints": [
+    28,
+    57,
+    40
+  ],
+  "docxLanguageFontsVerified": true,
+  "bundleValid": true,
+  "browserChecks": [
+    "loading gate disabled save",
+    "invalid size rejected",
+    "writer changed selection to 28.5",
+    "peer reflected size",
+    "reader controls disabled",
+    "undo saved r3",
+    "redo saved r4"
+  ],
+  "legacyDocumentReadWithVerifiedFontSlots": true,
+  "legacyDocumentRevisionUnchanged": 3,
+  "legacyDocumentRootUnchanged": true,
+  "browserReopenSizePt": 28.5,
+  "browserExportMode": "current-content",
+  "browserExportSucceeded": true,
+  "legacyBrowserMigrationLoaded": true,
+  "legacyRenderedSlots": [
+    {
+      "latin": "Times New Roman",
+      "eastAsia": "宋体",
+      "sizePt": 14
+    },
+    {
+      "latin": "Arial",
+      "eastAsia": "黑体",
+      "sizePt": 20
+    }
+  ],
+  "bootstrapPendingAtSavedRevisionStillLocked": 4
+}

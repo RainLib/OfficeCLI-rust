@@ -8,9 +8,9 @@ use crate::{
     extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, AnnotationSet,
     ApplyResult, AssetDescriptor, FidelityWarning, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeStylePatch, PatchBatch,
-    PatchOperation, RevisionRecord, TextExtractEntry, TextExtractPage, TextNodeLookup,
-    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    PatchOperation, PdfPageRaster, PdfRasterPlan, RevisionRecord, TextExtractEntry,
+    TextExtractPage, TextNodeLookup, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2,
+    HCD_PATCH_SCHEMA_VERSION_3, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -41,6 +41,7 @@ struct StyleChange {
 
 #[derive(Clone, Default)]
 struct ImageChange {
+    restore_source: bool,
     asset_hash: Option<String>,
     geometry: Option<ImageGeometry>,
     visual_hash: String,
@@ -50,6 +51,15 @@ pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
     expected_revision: u64,
+) -> Result<ApplyResult, HcdError> {
+    apply_patch_with_pdf_rasters(bundle, patch, expected_revision, PdfRasterPlan::default())
+}
+
+pub fn apply_patch_with_pdf_rasters(
+    bundle: &Bundle,
+    patch: &PatchBatch,
+    expected_revision: u64,
+    raster_plan: PdfRasterPlan,
 ) -> Result<ApplyResult, HcdError> {
     let _write_guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
@@ -95,8 +105,28 @@ pub fn apply_patch(
     }
 
     let splices = collect_splices(patch)?;
+    let mut annotation_splices = splices.clone();
     let styles = collect_styles(patch)?;
     let images = collect_image_changes(patch)?;
+    let mut rich = BTreeMap::new();
+    for operation in &patch.operations {
+        if let PatchOperation::TextRuns { node_id, .. } = operation {
+            if rich.insert(node_id.clone(), operation).is_some()
+                || splices.contains_key(node_id)
+                || styles.contains_key(node_id)
+                || images.contains_key(node_id)
+            {
+                return Err(HcdError::InvalidPatch(format!(
+                    "text.runs must be the sole content operation for {node_id}"
+                )));
+            }
+        }
+    }
+    if !rich.is_empty() && manifest.source.format != "docx" {
+        return Err(HcdError::Unsupported(
+            "text.runs currently requires a DOCX source mapping".into(),
+        ));
+    }
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -110,13 +140,18 @@ pub fn apply_patch(
         .cloned()
         .chain(styles.keys().cloned())
         .chain(images.keys().cloned())
+        .chain(rich.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
         .collect();
 
     let new_revision = manifest.revision + 1;
     let new_index_prefix = format!("indexes/rev-{new_revision:020}");
     let new_index_root = bundle.root().join(&new_index_prefix);
-    let content_changed = !splices.is_empty() || !styles.is_empty() || !images.is_empty();
+    let content_changed = !splices.is_empty()
+        || !rich.is_empty()
+        || !styles.is_empty()
+        || !images.is_empty()
+        || !raster_plan.rasters.is_empty();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -133,17 +168,30 @@ pub fn apply_patch(
         .iter()
         .map(|asset| (asset.hash.clone(), asset.clone()))
         .collect();
+    let mut validated_assets = HashSet::new();
     for change in images.values() {
         let Some(hash) = change.asset_hash.as_deref() else {
             continue;
         };
-        if asset_by_hash.contains_key(hash) {
+        if !validated_assets.insert(hash) {
             continue;
         }
-        let staged = bundle.staged_asset(hash)?;
-        validate_staged_asset(bundle, &staged, hash)?;
-        asset_by_hash.insert(hash.to_string(), staged.clone());
-        asset_index.push(staged);
+        let asset = match asset_by_hash.get(hash) {
+            Some(asset) => asset.clone(),
+            None => bundle.staged_asset(hash)?,
+        };
+        validate_staged_asset(bundle, &asset, hash)?;
+        if !asset_by_hash.contains_key(hash) {
+            asset_by_hash.insert(hash.to_string(), asset.clone());
+            asset_index.push(asset);
+        }
+    }
+    for raster in &raster_plan.rasters {
+        if asset_by_hash.contains_key(&raster.asset.hash) {
+            continue;
+        }
+        asset_by_hash.insert(raster.asset.hash.clone(), raster.asset.clone());
+        asset_index.push(raster.asset.clone());
     }
     asset_index.sort_by(|left, right| left.hash.cmp(&right.hash));
     asset_index.dedup_by(|left, right| left.hash == right.hash);
@@ -154,6 +202,12 @@ pub fn apply_patch(
             bundle.write_json_object("assets/indexes", &asset_index)?.0
         };
 
+    let recomposed_pages: HashSet<u32> = raster_plan
+        .rasters
+        .iter()
+        .map(|raster| raster.page)
+        .collect();
+    let mut recomposed_nodes = HashSet::new();
     for page_number in 0..manifest.index_page_count {
         let mut page = bundle.read_index_page(&manifest, page_number)?;
         let mut page_changed = false;
@@ -162,7 +216,8 @@ pub fn apply_patch(
                 .iter()
                 .filter(|node_id| node_bloom_might_contain(&descriptor.node_bloom, node_id))
                 .collect();
-            if candidates.is_empty() {
+            let raster = raster_for_chunk(bundle, descriptor, &raster_plan.rasters)?;
+            if candidates.is_empty() && raster.is_none() {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
             }
@@ -170,6 +225,13 @@ pub fn apply_patch(
             let mut source_map = bundle.read_map(descriptor)?;
             let mut html = bundle.read_chunk(descriptor)?;
             let mut html_nodes = extract_html_text_nodes(&html)?;
+            let formats = crate::extract_text_run_sizes(&html)?;
+            let rich_spans = if rich.is_empty() {
+                HashMap::new()
+            } else {
+                crate::text_runs::spans(&html)?
+            };
+            let mut rich_replacements = HashMap::new();
             let mut image_nodes = extract_html_image_nodes(&html)?;
             let mut chunk_changed = false;
             for entry in &mut source_map.entries {
@@ -190,6 +252,45 @@ pub fn apply_patch(
                     )));
                 }
                 found_nodes.insert(entry.node_id.clone(), current_text.chars().count());
+                if let Some(PatchOperation::TextRuns {
+                    text,
+                    runs,
+                    precondition,
+                    ..
+                }) = rich.get(&entry.node_id).copied()
+                {
+                    if !entry.source.editable || entry.source.node_kind != "text" {
+                        return Err(HcdError::Unsupported(format!(
+                            "node {} is not editable source text",
+                            entry.node_id
+                        )));
+                    }
+                    let span = rich_spans.get(&entry.node_id).ok_or_else(|| {
+                        HcdError::InvalidBundle("source text span is absent".into())
+                    })?;
+                    if precondition.node_hash != entry.node_hash
+                        || precondition.format_hash != hash_bytes(span.html.as_bytes())
+                    {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "text or format precondition failed for {}",
+                            entry.node_id
+                        )));
+                    }
+                    rich_replacements.insert(
+                        entry.node_id.clone(),
+                        crate::text_runs::render(span, text, runs)?,
+                    );
+                    if let Some(splice) = minimal_splice(current_text, text, &entry.node_hash) {
+                        annotation_splices.insert(entry.node_id.clone(), vec![splice]);
+                    }
+                    entry.node_hash = hash_bytes(text.as_bytes());
+                    found_nodes.insert(entry.node_id.clone(), text.chars().count());
+                    html_nodes.insert(entry.node_id.clone(), text.clone());
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                    continue;
+                }
                 if entry.source.node_kind == "image"
                     && (styles.contains_key(&entry.node_id) || splices.contains_key(&entry.node_id))
                 {
@@ -199,6 +300,13 @@ pub fn apply_patch(
                     )));
                 }
                 if let Some(change) = images.get(&entry.node_id) {
+                    if manifest.source.format == "pdf"
+                        && !raster
+                            .as_ref()
+                            .is_some_and(|raster| raster.source_composited)
+                    {
+                        return Err(HcdError::Unsupported("PDF image edits require source-composited page rasters; use the PDF format planner before applying the patch".to_string()));
+                    }
                     if entry.source.node_kind != "image" {
                         return Err(HcdError::Unsupported(format!(
                             "node {} is not an image node",
@@ -217,10 +325,33 @@ pub fn apply_patch(
                             entry.node_id, change.visual_hash, current.visual_hash
                         )));
                     }
-                    let asset_hash = change
-                        .asset_hash
-                        .clone()
-                        .or_else(|| current.asset_hash.clone());
+                    let asset_hash = if change.restore_source {
+                        if manifest.source.format != "pdf"
+                            || !entry.source.part.starts_with("pdf/pages/")
+                        {
+                            return Err(HcdError::Unsupported(
+                                "source restore requires an original PDF image placement".into(),
+                            ));
+                        }
+                        let (original, _) =
+                            crate::manifest_at_revision(bundle, &manifest, Some(0))?;
+                        let original =
+                            get_image_node_in_manifest(bundle, &entry.node_id, &original)?;
+                        if original.node.asset_hash.is_some()
+                            || original.node.source != entry.source
+                        {
+                            return Err(HcdError::Unsupported(
+                                "image has no source-only PDF placement".into(),
+                            ));
+                        }
+                        restore_source_image(&mut html, &entry.node_id)?;
+                        None
+                    } else {
+                        change
+                            .asset_hash
+                            .clone()
+                            .or_else(|| current.asset_hash.clone())
+                    };
                     let geometry = change.geometry.clone().or_else(|| current.geometry.clone());
                     if let Some(hash) = change.asset_hash.as_deref() {
                         let asset = asset_by_hash.get(hash).ok_or_else(|| {
@@ -283,20 +414,53 @@ pub fn apply_patch(
                     }
                     let replacement = splice_text(current_text, node_splices)?;
                     let replacement_hash = hash_bytes(replacement.as_bytes());
-                    replace_node_text(&mut html, &entry.node_id, &replacement, &replacement_hash)?;
+                    if let Some(runs) = formats.get(&entry.node_id) {
+                        let runs = crate::text_runs::splice_runs(
+                            runs,
+                            &node_splices
+                                .iter()
+                                .map(|splice| {
+                                    (
+                                        splice.start,
+                                        splice.delete_count,
+                                        splice.insert_text.chars().count(),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                        let span = crate::text_runs::spans(&html)?
+                            .remove(&entry.node_id)
+                            .ok_or_else(|| {
+                                HcdError::InvalidBundle("formatted span is absent".into())
+                            })?;
+                        let rendered = crate::text_runs::render(&span, &replacement, &runs)?;
+                        html.replace_range(span.range, &rendered);
+                    } else {
+                        replace_node_text(
+                            &mut html,
+                            &entry.node_id,
+                            &replacement,
+                            &replacement_hash,
+                        )?;
+                    }
                     if manifest.source.format == "pdf" {
-                        set_element_attribute(
-                            &mut html,
-                            &entry.node_id,
-                            "data-hcd-patched",
-                            "true",
-                        )?;
-                        set_element_attribute(
-                            &mut html,
-                            &entry.node_id,
-                            "title",
-                            "Edited PDF text; preview placement is approximate",
-                        )?;
+                        let page = pdf_page_number(&entry.source.part);
+                        if page.is_some_and(|page| recomposed_pages.contains(&page)) {
+                            recomposed_nodes.insert(entry.node_id.clone());
+                        } else {
+                            set_element_attribute(
+                                &mut html,
+                                &entry.node_id,
+                                "data-hcd-patched",
+                                "true",
+                            )?;
+                            set_element_attribute(
+                                &mut html,
+                                &entry.node_id,
+                                "title",
+                                "Edited PDF text; preview placement is approximate",
+                            )?;
+                        }
                     }
                     entry.node_hash = replacement_hash;
                     found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
@@ -309,6 +473,60 @@ pub fn apply_patch(
                     apply_node_style(&mut html, &entry.node_id, &change.style)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+            }
+
+            if !rich_replacements.is_empty() {
+                let spans = crate::text_runs::spans(&html)?;
+                let mut replacements = Vec::new();
+                for (id, replacement) in rich_replacements {
+                    let span = spans.get(&id).ok_or_else(|| {
+                        HcdError::InvalidBundle("formatted span disappeared".into())
+                    })?;
+                    replacements.push((span.range.clone(), replacement));
+                }
+                replacements.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+                for (range, replacement) in replacements {
+                    html.replace_range(range, &replacement);
+                }
+            }
+
+            if let Some(raster) = raster {
+                if raster.source_composited {
+                    // Source rerender already contains these images and text.
+                    // Keep canonical geometry for selection, hide duplicate pixels,
+                    // and remove overlays left by earlier approximate text edits.
+                    for entry in &source_map.entries {
+                        if entry.source.node_kind == "image" {
+                            let marker =
+                                format!("data-hcd-id=\"{}\"", escape_attribute(&entry.node_id));
+                            update_start_tag_style(
+                                &mut html,
+                                &marker,
+                                &BTreeMap::from([("display".to_string(), "none".to_string())]),
+                                false,
+                            )?;
+                            set_element_attribute(
+                                &mut html,
+                                &entry.node_id,
+                                "data-hcd-image-composited",
+                                "true",
+                            )?;
+                        } else {
+                            set_element_attribute(
+                                &mut html,
+                                &entry.node_id,
+                                "data-hcd-patched",
+                                "false",
+                            )?;
+                        }
+                    }
+                    chunk_changed = true;
+                }
+                if html.contains("class=\"hcd-pdf-page-raster\"") {
+                    replace_page_raster(&mut html, &raster)?;
+                    dirty_parts.insert(format!("pdf/pages/{}", raster.page));
                     chunk_changed = true;
                 }
             }
@@ -349,7 +567,8 @@ pub fn apply_patch(
     }
 
     validate_annotation_ranges(patch, &found_nodes)?;
-    let (annotation_href, annotation_root_hash) = apply_annotations(bundle, &manifest, patch)?;
+    let (annotation_href, annotation_root_hash, invalidated_annotations) =
+        apply_annotations(bundle, &manifest, patch, &annotation_splices)?;
     let root_hash = if content_changed {
         finalize_root_hash(bundle, root_hasher, &asset_index_href)?
     } else {
@@ -378,30 +597,48 @@ pub fn apply_patch(
         dirty_node_ids: dirty_nodes.iter().cloned().collect(),
         dirty_chunk_ids: dirty_chunks.iter().cloned().collect(),
         dirty_source_parts: dirty_parts.iter().cloned().collect(),
-        warnings: styles
+        warnings: (invalidated_annotations > 0).then(|| FidelityWarning {
+            code: "ANNOTATIONS_INVALIDATED_BY_TEXT_EDIT".to_string(),
+            message: format!("{invalidated_annotations} annotation(s) intersected edited text and were invalidated; rescan the changed text to recreate recognition results"),
+            node_id: None,
+            source_part: None,
+        }).into_iter().chain(styles
             .keys()
             .map(|node_id| FidelityWarning {
                 code: "HCD_PRESENTATION_STYLE_ONLY".to_string(),
                 message: "node.style changes canonical HCD/HTML presentation; current source-backed Office/PDF exporters reject revisions containing presentation styles instead of silently dropping them".to_string(),
                 node_id: Some(node_id.clone()),
                 source_part: None,
-            })
+            }))
             .chain(images.keys().map(|node_id| FidelityWarning {
-                code: "HCD_IMAGE_PATCH_SEMANTIC_EXPORT".to_string(),
-                message: "image changes are canonical in HCD and pure-Rust semantic exports; source-backed Office/PDF export rejects them before writing until format-specific media rewrites are implemented".to_string(),
+                code: if manifest.source.format == "pdf" && raster_plan.rasters.iter().any(|raster| raster.source_composited) { "PDF_IMAGE_SOURCE_RECOMPOSED" } else { "HCD_IMAGE_PATCH_SEMANTIC_EXPORT" }.to_string(),
+                message: if manifest.source.format == "pdf" && raster_plan.rasters.iter().any(|raster| raster.source_composited) { "PDF images were rewritten in their source placements and the page preview was rerendered; immutable-source export replays the same edits" } else { "image changes are canonical in HCD and pure-Rust semantic exports; source-backed Office export rejects them before writing until format-specific media rewrites are implemented" }.to_string(),
                 node_id: Some(node_id.clone()),
                 source_part: None,
             }))
-            .chain(splices.keys().filter(|_| manifest.source.format == "pdf").map(|node_id| FidelityWarning {
+            .chain(splices.keys().filter(|node_id| manifest.source.format == "pdf" && !recomposed_nodes.contains(*node_id)).map(|node_id| FidelityWarning {
                 code: "PDF_EDITED_TEXT_OVERLAY_APPROXIMATE".to_string(),
                 message: "edited PDF text is painted over its original page raster for preview; source typography and background cannot be restored exactly".to_string(),
                 node_id: Some(node_id.clone()),
                 source_part: None,
             }))
+            .chain(splices.keys().filter(|node_id| recomposed_nodes.contains(*node_id)).map(|node_id| FidelityWarning {
+                code: "PDF_EDITED_TEXT_PAGE_RECOMPOSED".to_string(),
+                message: "edited PDF text is included in the recomposed page image".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
+            .chain(raster_plan.rasters.iter().filter(|raster| !raster.font_ids.is_empty()).map(|raster| FidelityWarning {
+                code: "PDF_RASTER_FALLBACK_FONTS".into(),
+                message: format!("page {} fallback raster font dependencies (including inherited background): {}", raster.page, raster.font_ids.join(", ")),
+                node_id: None,
+                source_part: Some(format!("pdf/pages/{}", raster.page)),
+            }))
+            .chain(raster_plan.skipped)
             .collect(),
         idempotent_replay: false,
     };
-    let record = RevisionRecord {
+    let mut record = RevisionRecord {
         schema_version: manifest.schema_version.clone(),
         document_id: manifest.document_id.clone(),
         revision: new_revision,
@@ -413,12 +650,24 @@ pub fn apply_patch(
         annotation_root_hash,
         index_prefix: manifest.index_prefix.clone(),
         index_root_href: manifest.index_root_href.clone(),
+        index_page_count: Some(manifest.index_page_count),
+        chunk_count: Some(manifest.chunk_count),
         asset_index_href,
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: result.dirty_node_ids.clone(),
         dirty_chunk_ids: result.dirty_chunk_ids.clone(),
         dirty_source_parts: result.dirty_source_parts.clone(),
+        structural_change: false,
+        layout_upgrade: false,
+        author_id: None,
+        author_name: None,
     };
+    let (author_id, author_name) = crate::revision_author(&patch.actor)?;
+    record.author_id = author_id;
+    record.author_name = author_name;
+    if !styles.is_empty() || !rich.is_empty() {
+        manifest.capabilities.style_patch = true;
+    }
     bundle.write_revision(&record)?;
     bundle.write_manifest(&manifest)?;
     Ok(result)
@@ -492,17 +741,27 @@ pub fn extract_text_page(
 /// bundle revision. Chunk bloom filters and source maps are consulted before
 /// materializing HTML, so lookup does not require a full-document text buffer.
 pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, HcdError> {
-    validate_node_id(node_id)?;
     let manifest = bundle.manifest()?;
+    get_text_node_in_manifest(bundle, node_id, &manifest)
+}
+
+pub fn get_text_node_in_manifest(
+    bundle: &Bundle,
+    node_id: &str,
+    manifest: &crate::HcdManifest,
+) -> Result<TextNodeLookup, HcdError> {
+    validate_node_id(node_id)?;
     let mut found = None;
+    let mut format_hash = None;
+    let mut font_size_runs = None;
 
     for page_number in 0..manifest.index_page_count {
-        let page = bundle.read_index_page(&manifest, page_number)?;
+        let page = bundle.read_index_page(manifest, page_number)?;
         for descriptor in &page.chunks {
             if !node_bloom_might_contain(&descriptor.node_bloom, node_id) {
                 continue;
             }
-            let source_map = bundle.read_map(descriptor)?;
+            let source_map = bundle.read_map_verified(descriptor)?;
             let mut matches = source_map
                 .entries
                 .iter()
@@ -518,8 +777,10 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
                     "node ID {node_id} occurs in more than one source map"
                 )));
             }
-            let html = bundle.read_chunk(descriptor)?;
+            let html = bundle.read_chunk_verified(descriptor)?;
             let html_nodes = extract_html_text_nodes(&html)?;
+            format_hash = crate::text_format_hashes(&html)?.remove(node_id);
+            font_size_runs = crate::extract_text_run_sizes(&html)?.remove(node_id);
             let text = html_nodes.get(node_id).ok_or_else(|| {
                 HcdError::InvalidBundle(format!(
                     "mapped node {node_id} is missing from canonical HTML"
@@ -544,23 +805,34 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
 
     let node = found.ok_or_else(|| HcdError::NodeNotFound(node_id.to_string()))?;
     Ok(TextNodeLookup {
-        document_id: manifest.document_id,
+        document_id: manifest.document_id.clone(),
         revision: manifest.revision,
+        format_hash,
+        font_size_runs,
         node,
     })
 }
 
 pub fn get_image_node(bundle: &Bundle, node_id: &str) -> Result<ImageNodeLookup, HcdError> {
-    validate_node_id(node_id)?;
     let manifest = bundle.manifest()?;
+    get_image_node_in_manifest(bundle, node_id, &manifest)
+}
+
+/// Locate an image against an immutable, verified revision's manifest.
+pub fn get_image_node_in_manifest(
+    bundle: &Bundle,
+    node_id: &str,
+    manifest: &crate::HcdManifest,
+) -> Result<ImageNodeLookup, HcdError> {
+    validate_node_id(node_id)?;
     let mut found = None;
     for page_number in 0..manifest.index_page_count {
-        let page = bundle.read_index_page(&manifest, page_number)?;
+        let page = bundle.read_index_page(manifest, page_number)?;
         for descriptor in &page.chunks {
             if !node_bloom_might_contain(&descriptor.node_bloom, node_id) {
                 continue;
             }
-            let source_map = bundle.read_map(descriptor)?;
+            let source_map = bundle.read_map_verified(descriptor)?;
             let Some(entry) = source_map
                 .entries
                 .iter()
@@ -573,7 +845,7 @@ pub fn get_image_node(bundle: &Bundle, node_id: &str) -> Result<ImageNodeLookup,
                     "image node ID {node_id} occurs in more than one source map"
                 )));
             }
-            let html = bundle.read_chunk(descriptor)?;
+            let html = bundle.read_chunk_verified(descriptor)?;
             let images = extract_html_image_nodes(&html)?;
             let image = images.get(node_id).ok_or_else(|| {
                 HcdError::InvalidBundle(format!(
@@ -691,6 +963,7 @@ fn validate_patch_identity(
     if patch.schema_version != HCD_PATCH_SCHEMA_VERSION
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_2
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_5
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -726,6 +999,30 @@ fn validate_patch_identity(
     let mut inserted = 0usize;
     for operation in &patch.operations {
         match operation {
+            PatchOperation::TextRuns {
+                node_id,
+                text,
+                runs,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_5 {
+                    return Err(HcdError::InvalidPatch(
+                        "text.runs requires schemaVersion hcd-patch/5".into(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                validate_sha256("formatHash", &precondition.format_hash)?;
+                if text.chars().any(is_forbidden_xml_character) {
+                    return Err(HcdError::InvalidPatch(
+                        "text.runs contains an invalid XML character".into(),
+                    ));
+                }
+                crate::text_runs::validate_text_runs(runs, text)?;
+                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
+                    HcdError::ResourceLimit("patch insert byte count overflowed".into())
+                })?;
+            }
             PatchOperation::TextSplice {
                 node_id,
                 insert_text,
@@ -763,7 +1060,9 @@ fn validate_patch_identity(
                 asset_hash,
                 precondition,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3 {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_5
+                {
                     return Err(HcdError::InvalidPatch(
                         "image.replace requires schemaVersion hcd-patch/3".to_string(),
                     ));
@@ -772,12 +1071,28 @@ fn validate_patch_identity(
                 validate_sha256("assetHash", asset_hash)?;
                 validate_sha256("visualHash", &precondition.visual_hash)?;
             }
+            PatchOperation::ImageRestoreSource {
+                node_id,
+                precondition,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_5
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "image.restoreSource requires schemaVersion hcd-patch/3".into(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("visualHash", &precondition.visual_hash)?;
+            }
             PatchOperation::ImageGeometry {
                 node_id,
                 geometry,
                 precondition,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3 {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_5
+                {
                     return Err(HcdError::InvalidPatch(
                         "image.geometry requires schemaVersion hcd-patch/3".to_string(),
                     ));
@@ -879,7 +1194,7 @@ fn validate_node_id(value: &str) -> Result<(), HcdError> {
     Ok(())
 }
 
-fn validate_sha256(name: &str, value: &str) -> Result<(), HcdError> {
+pub(crate) fn validate_sha256(name: &str, value: &str) -> Result<(), HcdError> {
     if value.len() != 64
         || !value
             .bytes()
@@ -1000,6 +1315,10 @@ fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageCha
                 node_id,
                 precondition,
                 ..
+            }
+            | PatchOperation::ImageRestoreSource {
+                node_id,
+                precondition,
             } => (node_id, &precondition.visual_hash),
             _ => continue,
         };
@@ -1016,11 +1335,20 @@ fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageCha
         }
         match operation {
             PatchOperation::ImageReplace { asset_hash, .. } => {
-                if change.asset_hash.replace(asset_hash.clone()).is_some() {
+                if change.restore_source || change.asset_hash.replace(asset_hash.clone()).is_some()
+                {
                     return Err(HcdError::InvalidPatch(format!(
                         "patch contains more than one image.replace for {node_id}"
                     )));
                 }
+            }
+            PatchOperation::ImageRestoreSource { .. } => {
+                if change.restore_source || change.asset_hash.is_some() {
+                    return Err(HcdError::InvalidPatch(format!(
+                        "patch contains conflicting image payload operations for {node_id}"
+                    )));
+                }
+                change.restore_source = true;
             }
             PatchOperation::ImageGeometry { geometry, .. } => {
                 if change.geometry.replace(geometry.clone()).is_some() {
@@ -1069,6 +1397,31 @@ fn splice_text(text: &str, splices: &[Splice]) -> Result<String, HcdError> {
     Ok(chars.into_iter().collect())
 }
 
+fn minimal_splice(before: &str, after: &str, node_hash: &str) -> Option<Splice> {
+    if before == after {
+        return None;
+    }
+    let before: Vec<char> = before.chars().collect();
+    let after: Vec<char> = after.chars().collect();
+    let prefix = before
+        .iter()
+        .zip(&after)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    Some(Splice {
+        start: prefix,
+        delete_count: before.len() - prefix - suffix,
+        insert_text: after[prefix..after.len() - suffix].iter().collect(),
+        node_hash: node_hash.to_string(),
+    })
+}
+
 fn replace_node_text(
     html: &mut String,
     node_id: &str,
@@ -1077,7 +1430,16 @@ fn replace_node_text(
 ) -> Result<(), HcdError> {
     let needle = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
     let attribute = html
-        .find(&needle)
+        .match_indices(&needle)
+        .map(|(offset, _)| offset)
+        .find(|&offset| {
+            let start = html[..offset].rfind('<').unwrap_or(offset);
+            let end = html[offset..]
+                .find('>')
+                .map(|end| offset + end)
+                .unwrap_or(offset);
+            html[start..end].contains("data-hcd-node-hash=\"")
+        })
         .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} missing from HTML")))?;
     let content_start = html[attribute + needle.len()..]
         .find('>')
@@ -1157,7 +1519,7 @@ fn apply_node_style(
     Ok(())
 }
 
-fn validate_staged_asset(
+pub(crate) fn validate_staged_asset(
     bundle: &Bundle,
     asset: &AssetDescriptor,
     expected_hash: &str,
@@ -1186,24 +1548,132 @@ fn validate_staged_asset(
     Ok(())
 }
 
-fn replace_image_asset(
+fn pdf_page_number(part: &str) -> Option<u32> {
+    let rest = part.strip_prefix("pdf/pages/")?;
+    rest.split('/').next()?.parse().ok()
+}
+
+fn raster_for_chunk(
+    bundle: &Bundle,
+    descriptor: &crate::ChunkDescriptor,
+    rasters: &[PdfPageRaster],
+) -> Result<Option<PdfPageRaster>, HcdError> {
+    if rasters.is_empty() {
+        return Ok(None);
+    }
+    let source_map = bundle.read_map(descriptor)?;
+    let page = source_map
+        .entries
+        .iter()
+        .find_map(|entry| pdf_page_number(&entry.source.part));
+    Ok(page.and_then(|page| rasters.iter().find(|raster| raster.page == page).cloned()))
+}
+
+fn replace_page_raster(html: &mut String, raster: &PdfPageRaster) -> Result<(), HcdError> {
+    if raster.font_ids.len() > 16
+        || raster.font_ids.iter().any(|id| {
+            let Some((hash, face)) = id.strip_prefix("sha256:").and_then(|id| id.split_once('#'))
+            else {
+                return true;
+            };
+            hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                || face
+                    .parse::<u32>()
+                    .ok()
+                    .is_none_or(|number| number.to_string() != face)
+        })
+    {
+        return Err(HcdError::InvalidPatch(
+            "invalid PDF raster font identity".into(),
+        ));
+    }
+    let asset = &raster.asset;
+    let (tag_start, tag_end) = page_raster_tag_range(html)?;
+    set_attribute_in_range(
+        html,
+        tag_start,
+        tag_end,
+        "src",
+        &format!("asset://sha256/{}", asset.hash),
+    )?;
+    let (tag_start, tag_end) = page_raster_tag_range(html)?;
+    set_attribute_in_range(html, tag_start, tag_end, "data-hcd-asset-href", &asset.href)?;
+    let (tag_start, tag_end) = page_raster_tag_range(html)?;
+    let fonts = raster
+        .font_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(" ");
+    set_attribute_in_range(html, tag_start, tag_end, "data-hcd-raster-font-ids", &fonts)
+}
+
+fn page_raster_tag_range(html: &str) -> Result<(usize, usize), HcdError> {
+    let class_at = html.find("class=\"hcd-pdf-page-raster\"").ok_or_else(|| {
+        HcdError::InvalidBundle("PDF page chunk is missing its raster image".to_string())
+    })?;
+    let tag_start = html[..class_at]
+        .rfind("<img")
+        .ok_or_else(|| HcdError::InvalidBundle("PDF page raster is not an img".to_string()))?;
+    let tag_end = html[class_at..]
+        .find('>')
+        .map(|offset| class_at + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PDF page raster img is not closed".to_string()))?;
+    Ok((tag_start, tag_end))
+}
+
+fn restore_source_image(html: &mut String, node_id: &str) -> Result<(), HcdError> {
+    let (start, end) = element_start_tag_range(html, node_id)?;
+    if !html[start..=end].contains("hcd-pdf-visual-node") || !html[start..=end].starts_with("<div")
+    {
+        return Err(HcdError::Unsupported(
+            "PDF source restore requires a source visual placeholder".into(),
+        ));
+    }
+    let content_end = element_content_end(html, start)?;
+    html.replace_range(end + 1..content_end, "");
+    for name in ["data-hcd-asset-hash", "data-hcd-image-asset-patched"] {
+        let (start, end) = element_start_tag_range(html, node_id)?;
+        let marker = format!(" {name}=\"");
+        if let Some(offset) = html[start..=end].find(&marker) {
+            let from = start + offset;
+            let value_start = from + marker.len();
+            let to = value_start
+                + html[value_start..=end]
+                    .find('"')
+                    .ok_or_else(|| HcdError::InvalidBundle("unclosed image attribute".into()))?;
+            html.replace_range(from..=to, "");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn replace_image_asset(
     html: &mut String,
     node_id: &str,
     asset: &AssetDescriptor,
 ) -> Result<(), HcdError> {
     set_element_attribute(html, node_id, "data-hcd-asset-hash", &asset.hash)?;
     set_element_attribute(html, node_id, "data-hcd-image-asset-patched", "true")?;
-    let (_, target_end) = element_start_tag_range(html, node_id)?;
-    let target_tag = &html[..=target_end];
-    let image_start = if target_tag[target_tag.rfind('<').unwrap_or(0)..].starts_with("<img") {
-        target_tag.rfind('<').unwrap_or(0)
+    let (target_start, target_end) = element_start_tag_range(html, node_id)?;
+    let image_start = if html[target_start..=target_end].starts_with("<img") {
+        target_start
     } else {
-        html[target_end + 1..]
-            .find("<img")
-            .map(|offset| target_end + 1 + offset)
-            .ok_or_else(|| {
-                HcdError::InvalidBundle(format!("image node {node_id} has no img child"))
-            })?
+        // Stay inside this canonical object. PDF source-raster hitboxes may
+        // have no child image; never find a different object's image instead.
+        let content_end = element_content_end(html, target_start)?;
+        if let Some(offset) = html[target_end + 1..content_end].find("<img") {
+            target_end + 1 + offset
+        } else {
+            let image = format!("<img src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\" alt=\"\" style=\"width:100%;height:100%\"/>", asset.hash, escape_attribute(&asset.href));
+            html.insert_str(target_end + 1, &image);
+            target_end + 1
+        }
     };
     let image_end = html[image_start..]
         .find('>')
@@ -1233,7 +1703,39 @@ fn replace_image_asset(
     )
 }
 
-fn replace_image_geometry(
+fn element_content_end(html: &str, start: usize) -> Result<usize, HcdError> {
+    let mut reader = quick_xml::Reader::from_str(&html[start..]);
+    let mut depth = 0usize;
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event().map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid image object HTML: {error}"))
+        })? {
+            quick_xml::events::Event::Start(_) => depth += 1,
+            quick_xml::events::Event::End(_) => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    HcdError::InvalidBundle("image object closes without an opening tag".into())
+                })?;
+                if depth == 0 {
+                    return Ok(start + before);
+                }
+            }
+            quick_xml::events::Event::Empty(_) if depth == 0 => {
+                return Err(HcdError::Unsupported(
+                    "image placeholder cannot be a self-closing container".into(),
+                ))
+            }
+            quick_xml::events::Event::Eof => {
+                return Err(HcdError::InvalidBundle(
+                    "image object has no closing tag".into(),
+                ))
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn replace_image_geometry(
     html: &mut String,
     node_id: &str,
     geometry: &ImageGeometry,
@@ -1310,7 +1812,7 @@ fn replace_image_geometry(
     update_start_tag_style(html, &marker, &properties, false)
 }
 
-fn set_element_attribute(
+pub(crate) fn set_element_attribute(
     html: &mut String,
     node_id: &str,
     name: &str,
@@ -1448,17 +1950,19 @@ fn apply_annotations(
     bundle: &Bundle,
     manifest: &crate::HcdManifest,
     patch: &PatchBatch,
-) -> Result<(Option<String>, String), HcdError> {
+    splices: &BTreeMap<String, Vec<Splice>>,
+) -> Result<(Option<String>, String, usize), HcdError> {
     let has_annotation_ops = patch.operations.iter().any(|operation| {
         matches!(
             operation,
             PatchOperation::AnnotationUpsert { .. } | PatchOperation::AnnotationRemove { .. }
         )
     });
-    if !has_annotation_ops {
+    if !has_annotation_ops && splices.is_empty() {
         return Ok((
             manifest.annotation_href.clone(),
             manifest.annotation_root_hash.clone(),
+            0,
         ));
     }
 
@@ -1474,6 +1978,16 @@ fn apply_annotations(
             annotations: Vec::new(),
         }
     };
+    // Existing ranges refer to the pre-patch text. Keep untouched ranges
+    // anchored to their text, and invalidate recognition results whose text
+    // was edited. Explicit upserts below use post-patch coordinates.
+    let before = set.annotations.len();
+    set.annotations.retain_mut(|annotation| {
+        splices
+            .get(&annotation.node_id)
+            .is_none_or(|edits| rebase_annotation(annotation, edits))
+    });
+    let invalidated = before - set.annotations.len();
     for operation in &patch.operations {
         match operation {
             PatchOperation::AnnotationUpsert { annotation } => {
@@ -1492,8 +2006,10 @@ fn apply_annotations(
                     .retain(|annotation| annotation.annotation_id != *annotation_id);
             }
             PatchOperation::TextSplice { .. }
+            | PatchOperation::TextRuns { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
+            | PatchOperation::ImageRestoreSource { .. }
             | PatchOperation::ImageGeometry { .. } => {}
         }
     }
@@ -1506,8 +2022,40 @@ fn apply_annotations(
             encoded.len()
         )));
     }
+    if set.annotations.is_empty() {
+        return Ok((None, hash_bytes(b"[]"), invalidated));
+    }
     let (href, hash) = bundle.write_json_object("annotations", &set)?;
-    Ok((Some(href), hash))
+    Ok((Some(href), hash, invalidated))
+}
+
+fn rebase_annotation(annotation: &mut crate::Annotation, splices: &[Splice]) -> bool {
+    let mut removed_before = 0;
+    let mut inserted_before = 0;
+    for splice in splices {
+        if splice.delete_count == 0 && splice.insert_text.is_empty() {
+            continue;
+        }
+        let end = splice.start + splice.delete_count; // splice_text checked bounds
+        let overlaps = if annotation.start == annotation.end {
+            splice.start < annotation.start && end > annotation.start
+        } else {
+            splice.start < annotation.end
+                && (end > annotation.start || splice.start > annotation.start)
+        };
+        if overlaps {
+            return false;
+        }
+        // Insertions at the start stay before the annotated text; insertions
+        // at the end stay after it. A zero-width anchor associates right.
+        if end <= annotation.start {
+            removed_before += splice.delete_count;
+            inserted_before += splice.insert_text.chars().count();
+        }
+    }
+    annotation.start = annotation.start - removed_before + inserted_before;
+    annotation.end = annotation.end - removed_before + inserted_before;
+    true
 }
 
 fn validate_annotation_ranges(
@@ -1530,7 +2078,7 @@ fn validate_annotation_ranges(
     Ok(())
 }
 
-fn find_idempotent_result(
+pub(crate) fn find_idempotent_result(
     bundle: &Bundle,
     manifest: &crate::HcdManifest,
     patch_id: &str,
@@ -1600,6 +2148,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_image_restore_removes_only_its_overlay_and_rejects_payload_collisions() {
+        let id = format!("n_{:032x}", 1);
+        let mut html = format!("<div class=\"hcd-pdf-visual-node\" data-hcd-id=\"{id}\" data-hcd-asset-hash=\"{}\" data-hcd-image-asset-patched=\"true\"><img src=\"replacement\"/></div><img src=\"neighbor\"/>", "a".repeat(64));
+        restore_source_image(&mut html, &id).unwrap();
+        assert!(!html.contains("replacement"));
+        assert!(!html.contains("data-hcd-asset-hash"));
+        assert!(!html.contains("data-hcd-image-asset-patched"));
+        assert!(html.ends_with("<img src=\"neighbor\"/>"));
+        let mut not_pdf = format!("<img data-hcd-id=\"{id}\" src=\"original\"/>");
+        let before = not_pdf.clone();
+        assert!(restore_source_image(&mut not_pdf, &id).is_err());
+        assert_eq!(not_pdf, before);
+        let restore = PatchOperation::ImageRestoreSource {
+            node_id: id.clone(),
+            precondition: crate::VisualPrecondition {
+                visual_hash: "b".repeat(64),
+            },
+        };
+        let replace = PatchOperation::ImageReplace {
+            node_id: id,
+            asset_hash: "a".repeat(64),
+            precondition: crate::VisualPrecondition {
+                visual_hash: "b".repeat(64),
+            },
+        };
+        for operations in [
+            vec![restore.clone(), replace.clone()],
+            vec![replace, restore.clone()],
+            vec![restore.clone(), restore],
+        ] {
+            let patch = PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+                document_id: "doc".into(),
+                patch_id: "restore".into(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations,
+            };
+            assert!(collect_image_changes(&patch).is_err());
+        }
+    }
+
+    #[test]
+    fn annotation_ranges_follow_unedited_text_using_scalar_offsets() {
+        let annotation = crate::Annotation {
+            annotation_id: "review".into(),
+            node_id: format!("n_{:032x}", 0),
+            start: 3,
+            end: 6,
+            kind: "recognition".into(),
+            rule_id: None,
+            confidence: None,
+            ignored: false,
+        };
+        let edit = |start, delete_count, text: &str| Splice {
+            start,
+            delete_count,
+            insert_text: text.into(),
+            node_hash: String::new(),
+        };
+        let mut shifted = annotation.clone();
+        assert!(rebase_annotation(
+            &mut shifted,
+            &[edit(0, 1, "😀甲"), edit(6, 0, "after")]
+        ));
+        assert_eq!((shifted.start, shifted.end), (4, 7));
+        let mut boundary = annotation.clone();
+        assert!(rebase_annotation(&mut boundary, &[edit(3, 0, "😀")]));
+        assert_eq!((boundary.start, boundary.end), (4, 7));
+        for splice in [
+            edit(2, 3, "x"),
+            edit(3, 1, "x"),
+            edit(4, 0, "x"),
+            edit(0, 10, "x"),
+        ] {
+            assert!(!rebase_annotation(&mut annotation.clone(), &[splice]));
+        }
+        let mut anchor = crate::Annotation {
+            end: 3,
+            ..annotation
+        };
+        assert!(rebase_annotation(&mut anchor, &[edit(3, 0, "😀")]));
+        assert_eq!((anchor.start, anchor.end), (4, 4));
+    }
+
+    #[test]
     fn unicode_scalar_splice_handles_emoji() {
         let result = splice_text(
             "甲😀乙",
@@ -1638,6 +2273,21 @@ mod tests {
     }
 
     #[test]
+    fn replacing_an_empty_image_placeholder_does_not_touch_the_next_object() {
+        let mut html = "<div data-hcd-id=\"n_1\"></div><div data-hcd-id=\"n_2\"><img src=\"original.png\"/></div>".to_string();
+        let asset = AssetDescriptor {
+            hash: "a".repeat(64),
+            href: "assets/new.png".into(),
+            source_part: "upload".into(),
+            byte_length: 1,
+        };
+        replace_image_asset(&mut html, "n_1", &asset).unwrap();
+        let first_end = html.find("</div>").unwrap();
+        assert!(html[..first_end].contains("asset://sha256/"));
+        assert!(html[first_end..].contains("<img src=\"original.png\"/>"));
+    }
+
+    #[test]
     fn generated_span_text_is_replaced_and_escaped() {
         let mut html = "<p><span data-hcd-id=\"n_1\" data-hcd-node-hash=\"oldhash\">old</span></p>"
             .to_string();
@@ -1646,6 +2296,44 @@ mod tests {
             html,
             "<p><span data-hcd-id=\"n_1\" data-hcd-node-hash=\"newhash\">a &lt; b</span></p>"
         );
+    }
+
+    #[test]
+    fn text_patch_targets_the_canonical_span_when_its_block_shares_the_id() {
+        let mut html = "<p data-hcd-id=\"n_1\"><span data-hcd-id=\"n_1\" data-hcd-node-hash=\"old\">before</span></p>".to_string();
+        replace_node_text(&mut html, "n_1", "😀", "new").unwrap();
+        assert_eq!(html, "<p data-hcd-id=\"n_1\"><span data-hcd-id=\"n_1\" data-hcd-node-hash=\"new\">😀</span></p>");
+    }
+
+    #[test]
+    fn page_raster_font_identities_are_canonical_and_old_dependencies_are_cleared() {
+        let mut html =
+            "<img class=\"hcd-pdf-page-raster\" src=\"asset://sha256/old\"/>".to_string();
+        let mut raster = PdfPageRaster {
+            source_composited: false,
+            page: 1,
+            font_ids: vec![format!("sha256:{}#0", "a".repeat(64))],
+            asset: AssetDescriptor {
+                source_part: "pdf/pages/1/composited-raster".into(),
+                hash: "b".repeat(64),
+                href: "assets/new.png".into(),
+                byte_length: 1,
+            },
+        };
+        replace_page_raster(&mut html, &raster).unwrap();
+        assert!(html.contains(&format!(
+            "data-hcd-raster-font-ids=\"sha256:{}#0\"",
+            "a".repeat(64)
+        )));
+        raster.font_ids = vec!["sha256:unsafe\"#0".into()];
+        let before = html.clone();
+        assert!(replace_page_raster(&mut html, &raster).is_err());
+        assert_eq!(html, before);
+        raster.font_ids.clear();
+        raster.source_composited = true;
+        replace_page_raster(&mut html, &raster).unwrap();
+        assert!(html.contains("data-hcd-raster-font-ids=\"\""));
+        assert!(!html.contains(&"a".repeat(64)));
     }
 
     #[test]

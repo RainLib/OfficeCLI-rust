@@ -1,0 +1,148 @@
+{
+  "documentId": "geometry-drafts-workbench",
+  "revision": 3,
+  "scope": "local API, browser and semantic PPTX export",
+  "historyRevisions": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "images": [
+    {
+      "nodeId": "n_4ae2808d54f85e83e6ec8acd8d93f033",
+      "geometry": {
+        "height": 1066800.0,
+        "unit": "emu",
+        "width": 1524000.0,
+        "x": 1270000.0,
+        "y": 1778000.0
+      },
+      "visualHash": "a92fed09efe16c23c533d6e3d2a09cbf9d435ef06c6406b2f2c92d9ca8b8e13d"
+    },
+    {
+      "nodeId": "n_4bd98bfaab3ff9f3d9c64d8082a777c6",
+      "geometry": {
+        "height": 1066800.0,
+        "unit": "emu",
+        "width": 1524000.0,
+        "x": 4013200.0,
+        "y": 1778000.0
+      },
+      "visualHash": "0cd7fc9be153f03c28af673de95edadb63cafaa6320e090fafdecc036491b3e7"
+    },
+    {
+      "nodeId": "n_5fa38f8d8dad7ab0989c45c5192c088e",
+      "geometry": {
+        "height": 1066800.0,
+        "unit": "emu",
+        "width": 1524000.0,
+        "x": 1016000.0,
+        "y": 1778000.0
+      },
+      "visualHash": "4942f75cef5f9773f2e252986cfc0468fc7743ecd4efc8ab3a10ce31906390de"
+    },
+    {
+      "nodeId": "n_7dfa1b1cb435607baf57cf9c74770285",
+      "geometry": {
+        "height": 1066800.0,
+        "unit": "emu",
+        "width": 1524000.0,
+        "x": 3810000.0,
+        "y": 1778000.0
+      },
+      "visualHash": "898b518f62b29c7b6e286bb8772db235724b300d366f676a35d2b21640c9bb8d"
+    },
+    {
+      "nodeId": "n_a9a5d6d87dc46f28fc46507f83ba2151",
+      "geometry": {
+        "height": 1066800.0,
+        "unit": "emu",
+        "width": 1524000.0,
+        "x": 1016000.0,
+        "y": 2286000.0
+      },
+      "visualHash": "4d3cc345450a0b673f6c731f3f9fa5ecc6d9eff8e61c9d15244b2f76da00b6d1"
+    },
+    {
+      "nodeId": "n_115b0748e2d7aa8a26e6ae00077fd6a2",
+      "geometry": {
+        "height": 1066800.0,
+        "unit": "emu",
+        "width": 1524000.0,
+        "x": 3810000.0,
+        "y": 1778000.0
+      },
+      "visualHash": "898b518f62b29c7b6e286bb8772db235724b300d366f676a35d2b21640c9bb8d"
+    }
+  ],
+  "exportSlideCount": 3,
+  "exportPositions": [
+    {
+      "slide": "ppt/slides/slide1.xml",
+      "x": 1270000,
+      "y": 1778000,
+      "width": 1524000,
+      "height": 1066800
+    },
+    {
+      "slide": "ppt/slides/slide1.xml",
+      "x": 4013200,
+      "y": 1778000,
+      "width": 1524000,
+      "height": 1066800
+    },
+    {
+      "slide": "ppt/slides/slide2.xml",
+      "x": 1016000,
+      "y": 1778000,
+      "width": 1524000,
+      "height": 1066800
+    },
+    {
+      "slide": "ppt/slides/slide2.xml",
+      "x": 3810000,
+      "y": 1778000,
+      "width": 1524000,
+      "height": 1066800
+    },
+    {
+      "slide": "ppt/slides/slide3.xml",
+      "x": 1016000,
+      "y": 2286000,
+      "width": 1524000,
+      "height": 1066800
+    },
+    {
+      "slide": "ppt/slides/slide3.xml",
+      "x": 3810000,
+      "y": 1778000,
+      "width": 1524000,
+      "height": 1066800
+    }
+  ],
+  "exportText": [
+    "Saved together — 中文 😀",
+    "Geometry draft check — slide 2",
+    "Geometry draft check — slide 3"
+  ],
+  "rejections": {
+    "staleImage": 409,
+    "reader": 403,
+    "missingImageBase": 428
+  },
+  "rejectionsKeepRoot": true,
+  "validation": {
+    "data": {
+      "documentId": "geometry-drafts-workbench",
+      "issues": [],
+      "revision": 3,
+      "valid": true
+    },
+    "success": true
+  },
+  "limitations": [
+    "source-backed PPTX image rewrite is unsupported; semantic export used",
+    "in-memory drafts do not survive page refresh or process termination"
+  ]
+}

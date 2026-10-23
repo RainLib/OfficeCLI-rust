@@ -1,0 +1,31 @@
+{
+  "documentId": "fields-ppt-1792732822",
+  "evidence": "actual browser, independent peer API identity, downloaded semantic PPTX",
+  "disjointPeerRevision": 1,
+  "mergedSavedRevision": 2,
+  "firstMergeGeometryPt": {
+    "x": 20,
+    "y": 100,
+    "width": 130,
+    "height": 75
+  },
+  "conflictingPeerRevision": 3,
+  "reportedConflicts": [
+    "width"
+  ],
+  "remoteChoiceRetainsLocalX": true,
+  "finalSavedRevision": 4,
+  "exportGeometryPt": {
+    "x": 30,
+    "y": 120,
+    "width": 180,
+    "height": 80
+  },
+  "actualActiveImageBytesAndTextVerified": true,
+  "downloadSha256": "1027ea2f0f3c564a41aa6f7f0da734da876d5c21712b6c0ed0f554ababc822cb",
+  "limits": [
+    "Fixed text remains object-level conflict handling",
+    "Full Word Yjs unified history and active ACL revocation remain pending",
+    "Export here is semantic PPTX reconstruction"
+  ]
+}

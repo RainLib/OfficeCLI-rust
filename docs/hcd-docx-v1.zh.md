@@ -203,6 +203,7 @@ Markdown/HTML 导出 PDF 时，canonical HTML/CSS 由进程内纯 Rust 排版器
 - 同一 HCD revision 链中的正文 patch 只更新 `nodeHash`，不会改变 `nodeId`。完全相同的不可变源字节在省略 `--document-id` 时也会确定性重放相同 ID；内容变化后的逻辑文档必须复用外部 business document ID，且缺少原生 ID、依赖源序号的节点在前方结构增删后仍可能漂移。
 - 单 batch 最多 10,000 个 operation，插入正文总量最大 2 MiB，节点内 splice 不可重叠。
 - annotation 只记录 node-local 范围、规则、置信度等元数据，不记录敏感原文；annotation root hash 与正文 root hash 独立。
+- 文本 splice 使用修改前的 scalar 坐标：编辑之前的 annotation 自动平移；与删除、替换或范围内部插入相交的旧识别 annotation 失效，结果返回 `ANNOTATIONS_INVALIDATED_BY_TEXT_EDIT`，调用方应重新识别受影响正文。同批 `annotation.upsert` 使用修改后的坐标，可覆盖失效结果。结构替换与修订接受/拒绝只保留节点及其文本 hash 均未变化的 annotation；移动未修改节点会保留 annotation。历史 revision 的标注保持不变。
 - patch JSON 与 annotation 对未知字段采用拒绝策略，避免把 `originalText` 一类敏感旁路字段静默带入 bundle。
 
 Java 生产服务仍应以数据库 revision/head 为权威，在对象上传完成后做数据库 CAS。OfficeCLI 的本地 manifest head 只负责 bundle 内原子可见性。
@@ -262,6 +263,8 @@ DOCX、XLSX、PPTX、PDF 中可定位的图片进入 source-map，使用稳定 `
 ```
 
 同一 patch 中的替换和几何操作使用修改前相同的 `visualHash`，作为一次原子修改提交。同一图片已被其他 revision 修改时返回冲突。当前图片 patch 可在 HCD HTML 和不带 `--source` 的纯 Rust 语义导出中生效；DOCX/XLSX/PPTX/PDF 的原包增量媒体重写尚未实现，带 `--source` 导出会在创建输出文件前明确失败，不会静默保留旧图片。
+
+语义块事务 `hcd-patch/4` 也接受上述 `image.geometry` 操作，可以与块修改原子提交；图片坐标单位必须与原值一致，重复图片目标拒绝。协调 `/checkpoints` 的可选 `images` 使用同一结构及视觉前置条件，与正文、字号或结构共享一次 revision。联合请求签名绑定两部分，重放图片回执取保存时的不可变版本。完整 Word 前端/sidecar 的图片位置与尺寸草稿已接入此事务，使用保存协议 4，并能与正文共同保存、重开和处理迟到冲突。服务端现可在 `images` 项追加可选 `assetHash`，把暂存或已索引图片的替换与正文、尺寸一起提交；`hcd-patch/4` 的 `image.replace` 也可携带可选 `geometry`。新资源在验证字节及整批操作后才进入该版本资源索引，历史版本仍引用原索引。完整 Word 替换按钮已接入共享资源意图；并发不同替换保留预览候选，明确选择后才提交。固定/分段工作区仍使用独立替换写入；图片原生回写及完整浮动布局保真也未实现。可用 `scripts/hcd-word-image-transaction.py` 验证服务端契约，包括暂存损坏回滚、不可变回执及语义 DOCX 的实际图片字节。
 
 ## 后续保真优先级
 

@@ -11,6 +11,7 @@ use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
 pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
+pub use pdf::{pdf_layout_needs_upgrade, plan_pdf_page_rasters, upgrade_pdf_layout};
 
 /// Expand presentation-only Markdown features without changing canonical HCD.
 /// The transform is bounded to one chunk and safe to call after every revision.
