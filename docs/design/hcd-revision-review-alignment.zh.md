@@ -1,18 +1,18 @@
 # 跨入口历史审阅/还原对齐（HCD Revision Review Alignment）
 
-本文是 `hcd-overall-audit-2026-10-30.zh.md` 第 4 节 P0 项"跨入口历史审阅/还原对齐"的代码级落点分析与分阶段实施计划。`RevisionReview`/`RestoreRevisionDialog` 目前只接在普通语义入口；区域 Word、固定版式、工作簿三个入口有 revision 历史与 CAS 保存，但没有等价的"看历史版本 → 比较 → 还原"闭环。阶段 0（组件契约去 `Projection` 化）已随独立 PR 落地，本文同时记录其实际改动面。
+本文是 `hcd-overall-audit-2026-10-30.zh.md` 第 4 节 P0 项"跨入口历史审阅/还原对齐"的代码级落点分析与分阶段实施计划。`RevisionReview`/`RestoreRevisionDialog` 目前只接在普通语义入口；区域 Word、固定版式、工作簿三个入口有 revision 历史与 CAS 保存，但没有等价的"看历史版本 → 比较 → 还原"闭环。阶段 0（组件契约去 `Projection` 化）已随本 PR（#108）落地，本文同时记录其实际改动面。
 
 ## 1 现状：语义入口的完整链路
 
 审阅侧（`examples/hdoc/editor/src/App.tsx`）：
 
-1. `showRevision`（App.tsx:656-670）并发拉取 `/editor?revision=N` 与 `/editor?revision=head` 两份 `Projection`，构造选择并打开右栏。
+1. `showRevision`（App.tsx:658-672）并发拉取 `/editor?revision=N` 与 `/editor?revision=head` 两份 `Projection`，构造选择并打开右栏。
 2. `RevisionReview` 旧契约 `RevisionSelection={before:Projection;after:Projection}`（原 RevisionReview.tsx:8），diff 模式在组件内调用 `revisionDifferences`（revisionDiff.ts:15，类型锁定 schema.ts:158 的 `Projection/Block`）；文档模式复用 `RevisionDocument`。
 3. `RestoreRevisionDialog`（原 RestoreRevisionDialog.tsx:9）为了显示"改动条数"再算一遍全量 `revisionDifferences` —— 组件对 `Projection` 的全部依赖只有这一个数字。
 
 还原侧（协调式事务）：
 
-1. `restoreHistorical`（App.tsx:673-689）先 `save()` 取 head，再核对 `selection.after.revision`（不一致即 `restoreComparisonChanged`），生成 `RestoreSubmission{requestId,target,expectedRevision,fromEpoch}`，经 `submitRestore` 发给 sidecar。
+1. `restoreHistorical`（App.tsx:675-691）先 `save()` 取 head，再核对 `revisionSelection.comparedWith`（不一致即 `restoreComparisonChanged`），生成 `RestoreSubmission{requestId,target,expectedRevision,fromEpoch}`，经 `submitRestore` 发给 sidecar。
 2. sidecar 路由 `collaboration/restore/(\d+)`（sidecar.ts:235）：`coordinatedRestore!==true → 409`、协议非 `hcd-semantic-blocks/3|hcd-semantic-inline/1 → 403`（sidecar.ts:440-441），随后 `SidecarRestore` 走 quiesce/freeze/prepare/submit/release/committed 的 journal 事务（sidecarRestore.ts）。
 3. 原生端点 `POST /collaboration/restore/{revision}`（hdoc_server.rs:261-263 → hdoc_restore.rs）：协调器版本、身份、`remote.is_none()`（否则 501，hdoc_restore.rs:65-70）、协议白名单 `Structure3|Inline1`（hdoc_restore.rs:72-77）、Inline1 额外 model ack 头（hdoc_restore.rs:79-93）、pending/receipt 双文件 journal、epoch 轮转与 `restore_revision`。
 4. 直接还原端点 `POST /restore/{revision}`（hdoc_server.rs:5045-5072）要求 `collaboration_metadata.protocol == hcd-default/1`，否则 426（hdoc_server.rs:5052-5056）；成功后 `publish_mutation + reset_collaboration`（hdoc_server.rs:5069-5070）。
@@ -47,7 +47,7 @@
 | `src/revisionDiff.ts` | 新增 `semanticRevisionSelection(before,after,meta)` 适配器：`revisionDifferences` 输出折叠为行（行文本即时物化），引擎本体不动 |
 | `src/RevisionReview.tsx` | 不再 import `Projection/revisionDifferences/revisionBlockText`；revision 号取 `target/comparedWith`；行来自 `selection.changes` |
 | `src/RestoreRevisionDialog.tsx` | 改动条数改取 `revisionChangedRows(selection).length`；不再 import 引擎 |
-| `src/App.tsx` | `showRevision` 用适配器构造选择；`after.revision → comparedWith`（:678）、`before.revision → target`（:879 onRefresh） |
+| `src/App.tsx` | `showRevision` 用适配器构造选择；`after.revision → comparedWith`（:680）、`before.revision → target`（:881 onRefresh） |
 | `src/revisionDiff.test.ts` | 新增适配器用例（target/comparedWith/meta 透传、行文本、变更计数） |
 
 语义入口行为不变的判据：diff 计算从组件 render 移到选择构造（同一次选择只算一次，成本不升反降）；`key`/`data-revision-change` 导航、`onlyChanges`、`latest` 过期提示、restore 禁用条件（`target>=comparedWith`）逐字保留（两个重写文件与原文件做过字符级 opcode 对比，除上述列出的替换外无其它差异）。
