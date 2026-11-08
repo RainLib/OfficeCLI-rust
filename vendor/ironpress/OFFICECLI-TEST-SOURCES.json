@@ -1,0 +1,100 @@
+{
+  "upstreamCommit": "e7727b74838027337eb9532517d9e05df35e8a6a",
+  "files": [
+    {
+      "path": "tests/parity/cases/generated-content/generated-content-first-line-font-size.html",
+      "bytes": 680,
+      "sha256": "4616a2e03ba94acbe78e2db373b6c634691802f147686f3d998f259c313214ed"
+    },
+    {
+      "path": "tests/parity/cases/generated-content/generated-content-target-counter-page.html",
+      "bytes": 862,
+      "sha256": "3f9a3e0a61423a894bbe62a969dd7776c106dac75b8b9e9ef25a906cd2ba2884"
+    },
+    {
+      "path": "tests/parity/cases/grid/grid-display-contents-fragmentation-text-survival.html",
+      "bytes": 2219,
+      "sha256": "3fdac472dd7b3f91b081047511877aebba15921f3973e4ba06bba497e51ce186"
+    },
+    {
+      "path": "tests/parity/cases/grid/grid-subgrid-columns.html",
+      "bytes": 767,
+      "sha256": "c54827d738db2f681b76a609f5580b7345c3b07402af707d288968f0b9189027"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-backgrounds-gradients-x-text-advanced.html",
+      "bytes": 4103,
+      "sha256": "4bbe5fec85f5444035107b4fa6aa70b4f5e3123189e8554d9115e973fb79c684"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-clip-mask-x-paged-media.html",
+      "bytes": 4095,
+      "sha256": "5fdda835afd20806f5d39f402c2f8a09e3873b803d754370974299c3c512aae4"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-flexbox-x-images-replaced.html",
+      "bytes": 3857,
+      "sha256": "00a5cdcaa82f7a71bc2b0ba87956fd735138797d7afb51a8a44de07c240fbe0c"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-flexbox-x-paged-media.html",
+      "bytes": 4107,
+      "sha256": "6e239c483ccea914785f29d0c0c11494ad778bcb0bbae601e2907b9334e56dbf"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-flexbox-x-text-advanced.html",
+      "bytes": 4019,
+      "sha256": "1e7b8b8149e4d4afa14bdeb51fe78e56a19380847a6a64631b1c273d1c138fb2"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-grid-x-paged-media.html",
+      "bytes": 4093,
+      "sha256": "8cde87bb2ff13e6402fc7546d77e9bc55c6a7b4214f327fdadbd1b3d93330f09"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-images-replaced-x-positioning.html",
+      "bytes": 3826,
+      "sha256": "b3b3a543e24e9f71791f9ff15e4e160c6b582064c32761b786bcae42c0a08dc1"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-multicol-x-paged-media.html",
+      "bytes": 4103,
+      "sha256": "f4dbd8379d28417fce65eea2352b7f5eb4e92173ed78c2e04160978be0c5ba17"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-cartesian-paged-media-x-positioning.html",
+      "bytes": 4076,
+      "sha256": "0e074fec4ee7e1811a5a71139fc023118648f7a0ff8a8462a7f22b674d8c8c67"
+    },
+    {
+      "path": "tests/parity/cases/interactions/interactions-grid-fragmentation-svg-background-single-owner.html",
+      "bytes": 2081,
+      "sha256": "a1f121cd41ba976a5f33948859cae33ea0fb80d0334d69228f112acb0f710ccb"
+    },
+    {
+      "path": "tests/parity/cases/multicol/multicol-column-rule-wider-than-gap.html",
+      "bytes": 600,
+      "sha256": "1bd74dcef0cc41b7f5229fab64b2d42d069e044782a73789ee75de776106312c"
+    },
+    {
+      "path": "tests/parity/cases/paged-media/footnote-float.html",
+      "bytes": 793,
+      "sha256": "28c65f71352b6881a346d81ba4db64741f3c2e719305cd019fa133788f28a895"
+    },
+    {
+      "path": "tests/parity/cases/paged-media/paged-footnote-policy-block.html",
+      "bytes": 625,
+      "sha256": "2baf7af6a085a035d67bc5d9621b7c29b6e69f302a37682b6f943a57c3cb70bf"
+    },
+    {
+      "path": "tests/parity/cases/paged-media/paged-footnote-styling-pseudos.html",
+      "bytes": 625,
+      "sha256": "9b2509de83d21ecd607266fc075b23c338ed587b3c4963306fd7803cea00215e"
+    },
+    {
+      "path": "tests/parity/fonts/ParitySans.ttf",
+      "bytes": 759572,
+      "sha256": "6e9bdfac0e091b2715407a7a36019c1c40aeea91b992f1c4f271c7cdd55d06be"
+    }
+  ]
+}

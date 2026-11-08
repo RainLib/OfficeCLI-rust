@@ -1,0 +1,262 @@
+.guide-main {
+  padding: clamp(60px, 9vw, 120px) 0;
+}
+
+.guide-hero {
+  max-width: 900px;
+  margin: 0 auto 72px;
+  text-align: center;
+}
+
+.guide-hero .eyebrow {
+  justify-content: center;
+}
+
+.guide-hero h1 {
+  margin-bottom: 28px;
+  font-family: var(--serif);
+  font-size: clamp(50px, 7vw, 82px);
+  font-weight: 600;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+}
+
+.guide-hero h1 em {
+  color: var(--blue);
+  font-weight: inherit;
+}
+
+.guide-hero > p:not(.eyebrow) {
+  max-width: 700px;
+  margin: 0 auto;
+  color: var(--ink-soft);
+  font-size: 20px;
+}
+
+.guide-meta {
+  display: flex;
+  justify-content: center;
+  gap: 22px;
+  margin-top: 28px;
+  color: #706b5d;
+  font: 11px var(--mono);
+  text-transform: uppercase;
+}
+
+.guide-layout {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 720px);
+  justify-content: center;
+  gap: clamp(45px, 8vw, 90px);
+  align-items: start;
+}
+
+.guide-toc {
+  position: sticky;
+  top: 28px;
+  padding-top: 8px;
+}
+
+.guide-toc p {
+  margin-bottom: 14px;
+  font: 800 10px var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.guide-toc ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guide-toc li {
+  border-top: 1px solid var(--line);
+}
+
+.guide-toc li:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+.guide-toc a {
+  display: block;
+  padding: 10px 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.guide-toc a:hover {
+  color: var(--blue);
+}
+
+.prose {
+  min-width: 0;
+}
+
+.prose > p,
+.prose > ul,
+.prose > ol {
+  color: #303847;
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.78;
+}
+
+.prose h2 {
+  margin: 76px 0 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  font-family: var(--serif);
+  font-size: clamp(34px, 5vw, 48px);
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+}
+
+.prose h2:first-child {
+  margin-top: 0;
+}
+
+.prose h3 {
+  margin: 40px 0 12px;
+  font-family: var(--serif);
+  font-size: 26px;
+  letter-spacing: -0.025em;
+}
+
+.prose a {
+  color: var(--blue-dark);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.prose pre {
+  margin: 30px 0;
+  padding: 28px;
+  overflow-x: auto;
+  border: 1px solid #343c49;
+  border-radius: 5px;
+  background: var(--ink);
+  color: #dce3ee;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.prose :not(pre) > code {
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--paper-deep);
+  font-size: 0.84em;
+}
+
+.guide-callout {
+  margin: 34px 0;
+  padding: 24px 26px;
+  border-left: 4px solid var(--blue);
+  background: var(--white);
+}
+
+.guide-callout strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.guide-callout p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
+.prose table {
+  width: 100%;
+  margin: 32px 0;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.prose th,
+.prose td {
+  padding: 14px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  border-top: 2px solid var(--ink);
+  color: var(--ink);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.prose tbody tr:hover {
+  background: rgb(255 253 248 / 55%);
+}
+
+.article-cta {
+  margin-top: 72px;
+  padding: 38px;
+  border: 1px solid var(--ink);
+  background: var(--white);
+  box-shadow: 6px 6px 0 var(--ink);
+}
+
+.article-cta h2 {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+  font-size: 36px;
+}
+
+.article-cta p {
+  margin-bottom: 18px;
+  color: var(--ink-soft);
+}
+
+.prose .button-primary {
+  color: white;
+}
+
+@media (max-width: 920px) {
+  .guide-layout {
+    grid-template-columns: minmax(0, 720px);
+  }
+
+  .guide-toc {
+    position: static;
+    display: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .guide-main {
+    padding-top: 56px;
+  }
+
+  .guide-hero {
+    margin-bottom: 52px;
+    text-align: left;
+  }
+
+  .guide-hero .eyebrow,
+  .guide-meta {
+    justify-content: flex-start;
+  }
+
+  .guide-meta {
+    flex-wrap: wrap;
+  }
+
+  .prose > p,
+  .prose > ul,
+  .prose > ol {
+    font-size: 18px;
+  }
+
+  .prose table {
+    display: block;
+    overflow-x: auto;
+  }
+}

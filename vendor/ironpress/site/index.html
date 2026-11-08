@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ironpress: HTML to PDF in Pure Rust</title>
+    <meta
+      name="description"
+      content="Convert HTML, CSS, and Markdown to PDF in process with ironpress, a fast pure-Rust engine with no browser, subprocess, or system dependencies."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/">
+    <link rel="icon" type="image/png" href="./assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="ironpress: HTML to PDF in Pure Rust">
+    <meta
+      property="og:description"
+      content="A fast, in-process HTML, CSS, and Markdown to PDF engine. No browser, subprocess, or system dependencies."
+    >
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/">
+    <meta
+      property="og:image"
+      content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png"
+    >
+    <meta property="og:image:alt" content="ironpress logo">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="ironpress: HTML to PDF in Pure Rust">
+    <meta
+      name="twitter:description"
+      content="A fast, in-process HTML, CSS, and Markdown to PDF engine."
+    >
+    <link rel="stylesheet" href="./assets/styles.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://gastongouron.github.io/ironpress/#website",
+            "url": "https://gastongouron.github.io/ironpress/",
+            "name": "ironpress",
+            "description": "Pure-Rust HTML, CSS, and Markdown to PDF engine"
+          },
+          {
+            "@type": "SoftwareSourceCode",
+            "@id": "https://gastongouron.github.io/ironpress/#software",
+            "name": "ironpress",
+            "codeRepository": "https://github.com/gastongouron/ironpress",
+            "programmingLanguage": "Rust",
+            "runtimePlatform": ["Rust", "C", ".NET", "Java", "Command line", "Python", "Ruby", "Web browser", "Node.js"],
+            "license": "https://opensource.org/license/mit",
+            "description": "An in-process HTML, CSS, and Markdown to PDF engine written in Rust."
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="./" aria-label="ironpress home">
+          <img
+            src="./assets/ironpress-logo.png"
+            alt="ironpress"
+            width="44"
+            height="44"
+          >
+          <span>ironpress</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="#features">Features</a>
+          <a href="./get-started/">Get started</a>
+          <a href="./playground/">Playground</a>
+          <a
+            class="nav-github"
+            href="https://github.com/gastongouron/ironpress"
+          >GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero">
+        <div class="shell hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow"><span></span> Open source · MIT licensed</p>
+            <h1>HTML to PDF.<br><em>In process.</em><br>In pure Rust.</h1>
+            <p class="hero-lede">
+              Render HTML, CSS, and Markdown directly to PDF without a browser,
+              a subprocess, or system dependencies.
+            </p>
+            <div class="button-row">
+              <a class="button button-primary" href="./get-started/">
+                Get started <span aria-hidden="true">→</span>
+              </a>
+              <a
+                class="button button-secondary"
+                href="./playground/"
+              >Try the playground</a>
+            </div>
+            <p class="install-line">
+              <span aria-hidden="true">$</span>
+              <code>cargo add ironpress</code>
+            </p>
+          </div>
+
+          <div class="hero-visual" aria-label="HTML enters ironpress and a PDF comes out">
+            <div class="source-window">
+              <div class="window-bar">
+                <span></span><span></span><span></span>
+                <small>invoice.html</small>
+              </div>
+              <pre><code><span class="code-muted">&lt;style&gt;</span>
+<span class="code-tag">.invoice</span> {
+  display: <span class="code-value">grid</span>;
+  color: <span class="code-value">#172033</span>;
+}
+<span class="code-muted">&lt;/style&gt;</span>
+
+<span class="code-tag">&lt;h1&gt;</span>Invoice #042<span class="code-tag">&lt;/h1&gt;</span>
+<span class="code-tag">&lt;table&gt;</span>…<span class="code-tag">&lt;/table&gt;</span></code></pre>
+            </div>
+            <div class="engine-chip">
+              <span class="engine-mark" aria-hidden="true">Fe</span>
+              <span><strong>ironpress</strong><small>single process</small></span>
+            </div>
+            <article class="pdf-sheet">
+              <span class="pdf-label">PDF</span>
+              <p class="pdf-kicker">NORTHSTAR STUDIO</p>
+              <h2>Invoice <span>#042</span></h2>
+              <div class="pdf-rule"></div>
+              <div class="pdf-meta"><span>Issued<br><b>18 AUG 2026</b></span><span>Due<br><b>01 SEP 2026</b></span></div>
+              <div class="pdf-table">
+                <p><span>Design system</span><b>€2,400</b></p>
+                <p><span>Implementation</span><b>€4,800</b></p>
+                <p class="pdf-total"><span>Total</span><b>€7,200</b></p>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="proof-strip" aria-label="Project facts">
+        <div class="shell proof-grid">
+          <p><strong>0.93 ms</strong><span>simple HTML median</span></p>
+          <p><strong>3,200+</strong><span>tests</span></p>
+          <p><strong>1,664</strong><span>parity fixtures</span></p>
+          <p><strong>8</strong><span>runtime paths</span></p>
+        </div>
+      </section>
+
+      <section class="section" id="features">
+        <div class="shell">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow"><span></span> Built for documents</p>
+              <h2>A PDF engine,<br>not a browser in disguise.</h2>
+            </div>
+            <p>
+              ironpress owns the full rendering path, from parsing and layout to
+              font shaping and PDF output. That keeps deployment predictable.
+            </p>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature-card feature-wide">
+              <span class="feature-number">01</span>
+              <h3>Deploy one binary</h3>
+              <p>
+                No Chrome install, process pool, or platform package checklist.
+                The renderer runs inside your application.
+              </p>
+              <div class="binary-map" aria-hidden="true">
+                <span>HTML</span><span>CSS</span><span>MD</span>
+                <b>IRONPRESS</b><i>PDF</i>
+              </div>
+            </article>
+            <article class="feature-card">
+              <span class="feature-number">02</span>
+              <h3>Modern document CSS</h3>
+              <p>
+                Flexbox, grid, tables, multi-column layout, variables,
+                <code>@page</code>, and print-oriented headers and footers.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-number">03</span>
+              <h3>Serious typography</h3>
+              <p>
+                Custom fonts, subsetting, Unicode and CJK fallback, shaped with
+                Rustybuzz, plus LaTeX-style math.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-number">04</span>
+              <h3>Multiple runtimes</h3>
+              <p>
+                Use the same core from Rust, C, C++, .NET, Java, the CLI, Python,
+                Ruby, browser WebAssembly, or Node.js.
+              </p>
+              <ul class="runtime-list" aria-label="Supported runtimes">
+                <li>Rust</li><li>C</li><li>C++</li><li>.NET</li><li>Java</li><li>CLI</li><li>Python</li><li>Ruby</li><li>Browser</li><li>Node.js</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="feature-number">05</span>
+              <h3>Defensive by default</h3>
+              <p>
+                HTML and SVG sanitization, constrained file access, resource
+                limits, and opt-in remote fetching policies.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-ink">
+        <div class="shell">
+          <div class="section-heading section-heading-light">
+            <div>
+              <p class="eyebrow"><span></span> One core, ten paths</p>
+              <h2>Start in the language<br>you already ship.</h2>
+            </div>
+            <p>
+              The rendering engine is Rust. Every runtime shares the same
+              portable converter controls for pages, quality, fonts, and safety.
+              <a href="./get-started/">Choose your runtime.</a>
+            </p>
+          </div>
+          <div class="code-grid">
+            <article class="code-card">
+              <p><span>Rust</span><a href="https://crates.io/crates/ironpress">crates.io ↗</a></p>
+              <pre><code><b>use</b> ironpress::html_to_pdf;
+
+<b>let</b> pdf = html_to_pdf(
+    <em>"&lt;h1&gt;Hello&lt;/h1&gt;"</em>
+)?;</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>CLI</span><a href="./get-started/cli/">guide →</a></p>
+              <pre><code>ironpress invoice.html \
+  invoice.pdf \
+  --page-size a4</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>C</span><a href="./get-started/c/">guide →</a></p>
+              <pre><code><b>#include</b> <em>"ironpress.h"</em>
+
+IronpressStatus status =
+  ironpress_html_to_pdf(
+    html, &amp;pdf, &amp;error
+  );</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>C++</span><a href="./get-started/cpp/">guide →</a></p>
+              <pre><code><b>#include</b> <em>"ironpress.hpp"</em>
+
+ironpress::Converter converter;
+<b>auto</b> pdf = converter.convert_html(
+  <em>"&lt;h1&gt;Hello&lt;/h1&gt;"</em>
+);</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>Python</span><a href="https://pypi.org/project/ironpress/">PyPI ↗</a></p>
+              <pre><code><b>import</b> ironpress
+
+pdf = ironpress.html_to_pdf(
+    <em>"&lt;h1&gt;Hello&lt;/h1&gt;"</em>
+)</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>.NET</span><a href="./get-started/dotnet/">guide →</a></p>
+              <pre><code><b>using</b> Ironpress;
+
+<b>using var</b> converter =
+  <b>new</b> HtmlConverter();
+
+<b>byte</b>[] pdf = converter.ConvertHtml(
+  <em>"&lt;h1&gt;Hello&lt;/h1&gt;"</em>
+);</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>Java</span><a href="./get-started/java/">guide →</a></p>
+              <pre><code><b>try</b> (<b>var</b> converter =
+  <b>new</b> HtmlConverter()) {
+
+  <b>byte</b>[] pdf = converter.convertHtml(
+    <em>"&lt;h1&gt;Hello&lt;/h1&gt;"</em>
+  );
+}</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>Ruby</span><a href="https://rubygems.org/gems/ironpress">RubyGems ↗</a></p>
+              <pre><code><b>require</b> <em>"ironpress"</em>
+
+pdf = Ironpress.html_to_pdf(
+  <em>"&lt;h1&gt;Hello&lt;/h1&gt;"</em>
+)</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>Browser</span><a href="./get-started/browser/">guide →</a></p>
+              <pre><code><b>import</b> init, { htmlToPdf } <b>from</b> <em>"ironpress"</em>;
+
+<b>await</b> init();
+
+<b>const</b> pdf = htmlToPdf(
+  <em>"&lt;h1&gt;Hello&lt;/h1&gt;"</em>
+);</code></pre>
+            </article>
+            <article class="code-card">
+              <p><span>Node.js</span><a href="./get-started/node/">guide →</a></p>
+              <pre><code><b>import</b> init, { htmlToPdf }
+  <b>from</b> <em>"ironpress/node"</em>;
+
+<b>await</b> init();
+<b>const</b> pdf = htmlToPdf(html);</code></pre>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="shell compare-grid">
+          <div>
+            <p class="eyebrow"><span></span> Choose the right renderer</p>
+            <h2>When ironpress fits.</h2>
+            <p class="compare-intro">
+              Use ironpress when the document is known HTML and CSS, deployment
+              simplicity matters, and conversion belongs inside your process.
+            </p>
+            <a class="text-link" href="./guides/html-to-pdf-rust/">
+              Read the architecture guide <span aria-hidden="true">→</span>
+            </a>
+          </div>
+          <div class="decision-list">
+            <article>
+              <span class="decision-yes" aria-hidden="true">✓</span>
+              <div><h3>Choose ironpress for</h3><p>Invoices, reports, certificates, server-side exports, and offline or WASM workflows.</p></div>
+            </article>
+            <article>
+              <span class="decision-no" aria-hidden="true">×</span>
+              <div><h3>Choose a browser for</h3><p>JavaScript-driven pages or browser screenshots.</p></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="cta-section">
+        <div class="shell cta-card">
+          <div>
+            <p class="eyebrow"><span></span> Nothing to install</p>
+            <h2>Give your HTML<br>the press treatment.</h2>
+          </div>
+          <div>
+            <p>Install the package for your runtime and generate a PDF in your own process.</p>
+            <div class="button-row">
+              <a class="button button-primary" href="./get-started/">Choose your runtime <span aria-hidden="true">→</span></a>
+              <a class="button button-secondary" href="./playground/">Open playground</a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand" href="./" aria-label="ironpress home">
+          <img
+            src="./assets/ironpress-logo.png"
+            alt="ironpress"
+            width="36"
+            height="36"
+          >
+          <span>ironpress</span>
+        </a>
+        <p>Pure-Rust document rendering. Open source under MIT.</p>
+        <nav aria-label="Footer navigation">
+          <a href="https://github.com/gastongouron/ironpress">GitHub</a>
+          <a href="https://docs.rs/ironpress">Docs</a>
+          <a href="./parity/reports/">Parity</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

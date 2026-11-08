@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Get Started with ironpress in Your Runtime</title>
+    <meta
+      name="description"
+      content="Choose an ironpress guide for Rust, C, C++, .NET, Java, the CLI, Python, Ruby, browser JavaScript, TypeScript, or Node.js."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/">
+    <link rel="icon" type="image/png" href="../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress">
+    <meta
+      property="og:description"
+      content="Install ironpress and generate your first PDF in the runtime you already use."
+    >
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/">
+    <meta
+      property="og:image"
+      content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png"
+    >
+    <meta property="og:image:alt" content="ironpress logo">
+    <meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../assets/styles.css">
+    <link rel="stylesheet" href="../assets/guide.css">
+    <link rel="stylesheet" href="../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "name": "Get Started with ironpress",
+        "url": "https://gastongouron.github.io/ironpress/get-started/",
+        "mainEntity": {
+          "@type": "ItemList",
+          "itemListElement": [
+            { "@type": "ListItem", "position": 1, "name": "Rust", "url": "https://gastongouron.github.io/ironpress/get-started/rust/" },
+            { "@type": "ListItem", "position": 2, "name": "C", "url": "https://gastongouron.github.io/ironpress/get-started/c/" },
+            { "@type": "ListItem", "position": 3, "name": "C++", "url": "https://gastongouron.github.io/ironpress/get-started/cpp/" },
+            { "@type": "ListItem", "position": 4, "name": "CLI", "url": "https://gastongouron.github.io/ironpress/get-started/cli/" },
+            { "@type": "ListItem", "position": 5, "name": ".NET", "url": "https://gastongouron.github.io/ironpress/get-started/dotnet/" },
+            { "@type": "ListItem", "position": 6, "name": "Java", "url": "https://gastongouron.github.io/ironpress/get-started/java/" },
+            { "@type": "ListItem", "position": 7, "name": "Python", "url": "https://gastongouron.github.io/ironpress/get-started/python/" },
+            { "@type": "ListItem", "position": 8, "name": "Ruby", "url": "https://gastongouron.github.io/ironpress/get-started/ruby/" },
+            { "@type": "ListItem", "position": 9, "name": "Browser JavaScript", "url": "https://gastongouron.github.io/ironpress/get-started/browser/" },
+            { "@type": "ListItem", "position": 10, "name": "Node.js", "url": "https://gastongouron.github.io/ironpress/get-started/node/" }
+          ]
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="../" aria-label="ironpress home">
+          <img src="../assets/ironpress-logo.png" alt="ironpress" width="44" height="44">
+          <span>ironpress</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="./" aria-current="page">Get started</a>
+          <a href="../guides/html-to-pdf-rust/">Guide</a>
+          <a href="../playground/">Playground</a>
+          <a class="nav-github" href="https://github.com/gastongouron/ironpress">
+            GitHub <span aria-hidden="true">↗</span>
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="get-started-main" id="main-content">
+      <div class="shell">
+        <header class="get-started-hero">
+          <div>
+            <p class="eyebrow"><span></span> One engine, ten paths</p>
+            <h1>Your first PDF.<br><em>Your runtime.</em></h1>
+            <p class="get-started-lede">
+              Pick the environment you already ship. Every guide starts from a
+              clean project, produces a real PDF, then explains configuration,
+              resources, lifecycle, and runtime limits.
+            </p>
+          </div>
+          <aside class="start-promise" aria-label="Getting-started goal">
+            <strong>HTML to PDF in under five minutes.</strong>
+            <span>No browser process, subprocess manager, or system package checklist.</span>
+          </aside>
+        </header>
+
+        <section class="runtime-section" id="choose-runtime" aria-labelledby="native-title">
+          <div class="runtime-section-heading">
+            <div>
+              <p class="eyebrow"><span></span> Native entry points</p>
+              <h2 id="native-title">Run inside your application.</h2>
+            </div>
+            <p>
+              Use native bindings when your service needs in-process execution,
+              explicit ownership, and packaged platform libraries.
+            </p>
+          </div>
+          <div class="runtime-paths">
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Library</span><span class="runtime-package">crates.io</span></div>
+              <h3>Rust</h3>
+              <p>The full API: byte output, writers, async file conversion, local resources, and opt-in remote fetching.</p>
+              <a href="./rust/">Start with Rust</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Binary</span><span class="runtime-package">cargo install</span></div>
+              <h3>Command line</h3>
+              <p>Convert HTML or Markdown files from a shell, a script, or standard input without writing application code.</p>
+              <a href="./cli/">Start with the CLI</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Native ABI</span><span class="runtime-package">GitHub Releases</span></div>
+              <h3>C</h3>
+              <p>Link a versioned static or shared library through opaque handles, stable status codes, and explicit ownership.</p>
+              <a href="./c/">Start with C</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">RAII wrapper</span><span class="runtime-package">GitHub Releases</span></div>
+              <h3>C++</h3>
+              <p>Use move-only C++17 converters and PDF owners over the same stable native library.</p>
+              <a href="./cpp/">Start with C++</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Binding</span><span class="runtime-package">PyPI</span></div>
+              <h3>Python</h3>
+              <p>Install an ABI3 wheel and receive Python bytes from a native Rust renderer on Linux, macOS, or Windows.</p>
+              <a href="./python/">Start with Python</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Binding</span><span class="runtime-package">NuGet</span></div>
+              <h3>.NET</h3>
+              <p>Install one managed package with its native library for Linux, macOS, or Windows.</p>
+              <a href="./dotnet/">Start with .NET</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Binding</span><span class="runtime-package">Maven Central</span></div>
+              <h3>Java</h3>
+              <p>Use a Java 17 facade with deterministic ownership and native libraries for five platforms.</p>
+              <a href="./java/">Start with Java</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Binding</span><span class="runtime-package">RubyGems</span></div>
+              <h3>Ruby</h3>
+              <p>Use an idiomatic chainable converter backed by the same native Rust engine and package contract.</p>
+              <a href="./ruby/">Start with Ruby</a>
+            </article>
+          </div>
+        </section>
+
+        <section class="runtime-section" aria-labelledby="wasm-title">
+          <div class="runtime-section-heading">
+            <div>
+              <p class="eyebrow"><span></span> Portable WebAssembly</p>
+              <h2 id="wasm-title">One npm package, two hosts.</h2>
+            </div>
+            <p>
+              Browser and Node.js use the same WebAssembly renderer. Supply
+              fonts and document resources as bytes from the host application.
+            </p>
+          </div>
+          <div class="runtime-paths">
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Client side</span><span class="runtime-package">ironpress</span></div>
+              <h3>Browser JavaScript</h3>
+              <p>Initialize the WASM module, render locally, and turn the returned Uint8Array into a Blob for download or preview.</p>
+              <a href="./browser/">Start in the browser</a>
+            </article>
+            <article class="runtime-path">
+              <div class="runtime-path-top"><span class="runtime-label">Server side</span><span class="runtime-package">ironpress/node</span></div>
+              <h3>Node.js</h3>
+              <p>Use the package-owned WASM asset from Node.js 22 or 24 with ESM and write the returned Uint8Array where you need it.</p>
+              <a href="./node/">Start with Node.js</a>
+            </article>
+          </div>
+        </section>
+
+        <section class="runtime-section" id="capabilities" aria-labelledby="capabilities-title">
+          <div class="runtime-section-heading">
+            <div>
+              <p class="eyebrow"><span></span> Choose by capability</p>
+              <h2 id="capabilities-title">The important differences.</h2>
+            </div>
+            <p>All paths render HTML and Markdown with reusable converter settings. Host integration is what differs.</p>
+          </div>
+          <div class="prose">
+            <table class="capability-table">
+              <thead>
+                <tr><th>Capability</th><th>Rust</th><th>CLI</th><th>C</th><th>C++</th><th>.NET</th><th>Java</th><th>Python</th><th>Ruby</th><th>WASM</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>PDF bytes</td><td class="capability-yes">Yes</td><td class="capability-no">File</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td></tr>
+                <tr><td>Local resources</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-no">Host bytes</td><td class="capability-no">Host bytes</td><td class="capability-no">Host bytes</td><td class="capability-no">Host bytes</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-no">Host bytes</td></tr>
+                <tr><td>Direct file output</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-yes">Yes</td><td class="capability-yes">Yes</td><td class="capability-no">No</td></tr>
+                <tr><td>Streaming or async</td><td class="capability-yes">Yes</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td></tr>
+                <tr><td>Remote HTTP</td><td>Opt-in</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td><td class="capability-no">No</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand" href="../" aria-label="ironpress home">
+          <img src="../assets/ironpress-logo.png" alt="ironpress" width="36" height="36">
+          <span>ironpress</span>
+        </a>
+        <p>Pure-Rust document rendering. Open source under MIT.</p>
+        <nav aria-label="Footer navigation">
+          <a href="https://github.com/gastongouron/ironpress">GitHub</a>
+          <a href="https://docs.rs/ironpress">Docs</a>
+          <a href="../parity/reports/">Parity</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>.NET Getting Started: HTML and Markdown to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Install ironpress from NuGet, render HTML or Markdown to PDF bytes, configure a reusable converter, and manage native ownership safely."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/dotnet/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article"><meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress in .NET">
+    <meta property="og:description" content="Render PDF bytes through a managed facade and packaged native library.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/dotnet/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+    <meta property="og:image:alt" content="ironpress logo"><meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css"><link rel="stylesheet" href="../../assets/guide.css"><link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with ironpress in .NET",
+        "description": "Install the NuGet package and generate PDF bytes from HTML or Markdown in .NET.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/dotnet/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44"><span>ironpress</span></a>
+        <nav aria-label="Primary navigation"><a href="../" aria-current="page">Get started</a><a href="../../guides/html-to-pdf-rust/">Guide</a><a href="../../playground/">Playground</a><a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a></nav>
+      </div>
+    </header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> .NET getting started</p>
+          <h1>Generate PDF bytes<br><em>from .NET</em></h1>
+          <p>Install one managed package and run the native Rust renderer inside your process.</p>
+          <span class="runtime-type">.NET 8+ · NuGet · Linux, macOS, Windows</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents"><p>In this guide</p><ol><li><a href="#install">Install</a></li><li><a href="#first-pdf">First PDF</a></li><li><a href="#markdown">Markdown</a></li><li><a href="#configure">Configure</a></li><li><a href="#resources">Resources</a></li><li><a href="#limits">Limits and errors</a></li><li><a href="#next">Next steps</a></li></ol></aside>
+
+          <article class="prose">
+            <h2 id="install">Install from NuGet</h2>
+            <p>Add the package to any .NET 8 or newer project. NuGet selects the native asset for the current runtime identifier.</p>
+            <pre><code>dotnet add package Ironpress</code></pre>
+            <p>The package supports Linux x64 and ARM64 with glibc 2.28 or newer, macOS x64 and ARM64, and Windows x64.</p>
+
+            <h2 id="first-pdf">Create an HTML PDF</h2>
+            <pre><code>using Ironpress;
+
+using var converter = new HtmlConverter();
+byte[] pdf = converter.ConvertHtml(
+    "&lt;h1&gt;Hello from .NET&lt;/h1&gt;"
+);
+
+File.WriteAllBytes("output.pdf", pdf);</code></pre>
+            <div class="guide-callout"><strong>Deterministic ownership</strong><p>The managed converter uses a safe native handle. A <code>using</code> declaration releases it deterministically and the runtime retains a final safety net.</p></div>
+
+            <h2 id="markdown">Render Markdown</h2>
+            <p>The same configured converter accepts Markdown and returns an owned byte array:</p>
+            <pre><code>byte[] pdf = converter.ConvertMarkdown(
+    "# Release notes\n\nEverything shipped."
+);</code></pre>
+
+            <h2 id="configure">Reuse a configured converter</h2>
+            <p>Configuration methods return the same converter, so related page and quality choices remain readable together.</p>
+            <pre><code>using var converter = new HtmlConverter()
+    .SetPageSize(PageSize.Letter)
+    .SetMargins(PageMargins.FromPoints(36, 36, 48, 36))
+    .SetCompression(true)
+    .SetImageResolution(144)
+    .SetSanitization(true)
+    .SetHeader("Quarterly report")
+    .SetFooter("Page {page} of {pages}");
+
+byte[] first = converter.ConvertHtml(firstDocument);
+byte[] second = converter.ConvertHtml(secondDocument);</code></pre>
+
+            <h2 id="resources">Provide fonts as bytes</h2>
+            <p>The managed API accepts custom TrueType fonts and optional CJK or emoji packs as bytes. It never downloads a font implicitly.</p>
+            <pre><code>using var converter = new HtmlConverter()
+    .AddFont("MyFont", File.ReadAllBytes("MyFont.ttf"))
+    .AddFontPack(
+        FontPackKind.CjkJapanese,
+        File.ReadAllBytes("ironpress-font-cjk-jp.ttf")
+    );</code></pre>
+
+            <h2 id="limits">Handle failures and runtime limits</h2>
+            <p>Renderer failures throw <code>IronpressException</code>. Its <code>Kind</code> keeps the stable parse, layout, render, font, security, or argument category.</p>
+            <ul class="guide-checklist">
+              <li>HTML sanitization is enabled by default.</li>
+              <li>Converters must not be used or disposed concurrently.</li>
+              <li>Local paths, direct file output, async, streaming, and remote HTTP are absent.</li>
+              <li>The managed package verifies ABI generation 1 before allocating a converter.</li>
+            </ul>
+
+            <h2 id="next">Go further</h2>
+            <div class="guide-links">
+              <a href="https://www.nuget.org/packages/Ironpress">Package on NuGet</a><a href="https://github.com/gastongouron/ironpress/tree/main/bindings/dotnet">.NET binding reference</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/c/ABI.md">Native ABI contract</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/README.md">Capability matrix</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer"><div class="shell footer-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36"><span>ironpress</span></a><p>Pure-Rust document rendering. Open source under MIT.</p><nav aria-label="Footer navigation"><a href="../">All runtimes</a><a href="https://www.nuget.org/packages/Ironpress">NuGet</a><a href="../../parity/reports/">Parity</a></nav></div></footer>
+  </body>
+</html>

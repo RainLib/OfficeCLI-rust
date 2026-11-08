@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CLI Getting Started: Convert HTML or Markdown to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Install the ironpress command-line tool, convert HTML and Markdown files to PDF, and configure pages, margins, headers, and local resources."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/cli/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with the ironpress CLI">
+    <meta property="og:description" content="Turn an HTML or Markdown file into PDF from your terminal without a browser.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/cli/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+    <meta property="og:image:alt" content="ironpress logo">
+    <meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css">
+    <link rel="stylesheet" href="../../assets/guide.css">
+    <link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with the ironpress CLI",
+        "description": "Install ironpress and convert HTML or Markdown files to PDF from the command line.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/cli/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44"><span>ironpress</span></a>
+        <nav aria-label="Primary navigation">
+          <a href="../" aria-current="page">Get started</a><a href="../../guides/html-to-pdf-rust/">Guide</a><a href="../../playground/">Playground</a>
+          <a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> Command-line getting started</p>
+          <h1>Turn a document into PDF<br><em>from one command</em></h1>
+          <p>Use the Rust renderer from a shell, CI job, build script, or local automation without writing integration code.</p>
+          <span class="runtime-type">Native binary · HTML and Markdown</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents">
+            <p>In this guide</p>
+            <ol>
+              <li><a href="#install">Install</a></li><li><a href="#first-pdf">First PDF</a></li><li><a href="#markdown">Markdown</a></li>
+              <li><a href="#configure">Configure</a></li><li><a href="#resources">Resources</a></li><li><a href="#limits">Limits and errors</a></li><li><a href="#next">Next steps</a></li>
+            </ol>
+          </aside>
+
+          <article class="prose">
+            <h2 id="install">Install the binary</h2>
+            <p>Install the current release from crates.io with a Rust toolchain:</p>
+            <pre><code>cargo install ironpress</code></pre>
+            <p>Confirm the executable is available:</p>
+            <pre><code>ironpress --version</code></pre>
+
+            <h2 id="first-pdf">Convert an HTML file</h2>
+            <p>Create <code>invoice.html</code>, then provide the input and output paths:</p>
+            <pre><code>ironpress invoice.html invoice.pdf</code></pre>
+            <p>The command writes <code>invoice.pdf</code> and reports the completed path on standard error.</p>
+            <div class="guide-callout">
+              <strong>Pipe HTML from another command</strong>
+              <p><code>printf '&lt;h1&gt;Hello&lt;/h1&gt;' | ironpress --stdin output.pdf</code></p>
+            </div>
+
+            <h2 id="markdown">Convert Markdown</h2>
+            <p>Files ending in <code>.md</code> or <code>.markdown</code> are detected automatically:</p>
+            <pre><code>ironpress release-notes.md release-notes.pdf</code></pre>
+            <p>Standard input is treated as HTML. Use a temporary <code>.md</code> file when your pipeline starts with Markdown.</p>
+
+            <h2 id="configure">Set page and output options</h2>
+            <p>Compose flags to apply one document policy:</p>
+            <pre><code>ironpress report.html report.pdf \
+  --page-size letter \
+  --landscape \
+  --margin 36 \
+  --header "Quarterly report" \
+  --footer "Page {page} of {pages}"</code></pre>
+            <p>
+              Named sizes are <code>a4</code>, <code>letter</code>, and
+              <code>legal</code>. Margins and page geometry use PDF points.
+              Use <code>--header-html</code> or <code>--footer-html</code> for
+              sanitized images, tables, and styled markup.
+              Run <code>ironpress --help</code> for image quality, compression,
+              sanitization, and raster controls.
+            </p>
+
+            <h2 id="resources">Resolve local images, CSS, and fonts</h2>
+            <p>Grant a base directory before a document can resolve relative URLs:</p>
+            <pre><code>ironpress templates/invoice.html invoice.pdf \
+  --base-path templates</code></pre>
+            <p>
+              Relative <code>&lt;img&gt;</code>, CSS <code>@import</code>, and
+              <code>@font-face</code> URLs resolve below that canonical directory.
+              Traversal and symlink escapes are rejected.
+            </p>
+
+            <h2 id="limits">Understand CLI behavior</h2>
+            <ul class="guide-checklist">
+              <li>The CLI writes one complete output file per invocation.</li>
+              <li>HTML sanitization is enabled unless explicitly disabled.</li>
+              <li>The published binary does not fetch remote document resources.</li>
+              <li>JavaScript and browser DOM execution are outside the renderer's scope.</li>
+            </ul>
+            <p>Invalid flags, unreadable input, conversion failures, and output errors print a diagnostic and return a nonzero exit status.</p>
+
+            <h2 id="next">Go further</h2>
+            <p>Move to a language binding when your application needs PDF bytes in memory or a reusable converter instance.</p>
+            <div class="guide-links">
+              <a href="../rust/">Use the Rust crate</a><a href="../python/">Use Python</a><a href="../ruby/">Use Ruby</a><a href="https://github.com/gastongouron/ironpress#cli">CLI reference</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36"><span>ironpress</span></a>
+        <p>Pure-Rust document rendering. Open source under MIT.</p>
+        <nav aria-label="Footer navigation"><a href="../">All runtimes</a><a href="https://docs.rs/ironpress">Docs</a><a href="../../parity/reports/">Parity</a></nav>
+      </div>
+    </footer>
+  </body>
+</html>

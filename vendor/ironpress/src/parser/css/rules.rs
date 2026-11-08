@@ -1,0 +1,370 @@
+use super::{
+    CssRule, MediaContext, PseudoElement, lightning::parse_stylesheet_rules_with_lightning,
+    parse_inline_style, preprocess_media_queries_with_context,
+};
+
+/// Parse a CSS stylesheet string into a list of rules.
+#[allow(dead_code)]
+pub fn parse_stylesheet(css: &str) -> Vec<CssRule> {
+    parse_stylesheet_with_context(css, None)
+}
+
+/// Parse a CSS stylesheet with page-aware media query evaluation.
+pub fn parse_stylesheet_with_context(css: &str, ctx: Option<MediaContext>) -> Vec<CssRule> {
+    let preprocessed = preprocess_media_queries_with_context(css, ctx);
+    let mut rules = parse_stylesheet_rules_with_lightning(&preprocessed).unwrap_or_else(|| {
+        let mut rules = Vec::new();
+        parse_rules_from(&preprocessed, &mut rules);
+        rules
+    });
+    rules.retain(|rule| rule.counter_style_name().is_none());
+    rules.extend(extract_counter_style_rules(&preprocessed));
+    rules
+}
+
+fn extract_counter_style_rules(css: &str) -> Vec<CssRule> {
+    let mut rules = Vec::new();
+    let mut remaining = css;
+
+    while let Some(at_pos) = remaining.to_ascii_lowercase().find("@counter-style") {
+        let Some(after_at) = remaining.get(at_pos + "@counter-style".len()..) else {
+            break;
+        };
+        let Some(brace_pos) = after_at.find('{') else {
+            break;
+        };
+        let name = after_at[..brace_pos].trim();
+        let Some(after_brace) = after_at.get(brace_pos + 1..) else {
+            break;
+        };
+        let Some(close_pos) = matching_rule_close(after_brace) else {
+            break;
+        };
+        let declarations = parse_inline_style(&after_brace[..close_pos]);
+        if !name.is_empty() && !declarations.properties.is_empty() {
+            rules.push(CssRule {
+                selector: format!("@counter-style {}", name.to_ascii_lowercase()),
+                declarations,
+                pseudo_element: None,
+            });
+        }
+        remaining = &after_brace[close_pos + 1..];
+    }
+
+    rules
+}
+
+fn matching_rule_close(body: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escape = false;
+    for (index, ch) in body.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if quote.is_some() && ch == '\\' {
+            escape = true;
+            continue;
+        }
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '{') => depth += 1,
+            (None, '}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_rules_from(css: &str, rules: &mut Vec<CssRule>) {
+    for chunk in css.split('}') {
+        let Some((selector_text, decls)) = chunk.split_once('{') else {
+            continue;
+        };
+
+        let selector_text = selector_text.trim();
+        if selector_text.is_empty() {
+            continue;
+        }
+
+        let declarations = parse_inline_style(decls);
+        if declarations.properties.is_empty() {
+            continue;
+        }
+
+        for selector in selector_text
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            let (selector, pseudo_element) = extract_pseudo_element(selector);
+            rules.push(CssRule {
+                selector,
+                declarations: declarations.clone(),
+                pseudo_element,
+            });
+        }
+    }
+}
+
+/// Extract a supported pseudo-element from a selector.
+pub(crate) fn extract_pseudo_element(selector: &str) -> (String, Option<PseudoElement>) {
+    for (suffix, pseudo_element) in [
+        ("::before", PseudoElement::Before),
+        ("::after", PseudoElement::After),
+        ("::marker", PseudoElement::Marker),
+        ("::footnote-call", PseudoElement::FootnoteCall),
+        ("::footnote-marker", PseudoElement::FootnoteMarker),
+        ("::first-line", PseudoElement::FirstLine),
+        ("::first-letter", PseudoElement::FirstLetter),
+        (":before", PseudoElement::Before),
+        (":after", PseudoElement::After),
+        (":first-line", PseudoElement::FirstLine),
+        (":first-letter", PseudoElement::FirstLetter),
+    ] {
+        if let Some(base) = selector.strip_suffix(suffix) {
+            let base = base.trim();
+            let base = if base.is_empty() {
+                "*".to_string()
+            } else {
+                base.to_string()
+            };
+            return (base, Some(pseudo_element));
+        }
+    }
+
+    (selector.trim().to_string(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_pseudo_element, parse_stylesheet};
+    use crate::parser::css::PseudoElement;
+
+    #[test]
+    fn parse_stylesheet_basic_rules() {
+        let rules = parse_stylesheet("p { color: red; font-size: 14pt } h1 { font-weight: bold }");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].selector, "p");
+        assert_eq!(rules[1].selector, "h1");
+        assert!(rules[0].declarations.get("color").is_some());
+    }
+
+    #[test]
+    fn parse_stylesheet_keeps_counter_styles_in_document_rules() {
+        let rules = parse_stylesheet(
+            "@counter-style shared { system: cyclic; symbols: 'A'; } \
+             ol { list-style-type: shared; }",
+        );
+        let counter_styles: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule.selector == "@counter-style shared")
+            .collect();
+
+        assert_eq!(counter_styles.len(), 1);
+        assert!(counter_styles[0].declarations.get("symbols").is_some());
+    }
+
+    #[test]
+    fn parse_stylesheet_class_and_id_rules() {
+        let rules = parse_stylesheet(".highlight { font-weight: bold } #main { color: blue }");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].selector, ".highlight");
+        assert_eq!(rules[1].selector, "#main");
+    }
+
+    #[test]
+    fn parse_stylesheet_skips_empty_rules() {
+        assert!(parse_stylesheet("{ color: red }").is_empty());
+        assert!(parse_stylesheet("p { }").is_empty());
+    }
+
+    #[test]
+    fn parse_stylesheet_media_rules_follow_preprocessing() {
+        assert_eq!(
+            parse_stylesheet("@media print { p { color: red } }").len(),
+            1
+        );
+        assert!(parse_stylesheet("@media screen { p { color: red } }").is_empty());
+        assert_eq!(
+            parse_stylesheet(
+                "h1 { font-size: 24pt } @media print { p { color: blue } } h2 { font-size: 18pt }"
+            )
+            .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn parse_pseudo_elements() {
+        let before = parse_stylesheet(r#"p::before { content: "Hello" }"#);
+        let after = parse_stylesheet(r#"p:after { content: "!" }"#);
+        let footnote_call = parse_stylesheet(r#"aside::footnote-call { content: "[1]" }"#);
+        let footnote_marker = parse_stylesheet(r#"aside::footnote-marker { content: "1. " }"#);
+        assert_eq!(before[0].pseudo_element, Some(PseudoElement::Before));
+        assert_eq!(before[0].selector, "p");
+        assert_eq!(after[0].pseudo_element, Some(PseudoElement::After));
+        assert_eq!(after[0].selector, "p");
+        assert_eq!(
+            footnote_call[0].pseudo_element,
+            Some(PseudoElement::FootnoteCall)
+        );
+        assert_eq!(
+            footnote_marker[0].pseudo_element,
+            Some(PseudoElement::FootnoteMarker)
+        );
+    }
+
+    #[test]
+    fn extract_pseudo_element_variants() {
+        assert_eq!(
+            extract_pseudo_element("p::after"),
+            ("p".to_string(), Some(PseudoElement::After))
+        );
+        assert_eq!(
+            extract_pseudo_element("div:before"),
+            ("div".to_string(), Some(PseudoElement::Before))
+        );
+        assert_eq!(extract_pseudo_element("p"), ("p".to_string(), None));
+    }
+
+    #[test]
+    fn extract_pseudo_element_bare_pseudo() {
+        let (base, pe) = extract_pseudo_element("::before");
+        assert_eq!(base, "*");
+        assert_eq!(pe, Some(PseudoElement::Before));
+    }
+
+    #[test]
+    fn parse_stylesheet_comma_selectors() {
+        let rules = parse_stylesheet("h1, h2, h3 { font-weight: bold }");
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].selector, "h1");
+        assert_eq!(rules[1].selector, "h2");
+        assert_eq!(rules[2].selector, "h3");
+    }
+
+    #[test]
+    fn parse_stylesheet_preserves_child_combinator_semantics() {
+        let rules = parse_stylesheet(".node { width: 126px } .node > .node { width: 106px }");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].selector, ".node");
+        assert_eq!(rules[1].selector, ".node > .node");
+    }
+
+    #[test]
+    fn parse_stylesheet_with_context_none() {
+        use super::parse_stylesheet_with_context;
+        let rules = parse_stylesheet_with_context("p { color: red }", None);
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn parse_stylesheet_with_context_some() {
+        use super::super::MediaContext;
+        use super::parse_stylesheet_with_context;
+        let ctx = MediaContext {
+            width: 595.0,
+            height: 842.0,
+        };
+        let rules = parse_stylesheet_with_context("p { color: red }", Some(ctx));
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn parse_stylesheet_media_screen_excluded() {
+        let rules = parse_stylesheet("@media screen { .hidden { display: none } }");
+        assert!(
+            rules.is_empty(),
+            "screen-only rules should be excluded for print context"
+        );
+    }
+
+    #[test]
+    fn parse_stylesheet_media_print_included() {
+        let rules = parse_stylesheet("@media print { .visible { color: blue } }");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].selector, ".visible");
+    }
+
+    #[test]
+    fn parse_stylesheet_media_min_width_with_context() {
+        use super::super::MediaContext;
+        use super::parse_stylesheet_with_context;
+        // Page width 595pt > 400pt, so min-width: 400pt should match
+        let ctx = MediaContext {
+            width: 595.0,
+            height: 842.0,
+        };
+        let rules = parse_stylesheet_with_context(
+            "@media (min-width: 400pt) { .wide { font-size: 20pt } }",
+            Some(ctx),
+        );
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].selector, ".wide");
+    }
+
+    #[test]
+    fn parse_stylesheet_media_max_width_excludes_wide() {
+        use super::super::MediaContext;
+        use super::parse_stylesheet_with_context;
+        // Page width 595pt > 300pt, so max-width: 300pt should NOT match
+        let ctx = MediaContext {
+            width: 595.0,
+            height: 842.0,
+        };
+        let rules = parse_stylesheet_with_context(
+            "@media (max-width: 300pt) { .narrow { font-size: 10pt } }",
+            Some(ctx),
+        );
+        assert!(
+            rules.is_empty(),
+            "max-width: 300pt should not match a 595pt page"
+        );
+    }
+
+    #[test]
+    fn parse_stylesheet_malformed_css() {
+        // Missing closing brace should not panic
+        let rules = parse_stylesheet("p { color: red");
+        // May or may not produce a rule, but should not panic
+        let _ = rules;
+    }
+
+    #[test]
+    fn parse_stylesheet_keeps_pseudo_rules_with_embedded_braces_and_comments() {
+        let rules = parse_stylesheet(
+            r#"
+            /* legacy brace splitting would break this */
+            p::before,
+            div:after {
+                content: "}";
+                color: red;
+            }
+        "#,
+        );
+
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].selector, "p");
+        assert_eq!(rules[0].pseudo_element, Some(PseudoElement::Before));
+        assert_eq!(rules[1].selector, "div");
+        assert_eq!(rules[1].pseudo_element, Some(PseudoElement::After));
+        assert!(
+            rules
+                .iter()
+                .all(|rule| rule.declarations.get("color").is_some())
+        );
+        assert!(rules.iter().all(|rule| matches!(
+            rule.declarations.get("content"),
+            Some(crate::parser::css::CssValue::Keyword(value)) if value == "\"}\""
+        )));
+    }
+}

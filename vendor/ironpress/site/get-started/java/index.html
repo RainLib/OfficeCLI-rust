@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Java Getting Started: HTML and Markdown to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Install ironpress from Maven Central, render HTML or Markdown to PDF bytes, configure a reusable Java converter, and manage native ownership safely."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/java/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article"><meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress in Java">
+    <meta property="og:description" content="Render PDF bytes through a Java facade and packaged native library.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/java/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+    <meta property="og:image:alt" content="ironpress logo"><meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css"><link rel="stylesheet" href="../../assets/guide.css"><link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with ironpress in Java",
+        "description": "Install the Maven artifact and generate PDF bytes from HTML or Markdown in Java.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/java/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44"><span>ironpress</span></a>
+        <nav aria-label="Primary navigation"><a href="../" aria-current="page">Get started</a><a href="../../guides/html-to-pdf-rust/">Guide</a><a href="../../playground/">Playground</a><a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a></nav>
+      </div>
+    </header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> Java getting started</p>
+          <h1>Generate PDF bytes<br><em>from Java</em></h1>
+          <p>Install one JAR and run the native Rust renderer inside your JVM process.</p>
+          <span class="runtime-type">Java 17+ · Maven Central · Linux, macOS, Windows</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents"><p>In this guide</p><ol><li><a href="#install">Install</a></li><li><a href="#first-pdf">First PDF</a></li><li><a href="#markdown">Markdown</a></li><li><a href="#configure">Configure</a></li><li><a href="#resources">Resources</a></li><li><a href="#limits">Limits and errors</a></li><li><a href="#next">Next steps</a></li></ol></aside>
+
+          <article class="prose">
+            <h2 id="install">Install from Maven Central</h2>
+            <p>Add the artifact to any Java 17 or newer Maven project. The JAR selects the native asset for the current platform.</p>
+            <pre><code>&lt;dependency&gt;
+  &lt;groupId&gt;io.github.gastongouron&lt;/groupId&gt;
+  &lt;artifactId&gt;ironpress&lt;/artifactId&gt;
+  &lt;version&gt;1.6.0&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+            <p>The package supports Linux x86-64 and ARM64 with glibc 2.28 or newer, macOS x86-64 and ARM64, and Windows x86-64.</p>
+
+            <h2 id="first-pdf">Create an HTML PDF</h2>
+            <pre><code>import io.github.gastongouron.ironpress.HtmlConverter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+try (var converter = new HtmlConverter()) {
+    byte[] pdf = converter.convertHtml(
+        "&lt;h1&gt;Hello from Java&lt;/h1&gt;"
+    );
+    Files.write(Path.of("output.pdf"), pdf);
+}</code></pre>
+            <div class="guide-callout"><strong>Deterministic ownership</strong><p>The converter implements <code>AutoCloseable</code>. A try-with-resources block releases its native handle even when conversion fails.</p></div>
+
+            <h2 id="markdown">Render Markdown</h2>
+            <p>The same configured converter accepts Markdown and returns an owned byte array:</p>
+            <pre><code>byte[] pdf = converter.convertMarkdown(
+    "# Release notes\n\nEverything shipped."
+);</code></pre>
+
+            <h2 id="configure">Reuse a configured converter</h2>
+            <p>Configuration methods return the same converter, so related page and quality choices remain readable together.</p>
+            <pre><code>try (var converter = new HtmlConverter()
+        .setPageSize(PageSize.LETTER)
+        .setMargins(PageMargins.ofPoints(36, 36, 48, 36))
+        .setCompression(true)
+        .setImageResolution(144)
+        .setSanitization(true)
+        .setHeader("Quarterly report")
+        .setFooter("Page {page} of {pages}")) {
+    byte[] first = converter.convertHtml(firstDocument);
+    byte[] second = converter.convertHtml(secondDocument);
+}</code></pre>
+
+            <h2 id="resources">Provide fonts as bytes</h2>
+            <p>The Java API accepts custom TrueType fonts and optional CJK or emoji packs as bytes. It never downloads a font implicitly.</p>
+            <pre><code>try (var converter = new HtmlConverter()
+        .addFont("MyFont", Files.readAllBytes(Path.of("MyFont.ttf")))
+        .addFontPack(
+            FontPackKind.CJK_JAPANESE,
+            Files.readAllBytes(Path.of("ironpress-font-cjk-jp.ttf")))) {
+    // Render documents with the configured fallback pack.
+}</code></pre>
+
+            <h2 id="limits">Handle failures and runtime limits</h2>
+            <p>Renderer failures throw <code>IronpressException</code>. Its <code>Kind</code> keeps the stable parse, layout, render, font, security, or argument category.</p>
+            <ul class="guide-checklist">
+              <li>HTML sanitization is enabled by default.</li>
+              <li>Calls on the same converter, including close, must not overlap.</li>
+              <li>Local paths, direct file output, async, streaming, and remote HTTP are absent.</li>
+              <li>The JAR verifies ABI generation 1 and the exact package version before allocating a converter.</li>
+            </ul>
+
+            <h2 id="next">Go further</h2>
+            <div class="guide-links">
+              <a href="https://central.sonatype.com/artifact/io.github.gastongouron/ironpress">Package on Maven Central</a><a href="https://github.com/gastongouron/ironpress/tree/main/bindings/java">Java binding reference</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/c/ABI.md">Native ABI contract</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/README.md">Capability matrix</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer"><div class="shell footer-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36"><span>ironpress</span></a><p>Pure-Rust document rendering. Open source under MIT.</p><nav aria-label="Footer navigation"><a href="../">All runtimes</a><a href="https://central.sonatype.com/artifact/io.github.gastongouron/ironpress">Maven Central</a><a href="../../parity/reports/">Parity</a></nav></div></footer>
+  </body>
+</html>

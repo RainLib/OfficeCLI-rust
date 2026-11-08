@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rust Getting Started: HTML and Markdown to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Install the ironpress Rust crate, generate PDF bytes from HTML or Markdown, configure pages, and safely load fonts and document resources."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/rust/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress in Rust">
+    <meta property="og:description" content="From cargo add to a configured PDF converter in one practical Rust guide.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/rust/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+    <meta property="og:image:alt" content="ironpress logo">
+    <meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css">
+    <link rel="stylesheet" href="../../assets/guide.css">
+    <link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with ironpress in Rust",
+        "description": "Install ironpress and generate PDF bytes from HTML or Markdown in Rust.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/rust/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="../../" aria-label="ironpress home">
+          <img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44">
+          <span>ironpress</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="../" aria-current="page">Get started</a>
+          <a href="../../guides/html-to-pdf-rust/">Guide</a>
+          <a href="../../playground/">Playground</a>
+          <a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> Rust getting started</p>
+          <h1>Generate your first PDF<br><em>inside the Rust process</em></h1>
+          <p>Add one crate, call one function, and keep the full rendering pipeline inside your application.</p>
+          <span class="runtime-type">Rust 1.88+ · crates.io</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents">
+            <p>In this guide</p>
+            <ol>
+              <li><a href="#install">Install</a></li>
+              <li><a href="#first-pdf">First PDF</a></li>
+              <li><a href="#markdown">Markdown</a></li>
+              <li><a href="#configure">Configure</a></li>
+              <li><a href="#resources">Resources</a></li>
+              <li><a href="#limits">Limits and errors</a></li>
+              <li><a href="#next">Next steps</a></li>
+            </ol>
+          </aside>
+
+          <article class="prose">
+            <h2 id="install">Install the crate</h2>
+            <p>From an existing Cargo project, add the current ironpress release:</p>
+            <pre><code>cargo add ironpress</code></pre>
+            <p>
+              The default build needs no browser executable or system library.
+              Your project must use Rust 1.88 or later.
+            </p>
+
+            <h2 id="first-pdf">Create an HTML PDF</h2>
+            <p>The convenience function returns the complete PDF as <code>Vec&lt;u8&gt;</code>. Your application decides where those bytes go.</p>
+            <pre><code>use ironpress::html_to_pdf;
+
+fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let html = r#"
+        &lt;style&gt;
+          @page { size: A4; margin: 18mm; }
+          h1 { color: #295dff; }
+        &lt;/style&gt;
+        &lt;h1&gt;Hello from Rust&lt;/h1&gt;
+    "#;
+
+    let pdf = html_to_pdf(html)?;
+    std::fs::write("output.pdf", pdf)?;
+    Ok(())
+}</code></pre>
+            <div class="guide-callout">
+              <strong>Result</strong>
+              <p>Running <code>cargo run</code> writes a complete <code>output.pdf</code> without starting a subprocess.</p>
+            </div>
+
+            <h2 id="markdown">Render Markdown</h2>
+            <p>Markdown uses the same renderer and returns the same byte type:</p>
+            <pre><code>use ironpress::markdown_to_pdf;
+
+let pdf = markdown_to_pdf("# Release notes\n\nEverything shipped.")?;
+std::fs::write("release-notes.pdf", pdf)?;</code></pre>
+
+            <h2 id="configure">Reuse a configured converter</h2>
+            <p>Use <code>HtmlConverter</code> when several settings must compose or multiple documents share one policy.</p>
+            <pre><code>use ironpress::{HtmlConverter, Margin, PageSize};
+
+let converter = HtmlConverter::new()
+    .page_size(PageSize::LETTER)
+    .margin(Margin::new(36.0, 48.0, 36.0, 48.0))
+    .header("Quarterly report")
+    .footer("Page {page} of {pages}");
+
+let pdf = converter.convert("&lt;h1&gt;Results&lt;/h1&gt;")?;</code></pre>
+            <p>
+              The builder is immutable from the caller's perspective: each method
+              returns the configured value. Reuse the final converter for repeated
+              <code>convert</code> or <code>convert_markdown</code> calls.
+            </p>
+            <p>
+              Choose <code>header_html</code> or <code>footer_html</code> when a
+              page margin needs sanitized images, tables, or styled markup.
+            </p>
+
+            <h2 id="resources">Load fonts, images, and styles safely</h2>
+            <p>
+              Relative URLs are denied until you establish a local boundary.
+              <code>base_path</code> resolves URLs and also becomes the default
+              authorization root. Use <code>resource_root</code> only when shared
+              assets live in a broader parent directory.
+            </p>
+            <pre><code>use ironpress::HtmlConverter;
+use std::path::Path;
+
+let font = std::fs::read("assets/Inter.ttf")?;
+let pdf = HtmlConverter::new()
+    .base_path(Path::new("templates"))
+    .resource_root(Path::new("."))
+    .add_font("Inter", font)
+    .convert(r#"
+      &lt;style&gt;body { font-family: Inter }&lt;/style&gt;
+      &lt;img src="assets/logo.png"&gt;
+    "#)?;</code></pre>
+            <p>
+              Remote HTTP resources require <code>cargo add ironpress --features remote</code>
+              plus an explicit <code>NetworkPolicy</code>. They are not enabled by default.
+            </p>
+
+            <h2 id="limits">Handle errors and choose the right renderer</h2>
+            <p>
+              Conversion methods return <code>Result</code>. Propagate or map
+              <code>IronpressError</code> at your application boundary instead of
+              assuming every template is valid.
+            </p>
+            <ul class="guide-checklist">
+              <li>HTML sanitization is enabled by default.</li>
+              <li>JavaScript and live browser DOM behavior are not supported.</li>
+              <li>Local paths stay inside the canonical resource boundary.</li>
+              <li>Use a headless browser when exact Chrome print behavior is required.</li>
+            </ul>
+
+            <h2 id="next">Go further</h2>
+            <p>Move from the first conversion to the API surface that fits your service.</p>
+            <div class="guide-links">
+              <a href="https://docs.rs/ironpress">Rust API on docs.rs</a>
+              <a href="../../guides/html-to-pdf-rust/">Rendering architecture guide</a>
+              <a href="https://github.com/gastongouron/ironpress#streaming-output">Streaming output</a>
+              <a href="https://github.com/gastongouron/ironpress#security">Security controls</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand" href="../../" aria-label="ironpress home">
+          <img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36">
+          <span>ironpress</span>
+        </a>
+        <p>Pure-Rust document rendering. Open source under MIT.</p>
+        <nav aria-label="Footer navigation">
+          <a href="../">All runtimes</a><a href="https://docs.rs/ironpress">Docs</a><a href="../../parity/reports/">Parity</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

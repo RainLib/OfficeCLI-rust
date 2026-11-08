@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Python Getting Started: HTML and Markdown to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Install ironpress from PyPI, generate PDF bytes from Python, configure reusable converters, and safely load local images, CSS, and fonts."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/python/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article"><meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress in Python">
+    <meta property="og:description" content="From pip install to a configured native PDF converter in one practical Python guide.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/python/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+    <meta property="og:image:alt" content="ironpress logo"><meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css"><link rel="stylesheet" href="../../assets/guide.css"><link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with ironpress in Python",
+        "description": "Install ironpress and generate PDF bytes from HTML or Markdown in Python.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/python/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44"><span>ironpress</span></a>
+        <nav aria-label="Primary navigation"><a href="../" aria-current="page">Get started</a><a href="../../guides/html-to-pdf-rust/">Guide</a><a href="../../playground/">Playground</a><a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a></nav>
+      </div>
+    </header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> Python getting started</p>
+          <h1>Generate PDF bytes<br><em>from Python</em></h1>
+          <p>Install a native wheel, keep the Python API small, and let the Rust engine handle rendering in process.</p>
+          <span class="runtime-type">CPython 3.8+ · Linux, macOS, Windows</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents"><p>In this guide</p><ol><li><a href="#install">Install</a></li><li><a href="#first-pdf">First PDF</a></li><li><a href="#markdown">Markdown</a></li><li><a href="#configure">Configure</a></li><li><a href="#resources">Resources</a></li><li><a href="#limits">Limits and errors</a></li><li><a href="#next">Next steps</a></li></ol></aside>
+
+          <article class="prose">
+            <h2 id="install">Install the Python package</h2>
+            <pre><code>python -m pip install ironpress</code></pre>
+            <p>
+              PyPI provides CPython ABI3 wheels for supported Linux, macOS, and
+              Windows targets. An installed wheel does not need a Rust toolchain,
+              browser executable, or system PDF library.
+            </p>
+
+            <h2 id="first-pdf">Create an HTML PDF</h2>
+            <p>The convenience function returns a Python <code>bytes</code> value:</p>
+            <pre><code>from pathlib import Path
+import ironpress
+
+html = """
+&lt;style&gt;
+  @page { size: A4; margin: 18mm; }
+  h1 { color: #295dff; }
+&lt;/style&gt;
+&lt;h1&gt;Hello from Python&lt;/h1&gt;
+"""
+
+pdf = ironpress.html_to_pdf(html)
+Path("output.pdf").write_bytes(pdf)</code></pre>
+            <div class="guide-callout"><strong>Returned type</strong><p>Store the bytes, return them from a web response, or write them with <code>Path.write_bytes</code>.</p></div>
+
+            <h2 id="markdown">Render Markdown</h2>
+            <pre><code>pdf = ironpress.markdown_to_pdf(
+    "# Release notes\n\nEverything shipped."
+)
+Path("release-notes.pdf").write_bytes(pdf)</code></pre>
+
+            <h2 id="configure">Reuse a configured converter</h2>
+            <p>Python configuration methods mutate the converter and return <code>None</code>. Configure once, then reuse the object.</p>
+            <pre><code>converter = ironpress.HtmlConverter()
+converter.page_size("Letter")
+converter.margin_sides(36, 48, 36, 48)
+converter.header("Quarterly report")
+converter.footer("Page {page} of {pages}")
+
+pdf = converter.convert("&lt;h1&gt;Results&lt;/h1&gt;")
+markdown_pdf = converter.convert_markdown("# Results")</code></pre>
+            <p>Use <code>convert_to_file</code> or <code>convert_markdown_to_file</code> when direct output is more convenient than receiving bytes.</p>
+
+            <h2 id="resources">Load local resources and fonts</h2>
+            <p>Grant a canonical directory before relative document URLs can access local files:</p>
+            <pre><code>from pathlib import Path
+
+converter = ironpress.HtmlConverter()
+converter.base_path("templates")
+converter.resource_root(".")
+converter.add_font("Inter", Path("assets/Inter.ttf").read_bytes())
+
+pdf = converter.convert("""
+  &lt;style&gt;body { font-family: Inter }&lt;/style&gt;
+  &lt;img src="assets/logo.png"&gt;
+""")</code></pre>
+            <p>Optional CJK and emoji font packs also enter as verified bytes through <code>add_font_pack</code>. Rendering never downloads a font pack.</p>
+
+            <h2 id="limits">Handle failures and runtime limits</h2>
+            <p>Invalid configuration and conversion failures raise <code>ValueError</code>. File writes can also raise normal Python I/O exceptions.</p>
+            <ul class="guide-checklist">
+              <li>HTML sanitization is enabled by default.</li>
+              <li>The Python binding has no async or streaming conversion API.</li>
+              <li>Remote HTTP document resources are not available from the binding.</li>
+              <li>Use a browser renderer for JavaScript-driven pages or exact Chrome output.</li>
+            </ul>
+
+            <h2 id="next">Go further</h2>
+            <div class="guide-links">
+              <a href="https://pypi.org/project/ironpress/">Package on PyPI</a><a href="https://github.com/gastongouron/ironpress/tree/main/bindings/python">Python binding reference</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/README.md">Capability matrix</a><a href="../../guides/html-to-pdf-rust/">Rendering architecture guide</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer"><div class="shell footer-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36"><span>ironpress</span></a><p>Pure-Rust document rendering. Open source under MIT.</p><nav aria-label="Footer navigation"><a href="../">All runtimes</a><a href="https://pypi.org/project/ironpress/">PyPI</a><a href="../../parity/reports/">Parity</a></nav></div></footer>
+  </body>
+</html>

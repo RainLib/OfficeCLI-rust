@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ironpress Playground: HTML and Markdown to PDF</title>
+  <meta name="description" content="Try ironpress in your browser: convert HTML, CSS, or Markdown to PDF locally with the pure-Rust WebAssembly rendering engine.">
+  <link rel="canonical" href="https://gastongouron.github.io/ironpress/playground/">
+  <link rel="icon" type="image/png" href="../assets/ironpress-logo.png">
+  <meta name="theme-color" content="#161b22">
+  <meta property="og:title" content="ironpress HTML to PDF Playground">
+  <meta property="og:description" content="Convert HTML, CSS, and Markdown to PDF locally in your browser with ironpress WebAssembly.">
+  <meta property="og:url" content="https://gastongouron.github.io/ironpress/playground/">
+  <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+  <meta property="og:image:alt" content="ironpress logo">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e1e4e8; height: 100vh; display: flex; flex-direction: column; }
+    main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .skip-link { position: fixed; z-index: 20; top: 8px; left: 8px; padding: 8px 12px; transform: translateY(-150%); border-radius: 4px; background: #f0f6fc; color: #0d1117; font-weight: 600; }
+    .skip-link:focus { transform: translateY(0); }
+    :focus-visible { outline: 3px solid #58a6ff; outline-offset: 2px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+    header { padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #21262d; background: #161b22; }
+    .product-title { display: flex; align-items: center; gap: 10px; }
+    .product-title img { width: 34px; height: 34px; padding: 3px; object-fit: contain; border-radius: 5px; background: #f3efe4; }
+    header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    header h1 span { color: #58a6ff; }
+    header nav { display: flex; align-items: center; gap: 18px; }
+    header a { color: #a8b3c1; text-decoration: none; font-size: 13px; }
+    header a:hover { color: #58a6ff; }
+
+    .toolbar { padding: 8px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #21262d; background: #161b22; }
+    .toolbar select, .toolbar button { background: #21262d; color: #e1e4e8; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+    .toolbar select:hover, .toolbar button:hover { border-color: #58a6ff; }
+    .toolbar button.primary { background: #196c2e; border-color: #2ea043; color: #fff; font-weight: 700; }
+    .toolbar button.primary:hover { background: #238636; }
+    .toolbar button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .toolbar .spacer { flex: 1; }
+    .toolbar .status { font-size: 12px; color: #a8b3c1; }
+
+    .panels { flex: 1; display: flex; min-height: 0; }
+    .editor-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #21262d; }
+    .preview-panel { flex: 1; display: flex; flex-direction: column; background: #1c2028; }
+    .panel-header { padding: 8px 16px; font-size: 12px; font-weight: 600; color: #a8b3c1; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #21262d; }
+
+    textarea { flex: 1; background: #0d1117; color: #c9d1d9; border: none; padding: 16px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.5; resize: none; outline: none; tab-size: 2; }
+    textarea::placeholder { color: #8b949e; }
+
+    .preview-panel iframe { flex: 1; border: none; background: white; }
+    .preview-panel .empty { flex: 1; display: flex; align-items: center; justify-content: center; color: #8b949e; font-size: 14px; }
+
+    .loading { display: none; position: fixed; top: 0; left: 0; right: 0; height: 2px; background: #58a6ff; animation: loading 1s ease-in-out infinite; }
+    .loading.active { display: block; }
+    @keyframes loading { 0%, 100% { transform: scaleX(0); transform-origin: left; } 50% { transform: scaleX(1); transform-origin: left; } }
+
+    @media (max-width: 760px) {
+      body { height: auto; min-height: 100dvh; }
+      header { padding: 10px 14px; }
+      header h1 { font-size: 0; }
+      header h1 span { font-size: 16px; }
+      header nav { gap: 12px; }
+      .toolbar { padding: 10px 14px; flex-wrap: wrap; gap: 8px; }
+      .toolbar .spacer { display: none; }
+      .toolbar .status { width: 100%; order: 3; }
+      .panels { flex-direction: column; }
+      .editor-panel { min-height: 360px; border-right: 0; border-bottom: 1px solid #21262d; }
+      .preview-panel { min-height: 500px; }
+      .preview-panel iframe { min-height: 460px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .loading { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#playground-main">Skip to playground</a>
+  <div class="loading" id="loading" aria-hidden="true"></div>
+
+  <header>
+    <div class="product-title">
+      <img src="../assets/ironpress-logo.png" alt="ironpress" width="34" height="34">
+      <h1><span>ironpress</span> playground</h1>
+    </div>
+    <nav aria-label="Playground navigation">
+      <a href="../">Home</a>
+      <a href="../guides/html-to-pdf-rust/">Guide</a>
+      <a href="https://github.com/gastongouron/ironpress" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="playground-main">
+  <div class="toolbar" aria-label="Conversion controls">
+    <label class="sr-only" for="mode">Input format</label>
+    <select id="mode">
+      <option value="html">HTML</option>
+      <option value="markdown">Markdown</option>
+    </select>
+    <label class="sr-only" for="examples">Example document</label>
+    <select id="examples">
+      <option value="">Load example...</option>
+      <option value="simple">Simple page</option>
+      <option value="invoice">Invoice</option>
+      <option value="report">Report</option>
+      <option value="markdown">Markdown doc</option>
+      <option value="math">Math paper</option>
+      <option value="svg">SVG graphics</option>
+      <option value="rich-header">Rich page header</option>
+      <option value="unicode">Unicode & CJK</option>
+    </select>
+    <div class="spacer"></div>
+    <span class="status" id="status" aria-live="polite">Loading WASM...</span>
+    <button class="primary" id="convert" disabled>Convert to PDF</button>
+    <button id="download" style="display:none">Download PDF</button>
+  </div>
+
+  <div class="panels">
+    <div class="editor-panel">
+      <label class="panel-header" for="input">Input</label>
+      <textarea id="input" placeholder="Paste your HTML or Markdown here..." spellcheck="false"></textarea>
+    </div>
+    <div class="preview-panel">
+      <div class="panel-header" id="preview-label">Preview</div>
+      <div class="empty" id="placeholder">Click "Convert to PDF" to see the result</div>
+      <iframe id="preview" aria-labelledby="preview-label" title="Generated PDF preview" style="display:none"></iframe>
+    </div>
+  </div>
+  </main>
+
+  <script type="module">
+    import init, { HtmlConverter } from './ironpress.js';
+
+    const input = document.getElementById('input');
+    const preview = document.getElementById('preview');
+    const placeholder = document.getElementById('placeholder');
+    const convertBtn = document.getElementById('convert');
+    const downloadBtn = document.getElementById('download');
+    const status = document.getElementById('status');
+    const loading = document.getElementById('loading');
+    const modeSelect = document.getElementById('mode');
+    const examplesSelect = document.getElementById('examples');
+
+    let lastBlob = null;
+    let selectedPacks = [];
+
+    const PACK_ARTIFACTS = {
+      'cjk-jp': 'ironpress-font-cjk-jp.ttf',
+      'cjk-kr': 'ironpress-font-cjk-kr.ttf',
+      'cjk-sc': 'ironpress-font-cjk-sc.ttf',
+      'cjk-tc': 'ironpress-font-cjk-tc.ttf',
+      emoji: 'ironpress-font-emoji.ttf',
+    };
+
+    const EXAMPLES = {
+simple: `<h1>Hello, ironpress!</h1>
+<p>This PDF was generated <strong>entirely in your browser</strong> using WebAssembly.</p>
+<p>No server, no Chrome, no system dependencies.</p>
+<hr>
+<p style="color: navy; font-size: 10pt;">Generated with <a href="https://github.com/gastongouron/ironpress">ironpress</a></p>`,
+
+invoice: `<style>
+body { font-size: 10pt; color: #333; }
+h1 { color: #2c3e50; margin-bottom: 4pt; }
+.header { display: flex; justify-content: space-between; margin-bottom: 20pt; }
+.header div { flex: 1; }
+table { width: 100%; border-collapse: collapse; margin: 16pt 0; }
+th { background-color: #2c3e50; color: white; padding: 8pt; text-align: left; }
+td { padding: 8pt; border-bottom: 1pt solid #eee; }
+.total { text-align: right; font-size: 14pt; font-weight: bold; margin-top: 12pt; }
+.footer { margin-top: 30pt; font-size: 9pt; color: #999; text-align: center; }
+</style>
+<h1>INVOICE #2026-042</h1>
+<div class="header">
+<div>
+<strong>From:</strong><br>
+Acme Corp<br>
+123 Main Street<br>
+contact@acme.com
+</div>
+<div style="text-align: right;">
+<strong>To:</strong><br>
+Client Inc<br>
+456 Oak Avenue<br>
+billing@client.com
+</div>
+</div>
+<p><strong>Date:</strong> April 5, 2026 | <strong>Due:</strong> May 5, 2026</p>
+<table>
+<thead>
+<tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Total</th></tr>
+</thead>
+<tbody>
+<tr><td>Web Development</td><td>40h</td><td>$150</td><td>$6,000</td></tr>
+<tr><td>UI/UX Design</td><td>20h</td><td>$120</td><td>$2,400</td></tr>
+<tr><td>Server Setup</td><td>1</td><td>$500</td><td>$500</td></tr>
+<tr><td>Domain &amp; Hosting (1yr)</td><td>1</td><td>$200</td><td>$200</td></tr>
+</tbody>
+</table>
+<p class="total">Total: $9,100.00</p>
+<p class="footer">Thank you for your business.</p>`,
+
+report: `<style>
+body { font-size: 11pt; }
+h1 { color: navy; border-bottom: 2pt solid #ccc; padding-bottom: 4pt; }
+h2 { color: #336699; margin-top: 16pt; }
+table { width: 100%; border-collapse: collapse; margin: 8pt 0; }
+th { background: #336699; color: white; padding: 6pt; }
+td { border: 1pt solid #ddd; padding: 6pt; }
+.highlight { background-color: #ffffcc; }
+blockquote { border-left: 3pt solid #336699; padding-left: 10pt; color: #666; font-style: italic; }
+.flex { display: flex; gap: 10pt; margin: 12pt 0; }
+.flex > div { flex: 1; background: #f0f4f8; padding: 10pt; border-radius: 4pt; text-align: center; }
+.flex strong { display: block; font-size: 18pt; color: #336699; }
+</style>
+<h1>Q1 2026 Report</h1>
+<p>Prepared by the Analytics team.</p>
+<h2>Key Metrics</h2>
+<div class="flex">
+<div><strong>$5.5M</strong>Revenue</div>
+<div><strong>12,450</strong>Users</div>
+<div><strong>+13%</strong>Growth</div>
+</div>
+<h2>Revenue by Quarter</h2>
+<table>
+<thead><tr><th>Quarter</th><th>Revenue</th><th>Expenses</th><th>Margin</th></tr></thead>
+<tbody>
+<tr><td>Q1</td><td>$1.2M</td><td>$0.8M</td><td class="highlight">33%</td></tr>
+<tr><td>Q2</td><td>$1.4M</td><td>$0.9M</td><td class="highlight">36%</td></tr>
+<tr><td>Q3</td><td>$1.1M</td><td>$0.7M</td><td>36%</td></tr>
+<tr><td>Q4</td><td>$1.8M</td><td>$1.0M</td><td class="highlight">44%</td></tr>
+</tbody>
+</table>
+<h2>Highlights</h2>
+<ul>
+<li>Launched mobile app (50k downloads in first month)</li>
+<li>Expanded to 3 new markets</li>
+<li>Hired 12 engineers</li>
+</ul>
+<blockquote>The best way to predict the future is to create it. - Peter Drucker</blockquote>`,
+
+markdown: `# Project Documentation
+
+## Overview
+
+This document demonstrates **Markdown to PDF** conversion running entirely in the browser via WebAssembly.
+
+## Features
+
+- **Bold** and *italic* formatting
+- Inline \`code\` snippets
+- [Links](https://github.com/gastongouron/ironpress)
+- Lists (ordered and unordered)
+
+## Code Example
+
+\`\`\`rust
+use ironpress::html_to_pdf;
+
+let pdf = html_to_pdf("<h1>Hello</h1>").unwrap();
+std::fs::write("output.pdf", pdf).unwrap();
+\`\`\`
+
+## Roadmap
+
+1. Phase 1: Core engine
+2. Phase 2: CSS support
+3. Phase 3: Advanced features
+
+## Loose List
+
+- First item with some content
+  spanning two lines.
+
+- Second item after a blank line.
+  Markers sit on the first baseline.
+
+> ironpress: Pure Rust HTML to PDF. No browser needed.
+
+---
+
+*Generated with ironpress WASM playground*`,
+
+math: `# Mathematical Analysis
+
+## The Quadratic Formula
+
+For any quadratic equation $ax^2 + bx + c = 0$ with $a \\neq 0$, the solutions are:
+
+$$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$
+
+## Gauss's Sum
+
+For all $n \\geq 1$:
+
+$$\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}$$
+
+**Proof.** By induction. Base case $n = 1$: $\\frac{1 \\cdot 2}{2} = 1$. Assuming the result for $n$, then:
+
+$$\\sum_{k=1}^{n+1} k = \\frac{n(n+1)}{2} + (n+1) = \\frac{(n+1)(n+2)}{2}$$
+
+## Euler's Identity
+
+The most beautiful equation in mathematics:
+
+$$e^{i\\pi} + 1 = 0$$
+
+It connects five fundamental constants: $e$, $i$, $\\pi$, $1$, and $0$.
+
+## Gaussian Integral
+
+$$\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}$$
+
+## Matrix Notation
+
+$$\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} \\begin{pmatrix} x \\\\ y \\end{pmatrix} = \\begin{pmatrix} ax + by \\\\ cx + dy \\end{pmatrix}$$
+
+---
+
+*Generated with ironpress*`,
+
+svg: `<h1>SVG Graphics</h1>
+<p>Vector graphics rendered directly to PDF drawing operators.</p>
+
+<h2>Shapes and Text</h2>
+<svg width="400" height="200" viewBox="0 0 400 200">
+  <rect x="10" y="10" width="180" height="80" rx="10" fill="#4A90D9" />
+  <text x="100" y="58" text-anchor="middle" font-size="18" fill="white" font-weight="bold">ironpress</text>
+  <circle cx="300" cy="50" r="40" fill="#E74C3C" />
+  <text x="300" y="55" text-anchor="middle" font-size="14" fill="white">SVG</text>
+  <line x1="10" y1="120" x2="390" y2="120" stroke="#ccc" stroke-width="1" />
+  <polygon points="200,130 230,190 170,190" fill="#2ECC71" />
+  <text x="200" y="175" text-anchor="middle" font-size="10" fill="white">OK</text>
+</svg>
+
+<h2>Chart</h2>
+<svg width="300" height="150" viewBox="0 0 300 150">
+  <rect x="20" y="90" width="40" height="50" fill="#3498DB" />
+  <text x="40" y="85" text-anchor="middle" font-size="10">Q1</text>
+  <rect x="80" y="50" width="40" height="90" fill="#2ECC71" />
+  <text x="100" y="45" text-anchor="middle" font-size="10">Q2</text>
+  <rect x="140" y="70" width="40" height="70" fill="#E67E22" />
+  <text x="160" y="65" text-anchor="middle" font-size="10">Q3</text>
+  <rect x="200" y="20" width="40" height="120" fill="#9B59B6" />
+  <text x="220" y="15" text-anchor="middle" font-size="10">Q4</text>
+</svg>
+
+<h2>SVG Data URI</h2>
+<p>SVG images embedded as data URIs are rendered as vector graphics:</p>
+<img src="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22200%22%20height%3D%2260%22%3E%3Crect%20width%3D%22200%22%20height%3D%2260%22%20rx%3D%228%22%20fill%3D%22%23333%22%2F%3E%3Ctext%20x%3D%22100%22%20y%3D%2236%22%20text-anchor%3D%22middle%22%20font-size%3D%2216%22%20fill%3D%22white%22%3ESVG%20Data%20URI%3C%2Ftext%3E%3C%2Fsvg%3E">
+
+<p style="font-size: 9pt; color: #999;">Generated with ironpress</p>`,
+
+'rich-header': `<style>
+@page {
+  margin: 72pt 42pt 48pt;
+  @top-center { content: element(report-header, last); }
+}
+body { font-family: sans-serif; color: #172033; }
+.page-header {
+  position: running(report-header);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 510pt;
+  height: 42pt;
+  padding: 6pt 10pt;
+  border-bottom: 2pt solid #6d5dfc;
+  background: #f6f4ff;
+}
+.brand { display: flex; align-items: center; gap: 8pt; font-weight: bold; }
+.brand img { width: 24pt; height: 24pt; }
+.page-header table { border-collapse: collapse; font-size: 8pt; }
+.page-header td { border: 1pt solid #bbb5e8; padding: 3pt 6pt; }
+.page { min-height: 590pt; }
+h1 { color: #4434be; }
+</style>
+<div class="page-header">
+  <div class="brand">
+    <img alt="Ironpress mark" src="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2048%2048%22%3E%3Crect%20width%3D%2248%22%20height%3D%2248%22%20rx%3D%2210%22%20fill%3D%22%236d5dfc%22%2F%3E%3Cpath%20d%3D%22M15%2013h18v6H15zm0%208h18v14H15z%22%20fill%3D%22white%22%2F%3E%3C%2Fsvg%3E">
+    Ironpress report
+  </div>
+  <table><tr><td>Owner</td><td>Rendering team</td></tr></table>
+</div>
+<section class="page">
+  <h1>Rich headers</h1>
+  <p>The logo, layout, border, and table above are real HTML.</p>
+  <p>The Rust <code>header_html</code> API uses this same standards-based path.</p>
+  <p>The same captured element is painted through the normal layout pipeline.</p>
+</section>
+<section class="page" style="break-before: page">
+  <h1>Second page</h1>
+  <p>The complete header repeats without flattening its descendants to text.</p>
+</section>`,
+
+unicode: `<html>
+<head>
+<style>
+  body { font-family: sans-serif; margin: 40px; color: #1e293b; line-height: 1.8; }
+  h1 { font-size: 22px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin-top: 20px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  .sample { padding: 10px; margin-bottom: 10px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; }
+  .large { font-size: 20px; }
+  table { border-collapse: collapse; margin: 8px 0; }
+  th, td { border: 1px solid #d1d5db; padding: 6px 12px; text-align: left; }
+  th { background-color: #f1f5f9; }
+</style>
+</head>
+<body>
+  <h1>Unicode & International Text</h1>
+
+  <h2>CJK Characters</h2>
+  <div class="sample large">
+    <p lang="zh-Hans">Simplified Chinese: \u4F60\u597D\u4E16\u754C</p>
+    <p lang="zh-Hant">Traditional Chinese: \u4F60\u597D\u4E16\u754C</p>
+    <p lang="ja">Japanese: \u3053\u3093\u306B\u3061\u306F</p>
+    <p lang="ko">Korean: \uC548\uB155\uD558\uC138\uC694</p>
+  </div>
+
+  <h2>Emoji</h2>
+  <div class="sample large">\u{1F600} \u{1F680} \u{1F30D} \u{2764}\u{FE0F}</div>
+
+  <h2>Arabic & Hebrew</h2>
+  <div class="sample" style="font-size: 18px;">
+    <p>Arabic: \u0645\u0631\u062D\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645</p>
+    <p>Hebrew: \u05E9\u05DC\u05D5\u05DD \u05E2\u05D5\u05DC\u05DD</p>
+    <p>Mixed: Hello \u0645\u0631\u062D\u0628\u0627 World</p>
+  </div>
+
+  <h2>RTL Paragraphs (bidi)</h2>
+  <div class="sample" style="font-size: 18px;">
+    <div dir="rtl">\u05E9\u05DC\u05D5\u05DD \u05E2\u05D5\u05DC\u05DD Hello World</div>
+    <div style="direction: rtl;">\u05D1\u05D3\u05D9\u05E7\u05D4 \u05D1\u05E2\u05D1\u05E8\u05D9\u05EA RTL \u05D1\u05D3\u05D9\u05E7\u05D4 123</div>
+    <p>English only paragraph stays LTR.</p>
+  </div>
+
+  <h2>Mathematical Symbols</h2>
+  <div class="sample">
+    <p>Greek: \u03B1 \u03B2 \u03B3 \u03B4 \u03B5 \u03C0 \u03C9</p>
+    <p>Operators: \u00B1 \u00D7 \u00F7 \u2260 \u2264 \u2265 \u221E \u2211 \u222B</p>
+    <p>Sets: \u2208 \u2209 \u2282 \u2283 \u222A \u2229 \u2205</p>
+  </div>
+
+  <h2>Currency & Typography</h2>
+  <table>
+    <tr><th>Symbol</th><th>Name</th><th>Example</th></tr>
+    <tr><td>\u20AC</td><td>Euro</td><td>\u20AC1,234.56</td></tr>
+    <tr><td>\u00A3</td><td>Pound</td><td>\u00A31,234.56</td></tr>
+    <tr><td>\u00A5</td><td>Yen</td><td>\u00A5123,456</td></tr>
+    <tr><td>\u20B9</td><td>Rupee</td><td>\u20B91,23,456</td></tr>
+  </table>
+
+  <h2>Accented Characters</h2>
+  <div class="sample">
+    <p>French: \u00E0\u00E2\u00E6\u00E7\u00E9\u00E8\u00EA\u00EB \u2014 R\u00E9sum\u00E9, na\u00EFve, caf\u00E9</p>
+    <p>German: \u00E4\u00F6\u00FC\u00DF \u2014 Stra\u00DFe, Gem\u00FCtlichkeit</p>
+    <p>Spanish: \u00E1\u00E9\u00ED\u00F3\u00FA\u00F1\u00BF\u00A1 \u2014 El ni\u00F1o, se\u00F1or</p>
+  </div>
+
+  <p style="font-size: 9pt; color: #999;">Generated with ironpress</p>
+</body>
+</html>`
+    };
+
+    // Init WASM
+    await init();
+    const converter = new HtmlConverter();
+    const loadedPacks = new Set();
+
+    async function loadFontPacks(packs) {
+      const missing = packs.filter((pack) => !loadedPacks.has(pack));
+      if (missing.length === 0) return;
+      status.textContent = `Loading ${missing.join(', ')}...`;
+      const downloads = await Promise.all(missing.map(async (pack) => {
+        const response = await fetch(`./font-packs/${PACK_ARTIFACTS[pack]}`);
+        if (!response.ok) throw new Error(`Could not load ${pack} (${response.status})`);
+        return [pack, new Uint8Array(await response.arrayBuffer())];
+      }));
+      for (const [pack, bytes] of downloads) {
+        converter.addFontPack(pack, bytes);
+        loadedPacks.add(pack);
+      }
+    }
+
+    status.textContent = 'Ready';
+    convertBtn.disabled = false;
+    input.value = EXAMPLES.simple;
+
+    // Examples dropdown
+    examplesSelect.addEventListener('change', () => {
+      const key = examplesSelect.value;
+      if (key && EXAMPLES[key]) {
+        input.value = EXAMPLES[key];
+        modeSelect.value = (key === 'markdown' || key === 'math') ? 'markdown' : 'html';
+        selectedPacks = key === 'unicode'
+          ? ['cjk-jp', 'cjk-kr', 'cjk-sc', 'cjk-tc', 'emoji']
+          : [];
+        examplesSelect.value = '';
+      }
+    });
+
+    // Convert
+    convertBtn.addEventListener('click', async () => {
+      const text = input.value.trim();
+      if (!text) return;
+
+      loading.classList.add('active');
+      convertBtn.disabled = true;
+      status.textContent = 'Converting...';
+
+      try {
+        await new Promise(requestAnimationFrame);
+        await loadFontPacks(selectedPacks);
+        status.textContent = 'Converting...';
+        const start = performance.now();
+        const pdfBytes = modeSelect.value === 'markdown'
+          ? converter.markdownToPdf(text)
+          : converter.htmlToPdf(text);
+        const elapsed = (performance.now() - start).toFixed(1);
+
+        lastBlob = new Blob([pdfBytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(lastBlob);
+
+        preview.src = url;
+        preview.style.display = 'block';
+        placeholder.style.display = 'none';
+        downloadBtn.style.display = '';
+
+        status.textContent = `${(pdfBytes.length / 1024).toFixed(1)} KB in ${elapsed} ms`;
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+      } finally {
+        loading.classList.remove('active');
+        convertBtn.disabled = false;
+      }
+    });
+
+    // Download
+    downloadBtn.addEventListener('click', () => {
+      if (!lastBlob) return;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(lastBlob);
+      a.download = 'ironpress-output.pdf';
+      a.click();
+    });
+
+    // Ctrl+Enter shortcut
+    input.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        convertBtn.click();
+      }
+    });
+  </script>
+</body>
+</html>

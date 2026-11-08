@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* CSS GCPM `float: footnote`: the floated element is pulled out of flow and
+     rendered in the page's footnote area at the bottom, with an automatically
+     numbered call/marker left in the body text. This fixture uses a WeasyPrint
+     oracle because Chrome --print-to-pdf does not implement GCPM footnotes. */
+  @page { size: 400px 300px; margin: 1cm; }
+  * { margin: 0; box-sizing: border-box; }
+  html { font-family: ParitySans; line-height: 1.5; background: #ffffff; color: #111111; }
+  p { font-size: 16px; }
+  .fn { float: footnote; color: #b00020; }
+</style>
+</head>
+<body>
+  <p>Body text with a reference.<span class="fn">This belongs in the footnote area.</span> More body text follows the call.</p>
+</body>
+</html>

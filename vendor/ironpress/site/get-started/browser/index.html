@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Browser JavaScript Getting Started: HTML to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Install the ironpress npm package, initialize WebAssembly in a browser, generate a PDF Uint8Array, and configure pages, fonts, and lifecycle."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/browser/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png"><meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article"><meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress in the Browser">
+    <meta property="og:description" content="Generate PDF bytes locally in a browser through the portable WebAssembly package.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/browser/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png"><meta property="og:image:alt" content="ironpress logo"><meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css"><link rel="stylesheet" href="../../assets/guide.css"><link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with ironpress in the Browser",
+        "description": "Initialize ironpress WebAssembly and generate PDF bytes in browser JavaScript or TypeScript.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/browser/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header"><div class="shell header-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44"><span>ironpress</span></a><nav aria-label="Primary navigation"><a href="../" aria-current="page">Get started</a><a href="../../guides/html-to-pdf-rust/">Guide</a><a href="../../playground/">Playground</a><a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a></nav></div></header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> Browser getting started</p>
+          <h1>Generate a PDF<br><em>without leaving the browser</em></h1>
+          <p>Load the WebAssembly renderer once, convert locally, and keep document content inside the user's browser.</p>
+          <span class="runtime-type">ES modules · JavaScript and TypeScript</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents"><p>In this guide</p><ol><li><a href="#install">Install</a></li><li><a href="#first-pdf">First PDF</a></li><li><a href="#markdown">Markdown</a></li><li><a href="#configure">Configure</a></li><li><a href="#resources">Resources</a></li><li><a href="#limits">Limits and lifecycle</a></li><li><a href="#next">Next steps</a></li></ol></aside>
+
+          <article class="prose">
+            <h2 id="install">Install the npm package</h2>
+            <pre><code>npm install ironpress</code></pre>
+            <p>The package root is the browser entry point. Your bundler must support ES modules and WebAssembly assets.</p>
+
+            <h2 id="first-pdf">Create and download an HTML PDF</h2>
+            <p>Initialize the WASM module before calling exported conversion functions:</p>
+            <pre><code>import init, { htmlToPdf } from "ironpress";
+
+await init();
+
+const pdf = htmlToPdf("&lt;h1&gt;Hello from the browser&lt;/h1&gt;");
+const url = URL.createObjectURL(
+  new Blob([pdf], { type: "application/pdf" }),
+);
+
+const link = document.createElement("a");
+link.href = url;
+link.download = "output.pdf";
+link.click();
+URL.revokeObjectURL(url);</code></pre>
+            <div class="guide-callout"><strong>Returned type</strong><p>Browser conversion returns <code>Uint8Array</code>. Wrap it in a Blob for preview, download, upload, or IndexedDB storage.</p></div>
+
+            <h2 id="markdown">Render Markdown</h2>
+            <pre><code>import init, { markdownToPdf } from "ironpress";
+
+await init();
+const pdf = markdownToPdf("# Release notes\n\nEverything shipped.");</code></pre>
+
+            <h2 id="configure">Use a configured converter</h2>
+            <p>A converter keeps page and rendering settings across calls. WASM-owned objects must be freed when they are no longer needed.</p>
+            <pre><code>import init, { HtmlConverter } from "ironpress";
+
+await init();
+const converter = new HtmlConverter();
+
+try {
+  converter.pageSize("Letter");
+  converter.marginSides(36, 48, 36, 48);
+  converter.header("Quarterly report");
+  converter.footer("Page {page} of {pages}");
+
+  const pdf = converter.htmlToPdf("&lt;h1&gt;Results&lt;/h1&gt;");
+} finally {
+  converter.free();
+}</code></pre>
+
+            <h2 id="resources">Provide fonts and document assets</h2>
+            <p>The WASM renderer does not read paths. Fetch or import resource bytes in your host application, then pass them to the converter.</p>
+            <pre><code>const response = await fetch("/fonts/Inter.ttf");
+const font = new Uint8Array(await response.arrayBuffer());
+
+const converter = new HtmlConverter();
+try {
+  converter.addFont("Inter", font);
+  const pdf = converter.htmlToPdf(
+    '&lt;p style="font-family: Inter"&gt;Custom type&lt;/p&gt;',
+  );
+} finally {
+  converter.free();
+}</code></pre>
+            <p>Provide images as data URLs in the HTML. Optional CJK and emoji font packs enter through <code>addFontPack</code> as downloaded bytes.</p>
+
+            <h2 id="limits">Manage initialization, errors, and memory</h2>
+            <ul class="guide-checklist">
+              <li>Await the default initializer before the first conversion.</li>
+              <li>Call <code>free()</code> for every reusable converter.</li>
+              <li>Local paths, direct file output, streaming, and remote fetching are unavailable.</li>
+              <li>Conversion is synchronous after asynchronous WASM initialization.</li>
+            </ul>
+            <p>Initialization and conversion failures surface as JavaScript errors. Catch them at the UI boundary and keep raw untrusted document details out of user-facing messages.</p>
+
+            <h2 id="next">Go further</h2>
+            <div class="guide-links">
+              <a href="../../playground/">Try the browser playground</a><a href="https://www.npmjs.com/package/ironpress">Package on npm</a><a href="../node/">Use the Node.js entry</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/README.md">Capability matrix</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer"><div class="shell footer-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36"><span>ironpress</span></a><p>Pure-Rust document rendering. Open source under MIT.</p><nav aria-label="Footer navigation"><a href="../">All runtimes</a><a href="https://www.npmjs.com/package/ironpress">npm</a><a href="../../parity/reports/">Parity</a></nav></div></footer>
+  </body>
+</html>

@@ -69,3 +69,18 @@ unicode-segmentation = "1.13"
 
 # Legacy Office format conversion
 office_oxide = { version = "0.1.2" }
+
+# The preview API uses the development binary. Keep the application debuggable,
+# but optimize font parsing/shaping and print layout: repeated short CJK runs
+# otherwise spend minutes in dependency code that release builds optimize.
+[profile.dev.package.rustybuzz]
+opt-level = 3
+
+[profile.dev.package."ttf-parser@0.25.1"]
+opt-level = 3
+
+[profile.dev.package.ironpress]
+opt-level = 2
+
+[patch.crates-io]
+ironpress = { path = "vendor/ironpress" }

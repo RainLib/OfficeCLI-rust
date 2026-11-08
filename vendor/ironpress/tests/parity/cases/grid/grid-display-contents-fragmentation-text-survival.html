@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>grid-display-contents-fragmentation-text-survival</title>
+<style>
+  @page { size: 624px 360px; margin: 24px; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: #fff; color: #111; font: 16px/1.25 ParitySans; }
+  h1 { margin-bottom: 12px; padding: 8px; color: #fff; background: #222; font-size: 24px; }
+  .grid { display: grid; grid-template-columns: fit-content(30%) minmax(0, 1fr); gap: 8px 16px; width: 100%; }
+  .row { display: contents; }
+  .label, .value { padding: 8px; border: 3px solid #111; overflow-wrap: anywhere; }
+  .label { color: #fff; background: #c1121f; font-weight: 700; }
+  .value { background: #a8dadc; }
+</style>
+</head>
+<body>
+  <h1>ALL ROWS AND END MARKERS MUST SURVIVE</h1>
+  <div class="grid">
+    <div class="row"><div class="label">PROVENANCE-LABEL-01-LONG-WRAPPABLE LABEL-END-01</div><div class="value">First record carries enough text to establish an auto row and make overlap immediately visible. The complete value must remain beside its own red label. VALUE-END-01</div></div>
+    <div class="row"><div class="label">MATERIALS-LABEL-02-LONG-WRAPPABLE LABEL-END-02</div><div class="value">Second record is deliberately longer. Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda. Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda. VALUE-END-02</div></div>
+    <div class="row"><div class="label">RESTORATION-LABEL-03-LONG-WRAPPABLE LABEL-END-03</div><div class="value">Third record must continue on a later page without duplicating a previous word or losing this marker. Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda. VALUE-END-03</div></div>
+    <div class="row"><div class="label">PRESENTATION-LABEL-04-LONG-WRAPPABLE LABEL-END-04</div><div class="value">Fourth record proves placement continues after the break. Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda. Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda. VALUE-END-04</div></div>
+    <div class="row"><div class="label">VERIFY</div><div class="value">https://example.invalid/very/long/verification/path/FINAL-VERIFICATION-END</div></div>
+  </div>
+</body>
+</html>

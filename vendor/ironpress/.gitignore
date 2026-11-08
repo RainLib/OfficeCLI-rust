@@ -1,0 +1,43 @@
+/target
+/dist/
+/playground/font-packs/
+Cargo.lock
+.claude/
+.DS_Store
+docs/
+examples/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/target/
+tests/fixtures/references/**/*.png
+bindings/python/target/
+bindings/python/dist/
+bindings/ruby/target/
+bindings/ruby/pkg/
+bindings/ruby/tmp/
+bindings/ruby/lib/ironpress/ironpress_ruby.*
+/scripts/node_modules/
+# Visual parity harness scratch. Browser PDFs under tests/parity/oracles are the
+# committed source of truth; all PNGs are generated previews.
+tests/parity/diffs/
+target/parity-tmp/
+/tmp/ironpress-parity-fontcache/
+
+# IDE
+.idea/
+
+# stray parity artifacts and scratch dirs at repo root (keep them out of the tree)
+/*-ch.pdf
+/*-rast.png
+/tmpdiag/
+/.scratch/
+/pdfcmp_tmp/
+/chtmp/
+
+# generated parity render artifacts (browsable on the parity-report branch)
+/tests/parity/refs/
+/tests/parity/out/
+/tests/parity/reports/
+/tests/parity/_svgtmp/
+/tests/parity/_diag/
+/tests/parity/.chtmp/

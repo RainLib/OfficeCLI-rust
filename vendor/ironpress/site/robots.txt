@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://gastongouron.github.io/ironpress/sitemap.xml

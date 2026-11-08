@@ -1,0 +1,594 @@
+use std::collections::HashMap;
+
+/// Supported HTML tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HtmlTag {
+    Html,
+    Head,
+    Body,
+    H1,
+    H2,
+    H3,
+    H4,
+    H5,
+    H6,
+    P,
+    Div,
+    Span,
+    Strong,
+    B,
+    Em,
+    I,
+    U,
+    A,
+    Br,
+    Hr,
+    Table,
+    Thead,
+    Tbody,
+    Tfoot,
+    Tr,
+    Td,
+    Th,
+    Caption,
+    Colgroup,
+    Col,
+    Ul,
+    Ol,
+    Li,
+    Dl,
+    Dt,
+    Dd,
+    Img,
+    Blockquote,
+    Pre,
+    Code,
+    Small,
+    Sub,
+    Sup,
+    Del,
+    S,
+    Ins,
+    Mark,
+    Abbr,
+    Cite,
+    Q,
+    Section,
+    Article,
+    Nav,
+    Header,
+    Footer,
+    Main,
+    Aside,
+    Figure,
+    Figcaption,
+    Address,
+    Details,
+    Summary,
+    Svg,
+    Input,
+    Select,
+    Textarea,
+    Video,
+    Audio,
+    Progress,
+    Meter,
+    Unknown,
+}
+
+impl HtmlTag {
+    pub fn from_tag_name(tag: &str) -> Self {
+        match tag.to_ascii_lowercase().as_str() {
+            "html" => Self::Html,
+            "head" => Self::Head,
+            "body" => Self::Body,
+            "h1" => Self::H1,
+            "h2" => Self::H2,
+            "h3" => Self::H3,
+            "h4" => Self::H4,
+            "h5" => Self::H5,
+            "h6" => Self::H6,
+            "p" => Self::P,
+            "div" => Self::Div,
+            "span" => Self::Span,
+            "strong" => Self::Strong,
+            "b" => Self::B,
+            "em" => Self::Em,
+            "i" => Self::I,
+            "u" => Self::U,
+            "a" => Self::A,
+            "br" => Self::Br,
+            "hr" => Self::Hr,
+            "table" => Self::Table,
+            "thead" => Self::Thead,
+            "tbody" => Self::Tbody,
+            "tfoot" => Self::Tfoot,
+            "tr" => Self::Tr,
+            "td" => Self::Td,
+            "th" => Self::Th,
+            "caption" => Self::Caption,
+            "colgroup" => Self::Colgroup,
+            "col" => Self::Col,
+            "ul" => Self::Ul,
+            "ol" => Self::Ol,
+            "li" => Self::Li,
+            "dl" => Self::Dl,
+            "dt" => Self::Dt,
+            "dd" => Self::Dd,
+            "img" => Self::Img,
+            "blockquote" => Self::Blockquote,
+            "pre" => Self::Pre,
+            "code" => Self::Code,
+            "small" => Self::Small,
+            "sub" => Self::Sub,
+            "sup" => Self::Sup,
+            "del" | "strike" => Self::Del,
+            "s" => Self::S,
+            "ins" => Self::Ins,
+            "mark" => Self::Mark,
+            "abbr" => Self::Abbr,
+            "cite" => Self::Cite,
+            "q" => Self::Q,
+            "section" => Self::Section,
+            "article" => Self::Article,
+            "nav" => Self::Nav,
+            "header" => Self::Header,
+            "footer" => Self::Footer,
+            "main" => Self::Main,
+            "aside" => Self::Aside,
+            "figure" => Self::Figure,
+            "figcaption" => Self::Figcaption,
+            "address" => Self::Address,
+            "details" => Self::Details,
+            "summary" => Self::Summary,
+            "svg" => Self::Svg,
+            "input" => Self::Input,
+            "select" => Self::Select,
+            "textarea" => Self::Textarea,
+            "video" => Self::Video,
+            "audio" => Self::Audio,
+            "progress" => Self::Progress,
+            "meter" => Self::Meter,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn is_block(&self) -> bool {
+        matches!(
+            self,
+            Self::H1
+                | Self::H2
+                | Self::H3
+                | Self::H4
+                | Self::H5
+                | Self::H6
+                | Self::P
+                | Self::Div
+                | Self::Table
+                | Self::Thead
+                | Self::Tbody
+                | Self::Tfoot
+                | Self::Tr
+                | Self::Ul
+                | Self::Ol
+                | Self::Li
+                | Self::Dl
+                | Self::Dt
+                | Self::Dd
+                | Self::Hr
+                | Self::Body
+                | Self::Html
+                | Self::Blockquote
+                | Self::Pre
+                | Self::Caption
+                | Self::Section
+                | Self::Article
+                | Self::Nav
+                | Self::Header
+                | Self::Footer
+                | Self::Main
+                | Self::Aside
+                | Self::Figure
+                | Self::Figcaption
+                | Self::Address
+                | Self::Details
+                | Self::Summary
+                | Self::Video
+                | Self::Textarea
+        )
+    }
+
+    pub fn is_inline(&self) -> bool {
+        matches!(
+            self,
+            Self::Span
+                | Self::Strong
+                | Self::B
+                | Self::Em
+                | Self::I
+                | Self::U
+                | Self::A
+                | Self::Code
+                | Self::Small
+                | Self::Sub
+                | Self::Sup
+                | Self::Del
+                | Self::S
+                | Self::Ins
+                | Self::Mark
+                | Self::Abbr
+                | Self::Cite
+                | Self::Q
+                // `<br>` is an inline-level forced line break (HTML UA stylesheet):
+                // it must stay within the inline formatting context and NOT default
+                // to `display: block`, which would split a paragraph's inline runs
+                // into separate block boxes and insert a spurious empty line box per
+                // `<br>` (doubling the visible line spacing). The actual break is
+                // emitted as a `\n` run during inline collection (see text.rs).
+                | Self::Br
+                | Self::Img
+                | Self::Svg
+                | Self::Input
+                | Self::Select
+                | Self::Audio
+                | Self::Progress
+                | Self::Meter
+        )
+    }
+}
+
+/// A node in the internal DOM tree.
+#[derive(Debug, Clone)]
+pub enum DomNode {
+    Element(ElementNode),
+    Text(String),
+}
+
+/// An HTML element with tag, attributes, and children.
+#[derive(Debug, Clone)]
+pub struct ElementNode {
+    pub tag: HtmlTag,
+    /// The original tag name as it appeared in the HTML (lowercase).
+    /// Used by the SVG parser to identify SVG-specific elements like `rect`, `circle`, etc.
+    pub raw_tag_name: String,
+    pub attributes: HashMap<String, String>,
+    pub children: Vec<DomNode>,
+}
+
+impl ElementNode {
+    #[allow(dead_code)]
+    pub fn new(tag: HtmlTag) -> Self {
+        // Create a temporary to get the tag name string
+        let tmp = Self {
+            tag,
+            raw_tag_name: String::new(),
+            attributes: HashMap::new(),
+            children: Vec::new(),
+        };
+        let raw = tmp.tag_name().to_string();
+        Self {
+            tag,
+            raw_tag_name: raw,
+            attributes: HashMap::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn style_attr(&self) -> Option<&str> {
+        self.attributes.get("style").map(|s| s.as_str())
+    }
+
+    pub fn class_list(&self) -> Vec<&str> {
+        self.attributes
+            .get("class")
+            .map(|s| s.split_whitespace().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.attributes.get("id").map(|s| s.as_str())
+    }
+
+    pub fn tag_name(&self) -> &'static str {
+        match self.tag {
+            HtmlTag::Html => "html",
+            HtmlTag::Head => "head",
+            HtmlTag::Body => "body",
+            HtmlTag::H1 => "h1",
+            HtmlTag::H2 => "h2",
+            HtmlTag::H3 => "h3",
+            HtmlTag::H4 => "h4",
+            HtmlTag::H5 => "h5",
+            HtmlTag::H6 => "h6",
+            HtmlTag::P => "p",
+            HtmlTag::Div => "div",
+            HtmlTag::Span => "span",
+            HtmlTag::Strong => "strong",
+            HtmlTag::B => "b",
+            HtmlTag::Em => "em",
+            HtmlTag::I => "i",
+            HtmlTag::U => "u",
+            HtmlTag::A => "a",
+            HtmlTag::Br => "br",
+            HtmlTag::Hr => "hr",
+            HtmlTag::Table => "table",
+            HtmlTag::Thead => "thead",
+            HtmlTag::Tbody => "tbody",
+            HtmlTag::Tfoot => "tfoot",
+            HtmlTag::Tr => "tr",
+            HtmlTag::Td => "td",
+            HtmlTag::Th => "th",
+            HtmlTag::Caption => "caption",
+            HtmlTag::Colgroup => "colgroup",
+            HtmlTag::Col => "col",
+            HtmlTag::Ul => "ul",
+            HtmlTag::Ol => "ol",
+            HtmlTag::Li => "li",
+            HtmlTag::Dl => "dl",
+            HtmlTag::Dt => "dt",
+            HtmlTag::Dd => "dd",
+            HtmlTag::Img => "img",
+            HtmlTag::Blockquote => "blockquote",
+            HtmlTag::Pre => "pre",
+            HtmlTag::Code => "code",
+            HtmlTag::Small => "small",
+            HtmlTag::Sub => "sub",
+            HtmlTag::Sup => "sup",
+            HtmlTag::Del => "del",
+            HtmlTag::S => "s",
+            HtmlTag::Ins => "ins",
+            HtmlTag::Mark => "mark",
+            HtmlTag::Abbr => "abbr",
+            HtmlTag::Cite => "cite",
+            HtmlTag::Q => "q",
+            HtmlTag::Section => "section",
+            HtmlTag::Article => "article",
+            HtmlTag::Nav => "nav",
+            HtmlTag::Header => "header",
+            HtmlTag::Footer => "footer",
+            HtmlTag::Main => "main",
+            HtmlTag::Aside => "aside",
+            HtmlTag::Figure => "figure",
+            HtmlTag::Figcaption => "figcaption",
+            HtmlTag::Address => "address",
+            HtmlTag::Details => "details",
+            HtmlTag::Summary => "summary",
+            HtmlTag::Svg => "svg",
+            HtmlTag::Input => "input",
+            HtmlTag::Select => "select",
+            HtmlTag::Textarea => "textarea",
+            HtmlTag::Video => "video",
+            HtmlTag::Audio => "audio",
+            HtmlTag::Progress => "progress",
+            HtmlTag::Meter => "meter",
+            HtmlTag::Unknown => "unknown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_from_name() {
+        assert_eq!(HtmlTag::from_tag_name("h1"), HtmlTag::H1);
+        assert_eq!(HtmlTag::from_tag_name("H1"), HtmlTag::H1);
+        assert_eq!(HtmlTag::from_tag_name("blockquote"), HtmlTag::Blockquote);
+        assert_eq!(HtmlTag::from_tag_name("pre"), HtmlTag::Pre);
+        assert_eq!(HtmlTag::from_tag_name("code"), HtmlTag::Code);
+        assert_eq!(HtmlTag::from_tag_name("small"), HtmlTag::Small);
+        assert_eq!(HtmlTag::from_tag_name("sub"), HtmlTag::Sub);
+        assert_eq!(HtmlTag::from_tag_name("sup"), HtmlTag::Sup);
+        assert_eq!(HtmlTag::from_tag_name("del"), HtmlTag::Del);
+        assert_eq!(HtmlTag::from_tag_name("strike"), HtmlTag::Del);
+        assert_eq!(HtmlTag::from_tag_name("s"), HtmlTag::S);
+        assert_eq!(HtmlTag::from_tag_name("ins"), HtmlTag::Ins);
+        assert_eq!(HtmlTag::from_tag_name("mark"), HtmlTag::Mark);
+        assert_eq!(HtmlTag::from_tag_name("abbr"), HtmlTag::Abbr);
+        assert_eq!(HtmlTag::from_tag_name("section"), HtmlTag::Section);
+        assert_eq!(HtmlTag::from_tag_name("article"), HtmlTag::Article);
+        assert_eq!(HtmlTag::from_tag_name("nav"), HtmlTag::Nav);
+        assert_eq!(HtmlTag::from_tag_name("header"), HtmlTag::Header);
+        assert_eq!(HtmlTag::from_tag_name("footer"), HtmlTag::Footer);
+        assert_eq!(HtmlTag::from_tag_name("main"), HtmlTag::Main);
+        assert_eq!(HtmlTag::from_tag_name("aside"), HtmlTag::Aside);
+        assert_eq!(HtmlTag::from_tag_name("figure"), HtmlTag::Figure);
+        assert_eq!(HtmlTag::from_tag_name("figcaption"), HtmlTag::Figcaption);
+        assert_eq!(HtmlTag::from_tag_name("address"), HtmlTag::Address);
+        assert_eq!(HtmlTag::from_tag_name("details"), HtmlTag::Details);
+        assert_eq!(HtmlTag::from_tag_name("summary"), HtmlTag::Summary);
+        assert_eq!(HtmlTag::from_tag_name("thead"), HtmlTag::Thead);
+        assert_eq!(HtmlTag::from_tag_name("tbody"), HtmlTag::Tbody);
+        assert_eq!(HtmlTag::from_tag_name("tfoot"), HtmlTag::Tfoot);
+        assert_eq!(HtmlTag::from_tag_name("caption"), HtmlTag::Caption);
+        assert_eq!(HtmlTag::from_tag_name("colgroup"), HtmlTag::Colgroup);
+        assert_eq!(HtmlTag::from_tag_name("col"), HtmlTag::Col);
+        assert_eq!(HtmlTag::from_tag_name("dl"), HtmlTag::Dl);
+        assert_eq!(HtmlTag::from_tag_name("dt"), HtmlTag::Dt);
+        assert_eq!(HtmlTag::from_tag_name("dd"), HtmlTag::Dd);
+        assert_eq!(HtmlTag::from_tag_name("img"), HtmlTag::Img);
+        assert_eq!(HtmlTag::from_tag_name("table"), HtmlTag::Table);
+        assert_eq!(HtmlTag::from_tag_name("input"), HtmlTag::Input);
+        assert_eq!(HtmlTag::from_tag_name("select"), HtmlTag::Select);
+        assert_eq!(HtmlTag::from_tag_name("textarea"), HtmlTag::Textarea);
+        assert_eq!(HtmlTag::from_tag_name("video"), HtmlTag::Video);
+        assert_eq!(HtmlTag::from_tag_name("audio"), HtmlTag::Audio);
+        assert_eq!(HtmlTag::from_tag_name("progress"), HtmlTag::Progress);
+        assert_eq!(HtmlTag::from_tag_name("meter"), HtmlTag::Meter);
+        assert_eq!(HtmlTag::from_tag_name("nonsense"), HtmlTag::Unknown);
+    }
+
+    #[test]
+    fn block_elements() {
+        assert!(HtmlTag::P.is_block());
+        assert!(HtmlTag::Div.is_block());
+        assert!(HtmlTag::Blockquote.is_block());
+        assert!(HtmlTag::Pre.is_block());
+        assert!(HtmlTag::Section.is_block());
+        assert!(HtmlTag::Article.is_block());
+        assert!(HtmlTag::Details.is_block());
+        assert!(HtmlTag::Dl.is_block());
+        assert!(!HtmlTag::Span.is_inline() || HtmlTag::Span.is_inline());
+        assert!(!HtmlTag::Code.is_block());
+        assert!(HtmlTag::Video.is_block());
+        assert!(HtmlTag::Textarea.is_block());
+        assert!(!HtmlTag::Input.is_block());
+        assert!(!HtmlTag::Audio.is_block());
+        assert!(!HtmlTag::Progress.is_block());
+        assert!(!HtmlTag::Meter.is_block());
+    }
+
+    #[test]
+    fn inline_elements() {
+        assert!(HtmlTag::Span.is_inline());
+        assert!(HtmlTag::Strong.is_inline());
+        assert!(HtmlTag::Code.is_inline());
+        assert!(HtmlTag::Small.is_inline());
+        assert!(HtmlTag::Sub.is_inline());
+        assert!(HtmlTag::Sup.is_inline());
+        assert!(HtmlTag::Del.is_inline());
+        assert!(HtmlTag::S.is_inline());
+        assert!(HtmlTag::Ins.is_inline());
+        assert!(HtmlTag::Mark.is_inline());
+        assert!(HtmlTag::Abbr.is_inline());
+        assert!(!HtmlTag::P.is_inline());
+        assert!(HtmlTag::Input.is_inline());
+        assert!(HtmlTag::Select.is_inline());
+        assert!(HtmlTag::Audio.is_inline());
+        assert!(HtmlTag::Progress.is_inline());
+        assert!(HtmlTag::Meter.is_inline());
+        assert!(!HtmlTag::Video.is_inline());
+        assert!(!HtmlTag::Textarea.is_inline());
+    }
+
+    #[test]
+    fn element_node_new() {
+        let node = ElementNode::new(HtmlTag::P);
+        assert_eq!(node.tag, HtmlTag::P);
+        assert!(node.attributes.is_empty());
+        assert!(node.children.is_empty());
+        assert!(node.style_attr().is_none());
+    }
+
+    #[test]
+    fn element_node_with_style() {
+        let mut node = ElementNode::new(HtmlTag::Div);
+        node.attributes
+            .insert("style".to_string(), "color: red".to_string());
+        assert_eq!(node.style_attr(), Some("color: red"));
+    }
+
+    #[test]
+    fn tag_name_all_variants() {
+        // Exercises the tag_name() method on ElementNode (lines 239-297)
+        let cases: Vec<(HtmlTag, &str)> = vec![
+            (HtmlTag::Html, "html"),
+            (HtmlTag::Head, "head"),
+            (HtmlTag::Body, "body"),
+            (HtmlTag::H1, "h1"),
+            (HtmlTag::H2, "h2"),
+            (HtmlTag::H3, "h3"),
+            (HtmlTag::H4, "h4"),
+            (HtmlTag::H5, "h5"),
+            (HtmlTag::H6, "h6"),
+            (HtmlTag::P, "p"),
+            (HtmlTag::Div, "div"),
+            (HtmlTag::Span, "span"),
+            (HtmlTag::Strong, "strong"),
+            (HtmlTag::B, "b"),
+            (HtmlTag::Em, "em"),
+            (HtmlTag::I, "i"),
+            (HtmlTag::U, "u"),
+            (HtmlTag::A, "a"),
+            (HtmlTag::Br, "br"),
+            (HtmlTag::Hr, "hr"),
+            (HtmlTag::Table, "table"),
+            (HtmlTag::Thead, "thead"),
+            (HtmlTag::Tbody, "tbody"),
+            (HtmlTag::Tfoot, "tfoot"),
+            (HtmlTag::Tr, "tr"),
+            (HtmlTag::Td, "td"),
+            (HtmlTag::Th, "th"),
+            (HtmlTag::Caption, "caption"),
+            (HtmlTag::Colgroup, "colgroup"),
+            (HtmlTag::Col, "col"),
+            (HtmlTag::Ul, "ul"),
+            (HtmlTag::Ol, "ol"),
+            (HtmlTag::Li, "li"),
+            (HtmlTag::Dl, "dl"),
+            (HtmlTag::Dt, "dt"),
+            (HtmlTag::Dd, "dd"),
+            (HtmlTag::Img, "img"),
+            (HtmlTag::Blockquote, "blockquote"),
+            (HtmlTag::Pre, "pre"),
+            (HtmlTag::Code, "code"),
+            (HtmlTag::Small, "small"),
+            (HtmlTag::Sub, "sub"),
+            (HtmlTag::Sup, "sup"),
+            (HtmlTag::Del, "del"),
+            (HtmlTag::S, "s"),
+            (HtmlTag::Ins, "ins"),
+            (HtmlTag::Mark, "mark"),
+            (HtmlTag::Abbr, "abbr"),
+            (HtmlTag::Cite, "cite"),
+            (HtmlTag::Section, "section"),
+            (HtmlTag::Article, "article"),
+            (HtmlTag::Nav, "nav"),
+            (HtmlTag::Header, "header"),
+            (HtmlTag::Footer, "footer"),
+            (HtmlTag::Main, "main"),
+            (HtmlTag::Aside, "aside"),
+            (HtmlTag::Figure, "figure"),
+            (HtmlTag::Figcaption, "figcaption"),
+            (HtmlTag::Address, "address"),
+            (HtmlTag::Details, "details"),
+            (HtmlTag::Summary, "summary"),
+            (HtmlTag::Svg, "svg"),
+            (HtmlTag::Input, "input"),
+            (HtmlTag::Select, "select"),
+            (HtmlTag::Textarea, "textarea"),
+            (HtmlTag::Video, "video"),
+            (HtmlTag::Audio, "audio"),
+            (HtmlTag::Progress, "progress"),
+            (HtmlTag::Meter, "meter"),
+            (HtmlTag::Unknown, "unknown"),
+        ];
+        for (tag, expected_name) in cases {
+            let node = ElementNode::new(tag);
+            assert_eq!(
+                node.tag_name(),
+                expected_name,
+                "tag_name mismatch for {:?}",
+                tag
+            );
+        }
+    }
+
+    #[test]
+    fn element_node_class_list() {
+        let mut node = ElementNode::new(HtmlTag::Div);
+        node.attributes
+            .insert("class".to_string(), "foo bar baz".to_string());
+        assert_eq!(node.class_list(), vec!["foo", "bar", "baz"]);
+    }
+
+    #[test]
+    fn element_node_class_list_empty() {
+        let node = ElementNode::new(HtmlTag::Div);
+        assert!(node.class_list().is_empty());
+    }
+
+    #[test]
+    fn element_node_id() {
+        let mut node = ElementNode::new(HtmlTag::Div);
+        node.attributes.insert("id".to_string(), "main".to_string());
+        assert_eq!(node.id(), Some("main"));
+    }
+
+    #[test]
+    fn element_node_no_id() {
+        let node = ElementNode::new(HtmlTag::Div);
+        assert!(node.id().is_none());
+    }
+}

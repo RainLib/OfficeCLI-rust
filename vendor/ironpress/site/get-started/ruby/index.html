@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ruby Getting Started: HTML and Markdown to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Install the ironpress gem, generate binary PDF strings from Ruby, configure a chainable converter, and safely load local images, CSS, and fonts."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/ruby/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article"><meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress in Ruby">
+    <meta property="og:description" content="From gem install to a configured native PDF converter in one practical Ruby guide.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/ruby/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+    <meta property="og:image:alt" content="ironpress logo"><meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css"><link rel="stylesheet" href="../../assets/guide.css"><link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with ironpress in Ruby",
+        "description": "Install ironpress and generate PDF output from HTML or Markdown in Ruby.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/ruby/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header"><div class="shell header-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44"><span>ironpress</span></a><nav aria-label="Primary navigation"><a href="../" aria-current="page">Get started</a><a href="../../guides/html-to-pdf-rust/">Guide</a><a href="../../playground/">Playground</a><a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a></nav></div></header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> Ruby getting started</p>
+          <h1>Generate PDFs<br><em>from Ruby</em></h1>
+          <p>Install a native gem and use a small, chainable Ruby API backed by the same Rust rendering engine.</p>
+          <span class="runtime-type">Ruby 3.0+ · Linux, macOS, Windows</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents"><p>In this guide</p><ol><li><a href="#install">Install</a></li><li><a href="#first-pdf">First PDF</a></li><li><a href="#markdown">Markdown</a></li><li><a href="#configure">Configure</a></li><li><a href="#resources">Resources</a></li><li><a href="#limits">Limits and errors</a></li><li><a href="#next">Next steps</a></li></ol></aside>
+
+          <article class="prose">
+            <h2 id="install">Install the Ruby gem</h2>
+            <p>Add the package to your application:</p>
+            <pre><code>bundle add ironpress</code></pre>
+            <p>Or install it globally:</p>
+            <pre><code>gem install ironpress</code></pre>
+            <p>Releases include native gems for supported Linux, macOS, and Windows targets, plus a source gem.</p>
+
+            <h2 id="first-pdf">Create an HTML PDF</h2>
+            <p>The module function returns a binary Ruby <code>String</code> containing the complete PDF:</p>
+            <pre><code>require "ironpress"
+
+html = &lt;&lt;~HTML
+  &lt;style&gt;
+    @page { size: A4; margin: 18mm; }
+    h1 { color: #295dff; }
+  &lt;/style&gt;
+  &lt;h1&gt;Hello from Ruby&lt;/h1&gt;
+HTML
+
+pdf = Ironpress.html_to_pdf(html)
+File.binwrite("output.pdf", pdf)</code></pre>
+            <div class="guide-callout"><strong>Returned type</strong><p>Keep the string in binary form and send it as <code>application/pdf</code> or write it with <code>File.binwrite</code>.</p></div>
+
+            <h2 id="markdown">Render Markdown</h2>
+            <pre><code>pdf = Ironpress.markdown_to_pdf(
+  "# Release notes\n\nEverything shipped."
+)
+File.binwrite("release-notes.pdf", pdf)</code></pre>
+
+            <h2 id="configure">Build a reusable policy</h2>
+            <p>Each configuration call returns a new converter value, so settings compose naturally in a chain:</p>
+            <pre><code>converter = Ironpress::HtmlConverter.new
+  .page_size("Letter")
+  .margin_sides(36, 48, 36, 48)
+  .header("Quarterly report")
+  .footer("Page {page} of {pages}")
+
+pdf = converter.convert("&lt;h1&gt;Results&lt;/h1&gt;")
+markdown_pdf = converter.convert_markdown("# Results")</code></pre>
+            <p>Use <code>convert_to_file</code> or <code>convert_markdown_to_file</code> for direct file output.</p>
+
+            <h2 id="resources">Load local resources and fonts</h2>
+            <p>Grant a resource boundary, then pass custom font data as a binary string:</p>
+            <pre><code>converter = Ironpress::HtmlConverter.new
+  .base_path("templates")
+  .resource_root(".")
+  .add_font("Inter", File.binread("assets/Inter.ttf"))
+
+pdf = converter.convert(&lt;&lt;~HTML)
+  &lt;style&gt;body { font-family: Inter }&lt;/style&gt;
+  &lt;img src="assets/logo.png"&gt;
+HTML</code></pre>
+            <p>Optional CJK and emoji font packs also enter as caller-provided bytes. The renderer never downloads them.</p>
+
+            <h2 id="limits">Handle failures and runtime limits</h2>
+            <p>Invalid named settings raise <code>ArgumentError</code>. Conversion failures raise <code>RuntimeError</code>, while file operations keep Ruby's normal I/O errors.</p>
+            <ul class="guide-checklist">
+              <li>HTML sanitization is enabled by default.</li>
+              <li>The Ruby binding has no async or streaming conversion API.</li>
+              <li>Remote HTTP document resources are not available from the gem.</li>
+              <li>Use a browser renderer for JavaScript-driven pages or exact Chrome output.</li>
+            </ul>
+
+            <h2 id="next">Go further</h2>
+            <div class="guide-links">
+              <a href="https://rubygems.org/gems/ironpress">Package on RubyGems</a><a href="https://github.com/gastongouron/ironpress/tree/main/bindings/ruby">Ruby binding reference</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/README.md">Capability matrix</a><a href="../../guides/html-to-pdf-rust/">Rendering architecture guide</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer"><div class="shell footer-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36"><span>ironpress</span></a><p>Pure-Rust document rendering. Open source under MIT.</p><nav aria-label="Footer navigation"><a href="../">All runtimes</a><a href="https://rubygems.org/gems/ironpress">RubyGems</a><a href="../../parity/reports/">Parity</a></nav></div></footer>
+  </body>
+</html>

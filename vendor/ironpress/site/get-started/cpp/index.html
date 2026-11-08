@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>C++ Getting Started: HTML and Markdown to PDF | ironpress</title>
+    <meta
+      name="description"
+      content="Use the ironpress C++17 RAII wrapper to render HTML or Markdown to owned PDF bytes with move-only converters and typed native errors."
+    >
+    <link rel="canonical" href="https://gastongouron.github.io/ironpress/get-started/cpp/">
+    <link rel="icon" type="image/png" href="../../assets/ironpress-logo.png">
+    <meta name="theme-color" content="#f3efe4">
+    <meta property="og:type" content="article"><meta property="og:site_name" content="ironpress">
+    <meta property="og:title" content="Get Started with ironpress in C++">
+    <meta property="og:description" content="Use move-only C++17 owners over the stable native ABI to render PDF bytes in process.">
+    <meta property="og:url" content="https://gastongouron.github.io/ironpress/get-started/cpp/">
+    <meta property="og:image" content="https://gastongouron.github.io/ironpress/assets/ironpress-logo.png">
+    <meta property="og:image:alt" content="ironpress logo"><meta name="twitter:card" content="summary">
+    <link rel="stylesheet" href="../../assets/styles.css"><link rel="stylesheet" href="../../assets/guide.css"><link rel="stylesheet" href="../../assets/get-started.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Get Started with ironpress in C++",
+        "description": "Download the native library and generate PDF bytes from HTML or Markdown with C++17 RAII owners.",
+        "author": { "@type": "Person", "name": "Gaston Gouron", "url": "https://github.com/gastongouron" },
+        "publisher": { "@type": "Organization", "name": "ironpress", "url": "https://gastongouron.github.io/ironpress/" },
+        "mainEntityOfPage": "https://gastongouron.github.io/ironpress/get-started/cpp/",
+        "inLanguage": "en"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#article">Skip to article</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="44" height="44"><span>ironpress</span></a>
+        <nav aria-label="Primary navigation"><a href="../" aria-current="page">Get started</a><a href="../../guides/html-to-pdf-rust/">Guide</a><a href="../../playground/">Playground</a><a class="nav-github" href="https://github.com/gastongouron/ironpress">GitHub <span aria-hidden="true">↗</span></a></nav>
+      </div>
+    </header>
+
+    <main class="guide-main" id="article">
+      <div class="shell">
+        <header class="guide-hero">
+          <p class="eyebrow"><span></span> C++ getting started</p>
+          <h1>Generate PDF bytes<br><em>from C++</em></h1>
+          <p>Use move-only owners for native state and let deterministic destruction release every allocation.</p>
+          <span class="runtime-type">C++17 · ABI generation 1 · GCC, Clang, MSVC</span>
+        </header>
+
+        <div class="guide-layout">
+          <aside class="guide-toc" aria-label="Article contents"><p>In this guide</p><ol><li><a href="#install">Install</a></li><li><a href="#first-pdf">First PDF</a></li><li><a href="#markdown">Markdown</a></li><li><a href="#configure">Configure</a></li><li><a href="#resources">Resources</a></li><li><a href="#limits">Limits and errors</a></li><li><a href="#next">Next steps</a></li></ol></aside>
+
+          <article class="prose">
+            <h2 id="install">Download the native library</h2>
+            <p>Choose the archive for your platform from the matching GitHub release. It contains the C++ wrapper, the underlying C header, shared and static libraries, relocatable CMake metadata, the ABI contract, and checksums.</p>
+            <pre><code>find_package(Ironpress CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE Ironpress::CXX)</code></pre>
+            <p>Point <code>CMAKE_PREFIX_PATH</code> at the extracted archive. Use <code>Ironpress::CXXStatic</code> for static linkage. Both targets require C++17 and preserve the linked ABI check.</p>
+
+            <h2 id="first-pdf">Create an HTML PDF</h2>
+            <pre><code>#include "ironpress.hpp"
+
+#include &lt;fstream&gt;
+
+int main() {
+    ironpress::Converter converter;
+    auto pdf = converter.convert_html("&lt;h1&gt;Hello from C++&lt;/h1&gt;");
+
+    std::ofstream output("output.pdf", std::ios::binary);
+    output.write(reinterpret_cast&lt;const char*&gt;(pdf.data()),
+                 static_cast&lt;std::streamsize&gt;(pdf.size()));
+}</code></pre>
+            <div class="guide-callout"><strong>Ownership rule</strong><p><code>Converter</code> and <code>Pdf</code> are move-only. Their destructors release the one native owner and never throw.</p></div>
+
+            <h2 id="markdown">Render Markdown</h2>
+            <p>Markdown returns the same uniquely owned PDF type:</p>
+            <pre><code>auto pdf = converter.convert_markdown(
+    "# Release notes\n\nEverything shipped."
+);</code></pre>
+
+            <h2 id="configure">Reuse a configured converter</h2>
+            <p>Configuration methods return the converter, so related settings stay readable and reusable.</p>
+            <pre><code>converter
+    .set_page_size(ironpress::PageSize::letter)
+    .set_margins(ironpress::PageMargins::uniform(36.0F))
+    .set_compression(true)
+    .set_footer("Page {page} / {pages}");
+
+auto first = converter.convert_html(first_html);
+auto second = converter.convert_html(second_html);</code></pre>
+
+            <h2 id="resources">Provide fonts as bytes</h2>
+            <p>The C++ wrapper does not read document paths or access the network. Read a TrueType font or optional CJK or emoji pack in your application, then lend its bytes for one call.</p>
+            <pre><code>std::vector&lt;std::uint8_t&gt; font = read_font();
+converter.add_font("Inter", ironpress::BytesView(font));</code></pre>
+
+            <h2 id="limits">Handle failures and runtime limits</h2>
+            <p>Fallible methods throw <code>ironpress::Error</code> after the C call returns. Its status is stable and its message is copied before the native error owner is released.</p>
+            <pre><code>try {
+    auto pdf = converter.convert_html(source);
+} catch (const ironpress::Error&amp; error) {
+    log(error.status(), error.what());
+}</code></pre>
+            <ul class="guide-checklist">
+              <li>No exception or Rust panic crosses the native boundary.</li>
+              <li>A converter may move between threads while idle, but concurrent use is unsupported.</li>
+              <li>Local paths, direct file output, async, streaming, and remote HTTP are absent.</li>
+              <li>A moved-from owner may be destroyed or assigned a new owner.</li>
+            </ul>
+
+            <h2 id="next">Go further</h2>
+            <div class="guide-links">
+              <a href="https://github.com/gastongouron/ironpress/releases">Download a release</a><a href="https://github.com/gastongouron/ironpress/tree/main/bindings/cpp">C++ binding reference</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/c/ABI.md">ABI contract</a><a href="https://github.com/gastongouron/ironpress/blob/main/bindings/README.md">Capability matrix</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer"><div class="shell footer-inner"><a class="brand" href="../../" aria-label="ironpress home"><img src="../../assets/ironpress-logo.png" alt="ironpress" width="36" height="36"><span>ironpress</span></a><p>Pure-Rust document rendering. Open source under MIT.</p><nav aria-label="Footer navigation"><a href="../">All runtimes</a><a href="https://github.com/gastongouron/ironpress/releases">Releases</a><a href="../../parity/reports/">Parity</a></nav></div></footer>
+  </body>
+</html>

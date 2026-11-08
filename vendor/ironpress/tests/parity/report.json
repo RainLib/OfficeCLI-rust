@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "officecli-emergency-wrap/1",
+  "status": "scoped-regression-passed",
+  "mainNativeTests": 435,
+  "frontendTests": 388,
+  "patchModuleTests": 3,
+  "realPdfGeometryTests": 2,
+  "fullUpstreamChromiumParity": "not-run-full-corpus-not-distributed",
+  "oracleRegenerated": false,
+  "sourceFixturesRetrieved": 19,
+  "localNativeLifecyclePassed": true,
+  "actualBrowserDownloadReadbackPassed": true,
+  "renderedPagesInspected": 10,
+  "scope": "source-word emergency wrapping regression only; no full upstream layout conformance claim",
+  "listBlockChildren": {
+    "status": "scoped-regression-passed",
+    "test": "officecli::commands::html_convert::tests::css_pdf_list_continuations_keep_their_parent_content_edge",
+    "before": {
+      "firstWrapX": 75.99999,
+      "continuationX": 39.999996
+    },
+    "after": "paragraphs share parent content edge, nested levels retained, wrapped content fits, fixed child not shifted",
+    "actualFileGeometry": "repository:docs/assets/hcd-lists-2026-10-24/list-paragraphs-evidence.json",
+    "nativeTestsThisBatch": 294,
+    "rendererClippy": "passed",
+    "fullUpstreamChromiumParity": "not-run-full-corpus-not-distributed"
+  }
+}

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>multicol x paged-media interaction</title>
+<style>
+  @page { size: 192px 200px; margin: 0; }
+
+  @font-face {
+    font-family: MatrixSans;
+    src: url('../../fonts/ParitySans.ttf') format('truetype');
+    font-style: normal;
+    font-weight: 400;
+  }
+  html { font-family: ParitySans; font-size: 16px; line-height: 1.2; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: #ffffff; }
+  body { padding: 16px; color: #17324d; font-size: 0; white-space: nowrap; }
+  .stage {
+    display: inline-flex;
+    width: 156px;
+    min-height: 164px;
+    margin-right: 8px;
+    align-items: center;
+    justify-content: center;
+    background: #f7fafc;
+    border: 1px solid #cbd5e1;
+    font-size: 16px;
+    vertical-align: top;
+  }
+  .stage:last-child { margin-right: 0; }
+  .node {
+    width: 126px;
+    padding: 7px;
+    border: 2px solid #577590;
+    background-color: #e7f5ff;
+    color: #17324d;
+  }
+  .node.inner {
+    width: 58px;
+    height: 48px;
+    padding: 5px;
+  }
+  .node.outer { min-height: 96px; }
+  .own { height: 22px; white-space: nowrap; }
+  .asset { display: none; width: 34px; height: 24px; object-fit: cover; object-position: 70% 50%; }
+  .f-generated-content::before { content: '‹'; color: #d62828; font-weight: 700; }
+  .f-generated-content::after { content: '›'; color: #2a9d8f; font-weight: 700; }
+  .f-images-replaced > .own > .asset { display: inline-block; }
+  .f-inline-text > .own > .token:first-of-type { font-size: .72em; vertical-align: super; }
+  .f-lists-counters > .own > .token { counter-increment: pair-item; }
+  .f-lists-counters > .own > .token::before { content: counter(pair-item) '.'; color: #d62828; }
+  .f-positioning > .own > .token:last-of-type { position: absolute; right: 4px; bottom: 4px; }
+  .f-selectors-cascade:is(.node) > .own > .token:nth-of-type(2) { color: #c1121f; }
+  @supports (display:grid) {
+    .f-selectors-cascade { border-left-color: #06d6a0; border-right-color: #06d6a0; }
+  }
+  .f-tables > .own > .token { display: table-cell; vertical-align: middle; }
+
+  body { display: block; padding: 0; font-size: 16px; white-space: normal; }
+  .stage { display: block; margin: 0; break-before: page; }
+  .stage > .node { min-height: 68px; margin: 47px auto 0; }
+  .stage > .node.outer { margin-top: 33px; }
+  .f-multicol {column-count:2;column-gap:7px;column-rule:2px solid #577590;}
+  .f-paged-media {break-before:page;break-inside:avoid;}
+</style>
+</head>
+<body>
+  <div class="stage"><div class="node  f-multicol f-paged-media"><div class="own"><span class="token">Ag</span><span class="token">Bb</span><img class="asset" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAIElEQVR42mM4IScHR3I9NnDEgFNCzu0EHN1ZJQJHOCUAni4lgeO2HLIAAAAASUVORK5CYII="></div></div></div>
+  <div class="stage"><div class="node outer f-multicol"><div class="own"><span class="token">Ag</span><span class="token">Bb</span><img class="asset" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAIElEQVR42mM4IScHR3I9NnDEgFNCzu0EHN1ZJQJHOCUAni4lgeO2HLIAAAAASUVORK5CYII="></div><div class="node inner f-paged-media"><div class="own"><span class="token">A</span><span class="token">B</span><img class="asset" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAIElEQVR42mM4IScHR3I9NnDEgFNCzu0EHN1ZJQJHOCUAni4lgeO2HLIAAAAASUVORK5CYII="></div></div></div></div>
+  <div class="stage"><div class="node outer f-paged-media"><div class="own"><span class="token">Ag</span><span class="token">Bb</span><img class="asset" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAIElEQVR42mM4IScHR3I9NnDEgFNCzu0EHN1ZJQJHOCUAni4lgeO2HLIAAAAASUVORK5CYII="></div><div class="node inner f-multicol"><div class="own"><span class="token">A</span><span class="token">B</span><img class="asset" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAIElEQVR42mM4IScHR3I9NnDEgFNCzu0EHN1ZJQJHOCUAni4lgeO2HLIAAAAASUVORK5CYII="></div></div></div></div>
+</body>
+</html>

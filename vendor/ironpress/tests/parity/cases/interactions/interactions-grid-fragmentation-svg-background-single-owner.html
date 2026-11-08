@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>interactions-grid-fragmentation-svg-background-single-owner</title>
+<style>
+  @page { size: 624px 360px; margin: 24px; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: #fff; color: #111; font: 16px/1.25 ParitySans; }
+  .certificate {
+    min-height: 680px;
+    padding-top: 8px;
+    background-color: #e9f5db;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%236a4c93'/%3E%3Ccircle cx='50' cy='50' r='34' fill='%23ffca3a'/%3E%3Cpath d='M18 50h64M50 18v64' stroke='%23d7263d' stroke-width='12'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right top;
+    background-size: 180px 180px;
+  }
+  h1 { width: 360px; padding: 10px; color: #fff; background: #111; font-size: 24px; }
+  .grid { display: grid; grid-template-columns: fit-content(30%) minmax(0, 1fr); gap: 10px 16px; width: 72%; margin-top: 14px; }
+  .row { display: contents; }
+  .label, .value { min-height: 82px; padding: 8px; border: 4px solid #111; overflow-wrap: anywhere; }
+  .label { color: #fff; background: #006d77; }
+  .value { background: #ffddd2; }
+</style>
+</head>
+<body>
+  <div class="certificate">
+    <h1>SVG EMBLEM APPEARS ONCE ONLY</h1>
+    <div class="grid">
+      <div class="row"><div class="label">LABEL ONE</div><div class="value">FIRST VALUE END</div></div>
+      <div class="row"><div class="label">LABEL TWO WRAPS</div><div class="value">SECOND VALUE END</div></div>
+      <div class="row"><div class="label">LABEL THREE WRAPS</div><div class="value">THIRD VALUE END</div></div>
+      <div class="row"><div class="label">LABEL FOUR WRAPS</div><div class="value">FOURTH VALUE END</div></div>
+      <div class="row"><div class="label">LABEL FIVE WRAPS</div><div class="value">FIFTH VALUE END</div></div>
+      <div class="row"><div class="label">LABEL SIX WRAPS</div><div class="value">FINAL-SVG-MARKER</div></div>
+    </div>
+  </div>
+</body>
+</html>

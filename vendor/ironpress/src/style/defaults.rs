@@ -1,0 +1,451 @@
+use crate::parser::css::{CssValue, SpecifiedColor, StyleMap};
+use crate::parser::dom::HtmlTag;
+use crate::types::Color;
+
+/// Returns the default (user-agent) styles for a given HTML tag.
+pub fn default_style(tag: HtmlTag) -> StyleMap {
+    let mut style = StyleMap::new();
+
+    match tag {
+        // Chrome UA stylesheet uses em-relative values for both font-size and
+        // margins. CssValue::Em represents an em multiplier, resolved in
+        // apply_style_map by multiplying with the current/inherited font-size.
+        // This makes headings scale with body font-size (e.g. body { font-size:
+        // 14px } yields H1 at 2em = 28px, not a fixed 32px).
+        HtmlTag::H1 => {
+            style.set("font-size", CssValue::Em(2.0));
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            style.set("margin-top", CssValue::Em(0.67));
+            style.set("margin-bottom", CssValue::Em(0.67));
+        }
+        HtmlTag::H2 => {
+            style.set("font-size", CssValue::Em(1.5));
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            style.set("margin-top", CssValue::Em(0.83));
+            style.set("margin-bottom", CssValue::Em(0.83));
+        }
+        HtmlTag::H3 => {
+            style.set("font-size", CssValue::Em(1.17));
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            style.set("margin-top", CssValue::Em(1.0));
+            style.set("margin-bottom", CssValue::Em(1.0));
+        }
+        HtmlTag::H4 => {
+            // Chrome UA does not set font-size on H4 (inherits parent, 1em).
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            style.set("margin-top", CssValue::Em(1.33));
+            style.set("margin-bottom", CssValue::Em(1.33));
+        }
+        HtmlTag::H5 => {
+            style.set("font-size", CssValue::Em(0.83));
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            style.set("margin-top", CssValue::Em(1.67));
+            style.set("margin-bottom", CssValue::Em(1.67));
+        }
+        HtmlTag::H6 => {
+            style.set("font-size", CssValue::Em(0.67));
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            style.set("margin-top", CssValue::Em(2.33));
+            style.set("margin-bottom", CssValue::Em(2.33));
+        }
+        HtmlTag::P => {
+            style.set("margin-top", CssValue::Em(1.0));
+            style.set("margin-bottom", CssValue::Em(1.0));
+        }
+        HtmlTag::Strong | HtmlTag::B => {
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+        }
+        HtmlTag::Em | HtmlTag::I => {
+            style.set("font-style", CssValue::Keyword("italic".into()));
+        }
+        HtmlTag::U | HtmlTag::Ins => {
+            style.set("text-decoration", CssValue::Keyword("underline".into()));
+        }
+        HtmlTag::Del | HtmlTag::S => {
+            style.set("text-decoration", CssValue::Keyword("line-through".into()));
+        }
+        HtmlTag::A => {
+            style.set(
+                "color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(0, 0, 238))),
+            );
+            style.set("text-decoration", CssValue::Keyword("underline".into()));
+        }
+        HtmlTag::Hr => {
+            style.set("margin-top", CssValue::Length(6.0));
+            style.set("margin-bottom", CssValue::Length(6.0));
+        }
+        HtmlTag::Li => {
+            style.set("margin-bottom", CssValue::Length(2.0));
+        }
+        HtmlTag::Ul | HtmlTag::Ol => {
+            // Chrome UA: margin 1em top/bottom, padding-left 40px (≈30pt).
+            // Use padding-left (not margin-left) so user CSS `padding-left:0`
+            // correctly resets list indentation.
+            style.set("margin-top", CssValue::Em(1.0));
+            style.set("margin-bottom", CssValue::Em(1.0));
+            style.set("padding-left", CssValue::Length(30.0));
+            // Chrome UA stylesheet: `ul { list-style-type: disc }`, `ol {
+            // list-style-type: decimal }`. `list-style-type` is inherited, so the
+            // marker is resolved from the <li>'s computed value; without these
+            // explicit defaults an <ol> would fall back to the global initial
+            // (`disc`) and render bullets instead of `1.`/`2.`. Setting both also
+            // ensures a <ul> nested inside an <ol> resets to `disc` rather than
+            // inheriting the enclosing `decimal`.
+            style.set(
+                "list-style-type",
+                CssValue::Keyword(
+                    if matches!(tag, HtmlTag::Ol) {
+                        "decimal"
+                    } else {
+                        "disc"
+                    }
+                    .into(),
+                ),
+            );
+        }
+        HtmlTag::Table => {
+            style.set("box-sizing", CssValue::Keyword("border-box".into()));
+            style.set("border-spacing", CssValue::Length(1.5));
+            style.set("text-indent", CssValue::Keyword("initial".into()));
+        }
+        HtmlTag::Dl => {
+            style.set("margin-top", CssValue::Length(4.0));
+            style.set("margin-bottom", CssValue::Length(8.0));
+        }
+        HtmlTag::Dt => {
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            style.set("margin-top", CssValue::Length(4.0));
+        }
+        HtmlTag::Dd => {
+            style.set("margin-left", CssValue::Length(30.0));
+            style.set("margin-bottom", CssValue::Length(4.0));
+        }
+        HtmlTag::Td => {
+            style.set("padding-top", CssValue::Length(0.75));
+            style.set("padding-right", CssValue::Length(0.75));
+            style.set("padding-bottom", CssValue::Length(0.75));
+            style.set("padding-left", CssValue::Length(0.75));
+            // Chrome UA stylesheet: row groups/rows set `vertical-align: middle`
+            // and `td,th { vertical-align: inherit }`, so a cell with no author
+            // `vertical-align` resolves to `middle` (NOT the `baseline` initial
+            // value). A single line of content in an over-tall cell is therefore
+            // vertically centered, matching Chrome. An explicit author
+            // `vertical-align` (e.g. `baseline`/`top`) still wins (UA precedence).
+            style.set("vertical-align", CssValue::Keyword("middle".into()));
+        }
+        HtmlTag::Th => {
+            style.set("padding-top", CssValue::Length(0.75));
+            style.set("padding-right", CssValue::Length(0.75));
+            style.set("padding-bottom", CssValue::Length(0.75));
+            style.set("padding-left", CssValue::Length(0.75));
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+            // Chrome UA stylesheet: th { text-align: center }. text-align is an
+            // inherited property and is not reset in compute_style_with_context,
+            // so without this default a th would inherit the row/body alignment
+            // (typically left) rather than centering its content like Chrome.
+            style.set("text-align", CssValue::Keyword("center".into()));
+            // Same `vertical-align: middle` UA default as <td> (see above).
+            style.set("vertical-align", CssValue::Keyword("middle".into()));
+        }
+        HtmlTag::Blockquote => {
+            style.set("margin-top", CssValue::Length(8.0));
+            style.set("margin-bottom", CssValue::Length(8.0));
+            style.set("margin-left", CssValue::Length(30.0));
+            style.set("font-style", CssValue::Keyword("italic".into()));
+        }
+        HtmlTag::Pre => {
+            style.set("font-family", CssValue::Keyword("monospace".into()));
+            style.set("font-size", CssValue::Length(10.0));
+            style.set("margin-top", CssValue::Length(8.0));
+            style.set("margin-bottom", CssValue::Length(8.0));
+            style.set("padding-top", CssValue::Length(8.0));
+            style.set("padding-bottom", CssValue::Length(8.0));
+            style.set("padding-left", CssValue::Length(8.0));
+            style.set("padding-right", CssValue::Length(8.0));
+            style.set(
+                "background-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(245, 245, 245))),
+            );
+            style.set("white-space", CssValue::Keyword("pre".into()));
+        }
+        HtmlTag::Code => {
+            style.set("font-family", CssValue::Keyword("monospace".into()));
+            style.set("font-size", CssValue::Length(10.0));
+            style.set(
+                "background-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(245, 245, 245))),
+            );
+        }
+        HtmlTag::Small => {
+            style.set("font-size", CssValue::Length(10.0));
+        }
+        // Chrome UA stylesheet: `sub`/`sup` shift the baseline and shrink the
+        // font. `font-size: smaller` resolves to ~0.83em within the medium
+        // range; expressed here as an `Em` multiplier (resolved against
+        // the inherited size, like the heading defaults above).
+        HtmlTag::Sub => {
+            style.set("vertical-align", CssValue::Keyword("sub".into()));
+            style.set("font-size", CssValue::Em(0.83));
+        }
+        HtmlTag::Sup => {
+            style.set("vertical-align", CssValue::Keyword("super".into()));
+            style.set("font-size", CssValue::Em(0.83));
+        }
+        HtmlTag::Mark => {
+            style.set(
+                "background-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(255, 255, 0))),
+            );
+        }
+        HtmlTag::Address => {
+            style.set("font-style", CssValue::Keyword("italic".into()));
+            style.set("margin-top", CssValue::Length(4.0));
+            style.set("margin-bottom", CssValue::Length(4.0));
+        }
+        HtmlTag::Figure => {
+            style.set("margin-top", CssValue::Length(8.0));
+            style.set("margin-bottom", CssValue::Length(8.0));
+            style.set("margin-left", CssValue::Length(30.0));
+        }
+        HtmlTag::Figcaption => {
+            style.set("font-size", CssValue::Length(10.0));
+            style.set("font-style", CssValue::Keyword("italic".into()));
+        }
+        HtmlTag::Caption => {
+            // Chrome UA stylesheet: caption { display: table-caption;
+            // text-align: center }. It does NOT bold the caption, so do not set
+            // font-weight here (that previously made captions render heavier
+            // than Chrome).
+            style.set("text-align", CssValue::Keyword("center".into()));
+        }
+        HtmlTag::Summary => {
+            style.set("font-weight", CssValue::Keyword("bold".into()));
+        }
+        HtmlTag::Input => {
+            style.set("padding-top", CssValue::Length(2.0));
+            style.set("padding-right", CssValue::Length(4.0));
+            style.set("padding-bottom", CssValue::Length(2.0));
+            style.set("padding-left", CssValue::Length(4.0));
+            style.set("border-width", CssValue::Length(1.0));
+            style.set(
+                "border-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(169, 169, 169))),
+            );
+        }
+        HtmlTag::Select => {
+            style.set("padding-top", CssValue::Length(2.0));
+            style.set("padding-right", CssValue::Length(4.0));
+            style.set("padding-bottom", CssValue::Length(2.0));
+            style.set("padding-left", CssValue::Length(4.0));
+            style.set("border-width", CssValue::Length(1.0));
+            style.set(
+                "border-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(169, 169, 169))),
+            );
+        }
+        HtmlTag::Textarea => {
+            style.set("padding-top", CssValue::Length(4.0));
+            style.set("padding-right", CssValue::Length(4.0));
+            style.set("padding-bottom", CssValue::Length(4.0));
+            style.set("padding-left", CssValue::Length(4.0));
+            style.set("border-width", CssValue::Length(1.0));
+            style.set(
+                "border-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(169, 169, 169))),
+            );
+            style.set("font-size", CssValue::Length(10.0));
+        }
+        HtmlTag::Video => {
+            style.set("margin-top", CssValue::Length(4.0));
+            style.set("margin-bottom", CssValue::Length(4.0));
+            style.set(
+                "background-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(0, 0, 0))),
+            );
+        }
+        HtmlTag::Audio => {
+            style.set("margin-top", CssValue::Length(2.0));
+            style.set("margin-bottom", CssValue::Length(2.0));
+            style.set(
+                "background-color",
+                CssValue::Color(SpecifiedColor::Absolute(Color::rgb(240, 240, 240))),
+            );
+        }
+        HtmlTag::Progress => {
+            style.set("margin-top", CssValue::Length(2.0));
+            style.set("margin-bottom", CssValue::Length(2.0));
+        }
+        HtmlTag::Meter => {
+            style.set("margin-top", CssValue::Length(2.0));
+            style.set("margin-bottom", CssValue::Length(2.0));
+        }
+        _ => {}
+    }
+
+    style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h1_defaults() {
+        let s = default_style(HtmlTag::H1);
+        assert!(s.get("font-size").is_some());
+        assert!(s.get("font-weight").is_some());
+    }
+
+    #[test]
+    fn all_heading_defaults() {
+        for tag in [
+            HtmlTag::H1,
+            HtmlTag::H2,
+            HtmlTag::H3,
+            HtmlTag::H4,
+            HtmlTag::H5,
+            HtmlTag::H6,
+        ] {
+            let s = default_style(tag);
+            assert!(
+                s.get("font-weight").is_some(),
+                "Missing font-weight for {:?}",
+                tag
+            );
+        }
+    }
+
+    #[test]
+    fn inline_defaults() {
+        assert!(default_style(HtmlTag::Strong).get("font-weight").is_some());
+        assert!(default_style(HtmlTag::Em).get("font-style").is_some());
+        assert!(default_style(HtmlTag::U).get("text-decoration").is_some());
+        assert!(default_style(HtmlTag::A).get("color").is_some());
+        assert!(default_style(HtmlTag::Del).get("text-decoration").is_some());
+        assert!(default_style(HtmlTag::S).get("text-decoration").is_some());
+        assert!(default_style(HtmlTag::Ins).get("text-decoration").is_some());
+        assert!(
+            default_style(HtmlTag::Mark)
+                .get("background-color")
+                .is_some()
+        );
+        assert!(default_style(HtmlTag::Small).get("font-size").is_some());
+        assert!(default_style(HtmlTag::Code).get("font-size").is_some());
+    }
+
+    #[test]
+    fn ua_colors_are_explicit_absolute_specified_values() {
+        assert!(matches!(
+            default_style(HtmlTag::A).get("color"),
+            Some(CssValue::Color(SpecifiedColor::Absolute(color)))
+                if *color == Color::rgb(0, 0, 238)
+        ));
+        assert!(matches!(
+            default_style(HtmlTag::Mark).get("background-color"),
+            Some(CssValue::Color(SpecifiedColor::Absolute(color)))
+                if *color == Color::rgb(255, 255, 0)
+        ));
+    }
+
+    #[test]
+    fn list_defaults() {
+        assert!(default_style(HtmlTag::Ul).get("padding-left").is_some());
+        assert!(default_style(HtmlTag::Ol).get("padding-left").is_some());
+        assert!(default_style(HtmlTag::Li).get("margin-bottom").is_some());
+        assert!(default_style(HtmlTag::Dl).get("margin-top").is_some());
+        assert!(default_style(HtmlTag::Dt).get("font-weight").is_some());
+        assert!(default_style(HtmlTag::Dd).get("margin-left").is_some());
+    }
+
+    #[test]
+    fn table_defaults() {
+        assert!(default_style(HtmlTag::Td).get("padding-top").is_some());
+        assert!(default_style(HtmlTag::Th).get("font-weight").is_some());
+        // th defaults center its content like Chrome's UA stylesheet.
+        assert!(matches!(
+            default_style(HtmlTag::Th).get("text-align"),
+            Some(CssValue::Keyword(k)) if k == "center"
+        ));
+        // caption is centered but NOT bold (matching Chrome's UA stylesheet).
+        assert!(matches!(
+            default_style(HtmlTag::Caption).get("text-align"),
+            Some(CssValue::Keyword(k)) if k == "center"
+        ));
+        assert!(default_style(HtmlTag::Caption).get("font-weight").is_none());
+    }
+
+    #[test]
+    fn block_element_defaults() {
+        assert!(
+            default_style(HtmlTag::Blockquote)
+                .get("margin-left")
+                .is_some()
+        );
+        assert!(
+            default_style(HtmlTag::Pre)
+                .get("background-color")
+                .is_some()
+        );
+        assert!(default_style(HtmlTag::Address).get("font-style").is_some());
+        assert!(default_style(HtmlTag::Figure).get("margin-left").is_some());
+        assert!(
+            default_style(HtmlTag::Figcaption)
+                .get("font-style")
+                .is_some()
+        );
+        assert!(default_style(HtmlTag::Summary).get("font-weight").is_some());
+    }
+
+    #[test]
+    fn form_element_defaults() {
+        let input = default_style(HtmlTag::Input);
+        assert!(input.get("padding-top").is_some());
+        assert!(input.get("border-width").is_some());
+        assert!(input.get("border-color").is_some());
+
+        let select = default_style(HtmlTag::Select);
+        assert!(select.get("padding-top").is_some());
+        assert!(select.get("border-width").is_some());
+
+        let textarea = default_style(HtmlTag::Textarea);
+        assert!(textarea.get("padding-top").is_some());
+        assert!(textarea.get("font-size").is_some());
+        assert!(textarea.get("border-width").is_some());
+    }
+
+    #[test]
+    fn media_element_defaults() {
+        let video = default_style(HtmlTag::Video);
+        assert!(video.get("background-color").is_some());
+        assert!(video.get("margin-top").is_some());
+
+        let audio = default_style(HtmlTag::Audio);
+        assert!(audio.get("background-color").is_some());
+        assert!(audio.get("margin-top").is_some());
+    }
+
+    #[test]
+    fn progress_meter_defaults() {
+        let progress = default_style(HtmlTag::Progress);
+        assert!(progress.get("margin-top").is_some());
+
+        let meter = default_style(HtmlTag::Meter);
+        assert!(meter.get("margin-top").is_some());
+    }
+
+    #[test]
+    fn unknown_tag_has_no_defaults() {
+        let s = default_style(HtmlTag::Unknown);
+        assert!(s.properties.is_empty());
+    }
+
+    #[test]
+    fn p_has_no_default_font_size() {
+        let s = default_style(HtmlTag::P);
+        assert!(
+            s.get("font-size").is_none(),
+            "P tag should not have a default font-size (it inherits from parent)"
+        );
+    }
+}
