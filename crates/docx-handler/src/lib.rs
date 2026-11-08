@@ -15,4 +15,4 @@ pub mod view;
 
 pub use handler::{AddBatchItem, SetRangeBatchItem, WordHandler};
 
-pub use rich_text::{RichBlock, RichBorder, RichFont, RichParagraph, RichRun};
+pub use rich_text::{RichBlock, RichBorder, RichFieldControl, RichFont, RichParagraph, RichRun};

@@ -156,6 +156,26 @@
         },
         "exactPagination": {
           "const": false
+        },
+        "inlineReferences": {
+          "const": 1
+        },
+        "extensionNodes": {
+          "type": "integer",
+          "enum": [
+            1,
+            2,
+            3
+          ]
+        },
+        "customMarks": {
+          "const": 1
+        },
+        "flowLayout": {
+          "enum": [1, 2]
+        },
+        "wordLayoutEdits": {
+          "enum": [1, 2, 3]
         }
       }
     },

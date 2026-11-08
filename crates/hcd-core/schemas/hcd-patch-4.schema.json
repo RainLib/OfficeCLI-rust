@@ -23,7 +23,10 @@
     "patchId": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 256
+      "maxLength": 256,
+      "not": {
+        "pattern": "^restore-"
+      }
     },
     "baseRevision": {
       "type": "integer",
@@ -218,6 +221,35 @@
         "fontSizeExplicit": {
           "type": "boolean",
           "default": false
+        },
+        "reference": {
+          "$ref": "#/$defs/inlineReference"
+        },
+        "extension": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/extensionNode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nodeId": {
+          "$ref": "#/$defs/nodeId",
+          "description": "Retain an existing source ID only from roots explicitly replaced or deleted by the same batch. Runtime validates source roles, changed-root membership and final uniqueness; arbitrary new IDs cannot be assigned."
+        },
+        "customMarks": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/customTextMark"
+          },
+          "description": "Ordinary text only. Unique business types in ASCII order; immutable value formatting, not atom data."
+        },
+        "content": {
+          "$ref": "#/$defs/block",
+          "description": "Editable inline container only: extension kind, envelope3/display inline/contentModel inline, empty wrapper text and ordinary child inlines. Runtime validates bounds and placement."
         }
       }
     },
@@ -238,7 +270,8 @@
             "blockquote",
             "bullet_list",
             "ordered_list",
-            "horizontal_rule"
+            "horizontal_rule",
+            "extension"
           ]
         },
         "level": {
@@ -269,6 +302,16 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1000000
+        },
+        "extension": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/extensionNode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -480,6 +523,472 @@
         },
         "precondition": {
           "$ref": "#/$defs/visualPrecondition"
+        }
+      }
+    },
+    "inlineReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "version",
+        "mentionId",
+        "target",
+        "snapshot"
+      ],
+      "properties": {
+        "type": {
+          "const": "hcd.mention"
+        },
+        "version": {
+          "const": 1
+        },
+        "mentionId": {
+          "type": "string",
+          "pattern": "^m_[0-9a-f]{32}$"
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9._-]*$"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        }
+      }
+    },
+    "extensionNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "instanceId",
+        "type",
+        "version",
+        "display",
+        "data",
+        "fallback"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "enum": [
+            "hcd.extension/1",
+            "hcd.extension/2",
+            "hcd.extension/3"
+          ]
+        },
+        "instanceId": {
+          "type": "string",
+          "pattern": "^x_[a-f0-9]{32}$"
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "display": {
+          "enum": [
+            "inline",
+            "block"
+          ]
+        },
+        "data": {
+          "type": "object"
+        },
+        "fallback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            }
+          }
+        },
+        "contentModel": {
+          "enum": [
+            "blocks",
+            "inline"
+          ]
+        },
+        "resources": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "hash",
+              "byteLength",
+              "name",
+              "mediaType"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "pattern": "^[a-z][a-zA-Z0-9_-]{0,63}$"
+              },
+              "hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "byteLength": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8388608
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "mediaType": {
+                "type": "string",
+                "maxLength": 128
+              }
+            }
+          }
+        },
+        "exports": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "docx": {
+              "$ref": "#/$defs/extensionExport"
+            },
+            "xlsx": {
+              "$ref": "#/$defs/extensionExport"
+            },
+            "pptx": {
+              "$ref": "#/$defs/extensionExport"
+            },
+            "pdf": {
+              "$ref": "#/$defs/extensionExport"
+            },
+            "html": {
+              "$ref": "#/$defs/extensionExport"
+            },
+            "md": {
+              "$ref": "#/$defs/extensionExport"
+            },
+            "txt": {
+              "$ref": "#/$defs/extensionExport"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "schemaVersion": {
+                "const": "hcd.extension/1"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "contentModel"
+                  ]
+                },
+                {
+                  "required": [
+                    "resources"
+                  ]
+                },
+                {
+                  "required": [
+                    "exports"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "schemaVersion": {
+                "const": "hcd.extension/3"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "contentModel"
+            ],
+            "properties": {
+              "display": {
+                "const": "inline"
+              },
+              "contentModel": {
+                "const": "inline"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "contentModel"
+            ],
+            "properties": {
+              "contentModel": {
+                "const": "blocks"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schemaVersion": {
+                "const": "hcd.extension/2"
+              },
+              "display": {
+                "const": "block"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "contentModel"
+            ],
+            "properties": {
+              "contentModel": {
+                "const": "inline"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schemaVersion": {
+                "const": "hcd.extension/3"
+              },
+              "display": {
+                "const": "inline"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "extensionExport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "support",
+        "blocks"
+      ],
+      "properties": {
+        "support": {
+          "enum": [
+            "semantic",
+            "static",
+            "unsupported"
+          ]
+        },
+        "blocks": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "runs"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "paragraph",
+                  "heading",
+                  "bullet"
+                ]
+              },
+              "level": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "runs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "text"
+                      ],
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16384
+                        },
+                        "bold": {
+                          "type": "boolean"
+                        },
+                        "italic": {
+                          "type": "boolean"
+                        },
+                        "underline": {
+                          "type": "boolean"
+                        },
+                        "strike": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "resource",
+                        "alt",
+                        "widthPt",
+                        "heightPt"
+                      ],
+                      "properties": {
+                        "resource": {
+                          "type": "string"
+                        },
+                        "alt": {
+                          "type": "string",
+                          "maxLength": 1024
+                        },
+                        "widthPt": {
+                          "type": "number",
+                          "exclusiveMinimum": 0,
+                          "maximum": 2000
+                        },
+                        "heightPt": {
+                          "type": "number",
+                          "exclusiveMinimum": 0,
+                          "maximum": 2000
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "includeContent": {
+          "const": true
+        }
+      }
+    },
+    "customTextMark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "type",
+        "version",
+        "data",
+        "fallback"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "hcd.mark/1"
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!hcd\\.)[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "data": {
+          "type": "object",
+          "description": "Bounded JSON validated by the common extension-data limits at runtime."
+        },
+        "fallback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "label",
+            "style"
+          ],
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "style": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "bold": {
+                  "const": true
+                },
+                "italic": {
+                  "const": true
+                },
+                "underline": {
+                  "const": true
+                },
+                "strike": {
+                  "const": true
+                },
+                "textColor": {
+                  "type": "string",
+                  "pattern": "^#[0-9a-f]{6}$"
+                },
+                "backgroundColor": {
+                  "type": "string",
+                  "pattern": "^#[0-9a-f]{6}$"
+                }
+              }
+            }
+          }
         }
       }
     }

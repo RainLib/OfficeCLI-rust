@@ -1,4 +1,7 @@
+mod print_media;
 mod rich;
+mod word_fields;
+pub(crate) mod word_regions;
 
 use docx_handler::WordHandler;
 use handler_common::{DocumentHandler, HandlerError, InsertPosition};
@@ -153,9 +156,32 @@ struct SemanticHtml {
     links: Vec<SemanticLink>,
     table_links: Vec<SemanticTableLink>,
     styles: Vec<rich::BlockStyle>,
+    fields: Vec<word_fields::BlockEvent>,
     table_styles: Vec<rich::TableBlockStyle>,
+    list_paragraphs: HashMap<usize, ListParagraph>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListParagraph {
+    list_id: usize,
+    item_id: u32,
+    depth: usize,
+    markdown_indent: usize,
+    ordered: bool,
+    ordinal: usize,
+    marker: bool,
+}
+
+impl ListParagraph {
+    fn marker_text(&self) -> String {
+        if self.ordered {
+            format!("{}. ", self.ordinal)
+        } else {
+            "- ".into()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +234,7 @@ struct PdfLineBuilder {
 }
 
 struct PendingBlock {
+    fields: Vec<word_fields::Event>,
     styles: Vec<rich::StyleRange>,
     preserve_edges: bool,
     preserve_empty: bool,
@@ -239,6 +266,8 @@ struct TableBuilder {
     fragment: Option<HcdTableFragment>,
     styles: Vec<rich::TableStyle>,
     cell_styles: Vec<rich::StyleRange>,
+    cell_fields: Vec<word_fields::Event>,
+    fields: Vec<word_fields::CellEvent>,
     cell_preserve: bool,
     cell_link_start: usize,
 }
@@ -265,6 +294,7 @@ struct HcdTableFragment {
 }
 
 struct LogicalTableBuilder {
+    fields: Vec<word_fields::CellEvent>,
     node_id: String,
     next_fragment: usize,
     next_row: usize,
@@ -277,17 +307,32 @@ struct LogicalTableBuilder {
 
 #[derive(Default)]
 struct ListState {
+    id: usize,
+    item_id: u32,
+    markdown_indent: usize,
     ordered: bool,
     next: usize,
+    item: Option<(usize, bool)>,
+    orphan: bool,
+    word_series: Option<String>,
 }
 
 #[derive(Default)]
 struct HtmlParser {
+    field_definitions: Option<std::sync::Arc<HashMap<String, String>>>,
+    numeric_field_atoms: bool,
+    numeric_field_seen: HashSet<String>,
+    numeric_field_stack: Vec<String>,
+    decoration_span_depth: usize,
     document: SemanticHtml,
     pending: Option<PendingBlock>,
     table: Option<TableBuilder>,
     logical_table: Option<LogicalTableBuilder>,
     lists: Vec<ListState>,
+    next_list_id: usize,
+    next_item_id: u32,
+    last_orphan_list: Option<(usize, bool, usize, usize, Option<String>)>,
+    quote_depth: usize,
     links: Vec<ActiveLink>,
     image_geometry_stack: Vec<Option<ImageGeometry>>,
     pdf_line: Option<PdfLineBuilder>,
@@ -503,8 +548,21 @@ pub(crate) fn convert_html_with_assets(
         )));
     }
     let bytes = std::fs::read(input).map_err(HandlerError::IoError)?;
-    let source = String::from_utf8_lossy(&bytes);
-    let mut document = parse_html(&source)?;
+    let source = normalize_canonical_lists(&String::from_utf8_lossy(&bytes));
+    let mut document = if output_format == "docx" {
+        parse_html_with_parser(
+            &source,
+            HtmlParser {
+                numeric_field_atoms: true,
+                ..Default::default()
+            },
+        )?
+    } else {
+        parse_html(&source)?
+    };
+    if !document.fields.is_empty() {
+        document.warnings.insert("Numeric Word fields retain their instructions and readable placeholders for target applications to calculate; OfficeCLI does not paginate or recalculate them".into());
+    }
     document.assets = assets;
     if document.blocks.is_empty() {
         document
@@ -527,6 +585,12 @@ pub(crate) fn convert_html_with_assets(
         ));
     }
 
+    if output_format == "docx" && document.list_paragraphs.values().any(|list| list.depth > 8) {
+        document.warnings.insert(
+            "DOCX lists deeper than nine levels use native level 8 with explicit indentation"
+                .into(),
+        );
+    }
     if output_format == "docx"
         && document
             .styles
@@ -630,15 +694,21 @@ fn export_pdf_css(
     assets: &HashMap<String, SemanticAsset>,
     output: &Path,
 ) -> Result<usize, HandlerError> {
-    let embedded = assets
+    let media = print_media::PrintMedia::prepare(source);
+    let expected = media
+        .image_sources
         .iter()
-        .filter(|(href, asset)| {
-            source.contains(href.as_str())
-                && matches!(asset.format.as_str(), "png" | "jpg" | "jpeg")
+        .filter(|src| {
+            assets
+                .get(src.as_str())
+                .is_some_and(|a| matches!(a.format.as_str(), "png" | "jpg" | "jpeg"))
         })
         .count();
+    let source = media.html.as_str();
     let (html, resource_root) = print_html_with_assets(source, input, assets)?;
     let font = html_pdf_primary_font();
+    let fallback_font = html_pdf_fallback_font();
+    let html = mark_print_font_fallback(&html, &font, fallback_font.as_deref())?;
     let mut converter = HtmlConverter::new()
         .page_size(PageSize::A4)
         .margin(Margin::uniform(40.0))
@@ -648,7 +718,7 @@ fn export_pdf_css(
             "HCDEmoji",
             pdf_handler::font_embedder::bundled_noto_emoji().to_vec(),
         );
-    if let Some(font) = html_pdf_fallback_font() {
+    if let Some(font) = fallback_font {
         converter = converter.add_font("HCDFallback", font);
     }
     if let Some(root) = resource_root.as_deref() {
@@ -662,6 +732,24 @@ fn export_pdf_css(
             HandlerError::OperationFailed(format!("pure-Rust HTML/CSS PDF layout failed: {error}"))
         })?;
     std::io::Write::flush(&mut writer).map_err(HandlerError::IoError)?;
+    let embedded = if media.image_sources.is_empty() {
+        0
+    } else {
+        let reader = pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref())?;
+        (1..=reader.page_count()).try_fold(0usize, |count, page| {
+            reader
+                .parse_page_text_blocks_with_images_bounded(
+                    page,
+                    16 * 1024 * 1024,
+                    16 * 1024 * 1024,
+                    64 * 1024 * 1024,
+                )
+                .map(|parsed| count + parsed.image_blocks.len())
+        })?
+    };
+    if embedded < expected {
+        return Err(HandlerError::OperationFailed(format!("PDF renderer retained {embedded} of {expected} trusted image occurrences; no incomplete export was published")));
+    }
     Ok(embedded)
 }
 
@@ -675,12 +763,13 @@ fn print_html_with_assets(
     // grapheme clusters explicitly in this presentation-only copy so the
     // monochrome outline font is selected without changing canonical HCD HTML,
     // text content, or data-hcd-id ownership.
-    let mut html = normalize_markdown_print_controls(&mark_print_emoji(source));
+    let mut html =
+        normalize_markdown_print_controls(&mark_print_emoji(&normalize_print_hard_breaks(source)));
     // Keep this rule deliberately compatible with the print engine's CSS
     // selector subset. A compound attribute selector caused the whole reset to
     // be skipped, which silently selected platform fonts and changed line
     // breaks even though the browser preview looked correct.
-    let print_styles = "<style id=\"officecli-hcd-print\">html{background:#fff!important}body{box-sizing:border-box!important;width:auto!important;max-width:none!important;min-width:0!important;margin:0!important;padding:0!important;background:#fff!important;box-shadow:none!important;font-family:HCDSans,HCDEmoji,HCDFallback,sans-serif!important;font-size:12pt!important}.hcd-chunk{content-visibility:visible!important;contain:none!important}.hcd-print-emoji{font-family:HCDEmoji!important;font-style:normal!important}.hcd-print-kbd{display:inline!important;white-space:nowrap!important;font-family:ui-monospace,SFMono-Regular,Consolas,monospace!important}.hcd-markdown-image{display:inline-block!important;width:auto!important;max-width:100%!important}.hcd-markdown-task-item{list-style:none!important}.hcd-markdown-task{display:inline!important;margin-left:0!important}.hcd-markdown-task-marker{display:inline-block!important;width:1.05em!important;margin-right:.4em!important;font-family:HCDSans!important}.hcd-markdown-paragraph mark,.hcd-markdown-paragraph u,.hcd-markdown-paragraph s,.hcd-markdown-paragraph small,.hcd-markdown-paragraph sub,.hcd-markdown-paragraph sup{display:inline!important}.hcd-markdown-paragraph sub,.hcd-markdown-paragraph sup{line-height:0!important}</style>";
+    let print_styles = "<style id=\"officecli-hcd-print\">html{background:#fff!important}body{box-sizing:border-box!important;width:auto!important;max-width:none!important;min-width:0!important;margin:0!important;padding:0!important;background:#fff!important;box-shadow:none!important;font-family:HCDSans,HCDEmoji,HCDFallback,sans-serif!important;font-size:12pt!important;overflow-wrap:anywhere!important}.hcd-chunk{content-visibility:visible!important;contain:none!important;overflow-wrap:anywhere!important}.hcd-print-emoji{font-family:HCDEmoji!important;font-style:normal!important}.hcd-print-kbd{display:inline!important;white-space:nowrap!important;font-family:ui-monospace,SFMono-Regular,Consolas,monospace!important}.hcd-markdown-image{display:inline-block!important;width:auto!important;max-width:100%!important}.hcd-markdown-task-item{list-style:none!important}.hcd-markdown-task{display:inline!important;margin-left:0!important}.hcd-markdown-task-marker{display:inline-block!important;width:1.05em!important;margin-right:.4em!important;font-family:HCDSans!important}.hcd-markdown-paragraph mark,.hcd-markdown-paragraph u,.hcd-markdown-paragraph s,.hcd-markdown-paragraph small,.hcd-markdown-paragraph sub,.hcd-markdown-paragraph sup{display:inline!important}.hcd-markdown-paragraph sub,.hcd-markdown-paragraph sup{line-height:0!important}</style>";
     if let Some(position) = html.rfind("</head>") {
         html.insert_str(position, print_styles);
     } else {
@@ -694,6 +783,52 @@ fn print_html_with_assets(
         root = Some(common_resource_root(root.as_deref(), &canonical));
     }
     Ok((html, root.filter(|path| path.is_dir())))
+}
+
+fn normalize_print_hard_breaks(source: &str) -> String {
+    // Canonical HCD uses a marked newline span so it has an addressable ID.
+    // Ironpress collapses the newline in that nested pre-wrap span. A real br
+    // in this print-only copy keeps the forced break and its source attributes.
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    let mut raw_text_element = None;
+    while let Some(relative) = source[cursor..].find('<') {
+        let start = cursor + relative;
+        output.push_str(&source[cursor..start]);
+        let end = html_tag_end(source, start).unwrap_or(source.len());
+        let tag = &source[start..end];
+        if raw_text_element.is_none()
+            && tag
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("<span"))
+            && parse_tag(&tag[1..tag.len().saturating_sub(1)]).is_some_and(|tag| {
+                tag.name == "span"
+                    && !tag.closing
+                    && !tag.self_closing
+                    && tag
+                        .attributes
+                        .get("data-hcd-hard-break")
+                        .is_some_and(|value| value == "true")
+            })
+        {
+            let rest = &source[end..];
+            if let Some(length) = ["\n</span>", "\r\n</span>"]
+                .iter()
+                .find_map(|suffix| rest.starts_with(suffix).then_some(suffix.len()))
+            {
+                output.push_str("<br");
+                output.push_str(&tag[5..tag.len() - 1]);
+                output.push_str("/>");
+                cursor = end + length;
+                continue;
+            }
+        }
+        output.push_str(tag);
+        update_raw_text_element(tag, &mut raw_text_element);
+        cursor = end;
+    }
+    output.push_str(&source[cursor..]);
+    output
 }
 
 fn normalize_markdown_print_controls(source: &str) -> String {
@@ -718,21 +853,74 @@ fn normalize_markdown_print_controls(source: &str) -> String {
 }
 
 fn mark_print_emoji(source: &str) -> String {
+    transform_print_text(source, |output, text| append_print_text(output, text, true))
+}
+
+/// Explicitly choose the registered secondary face where it covers a complete
+/// grapheme absent from the primary font. The print engine does not yet select
+/// authored secondary families per glyph. Preserve Unicode and canonical HTML.
+fn mark_print_font_fallback(
+    source: &str,
+    primary: &[u8],
+    fallback: Option<&[u8]>,
+) -> Result<String, HandlerError> {
+    let Some(fallback) = fallback else {
+        return Ok(source.to_string());
+    };
+    let characters: HashSet<_> = source.chars().collect();
+    let primary_missing =
+        pdf_handler::font_embedder::font_bytes_missing_chars(primary, &characters)
+            .map_err(HandlerError::OperationFailed)?;
+    let fallback_missing =
+        pdf_handler::font_embedder::font_bytes_missing_chars(fallback, &characters)
+            .map_err(HandlerError::OperationFailed)?;
+    Ok(mark_print_missing_graphemes(
+        source,
+        &primary_missing,
+        &fallback_missing,
+    ))
+}
+
+fn mark_print_missing_graphemes(
+    source: &str,
+    primary_missing: &HashSet<char>,
+    fallback_missing: &HashSet<char>,
+) -> String {
+    transform_print_text(source, |output, text| {
+        for grapheme in text.graphemes(true) {
+            let secondary = grapheme.chars().any(|ch| primary_missing.contains(&ch))
+                && !grapheme.chars().any(|ch| fallback_missing.contains(&ch));
+            if secondary {
+                output.push_str("<span style=\"font-family:HCDFallback!important\">");
+            }
+            output.push_str(grapheme);
+            if secondary {
+                output.push_str("</span>");
+            }
+        }
+    })
+}
+
+fn transform_print_text(source: &str, mut append: impl FnMut(&mut String, &str)) -> String {
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0;
     let mut raw_text_element: Option<String> = None;
 
     while cursor < source.len() {
         let Some(relative_tag_start) = source[cursor..].find('<') else {
-            append_print_text(&mut output, &source[cursor..], raw_text_element.is_none());
+            if raw_text_element.is_none() {
+                append(&mut output, &source[cursor..]);
+            } else {
+                output.push_str(&source[cursor..]);
+            }
             break;
         };
         let tag_start = cursor + relative_tag_start;
-        append_print_text(
-            &mut output,
-            &source[cursor..tag_start],
-            raw_text_element.is_none(),
-        );
+        if raw_text_element.is_none() {
+            append(&mut output, &source[cursor..tag_start]);
+        } else {
+            output.push_str(&source[cursor..tag_start]);
+        }
 
         let tag_end = html_tag_end(source, tag_start).unwrap_or(source.len());
         let tag = &source[tag_start..tag_end];
@@ -869,10 +1057,13 @@ fn export_textual(
     markdown: bool,
 ) -> Result<usize, HandlerError> {
     let content = if markdown {
-        to_markdown_blocks(
+        to_markdown_blocks_styled(
             document.blocks.iter().enumerate(),
             &document.links,
             &document.table_links,
+            &document.list_paragraphs,
+            &document.styles,
+            &document.table_styles,
         )
     } else {
         let mut text = String::new();
@@ -892,7 +1083,13 @@ fn export_textual(
 }
 
 fn parse_html(source: &str) -> Result<SemanticHtml, HandlerError> {
-    let mut parser = HtmlParser::default();
+    parse_html_with_parser(source, HtmlParser::default())
+}
+
+fn parse_html_with_parser(
+    source: &str,
+    mut parser: HtmlParser,
+) -> Result<SemanticHtml, HandlerError> {
     let mut cursor = 0usize;
     while cursor < source.len() {
         if let Some(tag) = parser.suppressed_tag.clone() {
@@ -933,12 +1130,116 @@ fn parse_html(source: &str) -> Result<SemanticHtml, HandlerError> {
         }
         cursor = end + 1;
     }
+    if !parser.numeric_field_stack.is_empty() {
+        return Err(HandlerError::ValidationError(
+            "unclosed numeric field atom".into(),
+        ));
+    }
     parser.finish()
+}
+
+/// Canonical editable blocks may be independent li fragments after a save.
+/// Restore a transient container from their declared kind, never from text.
+/// This copy is also the CSS/PDF input; canonical bytes and IDs stay untouched.
+fn normalize_canonical_lists(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    let mut list_depth = 0usize;
+    let mut items: Vec<Option<&str>> = Vec::new();
+    while let Some(relative) = source[cursor..].find('<') {
+        let start = cursor + relative;
+        output.push_str(&source[cursor..start]);
+        if source[start..].starts_with("<!--") {
+            let end = source[start + 4..]
+                .find("-->")
+                .map(|offset| start + 4 + offset + 3)
+                .unwrap_or(source.len());
+            output.push_str(&source[start..end]);
+            cursor = end;
+            continue;
+        }
+        let Some(end) = find_tag_end(source.as_bytes(), start + 1) else {
+            output.push_str(&source[start..]);
+            return output;
+        };
+        let raw = &source[start..=end];
+        let Some(tag) = parse_tag(&source[start + 1..end]) else {
+            output.push_str(raw);
+            cursor = end + 1;
+            continue;
+        };
+        if !tag.closing
+            && !tag.self_closing
+            && matches!(tag.name.as_str(), "script" | "style" | "textarea" | "title")
+        {
+            let close = format!("</{}", tag.name);
+            if let Some(offset) =
+                find_ascii_case_insensitive(&source.as_bytes()[end + 1..], close.as_bytes())
+            {
+                let at = end + 1 + offset;
+                if let Some(last) = find_tag_end(source.as_bytes(), at + 1) {
+                    output.push_str(&source[start..=last]);
+                    cursor = last + 1;
+                    continue;
+                }
+            }
+            output.push_str(&source[start..]);
+            return output;
+        }
+        if tag.name == "li" && !tag.closing && !tag.self_closing {
+            let orphan = list_depth == 0
+                && items.is_empty()
+                && tag
+                    .attributes
+                    .get("data-hcd-editor-kind")
+                    .is_some_and(|kind| kind == "list_item");
+            let wrapper = orphan.then_some(
+                if tag
+                    .attributes
+                    .get("data-hcd-editor-level")
+                    .is_some_and(|level| level == "1")
+                {
+                    "ol"
+                } else {
+                    "ul"
+                },
+            );
+            if let Some(wrapper) = wrapper {
+                let ordinal = tag
+                    .attributes
+                    .get("data-hcd-list-start")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(1);
+                output.push_str(&format!(
+                    "<{wrapper} data-hcd-export-orphan-list=\"true\" start=\"{ordinal}\">"
+                ));
+                list_depth += 1;
+            }
+            items.push(wrapper);
+        }
+        output.push_str(raw);
+        if tag.name == "li" && tag.closing {
+            if let Some(Some(wrapper)) = items.pop() {
+                output.push_str(&format!("</{wrapper}>"));
+                list_depth = list_depth.saturating_sub(1);
+            }
+        } else if matches!(tag.name.as_str(), "ul" | "ol") && !tag.self_closing {
+            if tag.closing {
+                list_depth = list_depth.saturating_sub(1);
+            } else {
+                list_depth += 1;
+            }
+        }
+        cursor = end + 1;
+    }
+    output.push_str(&source[cursor..]);
+    output
 }
 
 impl HtmlParser {
     fn text(&mut self, raw: &str) -> Result<(), HandlerError> {
-        if raw.is_empty() || self.suppressed_tag.is_some() {
+        if raw.is_empty() || self.suppressed_tag.is_some() || self.decoration_span_depth > 0 {
             return Ok(());
         }
         let decoded = decode_entities(raw);
@@ -958,7 +1259,12 @@ impl HtmlParser {
         }
         if self.pending.is_none() && decoded.chars().any(|character| !character.is_whitespace()) {
             self.pending = Some(PendingBlock {
-                kind: PendingKind::Paragraph,
+                fields: Vec::new(),
+                kind: if self.quote_depth > 0 {
+                    PendingKind::Quote
+                } else {
+                    PendingKind::Paragraph
+                },
                 text: String::new(),
                 links: Vec::new(),
                 styles: Vec::new(),
@@ -977,6 +1283,32 @@ impl HtmlParser {
     }
 
     fn tag(&mut self, tag: Tag) -> Result<(), HandlerError> {
+        if self.decoration_span_depth > 0 {
+            if tag.name == "span" {
+                if tag.closing {
+                    self.decoration_span_depth -= 1;
+                } else if !tag.self_closing {
+                    self.decoration_span_depth += 1;
+                }
+            }
+            return Ok(());
+        }
+        // Imported Word lists keep a visual source marker for static preview.
+        // Native semantic list output generates its own marker; never turn the
+        // decoration into editable paragraph text or a second number.
+        if tag.name == "span"
+            && !tag.closing
+            && !self.lists.is_empty()
+            && tag
+                .attributes
+                .get("data-hcd-decoration")
+                .is_some_and(|kind| kind == "list-marker")
+        {
+            if !tag.self_closing {
+                self.decoration_span_depth = 1;
+            }
+            return Ok(());
+        }
         if matches!(
             tag.name.as_str(),
             "script" | "style" | "noscript" | "iframe" | "object" | "embed"
@@ -1000,6 +1332,7 @@ impl HtmlParser {
             self.leave_style(&tag.name);
             Ok(())
         } else {
+            self.word_field_control(&tag)?;
             self.enter_style(&tag)?;
             self.start_tag(&tag)?;
             if tag.self_closing || is_void_element(&tag.name) {
@@ -1044,7 +1377,10 @@ impl HtmlParser {
                     self.start_pending(PendingKind::Paragraph)?;
                 }
             }
-            "blockquote" => self.start_pending(PendingKind::Quote)?,
+            "blockquote" => {
+                self.start_pending(PendingKind::Quote)?;
+                self.quote_depth += 1;
+            }
             "pre" => self.start_pending(PendingKind::Preformatted)?,
             "section" | "main" => {
                 self.flush_pending()?;
@@ -1053,25 +1389,85 @@ impl HtmlParser {
                     self.push_section_break()?;
                 }
             }
-            "ul" => self.lists.push(ListState {
-                ordered: false,
-                next: 1,
-            }),
-            "ol" => self.lists.push(ListState {
-                ordered: true,
-                next: tag
+            "ul" | "ol" => {
+                self.flush_pending()?;
+                self.ensure_list_item()?;
+                let markdown_indent = self
+                    .lists
+                    .last()
+                    .map(|parent| {
+                        parent.markdown_indent
+                            + parent
+                                .item
+                                .map(|(ordinal, _)| {
+                                    if parent.ordered {
+                                        ordinal.to_string().len() + 2
+                                    } else {
+                                        2
+                                    }
+                                })
+                                .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                let ordered = tag.name == "ol";
+                let next = tag
                     .attributes
                     .get("start")
                     .and_then(|value| value.parse().ok())
-                    .unwrap_or(1),
-            }),
+                    .unwrap_or(1);
+                let word_series = tag
+                    .attributes
+                    .get("data-hcd-word-list-id")
+                    .or_else(|| tag.attributes.get("data-hcd-source-list-id"))
+                    .cloned();
+                let orphan = self.lists.is_empty() && word_series.is_some()
+                    || tag
+                        .attributes
+                        .get("data-hcd-export-orphan-list")
+                        .is_some_and(|value| value == "true");
+                let previous =
+                    self.last_orphan_list
+                        .as_ref()
+                        .filter(|(_, kind, ordinal, end, series)| {
+                            orphan
+                                && self.lists.is_empty()
+                                && *end == self.document.blocks.len()
+                                && *kind == ordered
+                                && series == &word_series
+                                && (!ordered || *ordinal == next)
+                        });
+                let id = previous.map(|(id, _, _, _, _)| *id).unwrap_or_else(|| {
+                    let id = self.next_list_id;
+                    self.next_list_id += 1;
+                    id
+                });
+                self.lists.push(ListState {
+                    id,
+                    item_id: 0,
+                    markdown_indent,
+                    ordered,
+                    next,
+                    item: None,
+                    orphan,
+                    word_series,
+                });
+            }
             "li" => {
+                self.flush_pending()?;
+                self.next_item_id = self.next_item_id.saturating_add(1);
+                let item_id = self.next_item_id;
                 let (ordered, ordinal) = self
                     .lists
                     .last_mut()
                     .map(|state| {
-                        let ordinal = state.next;
-                        state.next = state.next.saturating_add(1);
+                        let ordinal = tag
+                            .attributes
+                            .get("value")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(state.next);
+                        state.next = ordinal.saturating_add(1);
+                        state.item_id = item_id;
+                        state.item = Some((ordinal, false));
                         (state.ordered, ordinal)
                     })
                     .unwrap_or((false, 1));
@@ -1183,12 +1579,31 @@ impl HtmlParser {
         match name {
             "title" => self.in_title = false,
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "div" | "article" | "header"
-            | "footer" | "address" | "figure" | "figcaption" | "blockquote" | "pre" | "li" => {
-                self.flush_pending()?
+            | "footer" | "address" | "figure" | "figcaption" | "pre" => self.flush_pending()?,
+            "li" => {
+                self.flush_pending()?;
+                self.ensure_list_item()?;
+                if let Some(list) = self.lists.last_mut() {
+                    list.item = None;
+                }
+            }
+            "blockquote" => {
+                self.flush_pending()?;
+                self.quote_depth = self.quote_depth.saturating_sub(1);
             }
             "ul" | "ol" => {
                 self.flush_pending()?;
-                self.lists.pop();
+                if let Some(list) = self.lists.pop() {
+                    if list.orphan {
+                        self.last_orphan_list = Some((
+                            list.id,
+                            list.ordered,
+                            list.next,
+                            self.document.blocks.len(),
+                            list.word_series,
+                        ));
+                    }
+                }
             }
             "td" | "th" => {
                 if let Some(table) = &mut self.table {
@@ -1250,6 +1665,7 @@ impl HtmlParser {
             links,
             fragment,
             styles,
+            fields,
             ..
         } = table;
         let Some(fragment) = fragment else {
@@ -1262,6 +1678,13 @@ impl HtmlParser {
             if !rows.is_empty() {
                 let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(rows))?;
+                self.document.fields.extend(fields.into_iter().map(|cell| {
+                    word_fields::BlockEvent {
+                        block_index,
+                        cell: Some((cell.row, cell.column)),
+                        event: cell.event,
+                    }
+                }));
                 self.document.table_styles.extend(
                     styles
                         .into_iter()
@@ -1318,6 +1741,7 @@ impl HtmlParser {
                 cell_count: 0,
                 links: Vec::new(),
                 styles: Vec::new(),
+                fields: Vec::new(),
             });
         }
 
@@ -1354,6 +1778,10 @@ impl HtmlParser {
         }
         let row_offset = logical.rows.len();
         logical.rows.extend(rows);
+        logical.fields.extend(fields.into_iter().map(|mut cell| {
+            cell.row += row_offset;
+            cell
+        }));
         logical.styles.extend(styles.into_iter().map(|mut style| {
             style.row += row_offset;
             style
@@ -1383,6 +1811,18 @@ impl HtmlParser {
             if !logical.rows.is_empty() {
                 let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(logical.rows))?;
+                self.document
+                    .fields
+                    .extend(
+                        logical
+                            .fields
+                            .into_iter()
+                            .map(|cell| word_fields::BlockEvent {
+                                block_index,
+                                cell: Some((cell.row, cell.column)),
+                                event: cell.event,
+                            }),
+                    );
                 self.document.table_styles.extend(
                     logical
                         .styles
@@ -1405,6 +1845,11 @@ impl HtmlParser {
     }
 
     fn start_pending(&mut self, kind: PendingKind) -> Result<(), HandlerError> {
+        let kind = if self.quote_depth > 0 && matches!(kind, PendingKind::Paragraph) {
+            PendingKind::Quote
+        } else {
+            kind
+        };
         if self
             .table
             .as_ref()
@@ -1425,6 +1870,7 @@ impl HtmlParser {
             self.flush_pdf_line()?;
         }
         self.pending = Some(PendingBlock {
+            fields: Vec::new(),
             kind,
             text: String::new(),
             links: Vec::new(),
@@ -1458,7 +1904,12 @@ impl HtmlParser {
         }
         if self.pending.is_none() {
             self.pending = Some(PendingBlock {
-                kind: PendingKind::Paragraph,
+                fields: Vec::new(),
+                kind: if self.quote_depth > 0 {
+                    PendingKind::Quote
+                } else {
+                    PendingKind::Paragraph
+                },
                 text: String::new(),
                 links: Vec::new(),
                 styles: Vec::new(),
@@ -1505,6 +1956,18 @@ impl HtmlParser {
         };
         let block_index = self.document.blocks.len();
         self.push_block(block)?;
+        self.document
+            .fields
+            .extend(
+                pending
+                    .fields
+                    .into_iter()
+                    .map(|event| word_fields::BlockEvent {
+                        block_index,
+                        cell: None,
+                        event: word_fields::trim(event, trim_start, trim_end),
+                    }),
+            );
         self.document
             .styles
             .extend(pending.styles.into_iter().filter_map(|range| {
@@ -1605,11 +2068,52 @@ impl HtmlParser {
         Ok(())
     }
 
-    fn push_block(&mut self, block: HtmlBlock) -> Result<(), HandlerError> {
+    fn ensure_list_item(&mut self) -> Result<(), HandlerError> {
+        if self.table.is_none()
+            && self
+                .lists
+                .last()
+                .is_some_and(|list| list.item.is_some_and(|(_, emitted)| !emitted))
+        {
+            self.push_block(HtmlBlock::Paragraph(String::new()))?;
+        }
+        Ok(())
+    }
+
+    fn push_block(&mut self, mut block: HtmlBlock) -> Result<(), HandlerError> {
         if self.document.blocks.len() >= MAX_HTML_BLOCKS {
             return Err(HandlerError::InvalidArgument(format!(
                 "HTML exceeds {MAX_HTML_BLOCKS} semantic blocks"
             )));
+        }
+        let depth = self.lists.len().saturating_sub(1);
+        if self.table.is_none() && !matches!(block, HtmlBlock::SectionBreak) {
+            if let Some(list) = self.lists.last_mut() {
+                if let Some((ordinal, emitted)) = list.item.as_mut() {
+                    let metadata = ListParagraph {
+                        list_id: list.id,
+                        item_id: list.item_id,
+                        depth,
+                        markdown_indent: list.markdown_indent,
+                        ordered: list.ordered,
+                        ordinal: *ordinal,
+                        marker: !*emitted,
+                    };
+                    if let HtmlBlock::Paragraph(text) = &block {
+                        if metadata.marker {
+                            block = HtmlBlock::ListItem {
+                                ordered: metadata.ordered,
+                                ordinal: metadata.ordinal,
+                                text: text.clone(),
+                            };
+                        }
+                    }
+                    *emitted = true;
+                    self.document
+                        .list_paragraphs
+                        .insert(self.document.blocks.len(), metadata);
+                }
+            }
         }
         self.document.blocks.push(block);
         Ok(())
@@ -2497,46 +3001,88 @@ fn validate_output(path: &Path, format: &str) -> Result<(), HandlerError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn to_markdown_blocks<'a>(
     blocks: impl IntoIterator<Item = (usize, &'a HtmlBlock)>,
     links: &[SemanticLink],
     table_links: &[SemanticTableLink],
+    lists: &HashMap<usize, ListParagraph>,
 ) -> String {
+    to_markdown_blocks_styled(blocks, links, table_links, lists, &[], &[])
+}
+
+fn to_markdown_blocks_styled<'a>(
+    blocks: impl IntoIterator<Item = (usize, &'a HtmlBlock)>,
+    links: &[SemanticLink],
+    table_links: &[SemanticTableLink],
+    lists: &HashMap<usize, ListParagraph>,
+    styles: &[rich::BlockStyle],
+    table_styles: &[rich::TableBlockStyle],
+) -> String {
+    let mut block_styles: HashMap<usize, Vec<&rich::StyleRange>> = HashMap::new();
+    for style in styles {
+        block_styles
+            .entry(style.block_index)
+            .or_default()
+            .push(&style.range);
+    }
+    let mut cell_styles: MarkdownTableStyles<'_> = HashMap::new();
+    for style in table_styles {
+        cell_styles
+            .entry((style.block_index, style.style.row, style.style.column))
+            .or_default()
+            .push(&style.style.range);
+    }
     let mut output = String::new();
-    for (block_index, block) in blocks {
+    let mut blocks = blocks.into_iter().peekable();
+    while let Some((block_index, block)) = blocks.next() {
+        let ranges = block_styles
+            .get(&block_index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let start = output.len();
         match block {
             HtmlBlock::Heading { level, text } => {
                 output.push_str(&"#".repeat(*level as usize));
                 output.push(' ');
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(&markdown_linked_text(text, block_index, links, ranges));
             }
             HtmlBlock::Paragraph(text) => {
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(&markdown_linked_text(text, block_index, links, ranges));
             }
             HtmlBlock::ListItem {
                 ordered,
                 ordinal,
                 text,
             } => {
-                if *ordered {
+                if lists.contains_key(&block_index) {
+                    // Native list context is applied below to every paragraph,
+                    // including continuation paragraphs and nested children.
+                } else if *ordered {
                     output.push_str(&format!("{ordinal}. "));
                 } else {
                     output.push_str("- ");
                 }
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(&markdown_linked_text(text, block_index, links, ranges));
             }
             HtmlBlock::Preformatted(text) => {
-                output.push_str("```\n");
+                let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+                let fence = "`".repeat(longest.saturating_add(1).max(3));
+                output.push_str(&fence);
+                output.push('\n');
                 output.push_str(text);
-                output.push_str("\n```");
+                output.push('\n');
+                output.push_str(&fence);
             }
             HtmlBlock::Quote(text) => {
                 output.push_str("> ");
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(
+                    &markdown_linked_text(text, block_index, links, ranges).replace('\n', "\n> "),
+                );
             }
             HtmlBlock::Rule => output.push_str("---"),
             HtmlBlock::Table(rows) => {
-                append_markdown_table(&mut output, rows, block_index, table_links)
+                append_markdown_table(&mut output, rows, block_index, table_links, &cell_styles)
             }
             HtmlBlock::Image { source, alt, .. } => {
                 output.push_str(&format!("[Image: {alt}]"));
@@ -2546,7 +3092,32 @@ fn to_markdown_blocks<'a>(
             }
             HtmlBlock::SectionBreak => {}
         }
-        output.push_str("\n\n");
+        if let Some(list) = lists.get(&block_index) {
+            let content = output.split_off(start);
+            let marker = list.marker_text();
+            let continuation = " ".repeat(list.markdown_indent + marker.len());
+            for (line, text) in content.split('\n').enumerate() {
+                if line > 0 {
+                    output.push('\n');
+                }
+                if line == 0 && list.marker {
+                    output.push_str(&" ".repeat(list.markdown_indent));
+                    output.push_str(&marker);
+                } else {
+                    output.push_str(&continuation);
+                }
+                output.push_str(text);
+            }
+        }
+        let empty_parent = matches!(block, HtmlBlock::ListItem {text, ..} if text.is_empty())
+            && lists.get(&block_index).is_some_and(|parent| {
+                parent.marker
+                    && blocks
+                        .peek()
+                        .and_then(|(index, _)| lists.get(index))
+                        .is_some_and(|child| child.depth > parent.depth)
+            });
+        output.push_str(if empty_parent { "\n" } else { "\n\n" });
     }
     if output.trim().is_empty() {
         " ".to_string()
@@ -2555,7 +3126,81 @@ fn to_markdown_blocks<'a>(
     }
 }
 
-fn markdown_linked_text(text: &str, block_index: usize, links: &[SemanticLink]) -> String {
+fn markdown_literal(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(
+            character,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '<'
+                | '>'
+                | '#'
+                | '+'
+                | '-'
+                | '!'
+                | '|'
+                | '.'
+        ) {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn markdown_styled_segment(
+    text: &str,
+    start: usize,
+    end: usize,
+    styles: &[&rich::StyleRange],
+) -> String {
+    let valid: Vec<_> = styles
+        .iter()
+        .copied()
+        .filter(|range| {
+            range.end > range.start
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end)
+        })
+        .collect();
+    let mut boundaries = vec![start, end];
+    for range in &valid {
+        for at in [range.start, range.end] {
+            if at > start && at < end {
+                boundaries.push(at);
+            }
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut result = String::new();
+    for pair in boundaries.windows(2) {
+        let value = &text[pair[0]..pair[1]];
+        if let Some(range) = valid
+            .iter()
+            .find(|range| range.start <= pair[0] && range.end >= pair[1])
+        {
+            result.push_str(&range.style.markdown(value));
+        } else {
+            result.push_str(&markdown_literal(value));
+        }
+    }
+    result
+}
+
+fn markdown_linked_text(
+    text: &str,
+    block_index: usize,
+    links: &[SemanticLink],
+    ranges: &[&rich::StyleRange],
+) -> String {
     let mut block_links = links
         .iter()
         .filter(|link| {
@@ -2573,23 +3218,28 @@ fn markdown_linked_text(text: &str, block_index: usize, links: &[SemanticLink]) 
         if link.start < cursor {
             continue;
         }
-        output.push_str(&text[cursor..link.start]);
+        output.push_str(&markdown_styled_segment(text, cursor, link.start, ranges));
         output.push('[');
-        output.push_str(&text[link.start..link.end]);
+        output.push_str(&markdown_styled_segment(text, link.start, link.end, ranges));
         output.push_str("](");
         output.push_str(&link.target);
         output.push(')');
         cursor = link.end;
     }
-    output.push_str(&text[cursor..]);
-    output
+    output.push_str(&markdown_styled_segment(text, cursor, text.len(), ranges));
+    // HTML whitespace is already collapsed by the parser; remaining newlines
+    // are explicit breaks, which a bare Markdown newline would turn into spaces.
+    output.replace('\n', "  \n")
 }
+
+type MarkdownTableStyles<'a> = HashMap<(usize, usize, usize), Vec<&'a rich::StyleRange>>;
 
 fn append_markdown_table(
     output: &mut String,
     rows: &[Vec<String>],
     block_index: usize,
     links: &[SemanticTableLink],
+    styles: &MarkdownTableStyles<'_>,
 ) {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     if columns == 0 {
@@ -2602,6 +3252,7 @@ fn append_markdown_table(
         block_index,
         0,
         links,
+        styles,
     );
     output.push('\n');
     output.push('|');
@@ -2610,7 +3261,7 @@ fn append_markdown_table(
     }
     for (row_index, row) in rows.iter().enumerate().skip(1) {
         output.push('\n');
-        append_markdown_row(output, row, columns, block_index, row_index, links);
+        append_markdown_row(output, row, columns, block_index, row_index, links, styles);
     }
 }
 
@@ -2621,17 +3272,35 @@ fn append_markdown_row(
     block_index: usize,
     row_index: usize,
     links: &[SemanticTableLink],
+    styles: &MarkdownTableStyles<'_>,
 ) {
     output.push('|');
     for column in 0..columns {
         output.push(' ');
         let text = row.get(column).map(String::as_str).unwrap_or("");
-        output.push_str(
-            &markdown_table_linked_text(text, block_index, row_index, column, links)
-                .replace('|', "\\|"),
-        );
+        output.push_str(&markdown_table_safe(&markdown_table_linked_text(
+            text,
+            block_index,
+            row_index,
+            column,
+            links,
+            styles,
+        )));
         output.push_str(" |");
     }
+}
+
+fn markdown_table_safe(text: &str) -> String {
+    let mut output = String::new();
+    let mut slashes = 0;
+    for c in text.chars() {
+        if c == '|' && slashes % 2 == 0 {
+            output.push('\\');
+        }
+        output.push(c);
+        slashes = if c == '\\' { slashes + 1 } else { 0 };
+    }
+    output.replace("  \n", "<br>")
 }
 
 fn markdown_table_linked_text(
@@ -2640,36 +3309,23 @@ fn markdown_table_linked_text(
     row: usize,
     column: usize,
     links: &[SemanticTableLink],
+    styles: &MarkdownTableStyles<'_>,
 ) -> String {
-    let mut cell_links = links
+    let cell_links: Vec<_> = links
         .iter()
-        .filter(|link| {
-            link.block_index == block_index
-                && link.row == row
-                && link.column == column
-                && link.end > link.start
-                && link.end <= text.len()
-                && text.is_char_boundary(link.start)
-                && text.is_char_boundary(link.end)
+        .filter(|link| link.block_index == block_index && link.row == row && link.column == column)
+        .map(|link| SemanticLink {
+            block_index: 0,
+            start: link.start,
+            end: link.end,
+            target: link.target.clone(),
         })
-        .collect::<Vec<_>>();
-    cell_links.sort_by_key(|link| (link.start, link.end));
-    let mut output = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-    for link in cell_links {
-        if link.start < cursor {
-            continue;
-        }
-        output.push_str(&text[cursor..link.start]);
-        output.push('[');
-        output.push_str(&text[link.start..link.end]);
-        output.push_str("](");
-        output.push_str(&link.target);
-        output.push(')');
-        cursor = link.end;
-    }
-    output.push_str(&text[cursor..]);
-    output
+        .collect();
+    let cell_styles = styles
+        .get(&(block_index, row, column))
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    markdown_linked_text(text, 0, &cell_links, cell_styles)
 }
 
 fn semantic_slides(document: &SemanticHtml) -> Vec<SemanticSlide> {
@@ -2894,6 +3550,15 @@ fn finish_table_cell(table: &mut TableBuilder) {
         let start = trimmed.as_ptr() as usize - cell.as_ptr() as usize;
         let end = start + trimmed.len();
         let (row, column) = (table.rows.len(), table.row.len());
+        table.fields.extend(
+            std::mem::take(&mut table.cell_fields)
+                .into_iter()
+                .map(|event| word_fields::CellEvent {
+                    row,
+                    column,
+                    event: word_fields::trim(event, start, end),
+                }),
+        );
         table.styles.extend(
             std::mem::take(&mut table.cell_styles)
                 .into_iter()
@@ -3236,6 +3901,187 @@ mod tests {
     use super::*;
 
     #[test]
+    fn css_pdf_preserves_both_owned_nested_image_occurrences_and_checks_actual_output() {
+        use base64::Engine;
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input.html");
+        let output = temp.path().join("output.pdf");
+        let image = temp.path().join("blue.png");
+        let bytes=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC").unwrap();
+        std::fs::write(&image, &bytes).unwrap();
+        let source="<html><body><p>Before <span class=\"hcd-run\"><img src=\"asset://blue\" style=\"width:96pt;height:48pt\"/></span> between <span class=\"hcd-extension-export-media\"><strong>Node image</strong><img src=\"asset://blue\" style=\"width:96pt;height:48pt\"/></span> after</p></body></html>";
+        let assets = HashMap::from([(
+            "asset://blue".into(),
+            SemanticAsset {
+                path: image.clone(),
+                format: "png".into(),
+            },
+        )]);
+        assert_eq!(export_pdf_css(source, &input, &assets, &output).unwrap(), 2);
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let images = reader
+            .parse_page_text_blocks_with_images_bounded(
+                1,
+                16 * 1024 * 1024,
+                16 * 1024 * 1024,
+                64 * 1024 * 1024,
+            )
+            .unwrap()
+            .image_blocks;
+        assert_eq!(images.len(), 2);
+        assert!(
+            images
+                .iter()
+                .all(|i| i.bbox.width > 90.0 && i.bbox.height > 40.0),
+            "painted bounds: {:?}",
+            images.iter().map(|i| &i.bbox).collect::<Vec<_>>()
+        );
+        std::fs::write(&image, b"invalid encoded image").unwrap();
+        assert!(export_pdf_css(source, &input, &assets, &output).is_err());
+        assert_eq!(std::fs::read(&image).unwrap(), b"invalid encoded image");
+    }
+
+    #[test]
+    fn print_hard_breaks_preserve_ids_and_skip_other_text_and_raw_elements() {
+        let marked = "<span title=\"a > b\" data-hcd-id=\"n_break\" data-hcd-hard-break=\"true\" style=\"white-space:pre-wrap\">\n</span>";
+        let source = format!("<!--{marked}--><script>const example = '{marked}'</script><p>{marked}<span>\n</span><span data-hcd-hard-break=\"false\">\n</span></p>");
+        let printed = normalize_print_hard_breaks(&source);
+        assert!(printed.starts_with(&format!(
+            "<!--{marked}--><script>const example = '{marked}'</script>"
+        )));
+        assert!(printed.contains("<br title=\"a > b\" data-hcd-id=\"n_break\" data-hcd-hard-break=\"true\" style=\"white-space:pre-wrap\"/>"));
+        assert!(
+            printed.ends_with("<span>\n</span><span data-hcd-hard-break=\"false\">\n</span></p>")
+        );
+        assert_eq!(normalize_print_hard_breaks(&printed), printed);
+    }
+
+    #[test]
+    fn css_pdf_keeps_canonical_forced_breaks_on_separate_visual_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("breaks.html");
+        let output = temp.path().join("breaks.pdf");
+        let html = "<p>line-one<span data-hcd-hard-break=\"true\" data-hcd-id=\"break-1\" style=\"white-space:pre-wrap\">\n</span>line-two<span data-hcd-hard-break=\"true\" data-hcd-id=\"break-2\" style=\"white-space:pre-wrap\">\n</span>line-three</p>";
+        export_pdf_css(html, &input, &HashMap::new(), &output).unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let page = reader.parse_page_text_blocks(1).unwrap();
+        let lines = ["line-one", "line-two", "line-three"].map(|text| {
+            page.text_blocks
+                .iter()
+                .find(|block| block.text.contains(text))
+                .expect("PDF line has readable text")
+        });
+        for pair in lines.windows(2) {
+            assert!(
+                pair[0].bbox.y > pair[1].bbox.y + 5.0,
+                "forced break was collapsed: {:?} then {:?}",
+                pair[0].bbox,
+                pair[1].bbox
+            );
+        }
+    }
+
+    #[test]
+    fn css_pdf_list_continuations_keep_their_parent_content_edge() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("list-paragraphs.pdf");
+        let html = format!("<style>p{{margin:0}}ol,ul{{margin:0;padding-left:40px}}li{{padding-left:8px}}</style><ol start=\"4\"><li><p>FirstLine<br>FirstWrap</p><p>Continuation</p><ol start=\"7\"><li><p>ChildLine<br>ChildWrap</p><p>ChildTail</p></li></ol><div><p>DeepBlock</p></div><p>ParentTail</p><p>{}</p><p style=\"position:fixed;left:3px;top:500px\">PinnedOutside</p></li><li>NextParent</li></ol><p>Outside</p>", "FlowWrap ".repeat(36));
+        export_pdf_css(
+            &html,
+            &temp.path().join("list.html"),
+            &HashMap::new(),
+            &output,
+        )
+        .unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let page = reader.parse_page_text_blocks(1).unwrap();
+        let position = |text: &str| {
+            page.text_blocks
+                .iter()
+                .find(|block| block.text.split_whitespace().any(|word| word == text))
+                .unwrap_or_else(|| panic!("missing {text}: {:?}", page.text_blocks))
+                .bbox
+                .x
+        };
+        for (first, continuation) in [
+            ("FirstWrap", "Continuation"),
+            ("FirstWrap", "ParentTail"),
+            ("ChildWrap", "ChildTail"),
+            ("FirstWrap", "DeepBlock"),
+        ] {
+            assert!(
+                (position(first) - position(continuation)).abs() < 0.5,
+                "{first} x={} differs from {continuation} x={}",
+                position(first),
+                position(continuation)
+            );
+        }
+        assert!(position("ChildTail") > position("ParentTail") + 20.0);
+        assert!(position("ParentTail") > position("Outside") + 20.0);
+        assert!(position("PinnedOutside") < position("ParentTail") - 20.0);
+        assert_eq!(
+            page.text_blocks
+                .iter()
+                .map(|block| block.text.matches("FlowWrap").count())
+                .sum::<usize>(),
+            36
+        );
+        assert!(page
+            .text_blocks
+            .iter()
+            .all(|block| block.bbox.x + block.bbox.width < 556.0));
+    }
+
+    #[test]
+    fn css_pdf_wraps_unbroken_text_across_alternating_inline_styles() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("wrap.html");
+        let output = temp.path().join("wrap.pdf");
+        let runs = (0..80)
+            .map(|index| {
+                if index % 2 == 0 {
+                    "<strong>·</strong>"
+                } else {
+                    "<span>·</span>"
+                }
+            })
+            .collect::<String>();
+        export_pdf_css(
+            &format!("<p style=\"width:100px\">{runs}</p>"),
+            &input,
+            &HashMap::new(),
+            &output,
+        )
+        .unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let page = reader.parse_page_text_blocks(1).unwrap();
+        assert_eq!(
+            page.text_blocks
+                .iter()
+                .map(|block| block.text.matches('·').count())
+                .sum::<usize>(),
+            80
+        );
+        let blocks = page
+            .text_blocks
+            .iter()
+            .filter(|block| block.text.contains('·'))
+            .collect::<Vec<_>>();
+        assert!(blocks.len() > 1, "unbroken inline sequence did not wrap");
+        assert!(
+            blocks
+                .iter()
+                .all(|block| block.bbox.x + block.bbox.width <= 556.0),
+            "text escaped the print page: {:?}",
+            blocks.iter().map(|block| &block.bbox).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn semantic_pdf_wrap_counts_east_asian_characters_as_wide() {
         let text = "中".repeat(42);
         let lines = wrap_text(&text, 82);
@@ -3300,6 +4146,31 @@ mod tests {
         assert_eq!(
             mark_print_emoji(source),
             r#"<!-- 😀 > --><p title="😀 >">☐ 正文 <span class="hcd-print-emoji">😀</span></p>"#
+        );
+    }
+
+    #[test]
+    fn print_missing_symbols_use_a_covering_secondary_face_without_rewriting_text_or_metadata() {
+        // Reproduced PDF regression: the primary face lacked U+2610, so an
+        // unknown task node's persisted "☐ title" became only "title".
+        let source =
+            r#"<!-- ☐ --><style>.x{content:"☐"}</style><p data-hcd-extension="☐">☐ task é 😀</p>"#;
+        let marked = mark_print_missing_graphemes(
+            source,
+            &['☐', '\u{301}', '😀'].into_iter().collect(),
+            &['😀'].into_iter().collect(),
+        );
+        assert_eq!(
+            marked,
+            r#"<!-- ☐ --><style>.x{content:"☐"}</style><p data-hcd-extension="☐"><span style="font-family:HCDFallback!important">☐</span> task <span style="font-family:HCDFallback!important">é</span> 😀</p>"#
+        );
+        assert_eq!(
+            mark_print_missing_graphemes(
+                "☐",
+                &['☐'].into_iter().collect(),
+                &['☐'].into_iter().collect()
+            ),
+            "☐"
         );
     }
 
@@ -3506,6 +4377,242 @@ mod tests {
     }
 
     #[test]
+    fn markdown_inline_formatting_survives_word_boundaries_links_and_reimport() {
+        let document=parse_html(r#"<p>中N<strong>es</strong>ted😀 <a href="https://example.com"><em>word</em></a> <u>under</u><s>gone</s> &lt;strong&gt;literal&lt;/strong&gt; <code>a``b</code></p>"#).unwrap();
+        let output = to_markdown_blocks_styled(
+            document.blocks.iter().enumerate(),
+            &document.links,
+            &document.table_links,
+            &document.list_paragraphs,
+            &document.styles,
+            &document.table_styles,
+        );
+        assert!(output.contains("中N<strong>es</strong>ted😀"), "{output}");
+        assert!(
+            output.contains("[<em>word</em>](https://example.com)"),
+            "{output}"
+        );
+        assert!(output.contains("<u>under</u><s>gone</s>"), "{output}");
+        assert!(output.contains(r"\<strong\>literal\</strong\>"), "{output}");
+        assert!(output.contains("```a``b```"), "{output}");
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("formatted.md");
+        let destination = root.path().join("formatted.hcd");
+        std::fs::write(&source, &output).unwrap();
+        hcd_formats::import_document(
+            &source,
+            &destination,
+            &hcd_formats::ImportOptions::new("formatted"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = hcd_core::Bundle::open(destination).unwrap();
+        let mut rendered = Vec::new();
+        hcd_core::render_standalone_html(
+            &bundle,
+            &hcd_core::HtmlPresentationOptions::default(),
+            &mut rendered,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains("<strong>"));
+        assert!(rendered.contains("<em>"));
+        let reopened = parse_html(&rendered).unwrap();
+        assert_eq!(reopened.blocks, document.blocks);
+        assert_eq!(
+            to_markdown_blocks_styled(
+                reopened.blocks.iter().enumerate(),
+                &reopened.links,
+                &reopened.table_links,
+                &reopened.list_paragraphs,
+                &reopened.styles,
+                &reopened.table_styles
+            ),
+            output
+        );
+    }
+
+    #[test]
+    fn markdown_table_styles_share_link_offsets_and_escape_pipes_once() {
+        let document=parse_html(r#"<table><tr><th><strong>名字</strong></th><th>Value</th></tr><tr><td><a href="https://example.com"><u>A|B</u></a><br>next</td><td><s>x</s></td></tr></table>"#).unwrap();
+        let output = to_markdown_blocks_styled(
+            document.blocks.iter().enumerate(),
+            &document.links,
+            &document.table_links,
+            &document.list_paragraphs,
+            &document.styles,
+            &document.table_styles,
+        );
+        assert!(output.contains("<strong>名字</strong>"), "{output}");
+        assert!(
+            output.contains(r"[<u>A\|B</u>](https://example.com)<br>next"),
+            "{output}"
+        );
+        assert!(output.contains("<s>x</s>"), "{output}");
+        assert_eq!(output.lines().count(), 4, "{output}");
+    }
+
+    #[test]
+    fn semantic_markdown_keeps_literal_input_and_code_fences_unambiguous() {
+        let blocks = vec![
+            HtmlBlock::Paragraph("<b>审批</b> [literal] *text*".into()),
+            HtmlBlock::Preformatted("before\n```\nafter".into()),
+        ];
+        let markdown = to_markdown_blocks(blocks.iter().enumerate(), &[], &[], &HashMap::new());
+        assert!(markdown.contains(r"\<b\>审批\</b\> \[literal\] \*text\*"));
+        assert!(markdown.contains("````\nbefore\n```\nafter\n````"));
+    }
+
+    #[test]
+    fn imported_word_list_decorations_do_not_become_second_native_markers() {
+        let document = parse_html(r#"<p><span data-hcd-decoration="list-marker">IV.</span>Static</p><ol start="4"><li><p><span data-hcd-decoration="list-marker"><span style="font-weight:bold">4.</span></span><strong>Parent</strong></p><ul><li><p><span data-hcd-decoration="list-marker">•</span>Child</p></li></ul></li></ol>"#).unwrap();
+        assert_eq!(document.blocks[0], HtmlBlock::Paragraph("IV.Static".into()));
+        assert_eq!(
+            document.blocks[1],
+            HtmlBlock::ListItem {
+                ordered: true,
+                ordinal: 4,
+                text: "Parent".into()
+            }
+        );
+        assert_eq!(
+            document.blocks[2],
+            HtmlBlock::ListItem {
+                ordered: false,
+                ordinal: 1,
+                text: "Child".into()
+            }
+        );
+        assert_eq!(document.list_paragraphs[&2].depth, 1);
+        let resumed = parse_html(r#"<ol data-hcd-word-list-id="1" start="4"><li>Four<ul data-hcd-word-list-id="2"><li>Child</li></ul></li></ol><ol data-hcd-word-list-id="1" start="5"><li>Five</li></ol><ol data-hcd-word-list-id="3" start="6"><li>Separate six</li></ol>"#).unwrap();
+        assert_eq!(
+            resumed.list_paragraphs[&0].list_id,
+            resumed.list_paragraphs[&2].list_id
+        );
+        assert_ne!(
+            resumed.list_paragraphs[&2].list_id,
+            resumed.list_paragraphs[&3].list_id
+        );
+    }
+
+    #[test]
+    fn markdown_lists_keep_nested_boundaries_continuations_and_large_marker_indentation() {
+        let document = parse_html(r#"<ol start="100"><li><p>parent</p><p>continued<br>line</p><ul><li><p>child</p></li></ul>tail</li><li>next</li></ol><ul><li>separate</li></ul>"#).unwrap();
+        let markdown = to_markdown_blocks_styled(
+            document.blocks.iter().enumerate(),
+            &document.links,
+            &document.table_links,
+            &document.list_paragraphs,
+            &document.styles,
+            &document.table_styles,
+        );
+        assert_eq!(markdown, "100. parent\n\n     continued  \n     line\n\n     - child\n\n     tail\n\n101. next\n\n- separate\n\n");
+        assert_eq!(
+            document.list_paragraphs[&0].list_id,
+            document.list_paragraphs[&4].list_id
+        );
+        assert_ne!(
+            document.list_paragraphs[&2].list_id,
+            document.list_paragraphs[&5].list_id
+        );
+        assert!(!document.list_paragraphs[&1].marker);
+        assert!(!document.list_paragraphs[&3].marker);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested.md");
+        std::fs::write(&path, &markdown).unwrap();
+        let bundle_path = temp.path().join("nested.hcd");
+        hcd_formats::import_document(
+            &path,
+            &bundle_path,
+            &hcd_formats::ImportOptions::new("nested"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = hcd_core::Bundle::open(bundle_path).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        let mut html = String::new();
+        for page in 0..manifest.index_page_count {
+            for chunk in bundle.read_index_page(&manifest, page).unwrap().chunks {
+                html.push_str(&bundle.read_chunk(&chunk).unwrap());
+            }
+        }
+        let reopened = parse_html(&html).unwrap();
+        assert_eq!(reopened.blocks, document.blocks);
+        assert_eq!(reopened.list_paragraphs, document.list_paragraphs);
+    }
+
+    #[test]
+    fn empty_list_parent_does_not_detach_its_markdown_children() {
+        let document =
+            parse_html("<ul><li><ul><li>child</li></ul></li><li>next</li></ul>").unwrap();
+        let markdown = to_markdown_blocks(
+            document.blocks.iter().enumerate(),
+            &[],
+            &[],
+            &document.list_paragraphs,
+        );
+        assert!(markdown.starts_with("- \n  - child"), "{markdown:?}");
+    }
+
+    #[test]
+    fn canonical_orphan_items_restore_containers_and_adjacent_numbering_without_mutating_content() {
+        let source = r#"<section><li data-hcd-editor-kind="list_item" data-hcd-editor-level="1" data-hcd-list-start="4"><p>parent</p><ul><li>child</li></ul></li></section><section><li data-hcd-editor-kind="list_item" data-hcd-editor-level="1" data-hcd-list-start="5">next</li><p>break</p><li data-hcd-editor-kind="list_item" data-hcd-editor-level="1" data-hcd-list-start="10">restart</li></section>"#;
+        let normalized = normalize_canonical_lists(source);
+        assert_eq!(normalized, normalize_canonical_lists(&normalized));
+        let doc = parse_html(&normalized).unwrap();
+        assert_eq!(doc.list_paragraphs[&0].depth, 0);
+        assert_eq!(doc.list_paragraphs[&1].depth, 1);
+        assert_eq!(
+            doc.list_paragraphs[&0].list_id,
+            doc.list_paragraphs[&2].list_id
+        );
+        assert_ne!(
+            doc.list_paragraphs[&0].list_id,
+            doc.list_paragraphs[&4].list_id
+        );
+        assert_eq!(doc.list_paragraphs[&2].ordinal, 5);
+        assert_eq!(doc.list_paragraphs[&4].ordinal, 10);
+        let literal = r#"<script>const x='<li data-hcd-editor-kind="list_item">literal</li>'</script><style>x::after{content:'<li>'}</style><ul><li>native</li></ul><!-- <li data-hcd-editor-kind="list_item">comment</li> -->"#;
+        assert_eq!(normalize_canonical_lists(literal), literal);
+    }
+
+    #[test]
+    fn editor_nested_quote_paragraphs_keep_markdown_and_docx_semantics() {
+        let document = parse_html(
+            r#"<p>Before</p><blockquote><p>First<br>continued</p><p>Second</p><blockquote><p>Nested</p></blockquote>Tail</blockquote><p>After</p>"#,
+        ).unwrap();
+        assert_eq!(
+            document.blocks,
+            vec![
+                HtmlBlock::Paragraph("Before".into()),
+                HtmlBlock::Quote("First\ncontinued".into()),
+                HtmlBlock::Quote("Second".into()),
+                HtmlBlock::Quote("Nested".into()),
+                HtmlBlock::Quote("Tail".into()),
+                HtmlBlock::Paragraph("After".into()),
+            ]
+        );
+        let markdown = to_markdown_blocks_styled(
+            document.blocks.iter().enumerate(),
+            &document.links,
+            &document.table_links,
+            &document.list_paragraphs,
+            &document.styles,
+            &document.table_styles,
+        );
+        assert!(markdown.contains("> First  \n> continued"));
+        assert!(markdown.contains("> Second"));
+        assert!(markdown.ends_with("After\n\n"));
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("quote.docx");
+        export_docx(&document, &output).unwrap();
+        validate_output(&output, "docx").unwrap();
+        let package = oxml::OxmlPackage::open(output.to_str().unwrap(), false).unwrap();
+        let xml = package.read_part_xml("word/document.xml").unwrap();
+        assert_eq!(xml.matches("w:val=\"Quote\"").count(), 4);
+    }
+
+    #[test]
     fn semantic_pdf_preserves_code_panel_and_safe_link_annotation() {
         let temp = tempfile::tempdir().unwrap();
         let output = temp.path().join("features.pdf");
@@ -3616,10 +4723,13 @@ mod tests {
                 target: "https://example.com".to_string(),
             }]
         );
-        let markdown = to_markdown_blocks(
+        let markdown = to_markdown_blocks_styled(
             document.blocks.iter().enumerate(),
             &document.links,
             &document.table_links,
+            &document.list_paragraphs,
+            &document.styles,
+            &document.table_styles,
         );
         assert!(markdown.contains("[site](https://example.com)"));
         assert!(markdown.contains("[123](https://example.com/value)"));

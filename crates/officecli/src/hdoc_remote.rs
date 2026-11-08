@@ -1,5 +1,8 @@
 //! Optional single-instance PostgreSQL/S3 durability for the HCD core API.
 //! Objects are uploaded before a PostgreSQL compare-and-swap advances head.
+use crate::hdoc_collaboration::{
+    Metadata as CollaborationMetadata, MigrationReceipt, Protocol as CollaborationProtocol,
+};
 use anyhow::{anyhow, Context, Result};
 use hcd_core::{hash_bytes, hash_file, Bundle};
 use object_store::aws::AmazonS3Builder;
@@ -22,6 +25,20 @@ pub enum CollaborationPut {
     Saved,
     EpochChanged,
     StateChanged,
+    ModelRequired,
+}
+
+pub enum MigrationResult {
+    Saved(CollaborationMetadata, bool),
+    SourceChanged,
+    HeadChanged,
+    SessionChanged,
+}
+fn collaboration_metadata_row(row: &tokio_postgres::Row) -> Result<CollaborationMetadata> {
+    let protocol: String = row.get(1);
+    let receipt: Option<String> = row.get(2);
+    let value = serde_json::json!({"epoch":row.get::<_,i64>(0),"protocol":protocol,"nodeEdits":row.get::<_,Option<i32>>(3),"migration":receipt.map(|value|serde_json::from_str::<MigrationReceipt>(&value)).transpose()?});
+    Ok(CollaborationMetadata::decode(&value.to_string())?)
 }
 
 impl RemoteStore {
@@ -55,7 +72,10 @@ impl RemoteStore {
             CREATE TABLE IF NOT EXISTS hcd_collaboration_recovery (
             document_id text NOT NULL, recovery_id text NOT NULL, epoch bigint NOT NULL,
             state bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
-            PRIMARY KEY(document_id,recovery_id));")
+            PRIMARY KEY(document_id,recovery_id));
+            ALTER TABLE hcd_collaboration_meta ADD COLUMN IF NOT EXISTS protocol text NOT NULL DEFAULT 'hcd-default/1';
+            ALTER TABLE hcd_collaboration_meta ADD COLUMN IF NOT EXISTS migration_receipt text;
+            ALTER TABLE hcd_collaboration_meta ADD COLUMN IF NOT EXISTS node_edits integer;")
             .await.context("initialize HCD PostgreSQL schema")?;
         let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
         if let Some(endpoint) = endpoint {
@@ -421,6 +441,7 @@ impl RemoteStore {
         epoch: u64,
         expected_hash: &str,
         bytes: &[u8],
+        node_edits: Option<u32>,
     ) -> Result<CollaborationPut> {
         let mut db = self.db.lock().await;
         let transaction = db.transaction().await?;
@@ -428,16 +449,18 @@ impl RemoteStore {
             "INSERT INTO hcd_collaboration_meta(document_id,epoch) VALUES($1,0) ON CONFLICT DO NOTHING",
             &[&id],
         ).await?;
-        let current = transaction
-            .query_opt(
-                "SELECT epoch FROM hcd_collaboration_meta WHERE document_id=$1 FOR UPDATE",
-                &[&id],
-            )
-            .await?
-            .map(|row| row.get::<_, i64>(0) as u64)
-            .unwrap_or(0);
-        if current != epoch {
+        let current = transaction.query_one("SELECT epoch,node_edits FROM hcd_collaboration_meta WHERE document_id=$1 FOR UPDATE", &[&id]).await?;
+        if current.get::<_, i64>(0) as u64 != epoch {
             return Ok(CollaborationPut::EpochChanged);
+        }
+        let model = current.get::<_, Option<i32>>(1);
+        if node_edits.is_some_and(|version| !matches!(version, 1..=7))
+            || model.is_some_and(|version| {
+                !(1..=7).contains(&version)
+                    || node_edits.is_none_or(|requested| requested < version as u32)
+            })
+        {
+            return Ok(CollaborationPut::ModelRequired);
         }
         let previous = transaction
             .query_opt(
@@ -453,6 +476,15 @@ impl RemoteStore {
         if actual_hash != expected_hash && actual_hash != hash_bytes(bytes) {
             return Ok(CollaborationPut::StateChanged);
         }
+        if let Some(version) = node_edits {
+            let version = version as i32;
+            transaction
+                .execute(
+                    "UPDATE hcd_collaboration_meta SET node_edits=$2 WHERE document_id=$1",
+                    &[&id, &version],
+                )
+                .await?;
+        }
         transaction
             .execute(
                 "INSERT INTO hcd_collaboration(document_id,state) VALUES($1,$2)
@@ -464,17 +496,87 @@ impl RemoteStore {
         Ok(CollaborationPut::Saved)
     }
 
-    pub async fn collaboration_epoch(&self, id: &str) -> Result<u64> {
-        let row = self
-            .db
-            .lock()
-            .await
+    pub async fn collaboration_metadata(&self, id: &str) -> Result<CollaborationMetadata> {
+        let row=self.db.lock().await.query_opt("SELECT epoch,protocol,migration_receipt,node_edits FROM hcd_collaboration_meta WHERE document_id=$1",&[&id]).await?;
+        row.as_ref()
+            .map(collaboration_metadata_row)
+            .transpose()
+            .map(|value| value.unwrap_or_default())
+    }
+
+    pub async fn collaboration_migrate(
+        &self,
+        id: &str,
+        request: &MigrationReceipt,
+        bytes: &[u8],
+    ) -> Result<MigrationResult> {
+        let mut db = self.db.lock().await;
+        let transaction = db.transaction().await?;
+        transaction.execute("INSERT INTO hcd_collaboration_meta(document_id,epoch) VALUES($1,0) ON CONFLICT DO NOTHING",&[&id]).await?;
+        let row=transaction.query_one("SELECT epoch,protocol,migration_receipt,node_edits FROM hcd_collaboration_meta WHERE document_id=$1 FOR UPDATE",&[&id]).await?;
+        let current = collaboration_metadata_row(&row)?;
+        if let Some(receipt) = &current.migration {
+            if receipt.id == request.id {
+                return Ok(if receipt == request {
+                    MigrationResult::Saved(current, true)
+                } else {
+                    MigrationResult::SessionChanged
+                });
+            }
+        }
+        if current.epoch != request.from_epoch
+            || current.protocol != CollaborationProtocol::Default1
+        {
+            return Ok(MigrationResult::SessionChanged);
+        }
+        let head = transaction
             .query_opt(
-                "SELECT epoch FROM hcd_collaboration_meta WHERE document_id=$1",
+                "SELECT head_revision FROM hcd_documents WHERE document_id=$1 FOR UPDATE",
                 &[&id],
             )
-            .await?;
-        Ok(row.map(|value| value.get::<_, i64>(0) as u64).unwrap_or(0))
+            .await?
+            .ok_or_else(|| anyhow!("migration document not found"))?;
+        if head.get::<_, i64>(0) != i64::try_from(request.base_revision)? {
+            return Ok(MigrationResult::HeadChanged);
+        }
+        let previous = transaction
+            .query_opt(
+                "SELECT state FROM hcd_collaboration WHERE document_id=$1",
+                &[&id],
+            )
+            .await?
+            .map(|row| row.get::<_, Vec<u8>>(0));
+        let actual = previous
+            .as_ref()
+            .map(|bytes| hash_bytes(bytes))
+            .unwrap_or_else(|| "none".into());
+        if actual != request.source_hash {
+            return Ok(MigrationResult::SourceChanged);
+        }
+        let next = CollaborationMetadata {
+            epoch: current
+                .epoch
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("collaboration epoch limit reached"))?,
+            protocol: CollaborationProtocol::Structure3,
+            node_edits: current.node_edits,
+            migration: Some(request.clone()),
+        };
+        if let Some(previous) = previous {
+            let recovery_id = format!(
+                "e{}-{}-{}",
+                current.epoch,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis(),
+                uuid::Uuid::new_v4().simple()
+            );
+            transaction.execute("INSERT INTO hcd_collaboration_recovery(document_id,recovery_id,epoch,state) VALUES($1,$2,$3,$4)",&[&id,&recovery_id,&i64::try_from(current.epoch)?,&previous]).await?;
+        }
+        transaction.execute("INSERT INTO hcd_collaboration(document_id,state) VALUES($1,$2) ON CONFLICT(document_id) DO UPDATE SET state=EXCLUDED.state,updated_at=now()",&[&id,&bytes]).await?;
+        transaction.execute("UPDATE hcd_collaboration_meta SET epoch=$2,protocol=$3,migration_receipt=$4 WHERE document_id=$1",&[&id,&i64::try_from(next.epoch)?,&next.protocol.name(),&serde_json::to_string(request)?]).await?;
+        transaction.commit().await?;
+        Ok(MigrationResult::Saved(next, false))
     }
 
     pub async fn collaboration_reset(&self, id: &str) -> Result<u64> {
@@ -483,7 +585,7 @@ impl RemoteStore {
         let row = transaction
             .query_one(
                 "INSERT INTO hcd_collaboration_meta(document_id,epoch) VALUES($1,1)
-             ON CONFLICT(document_id) DO UPDATE SET epoch=hcd_collaboration_meta.epoch+1
+             ON CONFLICT(document_id) DO UPDATE SET epoch=hcd_collaboration_meta.epoch+1,migration_receipt=NULL
              RETURNING epoch",
                 &[&id],
             )

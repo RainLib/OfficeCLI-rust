@@ -157,6 +157,19 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             "manifest.json",
         ));
     }
+    if manifest
+        .capabilities
+        .word_layout_edits
+        .is_some_and(|version| ![1, 2, 3].contains(&version))
+        || manifest.capabilities.word_layout_edits.is_some()
+            && (manifest.source.format != "docx" || manifest.profile != "semantic-flow")
+    {
+        issues.push(issue(
+            "WORD_LAYOUT_EDITS_MODEL_INVALID",
+            "unsupported Word layout edit model".into(),
+            "manifest.json",
+        ));
+    }
     validate_manifest_fields(&manifest, &mut issues);
     validate_revision_chain(bundle, &manifest, &mut issues);
 
@@ -187,6 +200,22 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
         .asset_index_href_for_revision(manifest.revision)
         .unwrap_or_else(|_| "assets/index.json".to_string());
     let asset_hashes = validate_assets(bundle, &asset_index_href, &mut issues);
+    let flow_layout = match crate::read_flow_document_layout(bundle, &manifest) {
+        Ok(value) => value,
+        Err(error) => {
+            issues.push(issue(
+                "FLOW_LAYOUT_INVALID",
+                error.to_string(),
+                &asset_index_href,
+            ));
+            None
+        }
+    };
+    let mut region_graph = flow_layout
+        .as_ref()
+        .filter(|layout| layout.schema_version == crate::FLOW_REGION_LAYOUT_SCHEMA)
+        .map(crate::structure::flow_regions::FlowGraphValidator::new)
+        .transpose()?;
     let annotations = load_annotations(bundle, &manifest, &mut issues);
     let mut annotation_targets: HashMap<[u8; 16], Option<usize>> = annotations
         .as_ref()
@@ -201,6 +230,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
     let mut node_ids = NodeIdTracker::new()?;
     let mut table_fragments = HcdTableFragmentTracker::default();
     let mut textual_range_end = 0u64;
+    let mut word_fields = crate::flow_layout::FlowFieldValidator::default();
     for page_number in 0..manifest.index_page_count {
         let page = match bundle.read_index_page(&manifest, page_number) {
             Ok(page) => page,
@@ -320,6 +350,29 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                 ));
             }
             let html_hash = hash_bytes(html.as_bytes());
+            if region_graph.is_none() {
+                if let Err(error) = crate::structure::flow_regions::reject_unscoped_metadata(&html)
+                {
+                    issues.push(issue(
+                        "FLOW_REGION_MODEL_REQUIRED",
+                        error.to_string(),
+                        &descriptor.html_href,
+                    ));
+                }
+            }
+            match crate::extensions::html_has_inline_containers(&html) {
+                Ok(true) if manifest.capabilities.extension_nodes != Some(3) => issues.push(issue(
+                    "INLINE_CONTAINER_MODEL_MISSING",
+                    "editable inline content requires extension envelope model 3".into(),
+                    &descriptor.html_href,
+                )),
+                Err(error) => issues.push(issue(
+                    "INLINE_CONTAINER_MODEL_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                )),
+                _ => (),
+            }
             if html_hash != descriptor.html_hash {
                 issues.push(issue(
                     "CHUNK_HASH_MISMATCH",
@@ -419,6 +472,28 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                 .map_err(HcdError::from)
             {
                 Ok(source_map) => {
+                    if let Some(graph) = &mut region_graph {
+                        if let Err(error) =
+                            graph.scan(&html, &source_map, &descriptor, &manifest.document_id)
+                        {
+                            issues.push(issue(
+                                "FLOW_REGION_GRAPH_INVALID",
+                                error.to_string(),
+                                &descriptor.html_href,
+                            ));
+                        }
+                    }
+                    if let Err(error) = word_fields.scan(
+                        &html,
+                        &source_map,
+                        matches!(manifest.capabilities.flow_layout, Some(1 | 2)),
+                    ) {
+                        issues.push(issue(
+                            "FLOW_WORD_FIELD_INVALID",
+                            error.to_string(),
+                            &descriptor.html_href,
+                        ));
+                    }
                     if source_map.schema_version != manifest.schema_version {
                         issues.push(issue(
                             "MAP_SCHEMA_VERSION",
@@ -537,6 +612,22 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                 )),
             }
         }
+    }
+    if let Some(graph) = region_graph {
+        if let Err(error) = graph.finish(flow_layout.as_ref().unwrap()) {
+            issues.push(issue(
+                "FLOW_REGION_GRAPH_INVALID",
+                error.to_string(),
+                "chunks/sha256",
+            ));
+        }
+    }
+    if let Err(error) = word_fields.finish() {
+        issues.push(issue(
+            "FLOW_WORD_FIELD_INVALID",
+            error.to_string(),
+            "chunks/sha256",
+        ));
     }
     if expected_sequence != manifest.chunk_count {
         issues.push(issue(
@@ -764,6 +855,7 @@ fn validate_revision_chain(
                 || !record.dirty_chunk_ids.is_empty()
                 || !record.dirty_source_parts.is_empty()
                 || record.layout_upgrade
+                || record.word_layout_change
                 || record.index_prefix != "indexes/rev-00000000000000000000"
             {
                 issues.push(issue(
@@ -775,6 +867,59 @@ fn validate_revision_chain(
             }
         } else {
             validate_patch_revision(&record, previous.as_ref(), &mut patch_ids, &path, issues);
+            if record.word_layout_change {
+                if !matches!(manifest.capabilities.word_layout_edits, Some(1..=3)) {
+                    issues.push(issue(
+                        "WORD_LAYOUT_EDITS_MODEL_MISSING",
+                        "Word layout history requires a supported model".into(),
+                        &path,
+                    ));
+                } else if let Some(previous) = previous.as_ref() {
+                    if let Err(error) = crate::structure::flow_regions::validate_word_layout_history(
+                        bundle, manifest, previous, &record,
+                    ) {
+                        issues.push(issue(
+                            "WORD_LAYOUT_HISTORY_INVALID",
+                            error.to_string(),
+                            &path,
+                        ));
+                    }
+                }
+            }
+            if record
+                .patch_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("word-story-unlink-"))
+            {
+                let valid_id = record
+                    .patch_id
+                    .as_deref()
+                    .and_then(|id| id.strip_prefix("word-story-unlink-"))
+                    .is_some_and(|id| {
+                        id.len() == 32
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    });
+                if manifest.capabilities.word_layout_edits != Some(3)
+                    || !valid_id
+                    || !record.structural_change
+                    || record.word_layout_change
+                    || record.patch_base_revision != Some(revision - 1)
+                    || crate::structure::flow_regions::validate_unlink_revision_content(
+                        bundle,
+                        revision - 1,
+                        revision,
+                    )
+                    .is_err()
+                {
+                    issues.push(issue(
+                        "WORD_STORY_UNLINK_HISTORY_INVALID",
+                        "invalid independent story revision".into(),
+                        &path,
+                    ));
+                }
+            }
             if record.layout_upgrade {
                 if manifest.source.format != "pdf" || manifest.profile != "fixed-layout" {
                     issues.push(issue(
@@ -915,7 +1060,24 @@ fn validate_patch_revision(
         .patch_id
         .as_deref()
         .is_some_and(|id| id.starts_with("restore-"));
-    let content_changed = !record.dirty_node_ids.is_empty();
+    // A structural change can affect an empty paragraph or region wrapper
+    // without changing any canonical text node. Do not invent dirty text IDs.
+    let content_changed = !record.dirty_node_ids.is_empty()
+        || record.structural_change && !restore && !record.word_layout_change;
+    if record.word_layout_change
+        && (restore
+            || record.layout_upgrade
+            || !record.structural_change
+            || !record.dirty_node_ids.is_empty()
+            || !record.dirty_chunk_ids.is_empty()
+            || record.dirty_source_parts != ["word/document.xml"])
+    {
+        issues.push(issue(
+            "WORD_LAYOUT_DIRTY_SET_INVALID",
+            "Word layout change must retain chunks and only mark the document source".into(),
+            path,
+        ));
+    }
     if record.layout_upgrade
         && (restore
             || record.structural_change
@@ -931,6 +1093,7 @@ fn validate_patch_revision(
     }
     if !restore
         && !record.layout_upgrade
+        && !record.word_layout_change
         && (content_changed == record.dirty_chunk_ids.is_empty()
             || content_changed == record.dirty_source_parts.is_empty())
     {
@@ -992,7 +1155,10 @@ fn validate_patch_revision(
                 ));
             }
         }
-        if !presentation_changed && record.root_hash != previous.root_hash {
+        if !presentation_changed
+            && !record.word_layout_change
+            && record.root_hash != previous.root_hash
+        {
             issues.push(issue(
                 "ANNOTATION_REVISION_CHANGED_BODY_ROOT",
                 "annotation-only revision changed the body root hash".to_string(),
@@ -1624,7 +1790,7 @@ fn validate_assets(
     known_hashes
 }
 
-struct NodeIdTracker {
+pub(crate) struct NodeIdTracker {
     _scratch: tempfile::TempDir,
     pending: Vec<[u8; 16]>,
     runs: Vec<PathBuf>,
@@ -1632,7 +1798,7 @@ struct NodeIdTracker {
 }
 
 impl NodeIdTracker {
-    fn new() -> Result<Self, HcdError> {
+    pub(crate) fn new() -> Result<Self, HcdError> {
         Ok(Self {
             _scratch: tempfile::tempdir()?,
             pending: Vec::with_capacity(NODE_ID_RUN_CAPACITY),
@@ -1641,7 +1807,7 @@ impl NodeIdTracker {
         })
     }
 
-    fn push(&mut self, node_id: [u8; 16]) -> Result<(), HcdError> {
+    pub(crate) fn push(&mut self, node_id: [u8; 16]) -> Result<(), HcdError> {
         self.pending.push(node_id);
         if self.pending.len() == NODE_ID_RUN_CAPACITY {
             self.flush_run()?;
@@ -1649,7 +1815,7 @@ impl NodeIdTracker {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Option<[u8; 16]>, HcdError> {
+    pub(crate) fn finish(mut self) -> Result<Option<[u8; 16]>, HcdError> {
         self.flush_run()?;
         if self.duplicate.is_some() || self.runs.len() < 2 {
             return Ok(self.duplicate);
@@ -1720,7 +1886,7 @@ fn read_node_id(reader: &mut impl Read) -> Result<Option<[u8; 16]>, HcdError> {
     Ok(Some(node_id))
 }
 
-fn decode_node_id(value: &str) -> Option<[u8; 16]> {
+pub(crate) fn decode_node_id(value: &str) -> Option<[u8; 16]> {
     let hex = value.strip_prefix("n_")?;
     if hex.len() != 32
         || !hex
@@ -1922,6 +2088,45 @@ fn validate_html_element<B: std::io::BufRead>(
             "HTML element {name} is not allowed by hcd/1"
         )));
     }
+    let extension = event
+        .try_get_attribute("data-hcd-extension")
+        .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+        .map(|attribute| {
+            attribute
+                .decode_and_unescape_value(reader.decoder())
+                .map(|value| value.into_owned())
+                .map_err(|error| HcdError::InvalidBundle(error.to_string()))
+        })
+        .transpose()?
+        .map(|raw| serde_json::from_str::<crate::ExtensionNode>(&raw))
+        .transpose()?;
+    if let Some(node) = &extension {
+        node.validate()?;
+    }
+    let inline_flag = event
+        .try_get_attribute("data-hcd-inline-container")
+        .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+        .map(|attribute| {
+            attribute
+                .decode_and_unescape_value(reader.decoder())
+                .map(|value| value.into_owned())
+                .map_err(|error| HcdError::InvalidBundle(error.to_string()))
+        })
+        .transpose()?;
+    if (inline_flag.is_some()
+        || extension
+            .as_ref()
+            .is_some_and(|node| node.envelope_version() == 3))
+        && (name != "span"
+            || inline_flag.as_deref() != Some("true")
+            || extension
+                .as_ref()
+                .is_none_or(|node| node.envelope_version() != 3))
+    {
+        return Err(HcdError::InvalidBundle(
+            "invalid editable inline container HTML".into(),
+        ));
+    }
     for attribute in event.attributes().with_checks(true) {
         let attribute = attribute
             .map_err(|error| HcdError::InvalidBundle(format!("invalid HTML attribute: {error}")))?;
@@ -1963,6 +2168,25 @@ fn validate_html_element<B: std::io::BufRead>(
                     HcdError::InvalidBundle(format!("invalid inline style attribute: {error}"))
                 })?;
             crate::html::validate_inline_style(&value)?;
+        }
+        if normalized_key == "data-hcd-custom-mark" || normalized_key == "data-hcd-custom-marks" {
+            let value = attribute
+                .decode_and_unescape_value(reader.decoder())
+                .map_err(|error| {
+                    HcdError::InvalidBundle(format!("invalid custom mark encoding: {error}"))
+                })?;
+            if value.len() > 8 * 65536 {
+                return Err(HcdError::ResourceLimit(
+                    "custom mark HTML payload exceeds limit".into(),
+                ));
+            }
+            if normalized_key == "data-hcd-custom-mark" {
+                serde_json::from_str::<crate::CustomTextMark>(&value)?.validate()?
+            } else {
+                crate::validate_custom_marks(&serde_json::from_str::<Vec<crate::CustomTextMark>>(
+                    &value,
+                )?)?
+            }
         }
         if matches!(normalized_key.as_str(), "loading" | "decoding") {
             if !name.eq_ignore_ascii_case("img") {
@@ -2193,6 +2417,29 @@ fn issue(code: &str, message: String, path: &str) -> ValidationIssue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_container_html_requires_a_matching_safe_envelope_and_span_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("inline.html");
+        let node = serde_json::json!({"schemaVersion":"hcd.extension/3","instanceId":format!("x_{:032x}",1),"type":"example.inline","version":77,"display":"inline","contentModel":"inline","data":{},"fallback":{"text":"Label"}});
+        let raw = node.to_string().replace('"', "&quot;");
+        for html in [
+            "<p><span data-hcd-inline-container='true'>Text</span></p>".to_owned(),
+            format!("<p><span data-hcd-extension='{raw}'>Text</span></p>"),
+            format!("<div data-hcd-inline-container='true' data-hcd-extension='{raw}'>Text</div>"),
+        ] {
+            std::fs::write(&path, html).unwrap();
+            assert!(validate_html_fragment(&path, &HashSet::new()).is_err());
+        }
+        std::fs::write(&path, format!("<p><span data-hcd-inline-container='true' data-hcd-extension='{raw}'>Text</span></p>")).unwrap();
+        assert!(validate_html_fragment(&path, &HashSet::new()).is_ok());
+        assert!(!crate::extensions::html_has_inline_containers(&format!(
+            "<p>{}</p>",
+            raw.replace('<', "&lt;")
+        ))
+        .unwrap());
+    }
 
     #[test]
     fn dangerous_html_elements_attributes_and_urls_are_rejected() {

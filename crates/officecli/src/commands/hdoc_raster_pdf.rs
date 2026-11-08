@@ -1,6 +1,8 @@
 //! Memory-bounded visual PDF reconstruction from HCD's final page rasters.
 //! JPEG streams stay compressed in the PDF object graph; PNG pages are decoded
-//! and compressed one at a time. This path deliberately reports VISUAL fidelity.
+//! and compressed one at a time. Canonical text is retained as an invisible,
+//! searchable layer. This path still reports VISUAL fidelity.
+mod text_layer;
 use handler_common::HandlerError;
 use hcd_core::{hash_file, Bundle, HcdManifest};
 use image::ImageDecoder;
@@ -120,12 +122,25 @@ fn raster_page_metadata(html: &str) -> Result<Option<(f32, f32, String)>, Handle
     }
 }
 
+pub(super) struct RasterExport {
+    pub pages: usize,
+    pub text_nodes: usize,
+}
+
+struct RasterPage {
+    id: lopdf::ObjectId,
+    source_page: u32,
+    rotation: u16,
+    width: f32,
+    height: f32,
+}
+
 pub(super) fn export(
     bundle: &Bundle,
     manifest: &HcdManifest,
     revision: u64,
     output: &Path,
-) -> Result<usize, HandlerError> {
+) -> Result<RasterExport, HandlerError> {
     let assets: HashMap<String, _> = bundle
         .read_asset_index_for_revision(revision)
         .map_err(error)?
@@ -134,17 +149,40 @@ pub(super) fn export(
         .collect();
     let mut document = Document::with_version("1.5");
     let pages_id = document.new_object_id();
+    document.set_object(
+        pages_id,
+        dictionary! {"Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0},
+    );
     let mut kids = Vec::new();
     let mut count = 0usize;
+    let mut text_nodes = 0usize;
+    let mut text_layer = text_layer::TextLayer::default();
+    let mut active: Option<RasterPage> = None;
     for page_number in 0..manifest.index_page_count {
         let page = bundle
             .read_index_page(manifest, page_number)
             .map_err(error)?;
         for descriptor in &page.chunks {
             let html = bundle.read_chunk_verified(descriptor).map_err(error)?;
+            let fragment = text_layer::parse(&html)?;
             let Some((width, height, hash)) = raster_page_metadata(&html)? else {
+                let active = active
+                    .as_ref()
+                    .ok_or_else(|| error("orphan PDF continuation"))?;
+                if !descriptor.continuation
+                    || fragment.page != active.source_page
+                    || fragment.rotation != active.rotation
+                    || (fragment.width - active.width).abs() > 0.01
+                    || (fragment.height - active.height).abs() > 0.01
+                {
+                    return Err(error("PDF continuation does not match its page"));
+                }
+                text_nodes += text_layer.append(&mut document, active.id, &fragment)?;
                 continue;
             };
+            if descriptor.continuation {
+                return Err(error("PDF continuation repeats a page raster"));
+            }
             if !width.is_finite()
                 || !height.is_finite()
                 || width <= 0.0
@@ -216,6 +254,14 @@ pub(super) fn export(
                 "Contents" => content_id,
             }));
             kids.push(Object::Reference(page_id));
+            text_nodes += text_layer.append(&mut document, page_id, &fragment)?;
+            active = Some(RasterPage {
+                id: page_id,
+                source_page: fragment.page,
+                rotation: fragment.rotation,
+                width,
+                height,
+            });
             count += 1;
         }
     }
@@ -237,7 +283,10 @@ pub(super) fn export(
     let temporary = output.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     document.save(&temporary).map_err(error)?;
     std::fs::rename(&temporary, output).map_err(error)?;
-    Ok(count)
+    Ok(RasterExport {
+        pages: count,
+        text_nodes,
+    })
 }
 
 #[cfg(test)]
@@ -301,6 +350,23 @@ mod tests {
         let output = temp.path().join("current.pdf");
         export(&bundle, &manifest, 1, &output).unwrap();
         let doc = Document::load(output).unwrap();
+        let expected_text = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|node| node.text)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>();
+        let extracted = doc
+            .extract_text(&doc.get_pages().keys().copied().collect::<Vec<_>>())
+            .unwrap();
+        for text in expected_text {
+            assert!(
+                extracted.contains(&text),
+                "{text:?} missing from {extracted:?}"
+            );
+        }
+        assert!(extracted.contains("Saved raster text"));
         let page = doc.get_pages()[&edited_page];
         let resources = doc
             .get_dictionary(page)
@@ -341,5 +407,49 @@ mod tests {
         }];
         hcd_core::apply_patch(&bundle, &patch, 1).unwrap();
         assert!(!can_export(&bundle, &bundle.manifest().unwrap()).unwrap());
+    }
+
+    #[test]
+    fn continuations_retain_text_once_and_share_fonts_without_adding_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/hdoc/pdf-raster-quality.pdf");
+        let root = temp.path().join("bundle");
+        let mut options = hcd_formats::ImportOptions::new("search-continuation");
+        options.chunk_blocks = 1;
+        hcd_formats::import_document(&source, &root, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        let entries = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries;
+        assert!(manifest.chunk_count > 1);
+        let output = temp.path().join("search.pdf");
+        let exported = export(&bundle, &manifest, 0, &output).unwrap();
+        let original = Document::load(source).unwrap();
+        let doc = Document::load(output).unwrap();
+        assert_eq!(exported.pages, original.get_pages().len());
+        assert_eq!(doc.get_pages().len(), original.get_pages().len());
+        assert_eq!(
+            exported.text_nodes,
+            entries
+                .iter()
+                .filter(|entry| !entry.text.trim().is_empty())
+                .count()
+        );
+        let actual = doc
+            .extract_text(&doc.get_pages().keys().copied().collect::<Vec<_>>())
+            .unwrap();
+        for entry in entries {
+            if !entry.text.trim().is_empty() {
+                assert_eq!(actual.matches(&entry.text).count(), 1, "{actual:?}");
+            }
+        }
+        assert!(doc
+            .objects
+            .values()
+            .any(|object| object.as_dict().is_ok_and(|font| font
+                .get(b"OfficeCLIInvisibleTextFont")
+                .is_ok_and(|value| value.as_bool().unwrap_or(false)))));
     }
 }

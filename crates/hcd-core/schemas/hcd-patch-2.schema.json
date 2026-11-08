@@ -8,7 +8,7 @@
   "properties": {
     "schemaVersion": { "const": "hcd-patch/2" },
     "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256, "not": { "pattern": "^restore-" } },
     "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
     "actor": {
       "type": "object",

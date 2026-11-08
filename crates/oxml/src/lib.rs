@@ -5,6 +5,7 @@ pub mod namespace;
 pub mod package;
 pub mod part;
 pub mod rels;
+pub mod semantic_lists;
 pub mod validate;
 pub mod xml_util;
 

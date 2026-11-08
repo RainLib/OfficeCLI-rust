@@ -2844,6 +2844,152 @@ fn part_asset_relationships(
     Ok(relationships)
 }
 
+/// Verify that an embedded image relationship in a source PPTX still resolves
+/// to the imported package part and bytes. Source file and revision identity
+/// must be checked separately by the caller.
+pub fn verify_source_picture_asset(
+    source: &Path,
+    slide_part: &str,
+    relationship_id: &str,
+    expected_part: &str,
+    expected_hash: &str,
+) -> Result<(), HcdError> {
+    let path = Path::new(slide_part);
+    let file = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| HcdError::InvalidBundle("invalid slide part".into()))?;
+    let rels = path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("_rels")
+        .join(format!("{file}.rels"));
+    let rels = rels
+        .to_str()
+        .ok_or_else(|| HcdError::InvalidBundle("invalid slide relationship path".into()))?;
+    let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let xml = archive
+        .read_control_part(rels, 16 * 1024 * 1024)
+        .map_err(package_error)?;
+    let target = checked_picture_relationship(&xml, relationship_id)?;
+    let part = resolve_part(slide_part, &target)?;
+    if part != expected_part {
+        return Err(HcdError::SourceMismatch(
+            "PPT picture relationship target changed".into(),
+        ));
+    }
+    let actual = archive
+        .with_part(&part, |mut input| {
+            hcd_core::hash_reader(&mut input)
+                .map_err(|e| PackageError::ReadPartError(e.to_string()))
+        })
+        .map_err(package_error)?;
+    if actual != expected_hash {
+        return Err(HcdError::SourceMismatch(
+            "PPT picture asset hash changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn checked_picture_relationship(xml: &[u8], wanted: &str) -> Result<String, HcdError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut root_seen = false;
+    let mut result = None;
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|e| HcdError::InvalidBundle(format!("relationship XML: {e}")))?;
+        budget.observe(&event, "picture relationships")?;
+        match &event {
+            Event::Start(node) if depth == 0 => {
+                if root_seen
+                    || node.name().as_ref() != b"Relationships"
+                    || strict_attribute(node, b"xmlns")?.as_deref()
+                        != Some("http://schemas.openxmlformats.org/package/2006/relationships")
+                {
+                    return Err(HcdError::Unsupported(
+                        "unsupported picture relationships namespace".into(),
+                    ));
+                }
+                root_seen = true;
+                depth += 1;
+            }
+            Event::Empty(node) if depth == 1 && node.name().as_ref() == b"Relationship" => {
+                if strict_attribute(node, b"xmlns")?.is_some() {
+                    return Err(HcdError::Unsupported(
+                        "picture relationship namespace rebinding".into(),
+                    ));
+                }
+                if strict_attribute(node, b"Id")?.as_deref() == Some(wanted) {
+                    if result.is_some() {
+                        return Err(HcdError::Unsupported(
+                            "duplicate picture relationship ID".into(),
+                        ));
+                    }
+                    let kind = strict_attribute(node, b"Type")?;
+                    let mode = strict_attribute(node, b"TargetMode")?;
+                    if kind.as_deref() != Some("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image") || mode.as_deref().is_some_and(|s| s != "Internal") {
+                        return Err(HcdError::Unsupported("picture relationship is not an internal image".into()));
+                    }
+                    result = Some(
+                        strict_attribute(node, b"Target")?
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| {
+                                HcdError::InvalidBundle(
+                                    "picture relationship target missing".into(),
+                                )
+                            })?,
+                    );
+                }
+            }
+            Event::Start(_) | Event::Empty(_) => {
+                return Err(HcdError::Unsupported(
+                    "unsupported picture relationship structure".into(),
+                ))
+            }
+            Event::End(_) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| HcdError::InvalidBundle("unbalanced relationships".into()))?;
+            }
+            Event::DocType(_) => return Err(HcdError::Unsupported("relationship XML DTD".into())),
+            Event::Eof => {
+                budget.finish("picture relationships")?;
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    if !root_seen || depth != 0 || wanted.is_empty() {
+        return Err(HcdError::InvalidBundle(
+            "incomplete picture relationships".into(),
+        ));
+    }
+    result.ok_or_else(|| HcdError::SourceMismatch("picture relationship missing".into()))
+}
+
+fn strict_attribute(element: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, HcdError> {
+    let mut result = None;
+    for attr in element.attributes().with_checks(true) {
+        let attr =
+            attr.map_err(|e| HcdError::InvalidBundle(format!("relationship attributes: {e}")))?;
+        if attr.key.as_ref() == name {
+            result = Some(
+                attr.unescape_value()
+                    .map_err(|e| HcdError::InvalidBundle(format!("relationship attribute: {e}")))?
+                    .into_owned(),
+            );
+        }
+    }
+    Ok(result)
+}
+
 fn part_chart_relationships(
     archive: &mut StreamingOxmlArchive,
     source_part: &str,
@@ -3014,8 +3160,24 @@ pub(crate) fn export_pptx(
     target: &Path,
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
-    let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
-    let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    let (manifest, revision, dirty_parts, dirty_node_ids) =
+        checked_export_state(bundle, source, options)?;
+    let picture_parts = crate::prepare_pptx_source_picture_geometry(bundle, source, revision)?;
+    let mut text_ids = dirty_node_ids.clone();
+    for page in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(&manifest, page)?.chunks {
+            for entry in bundle.read_map(&descriptor)?.entries {
+                if entry.source.node_kind == "image" {
+                    text_ids.remove(&entry.node_id);
+                }
+            }
+        }
+    }
+    let nodes = if text_ids.is_empty() {
+        Vec::new()
+    } else {
+        collect_dirty_nodes(bundle, &manifest, &dirty_parts, &text_ids)?
+    };
     let mut replacements: HashMap<String, BTreeMap<u64, String>> = HashMap::new();
     for node in nodes {
         replacements
@@ -3025,21 +3187,44 @@ pub(crate) fn export_pptx(
     }
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
+    for (part, xml) in picture_parts.parts {
+        let path = scratch
+            .path()
+            .join(format!("picture-{}", replacement_paths.len()));
+        std::fs::write(&path, xml)?;
+        replacement_paths.insert(part, path);
+    }
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
-    for (part, values) in &replacements {
-        let path = scratch.path().join(safe_temp_name(part));
+    for (index, (part, values)) in replacements.iter().enumerate() {
+        let path = scratch.path().join(format!("text-{index}"));
         let output = File::create(&path)?;
-        archive
-            .with_part(part, |input| {
-                rewrite_text_part(input, BufWriter::new(output), values)
-                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
-            })
-            .map_err(package_error)?;
+        if let Some(picture_path) = replacement_paths.get(part) {
+            let mut input = File::open(picture_path)?;
+            rewrite_text_part(&mut input, BufWriter::new(output), values)?;
+        } else {
+            archive
+                .with_part(part, |input| {
+                    rewrite_text_part(input, BufWriter::new(output), values)
+                        .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                })
+                .map_err(package_error)?;
+        }
         replacement_paths.insert(part.clone(), path);
     }
-    let changed =
-        StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "ppt/presentation.xml")
-            .map_err(package_error)?;
+    let mut additions = HashMap::new();
+    for (index, (part, bytes)) in picture_parts.assets.into_iter().enumerate() {
+        let path = scratch.path().join(format!("asset-{index}"));
+        std::fs::write(&path, bytes)?;
+        additions.insert(part, path);
+    }
+    let changed = StreamingOxmlRewriter::rewrite_with_additions(
+        source,
+        target,
+        &replacement_paths,
+        &additions,
+        "ppt/presentation.xml",
+    )
+    .map_err(package_error)?;
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if changed.is_empty() {
@@ -3049,7 +3234,8 @@ pub(crate) fn export_pptx(
         },
         preserved: vec![
             "unmodified OOXML entries copied as raw compressed payloads".to_string(),
-            "slide geometry, run formatting, media, charts, notes and animations".to_string(),
+            "unmodified slide geometry, run formatting, media, charts, notes and animations"
+                .to_string(),
         ],
         flattened: Vec::new(),
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
@@ -3201,18 +3387,6 @@ fn resolve_part(source_part: &str, target: &str) -> Result<String, HcdError> {
     Ok(output.to_string_lossy().replace('\\', "/"))
 }
 
-fn safe_temp_name(part: &str) -> String {
-    part.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 fn package_error(error: PackageError) -> HcdError {
     match error {
         PackageError::ResourceLimit(message) => HcdError::ResourceLimit(message),
@@ -3230,6 +3404,448 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn source_picture_replacement_keeps_shared_original_and_updates_target_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let initial = temp.path().join("initial.pptx");
+        let source = temp.path().join("shared.pptx");
+        create_styled_fixture(&initial);
+        let mut input = zip::ZipArchive::new(File::open(initial).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        for index in 0..input.len() {
+            let mut part = input.by_index(index).unwrap();
+            let name = part.name().to_string();
+            let mut bytes = Vec::new();
+            part.read_to_end(&mut bytes).unwrap();
+            if name == "ppt/slides/slide2.xml" {
+                let slide = String::from_utf8(bytes).unwrap();
+                let start = slide.find("<p:pic>").unwrap();
+                let end = slide.find("</p:pic>").unwrap() + "</p:pic>".len();
+                let copy = slide[start..end].replace("id=\"4\"", "id=\"5\"");
+                bytes = format!("{}{}{}", &slide[..end], copy, &slide[end..]).into_bytes();
+            }
+            output
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output.finish().unwrap();
+        let path = temp.path().join("bundle");
+        let manifest = import_pptx(
+            &source,
+            &path,
+            &ImportOptions::new("shared-picture"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(path).unwrap();
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        let descriptor = &page.chunks[0];
+        let map = bundle.read_map(descriptor).unwrap();
+        let target = map
+            .entries
+            .iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("/picture[@id=4]"))
+            .unwrap();
+        let other = map
+            .entries
+            .iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("/picture[@id=5]"))
+            .unwrap();
+        let html = bundle.read_chunk_verified(descriptor).unwrap();
+        let images = hcd_core::extract_html_image_nodes(&html).unwrap();
+        let image = &images[&target.node_id];
+        let replacement_bytes = include_bytes!("../testdata/replacement.png");
+        let asset = bundle
+            .stage_asset_from_reader("png", &mut std::io::Cursor::new(replacement_bytes))
+            .unwrap();
+        let mut geometry = image.geometry.clone().unwrap();
+        geometry.width += 127000.0;
+        hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_3.into(),
+                document_id: manifest.document_id,
+                patch_id: "replace-shared".into(),
+                base_revision: 0,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![
+                    PatchOperation::ImageReplace {
+                        node_id: target.node_id.clone(),
+                        asset_hash: asset.hash.clone(),
+                        precondition: hcd_core::VisualPrecondition {
+                            visual_hash: image.visual_hash.clone(),
+                        },
+                    },
+                    PatchOperation::ImageGeometry {
+                        node_id: target.node_id.clone(),
+                        geometry,
+                        precondition: hcd_core::VisualPrecondition {
+                            visual_hash: image.visual_hash.clone(),
+                        },
+                    },
+                ],
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::source_export_edit_blocker_with_source(&bundle, &source, 1).unwrap(),
+            None
+        );
+        let exported = temp.path().join("result.pptx");
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, "ppt/slides/slide2.xml");
+        assert_eq!(slide.matches("r:embed=\"rIdImage1\"").count(), 1);
+        assert_eq!(slide.matches("r:embed=\"hcd_").count(), 1);
+        assert!(slide.contains("cx=\"1955800\" cy=\"1371600\""));
+        let rels = read_zip_entry(&exported, "ppt/slides/_rels/slide2.xml.rels");
+        assert!(rels.contains("rIdImage1"));
+        assert!(rels.contains(&format!("hcd_{}", target.node_id)));
+        let media = format!("ppt/media/hcd-{}-{}.png", target.node_id, asset.hash);
+        let types = read_zip_entry(&exported, "[Content_Types].xml");
+        assert!(types.contains(&format!("/{media}")));
+        let mut archive = zip::ZipArchive::new(File::open(&exported).unwrap()).unwrap();
+        let mut bytes = Vec::new();
+        archive
+            .by_name(&media)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, replacement_bytes);
+        let mut original = Vec::new();
+        archive
+            .by_name("ppt/media/image1.png")
+            .unwrap()
+            .read_to_end(&mut original)
+            .unwrap();
+        assert_eq!(original, b"not-a-real-png-but-streamed-as-an-asset");
+        let other_image = &images[&other.node_id];
+        hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_3.into(),
+                document_id: "shared-picture".into(),
+                patch_id: "replace-second".into(),
+                base_revision: 1,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![PatchOperation::ImageReplace {
+                    node_id: other.node_id.clone(),
+                    asset_hash: asset.hash,
+                    precondition: hcd_core::VisualPrecondition {
+                        visual_hash: other_image.visual_hash.clone(),
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let both = temp.path().join("both.pptx");
+        export_pptx(&bundle, &source, &both, &ExportOptions::default()).unwrap();
+        let both_slide = read_zip_entry(&both, "ppt/slides/slide2.xml");
+        assert_eq!(both_slide.matches("r:embed=\"hcd_").count(), 2);
+        assert!(!both_slide.contains("r:embed=\"rIdImage1\""));
+        let historical = temp.path().join("one-at-r1.pptx");
+        export_pptx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(read_zip_entry(&historical, "ppt/slides/slide2.xml"), slide);
+        std::fs::write(bundle.resolve_href(&asset.href).unwrap(), b"corrupt").unwrap();
+        let corrupted = temp.path().join("corrupt-refused.pptx");
+        assert!(export_pptx(&bundle, &source, &corrupted, &ExportOptions::default()).is_err());
+        assert!(!corrupted.exists());
+    }
+
+    #[test]
+    #[ignore = "explicit real-PPTX fixture and output path required"]
+    fn real_picture_source_geometry_export_fixture() {
+        let source = PathBuf::from(
+            std::env::var_os("HCD_PPTX_SAMPLE_SOURCE").expect("HCD_PPTX_SAMPLE_SOURCE"),
+        );
+        let output = PathBuf::from(
+            std::env::var_os("HCD_PPTX_SAMPLE_OUTPUT").expect("HCD_PPTX_SAMPLE_OUTPUT"),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("bundle");
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("real-picture-test"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let mut picture = None;
+        for page in 0..manifest.index_page_count {
+            for descriptor in bundle.read_index_page(&manifest, page).unwrap().chunks {
+                let html = bundle.read_chunk_verified(&descriptor).unwrap();
+                if let Some((id, value)) = hcd_core::extract_html_image_nodes(&html)
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                {
+                    picture = Some((id, value));
+                    break;
+                }
+            }
+        }
+        let (id, value) = picture.expect("sample picture missing");
+        let mut geometry = value.geometry.expect("sample geometry missing");
+        geometry.width += 127000.0;
+        let mut operations = vec![PatchOperation::ImageGeometry {
+            node_id: id.clone(),
+            geometry,
+            precondition: hcd_core::VisualPrecondition {
+                visual_hash: value.visual_hash.clone(),
+            },
+        }];
+        if std::env::var_os("HCD_PPTX_SAMPLE_REPLACE").is_some() {
+            let asset = bundle
+                .stage_asset_from_reader(
+                    "png",
+                    &mut std::io::Cursor::new(include_bytes!("../testdata/replacement.png")),
+                )
+                .unwrap();
+            operations.push(PatchOperation::ImageReplace {
+                node_id: id,
+                asset_hash: asset.hash,
+                precondition: hcd_core::VisualPrecondition {
+                    visual_hash: value.visual_hash,
+                },
+            });
+        }
+        hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_3.into(),
+                document_id: manifest.document_id,
+                patch_id: "real-picture-size".into(),
+                base_revision: 0,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations,
+            },
+            0,
+        )
+        .unwrap();
+        export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn picture_plan_uses_saved_revision_and_verified_original_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("picture-plan"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let html = bundle.read_chunk_verified(descriptor).unwrap();
+        let images = hcd_core::extract_html_image_nodes(&html).unwrap();
+        let (id, picture) = images.iter().next().unwrap();
+        let mut text_entries = hcd_core::extract_text_page(&bundle, None, 10)
+            .unwrap()
+            .entries;
+        let second_text = text_entries.pop().unwrap();
+        let text_entry = text_entries.pop().unwrap();
+        let geometry = hcd_core::ImageGeometry {
+            x: 3657600.0,
+            y: 914400.0,
+            width: 2000000.0,
+            height: 1371600.0,
+            unit: hcd_core::ImageGeometryUnit::Emu,
+        };
+        hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_3.into(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "move-picture".into(),
+                base_revision: 0,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![
+                    PatchOperation::ImageGeometry {
+                        node_id: id.clone(),
+                        geometry,
+                        precondition: hcd_core::VisualPrecondition {
+                            visual_hash: picture.visual_hash.clone(),
+                        },
+                    },
+                    PatchOperation::TextSplice {
+                        node_id: text_entry.node_id,
+                        start: 0,
+                        delete_count: 2,
+                        insert_text: "新的".into(),
+                        precondition: NodePrecondition {
+                            node_hash: text_entry.node_hash,
+                        },
+                    },
+                    PatchOperation::TextSplice {
+                        node_id: second_text.node_id,
+                        start: 0,
+                        delete_count: 3,
+                        insert_text: "另页".into(),
+                        precondition: NodePrecondition {
+                            node_hash: second_text.node_hash,
+                        },
+                    },
+                ],
+            },
+            0,
+        )
+        .unwrap();
+        let parts = crate::prepare_pptx_source_picture_geometry(&bundle, &source, 1).unwrap();
+        let xml = std::str::from_utf8(parts.parts.get("ppt/slides/slide2.xml").unwrap()).unwrap();
+        assert!(xml.contains("cx=\"2000000\" cy=\"1371600\""));
+        assert!(xml.contains("<a:t>样式 😀</a:t>"));
+        assert_eq!(
+            crate::source_export_edit_blocker_with_source(&bundle, &source, 1).unwrap(),
+            None
+        );
+        let exported = temp.path().join("result.pptx");
+        export_pptx(
+            &bundle,
+            &source,
+            &exported,
+            &ExportOptions {
+                revision: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let exported_slide = read_zip_entry(&exported, "ppt/slides/slide2.xml");
+        assert!(exported_slide.contains("cx=\"2000000\" cy=\"1371600\""));
+        assert!(exported_slide.contains("<a:t>新的 😀</a:t>"));
+        assert!(read_zip_entry(&exported, "ppt/slides/slide1.xml").contains("<a:t>另页</a:t>"));
+        assert_eq!(
+            read_zip_entry(&source, "ppt/presentation.xml"),
+            read_zip_entry(&exported, "ppt/presentation.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&source, "ppt/media/image1.png"),
+            read_zip_entry(&exported, "ppt/media/image1.png")
+        );
+        assert!(
+            crate::prepare_pptx_source_picture_geometry(&bundle, &source, 0)
+                .unwrap()
+                .parts
+                .is_empty()
+        );
+        let mut changed_source = std::fs::read(&source).unwrap();
+        changed_source.push(0);
+        let other = temp.path().join("changed.pptx");
+        std::fs::write(&other, changed_source).unwrap();
+        assert!(crate::prepare_pptx_source_picture_geometry(&bundle, &other, 1).is_err());
+        let head = bundle.manifest().unwrap();
+        let current_page = bundle.read_index_page(&head, 0).unwrap();
+        let current_html = bundle.read_chunk_verified(&current_page.chunks[0]).unwrap();
+        let current_images = hcd_core::extract_html_image_nodes(&current_html).unwrap();
+        let replacement = bundle
+            .stage_asset_from_reader("png", &mut std::io::Cursor::new(b"\x89PNG\r\n\x1a\n"))
+            .unwrap();
+        hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_3.into(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "replace-picture".into(),
+                base_revision: 1,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![PatchOperation::ImageReplace {
+                    node_id: id.clone(),
+                    asset_hash: replacement.hash,
+                    precondition: hcd_core::VisualPrecondition {
+                        visual_hash: current_images[id].visual_hash.clone(),
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        assert!(crate::prepare_pptx_source_picture_geometry(&bundle, &source, 2).is_err());
+        assert_eq!(
+            crate::source_export_edit_blocker_with_source(&bundle, &source, 2).unwrap(),
+            Some("IMAGE_SOURCE_UNSUPPORTED")
+        );
+        let rejected = temp.path().join("rejected.pptx");
+        assert!(export_pptx(&bundle, &source, &rejected, &ExportOptions::default()).is_err());
+        assert!(!rejected.exists());
+        assert!(crate::prepare_pptx_source_picture_geometry(&bundle, &source, 1).is_ok());
+        let historical = temp.path().join("historical.pptx");
+        export_pptx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "ppt/slides/slide2.xml"),
+            exported_slide
+        );
+    }
+
+    #[test]
+    fn picture_source_asset_verifies_relationship_and_actual_package_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        create_styled_fixture(&source);
+        let hash = hash_bytes(b"not-a-real-png-but-streamed-as-an-asset");
+        let check = |id: &str, part: &str, asset_hash: &str| {
+            verify_source_picture_asset(&source, "ppt/slides/slide2.xml", id, part, asset_hash)
+        };
+        assert!(check("rIdImage1", "ppt/media/image1.png", &hash).is_ok());
+        assert!(check("rIdImage1", "ppt/media/image2.png", &hash).is_err());
+        assert!(check("rIdImage1", "ppt/media/image1.png", "wrong").is_err());
+        assert!(check("missing", "ppt/media/image1.png", &hash).is_err());
+        let rel = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/a.png"/></Relationships>"#;
+        assert!(checked_picture_relationship(rel.as_bytes(), "r").is_ok());
+        assert!(checked_picture_relationship(
+            rel.replace(
+                "Target=\"../media/a.png\"",
+                "Target=\"https://example.com/a\" TargetMode=\"External\""
+            )
+            .as_bytes(),
+            "r"
+        )
+        .is_err());
+        assert!(checked_picture_relationship(rel.replace("</Relationships>", "<Relationship Id=\"r\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/b.png\"/></Relationships>").as_bytes(), "r").is_err());
+        assert!(checked_picture_relationship(
+            rel.replace("package/2006/relationships", "wrong")
+                .as_bytes(),
+            "r"
+        )
+        .is_err());
+        assert!(checked_picture_relationship(
+            rel.replace("<Relationship Id=", "<Relationship xmlns=\"wrong\" Id=")
+                .as_bytes(),
+            "r"
+        )
+        .is_err());
+        assert!(resolve_part("ppt/slides/slide2.xml", "../../../../outside").is_err());
+    }
 
     struct EofTrackingReader {
         source: std::io::Cursor<Vec<u8>>,

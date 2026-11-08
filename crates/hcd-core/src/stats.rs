@@ -155,7 +155,7 @@ pub fn remove_orphan_objects(bundle: &Bundle) -> Result<BundleStats, HcdError> {
     bundle_stats(bundle)
 }
 
-fn collect_revision_references(
+pub(crate) fn collect_revision_references(
     bundle: &Bundle,
     head: &HcdManifest,
     revision: u64,
@@ -163,10 +163,7 @@ fn collect_revision_references(
 ) -> Result<(), HcdError> {
     referenced.insert(format!("revisions/{revision:020}.json"));
     let record = bundle.revision(revision)?;
-    let mut view = head.clone();
-    view.revision = revision;
-    view.index_prefix = record.index_prefix;
-    view.index_root_href = record.index_root_href;
+    let (view, _) = crate::manifest_at_revision(bundle, head, Some(revision))?;
     if let Some(root) = &view.index_root_href {
         referenced.extend(bundle.index_tree_objects(root)?);
     } else {

@@ -579,3 +579,5 @@ pub fn handle_goto(cmd: GotoCommand, json: bool) -> Result<String, HandlerError>
         Ok(format!("Scrolled to {}", cmd.path))
     }
 }
+
+pub(crate) mod hdoc_archive;

@@ -187,6 +187,17 @@ pub struct PdfTextBlock {
     pub line_token_index: usize,
     /// Whether the text comes from TJ (array with kerning) or Tj (simple)
     pub is_array_text: bool,
+    /// Disposable source-candidate grouping, independent of font segmentation.
+    pub source_group: Option<usize>,
+    pub show_operators: Vec<TextShowOperator>,
+    pub baseline: [f32; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct TextShowOperator {
+    pub ordinal: usize,
+    pub line: usize,
+    pub token: usize,
 }
 
 /// Font info extracted from the page's /Resources /Font dictionary.
@@ -274,10 +285,10 @@ pub fn estimate_text_width(
 
     for c in text.chars() {
         let mut code = c as u32;
-        if font_info.is_cid_font {
-            if let Some(&cid) = font_info.unicode_to_cid.get(&code) {
-                code = cid;
-            }
+        // ToUnicode can remap a simple font's one-byte codes too. Looking up
+        // widths by Unicode directly halves many CJK selection rectangles.
+        if let Some(&cid) = font_info.unicode_to_cid.get(&code) {
+            code = cid;
         }
         let w = font_info
             .char_widths
@@ -501,13 +512,23 @@ fn extract_font_widths(
     let mut widths = HashMap::new();
 
     if is_cid {
-        let dw = font_dict
+        // Type0 is the encoding wrapper; widths belong to its descendant.
+        let widths_font = font_dict
+            .get(b"DescendantFonts")
+            .ok()
+            .and_then(|value| doc.dereference(value).ok())
+            .and_then(|(_, value)| value.as_array().ok())
+            .and_then(|fonts| fonts.first())
+            .and_then(|font| doc.dereference(font).ok())
+            .and_then(|(_, font)| font.as_dict().ok())
+            .unwrap_or(font_dict);
+        let dw = widths_font
             .get(b"DW")
             .ok()
             .and_then(|v| v.as_float().ok().or(v.as_i64().ok().map(|i| i as f32)))
             .unwrap_or(1000.0);
 
-        if let Ok(w_obj) = font_dict.get(b"W") {
+        if let Ok(w_obj) = widths_font.get(b"W") {
             if let Ok((_, resolved)) = doc.dereference(w_obj) {
                 if let Object::Array(arr) = resolved {
                     parse_cid_width_array(&arr, &mut widths);
@@ -1128,6 +1149,9 @@ pub fn pick_fonts_for_text(
 
     if let Ok(fonts) = doc.get_page_fonts(page_id) {
         for (name, font) in fonts {
+            if crate::font_embedder::is_invisible_text_font(font) {
+                continue;
+            }
             let font_name = String::from_utf8_lossy(&name).to_string();
             let is_sub = font
                 .get(b"BaseFont")
@@ -1447,6 +1471,8 @@ struct TextState {
     last_rect: Option<(f32, f32, f32, f32)>,
     path_current: Option<(f32, f32)>,
     path_segments: Vec<(f32, f32, f32, f32)>,
+    source_group: Option<usize>,
+    marked_groups: Vec<Option<usize>>,
 }
 
 #[derive(Clone)]
@@ -1491,6 +1517,8 @@ impl Default for TextState {
             last_rect: None,
             path_current: None,
             path_segments: Vec::new(),
+            source_group: None,
+            marked_groups: Vec::new(),
         }
     }
 }
@@ -1537,6 +1565,9 @@ fn is_pdf_operator(token: &str) -> bool {
             | "B*"
             | "b"
             | "b*"
+            | "BMC"
+            | "BDC"
+            | "EMC"
     )
 }
 
@@ -1566,6 +1597,7 @@ fn add_or_merge_text_block(
     block_counter: &mut usize,
     is_array_text: bool,
     line_token_index: usize,
+    show_ordinal: usize,
 ) {
     let (width, height) = compute_block_dimensions(&text, font_map, state);
     let effective_font_size = state.font_size * state.tm_d.abs();
@@ -1640,7 +1672,13 @@ fn add_or_merge_text_block(
         };
         let same_color = colors_equal(last.style.fill_color.as_ref(), state.fill_color.as_ref());
 
-        if same_y && close_x && same_font && same_size && same_color {
+        if same_y
+            && close_x
+            && same_font
+            && same_size
+            && same_color
+            && last.source_group == state.source_group
+        {
             // If there's a small gap, inject a space character between segments
             if gap > 0.15 * effective_font_size
                 && !last.text.ends_with(' ')
@@ -1653,6 +1691,11 @@ fn add_or_merge_text_block(
             last.bbox = transform_bbox(&last.user_bbox);
             last.bt_end_line = line_idx;
             last.style.bg_color = find_bg_color(&last.user_bbox, &state.filled_rects);
+            last.show_operators.push(TextShowOperator {
+                ordinal: show_ordinal,
+                line: line_idx,
+                token: line_token_index,
+            });
             true
         } else {
             false
@@ -1665,6 +1708,10 @@ fn add_or_merge_text_block(
         *block_counter += 1;
         let bbox = transform_bbox(&user_bbox);
         let bg_color = find_bg_color(&user_bbox, &state.filled_rects);
+        let baseline = [
+            user_bbox.x * state.ctm_a + user_bbox.y * state.ctm_c + state.ctm_e,
+            user_bbox.x * state.ctm_b + user_bbox.y * state.ctm_d + state.ctm_f,
+        ];
         text_blocks.push(PdfTextBlock {
             index: *block_counter,
             text,
@@ -1684,6 +1731,13 @@ fn add_or_merge_text_block(
             text_line_index: line_idx,
             line_token_index,
             is_array_text,
+            source_group: state.source_group,
+            show_operators: vec![TextShowOperator {
+                ordinal: show_ordinal,
+                line: line_idx,
+                token: line_token_index,
+            }],
+            baseline,
         });
     }
 
@@ -2488,6 +2542,7 @@ fn parse_page_content_stream_inner(
     let mut vector_rects = Vec::new();
     let mut vector_lines = Vec::new();
     let mut block_counter = 0usize;
+    let mut show_ordinal = 0usize;
     let mut image_counter = 0usize;
 
     // Track BT/ET pairs to fill in bt_end_line
@@ -2501,6 +2556,27 @@ fn parse_page_content_stream_inner(
         for (token_idx, token) in tokens.iter().enumerate() {
             if is_pdf_operator(token) {
                 match token.as_str() {
+                    "BMC" | "BDC" => {
+                        if state.marked_groups.len() >= 4096 {
+                            return Err(HandlerError::InvalidArgument(
+                                "PDF marked-content nesting exceeds 4096".into(),
+                            ));
+                        }
+                        state.marked_groups.push(state.source_group);
+                        if token == "BMC" {
+                            if let Some(group) = operands
+                                .last()
+                                .and_then(|value| value.strip_prefix("/OfficeCLITextGroup"))
+                                .and_then(|value| value.parse::<usize>().ok())
+                                .filter(|value| *value > 0)
+                            {
+                                state.source_group = Some(group);
+                            }
+                        }
+                    }
+                    "EMC" => {
+                        state.source_group = state.marked_groups.pop().unwrap_or(None);
+                    }
                     "BT" => {
                         state.in_bt = true;
                         state.bt_start_line = line_idx;
@@ -2847,6 +2923,7 @@ fn parse_page_content_stream_inner(
                     }
                     "Tj" => {
                         if state.in_bt {
+                            show_ordinal += 1;
                             if let Some(operand) = operands.last() {
                                 let active_encoding = state
                                     .font_name
@@ -2875,6 +2952,7 @@ fn parse_page_content_stream_inner(
                                             &mut block_counter,
                                             false,
                                             token_idx.saturating_sub(1),
+                                            show_ordinal,
                                         );
                                     }
                                 }
@@ -2883,6 +2961,7 @@ fn parse_page_content_stream_inner(
                     }
                     "TJ" => {
                         if state.in_bt {
+                            show_ordinal += 1;
                             if let Some(operand) = operands.last() {
                                 let active_encoding = state
                                     .font_name
@@ -2914,6 +2993,7 @@ fn parse_page_content_stream_inner(
                                             &mut block_counter,
                                             true,
                                             token_idx.saturating_sub(1),
+                                            show_ordinal,
                                         );
                                     }
                                 }
@@ -3087,7 +3167,7 @@ mod tests {
 
     #[test]
     fn test_estimate_text_width() {
-        let font_info = FontInfo {
+        let mut font_info = FontInfo {
             pdf_name: "F1".to_string(),
             base_font: Some("Helvetica".to_string()),
             is_cid_font: false,
@@ -3099,6 +3179,12 @@ mod tests {
         };
         let width = estimate_text_width("Hello", &font_info, 12.0, 0.0, 0.0);
         assert!(width > 30.0 && width < 40.0);
+        font_info.unicode_to_cid = HashMap::from([('中' as u32, 128), ('文' as u32, 129)]);
+        font_info.char_widths = HashMap::from([(128, 1000.), (129, 900.)]);
+        assert!(
+            (estimate_text_width("中文", &font_info, 14., 0., 0.) - 26.6).abs() < 0.001,
+            "simple fonts with ToUnicode need their encoded widths, not a Latin default"
+        );
     }
 
     fn parser_document(resources: Dictionary) -> (LopdfDocument, ObjectId) {
@@ -3119,6 +3205,66 @@ mod tests {
             }),
         );
         (document, page_id)
+    }
+
+    #[test]
+    fn cid_metrics_come_from_descendant_widths_including_non_bmp_text() {
+        let mut doc = LopdfDocument::with_version("1.7");
+        let descendant=doc.add_object(lopdf::dictionary!{"Type"=>"Font","Subtype"=>"CIDFontType2","DW"=>750,"W"=>vec![Object::Integer(1),Object::Array(vec![1270.into()])]});
+        let cmap = doc.add_object(lopdf::Stream::new(
+            Dictionary::new(),
+            b"1 beginbfchar\n<0001> <D83DDE00>\nendbfchar\n".to_vec(),
+        ));
+        let font = lopdf::dictionary! {"Type"=>"Font","Subtype"=>"Type0","DescendantFonts"=>vec![Object::Reference(descendant)],"ToUnicode"=>cmap};
+        let info = build_font_info(&doc, &font, "Emoji", Some(1024)).unwrap();
+        assert_eq!(info.char_widths[&1], 1270.);
+        assert_eq!(info.default_width, 750.);
+        assert!((estimate_text_width("😀", &info, 14., 0., 0.) - 17.78).abs() < 0.001);
+    }
+
+    #[test]
+    fn source_group_identity_survives_merged_shows_and_font_split_replacement() {
+        let resources = lopdf::dictionary! {"Font"=>lopdf::dictionary!{"F1"=>lopdf::dictionary!{"Type"=>"Font","Subtype"=>"Type1","BaseFont"=>"Helvetica","Encoding"=>"WinAnsiEncoding"}}};
+        let (mut doc, page) = parser_document(resources);
+        let parent = doc
+            .get_dictionary(page)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let catalog = doc.add_object(lopdf::dictionary! {"Type"=>"Catalog","Pages"=>parent});
+        doc.trailer.set("Root", catalog);
+        let stream = doc.add_object(lopdf::Stream::new(
+            Dictionary::new(),
+            b"/OfficeCLITextGroup999 BMC BT /F1 12 Tf 10 100 Td (A\\351) Tj (B) Tj ET EMC".to_vec(),
+        ));
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Contents", stream);
+        let parsed =
+            parse_page_content_stream(&doc.get_page_content(page).unwrap(), page, &doc).unwrap();
+        assert_eq!(parsed.text_blocks.len(), 1);
+        assert_eq!(parsed.text_blocks[0].text, "AéB");
+        assert_eq!(parsed.text_blocks[0].show_operators.len(), 2);
+        crate::modifier::mark_source_text_groups(&mut doc, 1).unwrap();
+        assert!(std::str::from_utf8(&doc.get_page_content(page).unwrap()).is_ok());
+        crate::font_embedder::ensure_text_fallback_fonts(&mut doc, 1, "中😀").unwrap();
+        crate::modifier::replace_text_at_path(&mut doc, 1, 1, "中😀", None).unwrap();
+        let parsed =
+            parse_page_content_stream(&doc.get_page_content(page).unwrap(), page, &doc).unwrap();
+        assert_eq!(
+            parsed
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<String>(),
+            "中😀"
+        );
+        assert!(parsed
+            .text_blocks
+            .iter()
+            .all(|block| block.source_group == Some(1)));
     }
 
     #[test]

@@ -72,9 +72,35 @@ fn revision_snapshot(
     let mut targets = tracked.clone();
     match after {
         Some(previous) if previous <= head && head - previous <= MAX_REPLAY => {
+            // New grid cells add immutable chunks without being an OOXML
+            // structural edit. Peers must nevertheless reload their index:
+            // a text update alone cannot introduce a previously unknown cell.
+            let mut grid_chunks = if manifest.profile == "grid" && previous < head {
+                Some(
+                    manifest_at_revision(&bundle, &manifest, Some(previous))
+                        .map_err(internal)?
+                        .0
+                        .chunk_count,
+                )
+            } else {
+                None
+            };
             for revision in previous + 1..=head {
                 let record = bundle.revision(revision).map_err(internal)?;
                 event.reset |= record.structural_change || record.layout_upgrade;
+                if let Some(previous_count) = grid_chunks {
+                    let count = match record.chunk_count {
+                        Some(count) => count,
+                        None => {
+                            manifest_at_revision(&bundle, &manifest, Some(revision))
+                                .map_err(internal)?
+                                .0
+                                .chunk_count
+                        }
+                    };
+                    event.reset |= count != previous_count;
+                    grid_chunks = Some(count);
+                }
                 if head == previous + 1 {
                     event.patch_id = record.patch_id.unwrap_or_default();
                     event.author_name = record.author_name;
@@ -247,6 +273,13 @@ async fn socket_events(mut socket: WebSocket, state: ServerState, id: String) {
             close(&mut socket, 4401, "session expired").await;
             return;
         }
+        if !collaboration_service(&identity)
+            && !load_access(&state, &id)
+                .is_ok_and(|policy| policy.can_read(identity.sub.as_deref()))
+        {
+            close(&mut socket, 4403, "document access revoked").await;
+            return;
+        }
         let event = match snapshot(&state, &id, after, &tracked, force).await {
             Ok(event) => event,
             Err(_) => {
@@ -313,6 +346,7 @@ pub(super) async fn revision_events(
                 _ = heartbeat.tick() => {},
             }
             if SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() >= identity.exp as u64 { break; }
+            if !collaboration_service(&identity) && !load_access(&state,&id).is_ok_and(|policy|policy.can_read(identity.sub.as_deref())) { break; }
             match snapshot(&state, &id, after, &BTreeSet::new(), false).await {
                 Ok(event) if after != Some(event.revision) => {
                     after = Some(event.revision);
@@ -350,6 +384,7 @@ mod tests {
             remote: None,
             collaboration_lock: Arc::new(Mutex::new(())),
             revisions: RevisionHub::default(),
+            word_owners: word_owner::WordOwners::default(),
         };
         let bundle = open(&state, "doc").unwrap();
         let node = hcd_core::extract_text_page(&bundle, None, 1)
@@ -530,6 +565,55 @@ mod tests {
                 .unwrap();
             if let ClientFrame::Close(Some(frame)) = response {
                 assert_eq!(u16::from(frame.code), 4401);
+                break;
+            }
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn idle_socket_closes_after_read_membership_revocation() {
+        let (_root, state, _bundle, _node) = fixture();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://{}/v1/documents/doc/events/ws",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/documents/{id}/events/ws", get(revision_websocket))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        let (mut socket, _) = connect_async(&url).await.unwrap();
+        socket
+            .send(ClientFrame::Text(
+                json!({"type":"auth","token":token(&state,"doc",now+60)})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            socket.next().await.unwrap().unwrap(),
+            ClientFrame::Text(_)
+        ));
+        let policy = DocumentAccess::default()
+            .replace(Some(vec![]), Some(vec![]))
+            .unwrap();
+        FileAccessPolicy::new(&state.root)
+            .compare_replace("doc", 0, &policy)
+            .unwrap();
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let ClientFrame::Close(Some(frame)) = message {
+                assert_eq!(u16::from(frame.code), 4403);
                 break;
             }
         }

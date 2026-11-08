@@ -56,8 +56,10 @@ pub fn restore_revision(
         dirty_source_parts: Vec::new(),
         structural_change: true,
         layout_upgrade: false,
+        word_layout_change: false,
         author_id,
         author_name,
+        reference_authors: std::collections::BTreeMap::new(),
     };
     head.revision = revision;
     head.root_hash = record.root_hash.clone();
@@ -67,6 +69,10 @@ pub fn restore_revision(
     head.index_root_href = record.index_root_href.clone();
     head.index_page_count = historical.index_page_count;
     head.chunk_count = historical.chunk_count;
+    head.capabilities.flow_layout = historical.capabilities.flow_layout;
+    if historical.capabilities.flow_layout.is_some() {
+        head.capabilities.structure_patch = historical.capabilities.structure_patch;
+    }
     bundle.write_revision(&record)?;
     bundle.write_manifest(&head)?;
     Ok(ApplyResult {

@@ -13,6 +13,7 @@ lopdf = { workspace = true }
 handler-common = { path = "../handler-common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 quick-xml = { workspace = true }
 tempfile = { workspace = true }
 time = { workspace = true }

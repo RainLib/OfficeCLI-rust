@@ -18,6 +18,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 
+pub(crate) mod flow_regions;
+pub use flow_regions::{
+    apply_coordinated_flow_story_link_transaction, apply_flow_layout_transaction,
+    apply_flow_story_link_transaction, apply_flow_structure_patch, apply_prepared_story_unlink,
+    flow_layout_hash, flow_regions, preview_flow_story_link_transaction, project_flow_regions,
+    validate_flow_story_link_revision, validate_unlink_revision_content, word_region_index_page,
+    FlowRegion, FlowRegionEdits, FlowRegionKind, FlowStructurePatchBatch, WordRegionIndex,
+};
+
 const MAX_BLOCKS: usize = 1_000_000;
 const MAX_INLINE_BYTES: usize = 1024 * 1024;
 const MAX_OPS: usize = 10_000;
@@ -27,6 +36,16 @@ const CHUNK_SOFT_BYTES: usize = 512 * 1024;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditorInline {
     pub text: String,
+    /// Editable inline subtree. Its business envelope lives on the content,
+    /// while ordinary child text keeps independent source identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Box<EditorBlockContent>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_marks: Vec<crate::CustomTextMark>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<crate::InlineReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<crate::ExtensionNode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(default)]
@@ -68,6 +87,7 @@ pub enum EditorBlockKind {
     BulletList,
     OrderedList,
     HorizontalRule,
+    Extension,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -83,11 +103,15 @@ pub struct EditorBlockContent {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<crate::ExtensionNode>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorBlockView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_region_id: Option<String>,
     pub block_id: String,
     pub block_hash: String,
     pub region: String,
@@ -103,6 +127,10 @@ pub struct EditorProjection {
     pub document_id: String,
     pub revision: u64,
     pub blocks: Vec<EditorBlockView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_layout: Option<crate::FlowDocumentLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_layout_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_changes: Vec<TrackedChange>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -207,6 +235,8 @@ impl StructureOperation {
 
 #[derive(Clone)]
 struct Block {
+    scope: Option<FlowRegion>,
+    source_part: Option<String>,
     id: String,
     region: String,
     read_only: bool,
@@ -222,6 +252,7 @@ impl Block {
 
     fn view(&self) -> EditorBlockView {
         EditorBlockView {
+            flow_region_id: self.scope.as_ref().map(|scope| scope.id.clone()),
             block_id: self.id.clone(),
             block_hash: self.hash(),
             region: self.region.clone(),
@@ -248,13 +279,34 @@ pub fn editor_projection_with_typography_styles(
     let (manifest, revision) = crate::manifest_at_revision(bundle, &head, revision)?;
     ensure_semantic_flow(&manifest)?;
     let blocks = load_blocks_with_typography_styles(bundle, &manifest, typography_styles)?;
-    Ok(EditorProjection {
+    for block in &blocks {
+        crate::content_custom_marks(&block.content)?;
+    }
+    let flow_layout = crate::read_flow_document_layout(bundle, &manifest)?;
+    let flow_layout_hash = flow_layout
+        .as_ref()
+        .filter(|layout| layout.schema_version == crate::FLOW_REGION_LAYOUT_SCHEMA)
+        .map(flow_regions::flow_layout_hash)
+        .transpose()?;
+    let projection = EditorProjection {
+        flow_layout,
+        flow_layout_hash,
         document_id: manifest.document_id,
         revision,
         tracked_changes: tracked_changes(&blocks)?,
         comments: comment_notes(&blocks),
         blocks: blocks.iter().map(Block::view).collect(),
-    })
+    };
+    crate::projection_references(&projection)?;
+    let extensions = crate::projection_extensions(&projection)?;
+    if extensions.iter().any(|node| node.envelope_version() == 3)
+        && manifest.capabilities.extension_nodes != Some(3)
+    {
+        return Err(HcdError::InvalidBundle(
+            "editable inline content requires extension envelope model 3".into(),
+        ));
+    }
+    Ok(projection)
 }
 
 /// Create an immutable revision marking the first editor projection. The
@@ -263,6 +315,11 @@ pub fn project_editor(bundle: &Bundle, expected_revision: u64) -> Result<ApplyRe
     let _guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
     ensure_semantic_flow(&manifest)?;
+    if crate::read_flow_document_layout(bundle, &manifest)?.is_some() {
+        return Err(HcdError::Unsupported(
+            "Word section/story layout requires a region-aware editor protocol".into(),
+        ));
+    }
     if manifest.revision != expected_revision {
         return Err(HcdError::RevisionConflict(format!(
             "expected head {expected_revision}, actual {}",
@@ -366,8 +423,10 @@ fn revision_record(
         dirty_source_parts: Vec::new(),
         structural_change,
         layout_upgrade: false,
+        word_layout_change: false,
         author_id: None,
         author_name: None,
+        reference_authors: std::collections::BTreeMap::new(),
     })
 }
 
@@ -380,6 +439,11 @@ fn load_blocks_with_typography_styles(
     manifest: &HcdManifest,
     typography_styles: &str,
 ) -> Result<Vec<Block>, HcdError> {
+    let layout = crate::read_flow_document_layout(bundle, manifest)?;
+    let region_catalog = layout
+        .as_ref()
+        .filter(|layout| layout.schema_version == crate::FLOW_REGION_LAYOUT_SCHEMA)
+        .map(flow_regions::catalog);
     let mut stylesheet = String::new();
     fs::File::open(bundle.resolve_href(&manifest.styles_href)?)?
         .take(MAX_CONTROL_PART_BYTES + 1)
@@ -403,6 +467,9 @@ fn load_blocks_with_typography_styles(
         }
         for descriptor in &page.chunks {
             let html = bundle.read_chunk_verified(descriptor)?;
+            if region_catalog.is_none() {
+                flow_regions::reject_unscoped_metadata(&html)?;
+            }
             let map = bundle.read_map_verified(descriptor)?;
             let mut parsed = scan_chunk(&html, &map, descriptor, &manifest.document_id)?;
             let fonts = typography.resolve(&html)?;
@@ -419,6 +486,9 @@ fn load_blocks_with_typography_styles(
                 explicit: &HashSet<String>,
             ) {
                 for inline in &mut content.inlines {
+                    if let Some(body) = &mut inline.content {
+                        assign(body, fonts, partitions, explicit);
+                    }
                     inline.font_size_explicit = inline
                         .node_id
                         .as_ref()
@@ -458,8 +528,33 @@ fn load_blocks_with_typography_styles(
                 assign(&mut block.content, &fonts, &partitions, &explicit);
             }
 
+            let (part, scope) = if layout.is_some() {
+                flow_regions::chunk_region(&html, &map, descriptor, region_catalog.as_ref())?
+            } else {
+                let parts: HashSet<_> =
+                    map.entries.iter().map(|e| e.source.part.as_str()).collect();
+                (
+                    (parts.len() == 1).then(|| (*parts.iter().next().unwrap()).to_string()),
+                    None,
+                )
+            };
+            if scope.is_some() && parsed.iter().any(|block| block.html == html) {
+                return Err(HcdError::InvalidBundle(
+                    "Word region needs a stable root block".into(),
+                ));
+            }
             for block in &mut parsed {
+                block.source_part = part.clone();
+                block.scope = scope.clone();
+                if block.scope.is_some() {
+                    block.read_only = intrinsic_read_only(&block.content, &block.html);
+                }
                 if !seen.insert(block.id.clone()) {
+                    if region_catalog.is_some() {
+                        return Err(HcdError::InvalidBundle(
+                            "duplicate canonical Word region root".into(),
+                        ));
+                    }
                     block.id = stable_node_id(&[
                         &manifest.document_id,
                         &descriptor.chunk_id,
@@ -481,6 +576,12 @@ fn load_blocks_with_typography_styles(
             }
         }
     }
+    if let Some(layout) = layout
+        .as_ref()
+        .filter(|layout| layout.schema_version == crate::FLOW_REGION_LAYOUT_SCHEMA)
+    {
+        flow_regions::validate_graph(layout, &blocks)?;
+    }
     Ok(blocks)
 }
 
@@ -489,7 +590,7 @@ struct OpenBlock {
     depth: usize,
     name: String,
     id: Option<String>,
-    ordered: bool,
+    ordered: Option<bool>,
     list_start: Option<u32>,
 }
 
@@ -542,7 +643,7 @@ fn scan_chunk(
                         start: before,
                         depth: stack.len() + 1,
                         id: attribute(&start, &reader, "data-hcd-id")?,
-                        ordered: lists.last().is_some_and(|(_, ordered, _)| *ordered),
+                        ordered: lists.last().map(|(_, ordered, _)| *ordered),
                         list_start,
                         name: name.clone(),
                     });
@@ -556,7 +657,7 @@ fn scan_chunk(
                         start: before,
                         depth: stack.len() + 1,
                         id: attribute(&start, &reader, "data-hcd-id")?,
-                        ordered: lists.last().is_some_and(|(_, ordered, _)| *ordered),
+                        ordered: lists.last().map(|(_, ordered, _)| *ordered),
                         list_start: lists
                             .last()
                             .and_then(|(_, ordered, next)| ordered.then_some(*next)),
@@ -638,6 +739,8 @@ fn scan_chunk(
             })
             .collect();
         return Ok(vec![Block {
+            scope: None,
+            source_part: None,
             id: stable_node_id(&[document_id, &descriptor.chunk_id, "opaque"]),
             region: descriptor.region.clone(),
             read_only: true,
@@ -654,6 +757,37 @@ fn scan_chunk(
     Ok(blocks)
 }
 
+/// Resolve exact element identities once per block. Searching the complete HTML
+/// for every source-map entry was quadratic for many formatted inline runs.
+fn editor_node_ids(html: &str) -> Result<HashSet<String>, HcdError> {
+    let mut reader = Reader::from_str(html);
+    let mut buffer = Vec::new();
+    let mut ids = HashSet::new();
+    loop {
+        match reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("editor identity parse error: {error}"))
+        })? {
+            Event::Start(element) | Event::Empty(element) => {
+                if let Some(id) = attribute(&element, &reader, "data-hcd-id")? {
+                    ids.insert(id);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(ids)
+}
+
+fn intrinsic_read_only(content: &EditorBlockContent, raw: &str) -> bool {
+    matches!(content.kind, EditorBlockKind::Opaque)
+        || raw.contains("data-hcd-visual-hash=")
+        || raw.contains("data-hcd-word-field-")
+        || raw.contains("data-hcd-computed-field=")
+        || raw.contains("<table")
+}
+
 fn block_from_raw(
     raw: &str,
     open: &OpenBlock,
@@ -663,10 +797,11 @@ fn block_from_raw(
 ) -> Result<Block, HcdError> {
     let nodes = extract_html_text_nodes(raw)?;
     let marks = extract_marks(raw)?;
+    let ids = editor_node_ids(raw)?;
     let entries: Vec<NodeMapEntry> = map
         .entries
         .iter()
-        .filter(|entry| raw.contains(&format!("data-hcd-id=\"{}\"", entry.node_id)))
+        .filter(|entry| ids.contains(&entry.node_id))
         .cloned()
         .collect();
     let inlines = entries
@@ -689,20 +824,34 @@ fn block_from_raw(
                     border: mark.and_then(|value| value.border.clone()),
                     typography: None,
                     font_size_explicit: false,
+                    reference: None,
+                    custom_marks: Vec::new(),
+                    content: None,
+                    extension: None,
                 }
             })
         })
         .collect();
+    let declared_html_tree = raw
+        .split('>')
+        .next()
+        .is_some_and(|tag| tag.contains("data-hcd-html-tree=\"1\""));
+    let declared_word_tree = raw
+        .split('>')
+        .next()
+        .is_some_and(|tag| tag.contains("data-hcd-word-tree=\"1\""));
     let kind = match open.name.as_str() {
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => EditorBlockKind::Heading,
         "li" => EditorBlockKind::ListItem,
         "p" => EditorBlockKind::Paragraph,
+        "pre" if declared_html_tree => EditorBlockKind::CodeBlock,
+        "blockquote" if declared_html_tree => EditorBlockKind::Blockquote,
         _ => EditorBlockKind::Opaque,
     };
     let level = if matches!(kind, EditorBlockKind::Heading) {
         open.name.as_bytes().get(1).map(|byte| byte - b'0')
     } else if matches!(kind, EditorBlockKind::ListItem) {
-        Some(if open.ordered { 1 } else { 0 })
+        Some(u8::from(open.ordered.unwrap_or(false)))
     } else {
         None
     };
@@ -712,6 +861,8 @@ fn block_from_raw(
         .is_some_and(|tag| tag.contains("data-hcd-editor-kind="))
         || kind == EditorBlockKind::ListItem
             && (raw.contains("<ul") || raw.contains("<ol") || raw.contains("<p"))
+        || declared_html_tree
+        || declared_word_tree
     {
         parse_editor_tree(raw, &nodes, &marks)?
     } else {
@@ -726,13 +877,13 @@ fn block_from_raw(
         }
     };
     if kind == EditorBlockKind::ListItem {
-        content.level = level;
+        // Older chunk rewrites detached <li> from its outer list, while the
+        // canonical item still carries the correct order flag. An actual
+        // surrounding list takes priority; absence is not an unordered list.
+        content.level = open.ordered.map(u8::from).or(content.level).or(Some(0));
         content.list_start = open.list_start.or(content.list_start);
     }
-    let read_only = descriptor.region != "body"
-        || matches!(content.kind, EditorBlockKind::Opaque)
-        || raw.contains("data-hcd-visual-hash=")
-        || raw.contains("<table");
+    let read_only = descriptor.region != "body" || intrinsic_read_only(&content, raw);
     let fallback = stable_node_id(&[
         document_id,
         &descriptor.chunk_id,
@@ -745,6 +896,8 @@ fn block_from_raw(
         .or_else(|| entries.first().map(|entry| entry.node_id.clone()))
         .unwrap_or(fallback);
     Ok(Block {
+        scope: None,
+        source_part: None,
         id,
         region: descriptor.region.clone(),
         read_only,
@@ -797,6 +950,10 @@ fn parse_editor_tree(
                 .map(str::parse)
                 .transpose()
                 .map_err(|_| HcdError::InvalidBundle("invalid editor level".into()))?,
+            extension: node
+                .attribute("data-hcd-extension")
+                .map(serde_json::from_str)
+                .transpose()?,
             language: node.attribute("data-hcd-code-language").map(str::to_owned),
             list_start: node
                 .attribute("data-hcd-list-start")
@@ -808,14 +965,11 @@ fn parse_editor_tree(
         if infer {
             content.level = match kind {
                 EditorBlockKind::Heading => node.tag_name().name()[1..].parse().ok(),
-                EditorBlockKind::ListItem => Some(u8::from(
-                    node.ancestors()
-                        .skip(1)
-                        .find(|parent| {
-                            parent.is_element() && matches!(parent.tag_name().name(), "ul" | "ol")
-                        })
-                        .is_some_and(|parent| parent.tag_name().name() == "ol"),
-                )),
+                // Nested item order belongs to its parent container. Use the
+                // same neutral item flag as the editor snapshot/renderer so a
+                // text-only save does not invent a structural change. The root
+                // item's order is restored by block_from_raw from the outer list.
+                EditorBlockKind::ListItem => Some(0),
                 _ => None,
             };
             if kind == EditorBlockKind::OrderedList {
@@ -839,7 +993,12 @@ fn parse_editor_tree(
             if owner != Some(node) {
                 continue;
             }
-            if kind_of(child, infer).is_some() {
+            if child.attribute("data-hcd-inline-container") == Some("true") {
+                content.inlines.push(EditorInline {
+                    content: Some(Box::new(parse(child, texts, marks, depth + 1, infer)?)),
+                    ..Default::default()
+                });
+            } else if kind_of(child, infer).is_some() {
                 if matches!(
                     kind,
                     EditorBlockKind::ListItem | EditorBlockKind::Blockquote
@@ -872,6 +1031,7 @@ fn parse_editor_tree(
                 let mark = marks.get(id);
                 content.inlines.push(EditorInline {
                     text,
+                    content: None,
                     node_id: Some(id.into()),
                     bold: mark.is_some_and(|mark| mark.bold),
                     italic: mark.is_some_and(|mark| mark.italic),
@@ -885,6 +1045,19 @@ fn parse_editor_tree(
                     border: mark.and_then(|mark| mark.border.clone()),
                     typography: None,
                     font_size_explicit: false,
+                    extension: child
+                        .attribute("data-hcd-extension")
+                        .map(serde_json::from_str)
+                        .transpose()?,
+                    reference: child
+                        .attribute("data-hcd-reference")
+                        .map(serde_json::from_str)
+                        .transpose()?,
+                    custom_marks: child
+                        .attribute("data-hcd-custom-marks")
+                        .map(serde_json::from_str)
+                        .transpose()?
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -955,9 +1128,13 @@ fn extract_marks(raw: &str) -> Result<HashMap<String, Marks>, HcdError> {
                     background_color: None,
                     border: None,
                 });
-                let style = attribute(&start, &reader, "style")?
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
+                let style = if attribute(&start, &reader, "data-hcd-custom-mark-style")?.is_some() {
+                    String::new()
+                } else {
+                    attribute(&start, &reader, "style")?
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                };
                 let weight = style.split(';').find_map(|declaration| {
                     declaration
                         .trim()
@@ -1125,19 +1302,43 @@ pub fn apply_structure_patch(
     patch: &StructurePatchBatch,
     expected_revision: u64,
 ) -> Result<ApplyResult, HcdError> {
+    apply_structure_patch_inner(bundle, patch, expected_revision, None)
+}
+
+fn apply_structure_patch_inner(
+    bundle: &Bundle,
+    patch: &StructurePatchBatch,
+    expected_revision: u64,
+    regional: Option<(&FlowStructurePatchBatch, &[u8])>,
+) -> Result<ApplyResult, HcdError> {
     let _guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
     ensure_semantic_flow(&manifest)?;
-    let encoded = serde_json::to_vec(patch)?;
+    let mut layout = crate::read_flow_document_layout(bundle, &manifest)?;
+    if regional.is_none() && layout.is_some() {
+        return Err(HcdError::Unsupported(
+            "Word section/story layout requires a region-aware structural protocol".into(),
+        ));
+    }
+    let encoded = match regional {
+        Some((_, encoded)) => encoded.to_vec(),
+        None => serde_json::to_vec(patch)?,
+    };
     if encoded.len() as u64 > MAX_PATCH_JSON_BYTES {
         return Err(HcdError::ResourceLimit(
             "structure patch exceeds 8 MiB".to_string(),
         ));
     }
     let patch_hash = hash_bytes(&encoded);
-    if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_4
+    if patch.schema_version
+        != if regional.is_some() {
+            flow_regions::FLOW_STRUCTURE_PATCH_SCHEMA
+        } else {
+            HCD_PATCH_SCHEMA_VERSION_4
+        }
         || patch.document_id != manifest.document_id
         || patch.patch_id.is_empty()
+        || patch.patch_id.starts_with("restore-")
         || patch.patch_id.len() > 256
         || patch.operations.is_empty()
         || patch.operations.len() > MAX_OPS
@@ -1169,6 +1370,15 @@ pub fn apply_structure_patch(
             });
         }
     }
+    if regional.is_some()
+        && layout
+            .as_ref()
+            .is_none_or(|value| value.schema_version != crate::FLOW_REGION_LAYOUT_SCHEMA)
+    {
+        return Err(HcdError::Unsupported(
+            "canonical Word region projection required".into(),
+        ));
+    }
     if !manifest.capabilities.structure_patch {
         return Err(HcdError::InvalidPatch(
             "run hdoc project-editor before hcd-patch/4".to_string(),
@@ -1186,6 +1396,9 @@ pub fn apply_structure_patch(
         ));
     }
     let mut blocks = load_blocks(bundle, &manifest)?;
+    let operation_regions = regional
+        .map(|(batch, _)| flow_regions::operation_regions(batch, layout.as_ref().unwrap(), &blocks))
+        .transpose()?;
     let original_ids: HashSet<String> = blocks
         .iter()
         .flat_map(|block| block.entries.iter().map(|entry| entry.node_id.clone()))
@@ -1236,10 +1449,60 @@ pub fn apply_structure_patch(
             }
         }
     }
+    let mut changed_blocks = HashSet::new();
+    let mut wanted_sources = HashSet::new();
+    for operation in &patch.operations {
+        match operation {
+            StructureOperation::Delete { block_id, .. } => {
+                changed_blocks.insert(block_id.as_str());
+            }
+            StructureOperation::Replace {
+                block_id, block, ..
+            } => {
+                changed_blocks.insert(block_id.as_str());
+                wanted_sources.extend(
+                    content_inlines(block)
+                        .into_iter()
+                        .filter_map(|inline| inline.node_id.clone()),
+                );
+            }
+            StructureOperation::Insert { block, .. } => wanted_sources.extend(
+                content_inlines(block)
+                    .into_iter()
+                    .filter_map(|inline| inline.node_id.clone()),
+            ),
+            _ => {}
+        }
+    }
+    let source_scope = ReplacementSources::capture(
+        blocks
+            .iter()
+            .filter(|block| changed_blocks.contains(block.id.as_str()))
+            .map(|block| &block.content),
+        &wanted_sources,
+    );
+    let mut reserved_sources: HashMap<String, HashSet<usize>> = HashMap::new();
+    for (index, operation) in patch.operations.iter().enumerate() {
+        if let StructureOperation::Replace { block, .. }
+        | StructureOperation::Insert { block, .. } = operation
+        {
+            for inline in content_inlines(&source_scope.retain(block.clone())?) {
+                if let Some(id) = &inline.node_id {
+                    reserved_sources
+                        .entry(id.clone())
+                        .or_default()
+                        .insert(index);
+                }
+            }
+        }
+    }
     let context = OperationContext {
         manifest: &manifest,
         patch_id: &patch.patch_id,
         assets: &assets,
+        source_scope: &source_scope,
+        reserved_sources: &reserved_sources,
+        operation_regions: operation_regions.as_deref(),
     };
     // Resolve block preconditions against the original block HTML. Images are
     // applied last, so a removed image aborts the entire batch instead of losing
@@ -1265,6 +1528,25 @@ pub fn apply_structure_patch(
             &mut dirty_nodes,
             &mut dirty_parts,
         )?;
+        if !operation.is_image() {
+            dirty_parts.insert(
+                context
+                    .operation_regions
+                    .map(|regions| regions[operation_index].source_part.clone())
+                    .unwrap_or_else(|| {
+                        match manifest.source.format.as_str() {
+                            "docx" => "word/document.xml",
+                            "html" => "html/document",
+                            "md" => "markdown/document",
+                            _ => "text/document",
+                        }
+                        .into()
+                    }),
+            );
+        }
+    }
+    if let Some(layout) = layout.as_mut().filter(|_| regional.is_some()) {
+        flow_regions::update_boundaries(layout, &blocks)?;
     }
     if !blocks.iter().any(|block| block.region == "body") {
         return Err(HcdError::InvalidPatch(
@@ -1276,10 +1558,61 @@ pub fn apply_structure_patch(
             "editor block limit reached".to_string(),
         ));
     }
+    let mut reference_ids = HashSet::new();
+    for block in &blocks {
+        if crate::content_custom_marks(&block.content)? {
+            manifest.capabilities.custom_marks = Some(1)
+        }
+        for occurrence in crate::content_references(&block.id, &block.content)? {
+            if reference_ids.len() >= 10_000
+                || !reference_ids.insert(occurrence.reference.mention_id)
+            {
+                return Err(HcdError::InvalidPatch(
+                    "duplicate or excessive reference occurrences".into(),
+                ));
+            }
+        }
+    }
+    let mut extension_ids = HashSet::new();
+    let mut extension_version = manifest.capabilities.extension_nodes.unwrap_or(1);
+    for block in &blocks {
+        for node in crate::content_extensions(&block.content)? {
+            extension_version = extension_version.max(node.envelope_version());
+            for resource in &node.resources {
+                let descriptor = assets
+                    .get(&resource.hash)
+                    .cloned()
+                    .map(Ok)
+                    .unwrap_or_else(|| bundle.staged_asset(&resource.hash))?;
+                if descriptor.byte_length != resource.byte_length {
+                    return Err(HcdError::InvalidPatch(
+                        "resource byte length mismatch".into(),
+                    ));
+                }
+                crate::patch::validate_staged_asset(bundle, &descriptor, &resource.hash)?;
+                crate::validate_node_resource_asset(bundle, resource, &descriptor)?;
+                if !assets.contains_key(&resource.hash) {
+                    asset_index.push(descriptor.clone());
+                    assets.insert(resource.hash.clone(), descriptor);
+                }
+            }
+            if extension_ids.len() >= 10000 || !extension_ids.insert(node.instance_id) {
+                return Err(HcdError::InvalidPatch(
+                    "duplicate or excessive extension identities".into(),
+                ));
+            }
+        }
+    }
+    if !extension_ids.is_empty() {
+        manifest.capabilities.extension_nodes = Some(extension_version);
+    }
     let remaining_ids: HashSet<String> = blocks
         .iter()
         .flat_map(|block| block.entries.iter().map(|entry| entry.node_id.clone()))
         .collect();
+    if !reference_ids.is_empty() {
+        manifest.capabilities.inline_references = Some(1);
+    }
     for removed in original_ids.difference(&remaining_ids) {
         dirty_nodes.insert(removed.clone());
     }
@@ -1300,7 +1633,9 @@ pub fn apply_structure_patch(
     for descriptor in &descriptors {
         hash_descriptor(&mut hasher, descriptor);
     }
-    let asset_index_href = if asset_index.len() == indexed_asset_count {
+    let asset_index_href = if regional.is_some() {
+        flow_regions::write_layout_asset(bundle, layout.as_ref().unwrap(), &mut asset_index)?
+    } else if asset_index.len() == indexed_asset_count {
         bundle.asset_index_href_for_revision(manifest.revision)?
     } else {
         asset_index.sort_by(|left, right| left.hash.cmp(&right.hash));
@@ -1339,7 +1674,7 @@ pub fn apply_structure_patch(
         }
     }
     if blocks.iter().any(|block| {
-        block.content.inlines.iter().any(|inline| {
+        content_inlines(&block.content).iter().any(|inline| {
             inline.text_color.is_some()
                 || inline.background_color.is_some()
                 || inline.border.is_some()
@@ -1358,6 +1693,7 @@ pub fn apply_structure_patch(
     let (author_id, author_name) = crate::revision_author(&patch.actor)?;
     record.author_id = author_id;
     record.author_name = author_name;
+    record.reference_authors = crate::revision_reference_authors(&patch.actor)?;
     record.root_hash = root_hash.clone();
     record.asset_index_href = asset_index_href;
     record.annotation_root_hash = annotation_root_hash.clone();
@@ -1629,7 +1965,7 @@ fn rewrite_indexed_chunks(
         &mut RevisionDirty,
     ) -> Result<bool, HcdError>,
 ) -> Result<ApplyResult, HcdError> {
-    if patch_id.trim().is_empty() || patch_id.len() > 256 {
+    if patch_id.trim().is_empty() || patch_id.len() > 256 || patch_id.starts_with("restore-") {
         return Err(HcdError::InvalidPatch(
             "patchId must be 1 to 256 bytes".to_string(),
         ));
@@ -1637,6 +1973,11 @@ fn rewrite_indexed_chunks(
     let _guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
     ensure_semantic_flow(&manifest)?;
+    if crate::read_flow_document_layout(bundle, &manifest)?.is_some() {
+        return Err(HcdError::Unsupported(
+            "Word section/story layout requires a region-aware review protocol".into(),
+        ));
+    }
     if manifest.revision != expected_revision {
         return Err(HcdError::RevisionConflict(format!(
             "expected head {expected_revision}, actual {}",
@@ -1767,6 +2108,7 @@ fn rewrite_indexed_chunks(
     let (author_id, author_name) = crate::revision_author(actor)?;
     record.author_id = author_id;
     record.author_name = author_name;
+    record.reference_authors = crate::revision_reference_authors(actor)?;
     record.root_hash = root_hash.clone();
     record.index_root_href = manifest.index_root_href.clone();
     record.index_prefix = manifest.index_prefix.clone();
@@ -2011,6 +2353,9 @@ struct OperationContext<'a> {
     manifest: &'a HcdManifest,
     patch_id: &'a str,
     assets: &'a HashMap<String, crate::AssetDescriptor>,
+    source_scope: &'a ReplacementSources,
+    reserved_sources: &'a HashMap<String, HashSet<usize>>,
+    operation_regions: Option<&'a [FlowRegion]>,
 }
 
 fn apply_image_operation(
@@ -2087,6 +2432,9 @@ fn apply_operation(
 ) -> Result<(), HcdError> {
     let manifest = context.manifest;
     let patch_id = context.patch_id;
+    let scope = context
+        .operation_regions
+        .map(|regions| &regions[operation_index]);
     match operation {
         StructureOperation::ImageGeometry {
             node_id,
@@ -2127,11 +2475,16 @@ fn apply_operation(
             after_block_id,
             block,
         } => {
-            validate_content(block)?;
-            let insertion = insertion_index(blocks, after_block_id.as_deref())?;
-            if blocks
-                .get(insertion)
-                .is_some_and(|next| next.region != "body")
+            let block = context.source_scope.retain(block.clone())?;
+            let insertion = if let Some(scope) = scope {
+                flow_regions::insertion_index(blocks, after_block_id.as_deref(), scope)?
+            } else {
+                insertion_index(blocks, after_block_id.as_deref())?
+            };
+            if scope.is_none()
+                && blocks
+                    .get(insertion)
+                    .is_some_and(|next| next.region != "body")
             {
                 return Err(HcdError::Unsupported(
                     "cannot insert outside the body region".to_string(),
@@ -2148,8 +2501,15 @@ fn apply_operation(
                     "generated block ID collision".to_string(),
                 ));
             }
-            let generated =
-                render_new_block(manifest, patch_id, operation_index, id, block.clone(), None)?;
+            let generated = render_new_block_in_region(
+                manifest,
+                patch_id,
+                operation_index,
+                id,
+                block,
+                None,
+                scope,
+            )?;
             dirty_nodes.extend(generated.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(
                 generated
@@ -2190,10 +2550,15 @@ fn apply_operation(
                 ));
             }
             let moved = blocks.remove(index);
-            let insertion = insertion_index(blocks, after_block_id.as_deref())?;
-            if blocks
-                .get(insertion)
-                .is_some_and(|next| next.region != moved.region)
+            let insertion = if let Some(scope) = scope {
+                flow_regions::insertion_index(blocks, after_block_id.as_deref(), scope)?
+            } else {
+                insertion_index(blocks, after_block_id.as_deref())?
+            };
+            if scope.is_none()
+                && blocks
+                    .get(insertion)
+                    .is_some_and(|next| next.region != moved.region)
             {
                 return Err(HcdError::Unsupported(
                     "cannot move between document regions".to_string(),
@@ -2208,7 +2573,6 @@ fn apply_operation(
             block,
             precondition,
         } => {
-            validate_content(block)?;
             let index = block_index(blocks, block_id, precondition)?;
             if blocks[index].read_only {
                 return Err(HcdError::Unsupported(format!(
@@ -2216,16 +2580,38 @@ fn apply_operation(
                 )));
             }
             let old = &blocks[index];
-            let first_node_id = old.entries.first().map(|entry| entry.node_id.clone());
+            let replacement = context.source_scope.retain(block.clone())?;
+            let retained: HashSet<_> = content_inlines(&replacement)
+                .into_iter()
+                .filter_map(|inline| inline.node_id.as_deref())
+                .collect();
+            let first_node_id = old
+                .entries
+                .first()
+                .filter(|entry| !retained.contains(entry.node_id.as_str()))
+                .filter(|entry| {
+                    context
+                        .reserved_sources
+                        .get(&entry.node_id)
+                        .is_none_or(|owners| owners.iter().all(|owner| *owner == operation_index))
+                })
+                .filter(|_| {
+                    content_inlines(&old.content)
+                        .first()
+                        .zip(content_inlines(&replacement).first())
+                        .is_some_and(|(before, after)| same_inline_occurrence(before, after))
+                })
+                .map(|entry| entry.node_id.clone());
             dirty_nodes.extend(old.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(old.entries.iter().map(|entry| entry.source.part.clone()));
-            let generated = render_new_block(
+            let generated = render_new_block_in_region(
                 manifest,
                 patch_id,
                 operation_index,
                 block_id.clone(),
-                block.clone(),
+                replacement,
                 first_node_id,
+                scope,
             )?;
             dirty_nodes.extend(generated.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(
@@ -2280,8 +2666,676 @@ fn insertion_index(blocks: &[Block], after: Option<&str>) -> Result<usize, HcdEr
 }
 
 fn validate_content(content: &EditorBlockContent) -> Result<(), HcdError> {
+    crate::content_custom_marks(content)?;
+    crate::content_references("", content)?;
+    crate::content_extensions(content)?;
     let mut budget = (0usize, 0usize);
     validate_content_tree(content, 0, &mut budget)
+}
+
+fn content_inlines(content: &EditorBlockContent) -> Vec<&EditorInline> {
+    fn visit<'a>(content: &'a EditorBlockContent, output: &mut Vec<&'a EditorInline>) {
+        for inline in &content.inlines {
+            output.push(inline);
+            if let Some(content) = &inline.content {
+                visit(content, output);
+            }
+        }
+        for child in &content.children {
+            visit(child, output);
+        }
+    }
+    let mut output = Vec::new();
+    visit(content, &mut output);
+    output
+}
+
+fn same_inline_occurrence(before: &EditorInline, after: &EditorInline) -> bool {
+    before.hard_break == after.hard_break
+        && match (&before.content, &after.content) {
+            (Some(before), Some(after)) => {
+                before.extension.as_ref().map(|node| &node.instance_id)
+                    == after.extension.as_ref().map(|node| &node.instance_id)
+            }
+            (None, None) => true,
+            _ => false,
+        }
+        && match (&before.reference, &after.reference) {
+            (Some(before), Some(after)) => before.mention_id == after.mention_id,
+            (None, None) => true,
+            _ => false,
+        }
+        && match (&before.extension, &after.extension) {
+            (Some(before), Some(after)) => {
+                before.instance_id == after.instance_id
+                    && before.node_type == after.node_type
+                    && before.display == after.display
+            }
+            (None, None) => true,
+            _ => false,
+        }
+}
+
+#[derive(Clone, PartialEq)]
+struct InlineSourceRole {
+    hard_break: bool,
+    reference: Option<String>,
+    extension: Option<(String, String, crate::ExtensionDisplay)>,
+}
+impl InlineSourceRole {
+    fn of(inline: &EditorInline) -> Self {
+        Self {
+            hard_break: inline.hard_break,
+            reference: inline
+                .reference
+                .as_ref()
+                .map(|value| value.mention_id.clone()),
+            extension: inline.extension.as_ref().map(|value| {
+                (
+                    value.instance_id.clone(),
+                    value.node_type.clone(),
+                    value.display,
+                )
+            }),
+        }
+    }
+}
+
+/// A bounded proof of source roles from blocks explicitly changed by a batch.
+/// It keeps no text, business payload or resource copies. The native apply path
+/// builds this proof from its current blocks, never from a client's claim.
+pub struct ReplacementSources {
+    roles: HashMap<String, Vec<InlineSourceRole>>,
+}
+impl ReplacementSources {
+    pub fn capture<'a>(
+        contents: impl IntoIterator<Item = &'a EditorBlockContent>,
+        wanted: &HashSet<String>,
+    ) -> Self {
+        let mut roles: HashMap<String, Vec<InlineSourceRole>> = HashMap::new();
+        for content in contents {
+            for inline in content_inlines(content) {
+                if let Some(id) = inline.node_id.as_ref().filter(|id| wanted.contains(*id)) {
+                    roles
+                        .entry(id.clone())
+                        .or_default()
+                        .push(InlineSourceRole::of(inline));
+                }
+            }
+        }
+        Self { roles }
+    }
+    pub fn retain(&self, mut after: EditorBlockContent) -> Result<EditorBlockContent, HcdError> {
+        fn clear(content: &mut EditorBlockContent) {
+            for inline in &mut content.inlines {
+                inline.node_id = None;
+                if let Some(content) = &mut inline.content {
+                    clear(content);
+                }
+            }
+            for child in &mut content.children {
+                clear(child);
+            }
+        }
+        let mut plain = after.clone();
+        clear(&mut plain);
+        validate_content(&plain)?;
+        fn assign(
+            content: &mut EditorBlockContent,
+            scope: &ReplacementSources,
+            claimed: &mut HashSet<String>,
+        ) -> Result<(), HcdError> {
+            for inline in &mut content.inlines {
+                if let Some(content) = &mut inline.content {
+                    assign(content, scope, claimed)?;
+                }
+                let Some(id) = inline.node_id.clone() else {
+                    continue;
+                };
+                let roles = scope.roles.get(&id).ok_or_else(|| {
+                    HcdError::InvalidPatch(
+                        "replacement source identity does not belong to the changed blocks".into(),
+                    )
+                })?;
+                let role = InlineSourceRole::of(inline);
+                if !roles.iter().all(|old| old == &role) || !claimed.insert(id) {
+                    inline.node_id = None;
+                }
+            }
+            for child in &mut content.children {
+                assign(child, scope, claimed)?;
+            }
+            Ok(())
+        }
+        assign(&mut after, self, &mut HashSet::new())?;
+        Ok(after)
+    }
+}
+
+/// A single-block version for callers that do not transfer sources between
+/// changed roots. Repeated split fragments keep an ID only once.
+pub fn retain_replacement_sources(
+    before: &EditorBlockContent,
+    after: EditorBlockContent,
+) -> Result<EditorBlockContent, HcdError> {
+    let wanted = content_inlines(&after)
+        .into_iter()
+        .filter_map(|inline| inline.node_id.clone())
+        .collect();
+    ReplacementSources::capture([before], &wanted).retain(after)
+}
+
+/// Prepare content for a different Word story. The caller provides all IDs
+/// already used by the document and an extension-specific copy policy. This
+/// does not allocate canonical nodes, copy source parts, or publish a revision.
+pub fn prepare_story_content_copy<F, G>(
+    source: &[EditorBlockContent],
+    existing_ids: &HashSet<String>,
+    mut new_reference_id: F,
+    mut copy_extension: G,
+) -> Result<Vec<EditorBlockContent>, HcdError>
+where
+    F: FnMut(&crate::InlineReference) -> Result<String, HcdError>,
+    G: FnMut(&crate::ExtensionNode) -> Result<crate::ExtensionNode, HcdError>,
+{
+    if source.len() > 10_000 {
+        return Err(HcdError::ResourceLimit("too many story blocks".into()));
+    }
+    fn clear_sources(content: &mut EditorBlockContent, depth: usize) -> Result<(), HcdError> {
+        if depth > 24 {
+            return Err(HcdError::ResourceLimit(
+                "story copy nesting exceeds limit".into(),
+            ));
+        }
+        for inline in &mut content.inlines {
+            inline.node_id = None;
+            if let Some(inner) = &mut inline.content {
+                clear_sources(inner, depth + 1)?;
+            }
+        }
+        for child in &mut content.children {
+            clear_sources(child, depth + 1)?;
+        }
+        Ok(())
+    }
+    let mut result = source.to_vec();
+    let mut used = existing_ids.clone();
+    for content in &mut result {
+        clear_sources(content, 0)?;
+        validate_content(content)?;
+        for value in crate::content_references("", content)? {
+            used.insert(value.reference.mention_id);
+        }
+        for value in crate::content_extensions(content)? {
+            used.insert(value.instance_id);
+        }
+    }
+    fn replace<F, G>(
+        content: &mut EditorBlockContent,
+        used: &mut HashSet<String>,
+        reference: &mut F,
+        extension: &mut G,
+    ) -> Result<(), HcdError>
+    where
+        F: FnMut(&crate::InlineReference) -> Result<String, HcdError>,
+        G: FnMut(&crate::ExtensionNode) -> Result<crate::ExtensionNode, HcdError>,
+    {
+        fn copy_node<G>(
+            node: &mut crate::ExtensionNode,
+            used: &mut HashSet<String>,
+            copy: &mut G,
+        ) -> Result<(), HcdError>
+        where
+            G: FnMut(&crate::ExtensionNode) -> Result<crate::ExtensionNode, HcdError>,
+        {
+            let new = copy(node)?;
+            new.validate()?;
+            if !used.insert(new.instance_id.clone()) {
+                return Err(HcdError::InvalidPatch(
+                    "story copy extension identity collision".into(),
+                ));
+            }
+            *node = new;
+            Ok(())
+        }
+        if let Some(node) = &mut content.extension {
+            copy_node(node, used, extension)?;
+        }
+        for inline in &mut content.inlines {
+            if let Some(inner) = &mut inline.content {
+                replace(inner, used, reference, extension)?;
+            }
+            if let Some(value) = &mut inline.reference {
+                let id = reference(value)?;
+                if !used.insert(id.clone()) {
+                    return Err(HcdError::InvalidPatch(
+                        "story copy reference identity collision".into(),
+                    ));
+                }
+                value.mention_id = id;
+                value.validate()?;
+            }
+            if let Some(node) = &mut inline.extension {
+                copy_node(node, used, extension)?;
+            }
+        }
+        for child in &mut content.children {
+            replace(child, used, reference, extension)?;
+        }
+        Ok(())
+    }
+    for content in &mut result {
+        replace(
+            content,
+            &mut used,
+            &mut new_reference_id,
+            &mut copy_extension,
+        )?;
+        validate_content(content)?;
+    }
+    Ok(result)
+}
+
+/// Read the complete immutable projection before preparing an independent
+/// story. Unsupported content is rejected rather than silently omitted.
+pub fn prepare_story_copy_at_revision<F, G>(
+    bundle: &Bundle,
+    revision: u64,
+    expected_layout_hash: &str,
+    source_story_id: &str,
+    source_typography_styles: &str,
+    new_reference_id: F,
+    copy_extension: G,
+) -> Result<Vec<EditorBlockContent>, HcdError>
+where
+    F: FnMut(&crate::InlineReference) -> Result<String, HcdError>,
+    G: FnMut(&crate::ExtensionNode) -> Result<crate::ExtensionNode, HcdError>,
+{
+    let projection =
+        editor_projection_with_typography_styles(bundle, Some(revision), source_typography_styles)?;
+    let head = bundle.manifest()?;
+    let (manifest, _) = crate::manifest_at_revision(bundle, &head, Some(revision))?;
+    if let Some(href) = &manifest.annotation_href {
+        let annotations: AnnotationSet = read_json_bounded(
+            &bundle.resolve_href(href)?,
+            MAX_CONTROL_PART_BYTES,
+            "annotations",
+        )?;
+        if story_has_annotations(&projection, source_story_id, &annotations) {
+            return Err(HcdError::Unsupported(
+                "Word story contains annotations that cannot be copied safely".into(),
+            ));
+        }
+    }
+    let content = prepare_story_copy_projection(
+        &projection,
+        expected_layout_hash,
+        source_story_id,
+        new_reference_id,
+        copy_extension,
+    )?;
+    let assets = bundle.read_asset_index_for_revision(revision)?;
+    validate_story_copy_resources(bundle, &content, &assets)?;
+    Ok(content)
+}
+
+/// Require copied extension dependencies to exist in the pinned revision,
+/// rather than silently accepting a staged or later-version resource.
+fn validate_story_copy_resources(
+    bundle: &Bundle,
+    content: &[EditorBlockContent],
+    assets: &[crate::AssetDescriptor],
+) -> Result<(), HcdError> {
+    let assets: HashMap<_, _> = assets
+        .iter()
+        .map(|asset| (asset.hash.as_str(), asset))
+        .collect();
+    let mut verified = HashSet::new();
+    for block in content {
+        for node in crate::content_extensions(block)? {
+            for resource in &node.resources {
+                let asset = assets.get(resource.hash.as_str()).ok_or_else(|| {
+                    HcdError::InvalidPatch(
+                        "story copy resource is not in the selected revision".into(),
+                    )
+                })?;
+                if resource.byte_length != asset.byte_length {
+                    return Err(HcdError::InvalidPatch(
+                        "story copy resource length mismatch".into(),
+                    ));
+                }
+                if verified.insert(resource.hash.clone()) {
+                    crate::patch::validate_staged_asset(bundle, asset, &resource.hash)?;
+                }
+                crate::validate_node_resource_asset(bundle, resource, asset)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A read-only, revision-pinned candidate for creating an independent Word
+/// story. Publication must recheck head, room ownership, source ZIP part
+/// availability and resources, and write layout and blocks atomically.
+pub struct PreparedStoryUnlink {
+    pub revision: u64,
+    pub root_hash: String,
+    pub layout: crate::FlowDocumentLayout,
+    pub impact: crate::FlowStoryUnlinkPlan,
+    pub content: Vec<EditorBlockContent>,
+    /// Candidate canonical roots, generated without publishing any objects.
+    pub blocks: Vec<EditorBlockView>,
+    document_id: String,
+    integrity_hash: String,
+}
+
+/// Copy choices are data, not authorization. On recovery the source and
+/// revision must be re-read and each extension choice must pass its copy policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoryCopyChoices {
+    pub reference_ids: Vec<String>,
+    pub extensions: Vec<crate::ExtensionNode>,
+}
+
+impl PreparedStoryUnlink {
+    /// Capture the choices needed to reproduce this candidate after a restart.
+    pub fn copy_choices(&self) -> Result<StoryCopyChoices, HcdError> {
+        self.commitment()?;
+        fn collect(content: &EditorBlockContent, choices: &mut StoryCopyChoices) {
+            if let Some(node) = &content.extension {
+                choices.extensions.push(node.clone());
+            }
+            for inline in &content.inlines {
+                if let Some(inner) = &inline.content {
+                    collect(inner, choices);
+                }
+                if let Some(reference) = &inline.reference {
+                    choices.reference_ids.push(reference.mention_id.clone());
+                }
+                if let Some(node) = &inline.extension {
+                    choices.extensions.push(node.clone());
+                }
+            }
+            for child in &content.children {
+                collect(child, choices);
+            }
+        }
+        let mut choices = StoryCopyChoices {
+            reference_ids: Vec::new(),
+            extensions: Vec::new(),
+        };
+        for content in &self.content {
+            collect(content, &mut choices);
+        }
+        Ok(choices)
+    }
+    fn content_hash(&self) -> Result<String, HcdError> {
+        Ok(hash_bytes(&serde_json::to_vec(&(
+            "hcd-word-story-unlink-candidate/1",
+            &self.document_id,
+            self.revision,
+            &self.root_hash,
+            &self.layout,
+            &self.impact,
+            &self.content,
+            &self.blocks,
+        ))?))
+    }
+
+    /// Stable commitment to the prepared candidate, for binding an exact
+    /// native transaction receipt. This is not an authorization signature.
+    pub fn commitment(&self) -> Result<String, HcdError> {
+        let hash = self.content_hash()?;
+        if hash != self.integrity_hash {
+            return Err(HcdError::PreconditionFailed(
+                "Word story candidate changed after preparation".into(),
+            ));
+        }
+        Ok(hash)
+    }
+
+    /// Read-only preflight under the local document write lock. The lock is
+    /// released on return, so success is not authorization to publish later.
+    /// A future transaction must recheck while holding its own lock through
+    /// publication, and separately fence the room, authenticate the actor and
+    /// verify the original DOCX.
+    pub fn verify_current(&self, bundle: &Bundle) -> Result<(), HcdError> {
+        let guard = bundle.acquire_write_lock()?;
+        self.validate_locked(bundle, &guard)
+    }
+
+    fn validate_locked(
+        &self,
+        bundle: &Bundle,
+        _guard: &crate::bundle::BundleWriteGuard,
+    ) -> Result<(), HcdError> {
+        self.commitment()?;
+        let manifest = bundle.manifest()?;
+        if manifest.document_id != self.document_id
+            || manifest.revision != self.revision
+            || manifest.root_hash != self.root_hash
+        {
+            return Err(HcdError::RevisionConflict(
+                "Word story candidate base changed".into(),
+            ));
+        }
+        let current = crate::read_flow_document_layout(bundle, &manifest)?
+            .ok_or_else(|| HcdError::Unsupported("Word regional layout required".into()))?;
+        crate::validate_flow_story_unlink_transition(&current, &self.layout)?;
+        let assets = bundle.read_asset_index_for_revision(self.revision)?;
+        validate_story_copy_resources(bundle, &self.content, &assets)?;
+        Ok(())
+    }
+}
+
+pub fn prepare_story_unlink_at_revision<F, G>(
+    bundle: &Bundle,
+    revision: u64,
+    request: &crate::FlowStoryUnlinkRequest,
+    story: &crate::FlowStory,
+    source_typography_styles: &str,
+    new_reference_id: F,
+    copy_extension: G,
+) -> Result<PreparedStoryUnlink, HcdError>
+where
+    F: FnMut(&crate::InlineReference) -> Result<String, HcdError>,
+    G: FnMut(&crate::ExtensionNode) -> Result<crate::ExtensionNode, HcdError>,
+{
+    let head = bundle.manifest()?;
+    let (manifest, _) = crate::manifest_at_revision(bundle, &head, Some(revision))?;
+    let current = crate::read_flow_document_layout(bundle, &manifest)?
+        .ok_or_else(|| HcdError::Unsupported("Word regional layout required".into()))?;
+    let (impact, layout) = crate::plan_flow_story_unlink_layout(&current, request, story)?;
+    let mut blocks = load_blocks(bundle, &manifest)?;
+    if blocks.iter().any(|block| {
+        block.id == story.id
+            || block.source_part.as_deref() == Some(story.source_part.as_str())
+            || block
+                .entries
+                .iter()
+                .any(|entry| entry.node_id == story.id || entry.source.part == story.source_part)
+    }) || bundle
+        .read_asset_index_for_revision(revision)?
+        .iter()
+        .any(|asset| asset.source_part == story.source_part)
+    {
+        return Err(HcdError::InvalidPatch(
+            "Word story destination conflicts with canonical content or assets".into(),
+        ));
+    }
+    let mut content = if let Some(source) = &impact.inherited_story_id {
+        prepare_story_copy_at_revision(
+            bundle,
+            revision,
+            &request.base_layout_hash,
+            source,
+            source_typography_styles,
+            new_reference_id,
+            copy_extension,
+        )?
+    } else {
+        Vec::new()
+    };
+    // Every region requires at least one canonical root, including blank stories.
+    if content.is_empty() {
+        content.push(EditorBlockContent::default());
+    }
+    let scope = flow_regions(&layout)
+        .into_iter()
+        .find(|scope| scope.id == story.id)
+        .ok_or_else(|| HcdError::InvalidPatch("new Word story has no region".into()))?;
+    let mut used: HashSet<String> = blocks
+        .iter()
+        .flat_map(|block| {
+            std::iter::once(block.id.clone())
+                .chain(block.entries.iter().map(|entry| entry.node_id.clone()))
+        })
+        .collect();
+    used.extend(layout.sections.iter().map(|section| section.id.clone()));
+    used.extend(layout.stories.iter().map(|item| item.id.clone()));
+    // An identity reused after a historical restore must not generate the
+    // same canonical nodes in a different revision lineage.
+    let revision_identity = revision.to_string();
+    let patch_id = format!("word-story-unlink-{}-{revision_identity}", story.id);
+    let mut views = Vec::with_capacity(content.len());
+    let old_block_count = blocks.len();
+    for (index, value) in content.iter().enumerate() {
+        validate_content(value)?;
+        let id = stable_node_id(&[
+            &manifest.document_id,
+            &story.id,
+            &revision_identity,
+            &index.to_string(),
+            "independent-story-block",
+        ]);
+        if !used.insert(id.clone()) {
+            return Err(HcdError::InvalidPatch(
+                "new Word story root identity collision".into(),
+            ));
+        }
+        let block = render_new_block_in_region(
+            &manifest,
+            &patch_id,
+            index,
+            id,
+            value.clone(),
+            None,
+            Some(&scope),
+        )?;
+        for entry in &block.entries {
+            if !used.insert(entry.node_id.clone()) {
+                return Err(HcdError::InvalidPatch(
+                    "new Word story node identity collision".into(),
+                ));
+            }
+        }
+        views.push(block.view());
+        blocks.push(block);
+    }
+    flow_regions::validate_unlink_roots(&current, &layout, &blocks[..old_block_count], &blocks)?;
+    let mut prepared = PreparedStoryUnlink {
+        revision,
+        root_hash: manifest.root_hash,
+        layout,
+        impact,
+        content,
+        blocks: views,
+        document_id: manifest.document_id,
+        integrity_hash: String::new(),
+    };
+    prepared.integrity_hash = prepared.content_hash()?;
+    Ok(prepared)
+}
+
+fn story_has_annotations(
+    projection: &EditorProjection,
+    story_id: &str,
+    annotations: &AnnotationSet,
+) -> bool {
+    let nodes: HashSet<_> = projection
+        .blocks
+        .iter()
+        .filter(|block| block.flow_region_id.as_deref() == Some(story_id))
+        .flat_map(|block| {
+            std::iter::once(block.block_id.as_str()).chain(
+                content_inlines(&block.content)
+                    .into_iter()
+                    .filter_map(|inline| inline.node_id.as_deref()),
+            )
+        })
+        .collect();
+    annotations
+        .annotations
+        .iter()
+        .any(|annotation| nodes.contains(annotation.node_id.as_str()))
+}
+
+fn prepare_story_copy_projection<F, G>(
+    projection: &EditorProjection,
+    expected_layout_hash: &str,
+    source_story_id: &str,
+    new_reference_id: F,
+    copy_extension: G,
+) -> Result<Vec<EditorBlockContent>, HcdError>
+where
+    F: FnMut(&crate::InlineReference) -> Result<String, HcdError>,
+    G: FnMut(&crate::ExtensionNode) -> Result<crate::ExtensionNode, HcdError>,
+{
+    let layout = projection
+        .flow_layout
+        .as_ref()
+        .ok_or_else(|| HcdError::Unsupported("Word regional layout required".into()))?;
+    if projection.flow_layout_hash.as_deref() != Some(expected_layout_hash)
+        || flow_layout_hash(layout)? != expected_layout_hash
+    {
+        return Err(HcdError::PreconditionFailed(
+            "Word story copy layout changed".into(),
+        ));
+    }
+    if !layout
+        .stories
+        .iter()
+        .any(|story| story.id == source_story_id)
+    {
+        return Err(HcdError::InvalidPatch(
+            "Word story copy source not found".into(),
+        ));
+    }
+    let blocks: Vec<_> = projection
+        .blocks
+        .iter()
+        .filter(|block| block.flow_region_id.as_deref() == Some(source_story_id))
+        .collect();
+    if blocks
+        .iter()
+        .any(|block| block.read_only || block.content.kind == EditorBlockKind::Opaque)
+        || projection.comments.iter().any(|comment| {
+            blocks
+                .iter()
+                .any(|block| block.block_id == comment.block_id)
+        })
+        || projection
+            .tracked_changes
+            .iter()
+            .any(|change| blocks.iter().any(|block| block.block_id == change.block_id))
+    {
+        return Err(HcdError::Unsupported(
+            "Word story contains content that cannot be copied safely".into(),
+        ));
+    }
+    let mut existing = HashSet::new();
+    for reference in crate::projection_references(projection)? {
+        existing.insert(reference.reference.mention_id);
+    }
+    for extension in crate::projection_extensions(projection)? {
+        existing.insert(extension.instance_id);
+    }
+    let source: Vec<_> = blocks
+        .into_iter()
+        .map(|block| block.content.clone())
+        .collect();
+    prepare_story_content_copy(&source, &existing, new_reference_id, copy_extension)
 }
 
 fn validate_content_tree(
@@ -2305,6 +3359,7 @@ fn validate_content_tree(
         | EditorBlockKind::BulletList
         | EditorBlockKind::OrderedList
         | EditorBlockKind::HorizontalRule
+        | EditorBlockKind::Extension
             if content.level.is_none() => {}
         _ => {
             return Err(HcdError::InvalidPatch(
@@ -2334,7 +3389,10 @@ fn validate_content_tree(
     let container = matches!(
         content.kind,
         EditorBlockKind::Blockquote | EditorBlockKind::BulletList | EditorBlockKind::OrderedList
-    );
+    ) || content
+        .extension
+        .as_ref()
+        .is_some_and(|n| n.content_model.as_deref() == Some("blocks"));
     if (container && (content.children.is_empty() || !content.inlines.is_empty()))
         || (!content.children.is_empty() && !container && content.kind != EditorBlockKind::ListItem)
         || (content.kind == EditorBlockKind::ListItem
@@ -2429,16 +3487,38 @@ fn validate_content_tree(
     for child in &content.children {
         validate_content_tree(child, depth + 1, budget)?;
     }
+    for inline in &content.inlines {
+        if let Some(body) = &inline.content {
+            // Wrapper metadata cannot masquerade as another text/atom/span.
+            let mut bare = inline.clone();
+            bare.content = None;
+            if bare != EditorInline::default()
+                || content.kind == EditorBlockKind::CodeBlock
+                || body.kind != EditorBlockKind::Extension
+                || !body.children.is_empty()
+                || !body.extension.as_ref().is_some_and(|node| {
+                    node.schema_version == "hcd.extension/3"
+                        && node.content_model.as_deref() == Some("inline")
+                })
+            {
+                return Err(HcdError::InvalidPatch(
+                    "invalid editable inline container".into(),
+                ));
+            }
+            validate_content_tree(body, depth + 1, budget)?;
+        }
+    }
     Ok(())
 }
 
-fn render_new_block(
+fn render_new_block_in_region(
     manifest: &HcdManifest,
     patch_id: &str,
     operation_index: usize,
     block_id: String,
     content: EditorBlockContent,
     first_node_id: Option<String>,
+    scope: Option<&FlowRegion>,
 ) -> Result<Block, HcdError> {
     let part = match manifest.source.format.as_str() {
         "docx" => "word/document.xml",
@@ -2447,6 +3527,9 @@ fn render_new_block(
         "txt" => "text/document",
         _ => unreachable!("checked semantic-flow source format"),
     };
+    let part = scope
+        .map(|scope| scope.source_part.as_str())
+        .unwrap_or(part);
     let mut renderer = BlockRenderer {
         manifest,
         patch_id,
@@ -2470,8 +3553,10 @@ fn render_new_block(
         renderer.html.push_str(&format!("</{tag}>"));
     }
     Ok(Block {
+        scope: scope.cloned(),
+        source_part: Some(part.into()),
         id: block_id.clone(),
-        region: "body".into(),
+        region: scope.map(|s| s.kind.as_str()).unwrap_or("body").into(),
         read_only: false,
         content,
         html: renderer.html,
@@ -2501,6 +3586,23 @@ impl BlockRenderer<'_> {
             EditorBlockKind::BulletList => "ul".into(),
             EditorBlockKind::OrderedList => "ol".into(),
             EditorBlockKind::HorizontalRule => "div".into(),
+            EditorBlockKind::Extension => {
+                if content
+                    .extension
+                    .as_ref()
+                    .is_some_and(|n| n.content_model.as_deref() == Some("inline"))
+                {
+                    "span".into()
+                } else if content
+                    .extension
+                    .as_ref()
+                    .is_some_and(|n| n.content_model.is_some())
+                {
+                    "div".into()
+                } else {
+                    "p".into()
+                }
+            }
             EditorBlockKind::Opaque => {
                 return Err(HcdError::InvalidPatch(
                     "opaque content is not editable".into(),
@@ -2513,6 +3615,15 @@ impl BlockRenderer<'_> {
             .to_owned();
         self.html
             .push_str(&format!("<{tag} data-hcd-editor-kind=\"{kind}\""));
+        if let Some(extension) = &content.extension {
+            self.html.push_str(&format!(
+                " data-hcd-extension=\"{}\"",
+                escape_html(&serde_json::to_string(extension)?)
+            ));
+            if extension.content_model.as_deref() == Some("inline") {
+                self.html.push_str(" data-hcd-inline-container=\"true\"");
+            }
+        }
         if root {
             self.html.push_str(&format!(
                 " class=\"hcd-editor-block\" data-hcd-id=\"{}\"",
@@ -2545,12 +3656,20 @@ impl BlockRenderer<'_> {
             self.html.push_str("<hr/>");
         }
         for inline in &content.inlines {
-            self.inline(inline, false)?;
+            self.inline(
+                inline,
+                false,
+                content
+                    .extension
+                    .as_ref()
+                    .is_some_and(|node| node.content_model.is_none()),
+            )?;
         }
         if content.inlines.is_empty() && content.children.is_empty() {
             self.inline(
                 &EditorInline::default(),
                 content.kind == EditorBlockKind::HorizontalRule,
+                false,
             )?;
         }
         for child in &content.children {
@@ -2563,22 +3682,43 @@ impl BlockRenderer<'_> {
         Ok(())
     }
 
-    fn inline(&mut self, inline: &EditorInline, decoration: bool) -> Result<(), HcdError> {
-        let index = self.entries.len();
-        let node_id = if index == 0 {
-            self.first_node_id.clone()
-        } else {
-            None
+    fn inline(
+        &mut self,
+        inline: &EditorInline,
+        decoration: bool,
+        extension_fallback: bool,
+    ) -> Result<(), HcdError> {
+        if let Some(content) = &inline.content {
+            return self.render(content, false);
         }
-        .unwrap_or_else(|| {
-            stable_node_id(&[
-                &self.manifest.document_id,
-                self.patch_id,
-                &self.operation_index.to_string(),
-                &format!("text-{index}"),
-            ])
-        });
+        let index = self.entries.len();
+        let node_id = inline
+            .node_id
+            .clone()
+            .or_else(|| {
+                if index == 0 {
+                    self.first_node_id.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                stable_node_id(&[
+                    &self.manifest.document_id,
+                    self.patch_id,
+                    &self.operation_index.to_string(),
+                    &format!("text-{index}"),
+                ])
+            });
+        if self.entries.iter().any(|entry| entry.node_id == node_id) {
+            return Err(HcdError::InvalidPatch(
+                "duplicate replacement source identity".into(),
+            ));
+        }
         let node_hash = hash_bytes(inline.text.as_bytes());
+        for mark in &inline.custom_marks {
+            self.html.push_str(&format!("<span data-hcd-custom-mark-style=\"true\" data-hcd-custom-mark=\"{}\" style=\"{}\">",escape_html(&serde_json::to_string(mark)?),escape_html(&mark.css())));
+        }
         if let Some(link) = &inline.link {
             self.html
                 .push_str(&format!("<a href=\"{}\">", escape_html(link)));
@@ -2617,7 +3757,7 @@ impl BlockRenderer<'_> {
         }
         let patched = !presentation.is_empty();
         // A literal newline stays canonical text and renders as a line break.
-        if inline.hard_break {
+        if inline.hard_break || extension_fallback {
             presentation.push_str("white-space:pre-wrap;");
         }
         self.html.push_str(&format!(
@@ -2641,8 +3781,29 @@ impl BlockRenderer<'_> {
                 }
             }
         }
+        if extension_fallback {
+            self.html.push_str(" data-hcd-extension-fallback=\"true\"");
+        }
         if inline.hard_break {
             self.html.push_str(" data-hcd-hard-break=\"true\"");
+        }
+        if let Some(extension) = &inline.extension {
+            self.html.push_str(&format!(
+                " data-hcd-extension=\"{}\"",
+                escape_html(&serde_json::to_string(extension)?)
+            ));
+        }
+        if let Some(reference) = &inline.reference {
+            self.html.push_str(&format!(
+                " data-hcd-reference=\"{}\"",
+                escape_html(&serde_json::to_string(reference)?)
+            ));
+        }
+        if !inline.custom_marks.is_empty() {
+            self.html.push_str(&format!(
+                " data-hcd-custom-marks=\"{}\"",
+                escape_html(&serde_json::to_string(&inline.custom_marks)?)
+            ));
         }
         if !presentation.is_empty() {
             self.html
@@ -2657,6 +3818,9 @@ impl BlockRenderer<'_> {
         }
         if inline.link.is_some() {
             self.html.push_str("</a>");
+        }
+        for _ in &inline.custom_marks {
+            self.html.push_str("</span>")
         }
         self.entries.push(NodeMapEntry {
             node_id,
@@ -2698,15 +3862,22 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IndexNode {
-    first_page: usize,
-    child_span: usize,
-    children: Vec<String>,
-}
-
 type WrittenBlocks = (Vec<ChunkDescriptor>, Option<String>, Vec<String>);
+
+fn root_list_wrapper(block: &Block) -> Option<&'static str> {
+    if block.content.kind != EditorBlockKind::ListItem {
+        return None;
+    }
+    let rest = block.html.trim_start().strip_prefix("<li")?;
+    if !rest.starts_with('>') && !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(if block.content.level == Some(1) {
+        "ol"
+    } else {
+        "ul"
+    })
+}
 
 fn write_blocks(
     bundle: &Bundle,
@@ -2729,8 +3900,19 @@ fn write_blocks(
         let region = &blocks[offset].region;
         let mut end = offset;
         let mut bytes = 0usize;
-        while end < blocks.len() && blocks[end].region == *region && end - offset < 256 {
-            let next = bytes + blocks[end].html.len();
+        while end < blocks.len()
+            && blocks[end].region == *region
+            && blocks[end].scope == blocks[offset].scope
+            && end - offset < 256
+        {
+            let wrapper_bytes = root_list_wrapper(&blocks[end]).map_or(0, |tag| {
+                format!(
+                    "<{tag} start=\"{}\"></{tag}>",
+                    blocks[end].content.list_start.unwrap_or(1)
+                )
+                .len()
+            });
+            let next = bytes + blocks[end].html.len() + wrapper_bytes;
             if end > offset && next > CHUNK_SOFT_BYTES {
                 break;
             }
@@ -2752,12 +3934,22 @@ fn write_blocks(
         ])
         .replacen("n_", "c_", 1);
         let mut html = format!(
-            "<section class=\"hcd-chunk hcd-editor-chunk\" data-hcd-chunk-id=\"{chunk_id}\" data-hcd-region=\"{}\">",
-            escape_html(region)
+            "<section class=\"hcd-chunk hcd-editor-chunk\" data-hcd-chunk-id=\"{chunk_id}\" data-hcd-region=\"{}\"{}>",
+            escape_html(region),
+            blocks[offset].scope.as_ref().map(|scope|format!(" data-hcd-flow-region=\"{}\" data-hcd-source-part=\"{}\"",escape_html(&scope.id),escape_html(&scope.source_part))).unwrap_or_default()
         );
         let mut entries = Vec::new();
         for block in &blocks[offset..end] {
-            html.push_str(&block.html);
+            if let Some(tag) = root_list_wrapper(block) {
+                html.push_str(&format!(
+                    "<{tag} start=\"{}\">",
+                    block.content.list_start.unwrap_or(1)
+                ));
+                html.push_str(&block.html);
+                html.push_str(&format!("</{tag}>"));
+            } else {
+                html.push_str(&block.html);
+            }
             entries.extend(block.entries.clone());
         }
         html.push_str("</section>");
@@ -2819,54 +4011,8 @@ fn write_blocks(
         })
         .map(|descriptor| descriptor.chunk_id.clone())
         .collect();
-    let mut pages = Vec::new();
-    for (page_number, chunk) in descriptors.chunks(INDEX_PAGE_SIZE).enumerate() {
-        if chunk
-            == previous
-                .chunks(INDEX_PAGE_SIZE)
-                .nth(page_number)
-                .unwrap_or_default()
-        {
-            if let Some(root) = &manifest.index_root_href {
-                pages.push(bundle.index_page_href(root, page_number)?);
-                continue;
-            }
-        }
-        let page = ChunkIndexPage {
-            schema_version: HCD_SCHEMA_VERSION.to_string(),
-            revision,
-            page: page_number,
-            chunks: chunk.to_vec(),
-        };
-        pages.push(bundle.write_json_object("indexes/pages", &page)?.0);
-    }
-    if pages.len() > 10_000 {
-        return Err(HcdError::ResourceLimit(
-            "index page limit exceeded".to_string(),
-        ));
-    }
-    let mut children = pages;
-    let mut child_span = 1usize;
-    while !children.is_empty() {
-        let mut parents = Vec::new();
-        for (group, entries) in children.chunks(INDEX_PAGE_SIZE).enumerate() {
-            let first_page = group * INDEX_PAGE_SIZE * child_span;
-            let node = IndexNode {
-                first_page,
-                child_span,
-                children: entries.to_vec(),
-            };
-            parents.push(bundle.write_json_object("indexes/nodes", &node)?.0);
-        }
-        if parents.len() == 1 {
-            return Ok((descriptors, parents.pop(), dirty_chunks));
-        }
-        children = parents;
-        child_span = child_span
-            .checked_mul(INDEX_PAGE_SIZE)
-            .ok_or_else(|| HcdError::ResourceLimit("index tree span overflow".to_string()))?;
-    }
-    Ok((descriptors, None, dirty_chunks))
+    let root = bundle.rebuild_index(manifest, revision, &descriptors, &previous)?;
+    Ok((descriptors, root, dirty_chunks))
 }
 
 fn filter_annotations(
@@ -2898,7 +4044,1032 @@ fn filter_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_computed_field_cache_is_read_only_without_regional_metadata() {
+        let content = EditorBlockContent::default();
+        assert!(!intrinsic_read_only(&content, "<p>ordinary text</p>"));
+        assert!(intrinsic_read_only(
+            &content,
+            "<p><span data-hcd-computed-field=\"1\">cached result</span></p>"
+        ));
+    }
+
+    #[test]
+    fn story_copy_projection_checks_scope_and_refuses_unsupported_content() {
+        let id = |n| format!("n_{n:032x}");
+        let layout = crate::FlowDocumentLayout {
+            schema_version: crate::FLOW_REGION_LAYOUT_SCHEMA.into(),
+            even_and_odd_headers: false,
+            sections: vec![crate::FlowSection {
+                id: id(1),
+                canonical_end_block_id: None,
+                source: crate::FlowSectionSource {
+                    part: "word/document.xml".into(),
+                    paragraph_ordinal: None,
+                    paragraph_id: None,
+                    original_properties_xml: None,
+                },
+                different_first_page: false,
+                break_type: None,
+                page: Default::default(),
+                headers: crate::FlowStoryBindings {
+                    default: Some(id(2)),
+                    ..Default::default()
+                },
+                footers: Default::default(),
+            }],
+            stories: vec![crate::FlowStory {
+                id: id(2),
+                kind: crate::FlowStoryKind::Header,
+                source_part: "word/header1.xml".into(),
+            }],
+        };
+        let hash = flow_layout_hash(&layout).unwrap();
+        let block = EditorBlockView {
+            flow_region_id: Some(id(2)),
+            block_id: id(3),
+            block_hash: "hash".into(),
+            region: "header".into(),
+            read_only: false,
+            content: EditorBlockContent {
+                inlines: vec![EditorInline {
+                    text: "header".into(),
+                    node_id: Some(id(4)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            read_only_html: None,
+        };
+        let mut projection = EditorProjection {
+            document_id: "doc".into(),
+            revision: 1,
+            blocks: vec![block],
+            flow_layout: Some(layout),
+            flow_layout_hash: Some(hash.clone()),
+            tracked_changes: vec![],
+            comments: vec![],
+        };
+        let copy = |p: &EditorProjection, h: &str, story: &str| {
+            prepare_story_copy_projection(
+                p,
+                h,
+                story,
+                |_| Ok(format!("m_{:032x}", 9)),
+                |node| Ok(node.clone()),
+            )
+        };
+        let result = copy(&projection, &hash, &id(2)).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].inlines[0].text, "header");
+        assert_eq!(result[0].inlines[0].node_id, None);
+        assert!(copy(&projection, &"0".repeat(64), &id(2)).is_err());
+        assert!(copy(&projection, &hash, &id(9)).is_err());
+        let mut annotations = AnnotationSet {
+            schema_version: crate::HCD_SCHEMA_VERSION.into(),
+            annotations: vec![crate::Annotation {
+                annotation_id: "a".into(),
+                node_id: id(4),
+                start: 0,
+                end: 1,
+                kind: "test".into(),
+                rule_id: None,
+                confidence: None,
+                ignored: false,
+            }],
+        };
+        assert!(story_has_annotations(&projection, &id(2), &annotations));
+        annotations.annotations[0].node_id = id(7);
+        assert!(!story_has_annotations(&projection, &id(2), &annotations));
+        projection.blocks[0].read_only = true;
+        assert!(copy(&projection, &hash, &id(2)).is_err());
+        projection.blocks[0].read_only = false;
+        projection.comments.push(CommentNote {
+            block_id: id(3),
+            node_id: None,
+            node_hash: None,
+            text: "comment".into(),
+        });
+        assert!(copy(&projection, &hash, &id(2)).is_err());
+    }
+
+    #[test]
+    fn story_copy_clears_source_identity_and_requires_fresh_business_ids() {
+        let reference: crate::InlineReference = serde_json::from_value(serde_json::json!({"type":"hcd.mention","version":1,"mentionId":format!("m_{:032x}",1),"target":{"kind":"person","id":"alice"},"snapshot":{"label":"Alice"}})).unwrap();
+        let extension: crate::ExtensionNode = serde_json::from_value(serde_json::json!({"schemaVersion":"hcd.extension/1","instanceId":format!("x_{:032x}",1),"type":"example.review","version":1,"display":"inline","data":{"ticket":"T-1"},"fallback":{"text":"review"}})).unwrap();
+        let content = EditorBlockContent {
+            inlines: vec![
+                EditorInline {
+                    text: "@Alice".into(),
+                    reference: Some(reference.clone()),
+                    node_id: Some(format!("n_{:032x}", 1)),
+                    ..Default::default()
+                },
+                EditorInline {
+                    text: "review".into(),
+                    extension: Some(extension.clone()),
+                    node_id: Some(format!("n_{:032x}", 2)),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let reserved = HashSet::from([format!("m_{:032x}", 9), format!("x_{:032x}", 9)]);
+        let copied = prepare_story_content_copy(
+            &[content.clone()],
+            &reserved,
+            |_| Ok(format!("m_{:032x}", 2)),
+            |node| {
+                let mut node = node.clone();
+                node.instance_id = format!("x_{:032x}", 2);
+                Ok(node)
+            },
+        )
+        .unwrap();
+        assert_eq!(content.inlines[0].node_id, Some(format!("n_{:032x}", 1)));
+        assert!(copied[0].inlines.iter().all(|item| item.node_id.is_none()));
+        assert_eq!(
+            copied[0].inlines[0].reference.as_ref().unwrap().target,
+            reference.target
+        );
+        assert_eq!(
+            copied[0].inlines[0].reference.as_ref().unwrap().mention_id,
+            format!("m_{:032x}", 2)
+        );
+        assert_eq!(
+            copied[0].inlines[1].extension.as_ref().unwrap().data,
+            extension.data
+        );
+        assert_eq!(
+            copied[0].inlines[1].extension.as_ref().unwrap().instance_id,
+            format!("x_{:032x}", 2)
+        );
+        assert!(prepare_story_content_copy(
+            &[content.clone()],
+            &reserved,
+            |_| Ok(format!("m_{:032x}", 9)),
+            |node| Ok(node.clone())
+        )
+        .is_err());
+        assert!(prepare_story_content_copy(
+            &[content.clone()],
+            &reserved,
+            |_| Ok(format!("m_{:032x}", 2)),
+            |node| Ok(node.clone())
+        )
+        .is_err());
+        assert!(prepare_story_content_copy(
+            &[content],
+            &reserved,
+            |_| Ok(format!("m_{:032x}", 2)),
+            |_| Err(HcdError::Unsupported("copy policy missing".into()))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn story_copy_preserves_nested_formatting_and_rejects_reused_reference_ids() {
+        let reference: crate::InlineReference = serde_json::from_value(serde_json::json!({"type":"hcd.mention","version":1,"mentionId":format!("m_{:032x}",1),"target":{"kind":"person","id":"alice"},"snapshot":{"label":"Alice"}})).unwrap();
+        let inner = EditorBlockContent {
+            inlines: vec![EditorInline {
+                text: "@Alice".into(),
+                bold: true,
+                reference: Some(reference),
+                node_id: Some(format!("n_{:032x}", 1)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut second = inner.clone();
+        second.inlines[0].reference.as_mut().unwrap().mention_id = format!("m_{:032x}", 3);
+        let block = EditorBlockContent {
+            kind: EditorBlockKind::Blockquote,
+            children: vec![inner, second],
+            ..Default::default()
+        };
+        assert!(prepare_story_content_copy(
+            &[block.clone()],
+            &HashSet::new(),
+            |_| Ok(format!("m_{:032x}", 2)),
+            |node| Ok(node.clone())
+        )
+        .is_err());
+        let mut next = 4;
+        let copy = prepare_story_content_copy(
+            &[block],
+            &HashSet::new(),
+            |_| {
+                let id = format!("m_{next:032x}");
+                next += 1;
+                Ok(id)
+            },
+            |node| Ok(node.clone()),
+        )
+        .unwrap();
+        assert!(copy[0]
+            .children
+            .iter()
+            .all(|child| child.inlines[0].bold && child.inlines[0].node_id.is_none()));
+        assert_ne!(
+            copy[0].children[0].inlines[0]
+                .reference
+                .as_ref()
+                .unwrap()
+                .mention_id,
+            copy[0].children[1].inlines[0]
+                .reference
+                .as_ref()
+                .unwrap()
+                .mention_id
+        );
+    }
+
+    #[test]
+    fn invalid_inline_container_wrappers_and_duplicate_ids_do_not_publish() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let valid: EditorBlockContent = serde_json::from_value(serde_json::json!({
+            "kind":"paragraph","inlines":[{"text":"","content":{"kind":"extension","extension":{
+                "schemaVersion":"hcd.extension/3","instanceId":format!("x_{:032x}",1),"type":"example.inline","version":1,
+                "display":"inline","contentModel":"inline","data":{},"fallback":{"text":"Inline label"}
+            },"inlines":[{"text":"Body"}]}}]
+        })).unwrap();
+        let mut cases = Vec::new();
+        let mut wrong = valid.clone();
+        wrong.inlines[0].text = "Hidden duplicate body".into();
+        cases.push(wrong);
+        let mut wrong = valid.clone();
+        wrong.inlines[0].bold = true;
+        cases.push(wrong);
+        let mut wrong = valid.clone();
+        wrong.inlines[0]
+            .content
+            .as_mut()
+            .unwrap()
+            .children
+            .push(EditorBlockContent::default());
+        cases.push(wrong);
+        let mut wrong = valid.clone();
+        wrong.inlines.push(wrong.inlines[0].clone());
+        cases.push(wrong);
+        cases.push(*valid.inlines[0].content.clone().unwrap());
+        let mut wrong = valid.clone();
+        wrong.kind = EditorBlockKind::CodeBlock;
+        cases.push(wrong);
+        let mut deep = valid.inlines[0].clone();
+        for index in 2..29 {
+            let mut outer = valid.inlines[0].clone();
+            let body = outer.content.as_mut().unwrap();
+            body.extension.as_mut().unwrap().instance_id = format!("x_{index:032x}");
+            body.inlines = vec![deep];
+            deep = outer;
+        }
+        let mut wrong = valid;
+        wrong.inlines = vec![deep];
+        cases.push(wrong);
+        let manifest = std::fs::read(bundle.root().join("manifest.json")).unwrap();
+        for (index, block) in cases.into_iter().enumerate() {
+            let patch = StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: before.document_id.clone(),
+                patch_id: format!("invalid-inline-{index}"),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                operations: vec![StructureOperation::Replace {
+                    block_id: before.blocks[0].block_id.clone(),
+                    block,
+                    precondition: BlockPrecondition {
+                        block_hash: before.blocks[0].block_hash.clone(),
+                    },
+                }],
+            };
+            assert!(
+                apply_structure_patch(&bundle, &patch, 1).is_err(),
+                "case {index}"
+            );
+            assert_eq!(
+                std::fs::read(bundle.root().join("manifest.json")).unwrap(),
+                manifest,
+                "case {index} published"
+            );
+        }
+    }
+
+    #[test]
+    fn editable_inline_subtree_roundtrips_sources_references_resources_and_restore() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let bytes = b"Inline archived resource";
+        let asset = bundle
+            .stage_asset_from_reader("bin", &mut std::io::Cursor::new(bytes))
+            .unwrap();
+        let content: EditorBlockContent = serde_json::from_value(serde_json::json!({
+            "kind":"paragraph", "inlines":[{"text":"Before "},{"text":"", "content":{
+                "kind":"extension", "extension":{
+                    "schemaVersion":"hcd.extension/3", "instanceId":format!("x_{:032x}",27),
+                    "type":"example.editable", "version":77,"display":"inline","contentModel":"inline",
+                    "data":{"project":"P-27"},"fallback":{"text":"Field label"},
+                    "resources":[{"key":"notes","hash":asset.hash,"byteLength":bytes.len(),"name":"notes.bin","mediaType":"application/octet-stream"}]
+                }, "inlines":[{"text":"Shared中😀","bold":true},{"text":"@张三","reference":{
+                    "type":"hcd.mention","version":1,"mentionId":format!("m_{:032x}",27),
+                    "target":{"kind":"person","id":"alice"},"snapshot":{"label":"张三"}
+                }}]
+            }},{"text":" after"}]
+        })).unwrap();
+        let patch = |projection: &EditorProjection, content: EditorBlockContent, id: &str| {
+            StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: projection.document_id.clone(),
+                patch_id: id.into(),
+                base_revision: projection.revision,
+                actor: BTreeMap::new(),
+                operations: vec![StructureOperation::Replace {
+                    block_id: projection.blocks[0].block_id.clone(),
+                    block: content,
+                    precondition: BlockPrecondition {
+                        block_hash: projection.blocks[0].block_hash.clone(),
+                    },
+                }],
+            }
+        };
+        apply_structure_patch(&bundle, &patch(&before, content, "inline-created"), 1).unwrap();
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+        let saved = editor_projection(&bundle, None).unwrap();
+        let body = saved.blocks[0].content.inlines[1].content.as_ref().unwrap();
+        assert_eq!(body.inlines[0].text, "Shared中😀");
+        assert!(body.inlines[0].bold);
+        let source = body.inlines[0].node_id.clone().unwrap();
+        assert_eq!(
+            body.extension.as_ref().unwrap().data,
+            serde_json::json!({"project":"P-27"})
+        );
+        assert_eq!(
+            bundle.manifest().unwrap().capabilities.extension_nodes,
+            Some(3)
+        );
+        assert!(bundle
+            .read_asset_index_for_revision(2)
+            .unwrap()
+            .iter()
+            .any(|value| value.hash == asset.hash));
+        let refs = crate::projection_references(&saved).unwrap();
+        assert_eq!(refs[0].child_path, Vec::<usize>::new());
+        assert_eq!(refs[0].inline_path, vec![1]);
+        assert_eq!(refs[0].inline_index, 1);
+        let raw = chunk_html(&bundle, 0);
+        let export = crate::adapt_extension_exports(&raw, "docx").unwrap();
+        assert!(export.contains("Shared中😀") && export.contains("@张三"));
+        assert!(!export.contains("Field label"));
+        let text_patch: crate::PatchBatch = serde_json::from_value(serde_json::json!({
+            "schemaVersion":"hcd-patch/1", "documentId":saved.document_id,"patchId":"inline-text", "baseRevision":2,
+            "operations":[{"op":"text.splice","nodeId":source,"start":0,"deleteCount":6,"insertText":"Edited", "precondition":{"nodeHash":hash_bytes("Shared中😀".as_bytes())}}]
+        })).unwrap();
+        crate::apply_patch(&bundle, &text_patch, 2).unwrap();
+        let edited = editor_projection(&bundle, None).unwrap();
+        let mut update = edited.blocks[0].content.clone();
+        let body = update.inlines[1].content.as_mut().unwrap();
+        assert_eq!(body.inlines[0].text, "Edited中😀");
+        assert_eq!(body.inlines[0].node_id.as_deref(), Some(source.as_str()));
+        body.extension.as_mut().unwrap().data = serde_json::json!({"project":"P-28"});
+        apply_structure_patch(&bundle, &patch(&edited, update, "inline-properties"), 3).unwrap();
+        let updated = editor_projection(&bundle, None).unwrap();
+        let body = updated.blocks[0].content.inlines[1]
+            .content
+            .as_ref()
+            .unwrap();
+        assert_eq!(body.inlines[0].node_id.as_deref(), Some(source.as_str()));
+        assert_eq!(body.extension.as_ref().unwrap().version, 77);
+        crate::restore_revision(&bundle, 2, 4, None, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(editor_projection(&bundle, None).unwrap().blocks).unwrap(),
+            serde_json::to_value(saved.blocks).unwrap()
+        );
+        assert_eq!(
+            bundle.manifest().unwrap().capabilities.extension_nodes,
+            Some(3)
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+        let mut downgraded = bundle.manifest().unwrap();
+        downgraded.capabilities.extension_nodes = Some(2);
+        bundle.write_manifest(&downgraded).unwrap();
+        assert!(editor_projection(&bundle, None).is_err());
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(
+            !report.valid
+                && report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "INLINE_CONTAINER_MODEL_MISSING")
+        );
+    }
     use crate::{BundleWriter, HcdCapabilities, SourceDescriptor, StorageCodec};
+    #[test]
+    fn story_copy_requires_verified_revision_resources() {
+        let (_temp, bundle) = fixture();
+        let bytes = b"offline attachment body";
+        let asset = bundle
+            .stage_asset_from_reader("bin", &mut std::io::Cursor::new(bytes))
+            .unwrap();
+        let node: crate::ExtensionNode = serde_json::from_value(serde_json::json!({
+            "schemaVersion":"hcd.extension/2", "instanceId":format!("x_{:032x}", 1),
+            "type":"example.attachment", "version":1, "display":"inline",
+            "data":{}, "fallback":{"text":"file"}, "resources":[{
+                "key":"file", "hash":asset.hash, "byteLength":bytes.len(),
+                "name":"file.bin", "mediaType":"application/octet-stream"
+            }]
+        }))
+        .unwrap();
+        let content = EditorBlockContent {
+            inlines: vec![EditorInline {
+                text: "file".into(),
+                extension: Some(node),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            validate_story_copy_resources(&bundle, std::slice::from_ref(&content), &[]).is_err()
+        );
+        validate_story_copy_resources(
+            &bundle,
+            std::slice::from_ref(&content),
+            std::slice::from_ref(&asset),
+        )
+        .unwrap();
+        let mut wrong_length = content.clone();
+        wrong_length.inlines[0]
+            .extension
+            .as_mut()
+            .unwrap()
+            .resources[0]
+            .byte_length += 1;
+        assert!(validate_story_copy_resources(
+            &bundle,
+            &[wrong_length],
+            std::slice::from_ref(&asset)
+        )
+        .is_err());
+        let mut wrong_type = content.clone();
+        wrong_type.inlines[0].extension.as_mut().unwrap().resources[0].media_type =
+            "image/png".into();
+        assert!(validate_story_copy_resources(
+            &bundle,
+            &[wrong_type],
+            std::slice::from_ref(&asset)
+        )
+        .is_err());
+        std::fs::write(
+            bundle.resolve_href(&asset.href).unwrap(),
+            vec![b'x'; bytes.len()],
+        )
+        .unwrap();
+        assert!(validate_story_copy_resources(&bundle, &[content], &[asset]).is_err());
+    }
+    #[test]
+    fn portable_resource_dependencies_are_revision_scoped_verified_and_restorable() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let bytes = b"offline attachment body";
+        let asset = bundle
+            .stage_asset_from_reader("bin", &mut std::io::Cursor::new(bytes))
+            .unwrap();
+        let node:crate::ExtensionNode=serde_json::from_value(serde_json::json!({"schemaVersion":"hcd.extension/2","instanceId":format!("x_{:032x}",1),"type":"example.callout","version":1,"display":"block","contentModel":"blocks","data":{"private":"retained"},"fallback":{"text":"Team notes"},"resources":[{"key":"attachment","hash":asset.hash,"byteLength":bytes.len(),"name":"notes.bin","mediaType":"application/octet-stream"}]})).unwrap();
+        let content = EditorBlockContent {
+            kind: EditorBlockKind::Extension,
+            extension: Some(node.clone()),
+            children: vec![EditorBlockContent {
+                inlines: vec![EditorInline {
+                    text: "Editable child".into(),
+                    bold: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: before.document_id,
+            patch_id: "portable-resource".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            operations: vec![StructureOperation::Insert {
+                after_block_id: None,
+                block: content.clone(),
+            }],
+        };
+        let mut invalid = content.clone();
+        invalid.extension.as_mut().unwrap().resources[0].hash = "b".repeat(64);
+        patch.operations = vec![StructureOperation::Insert {
+            after_block_id: None,
+            block: invalid,
+        }];
+        assert!(apply_structure_patch(&bundle, &patch, 1).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        patch.operations = vec![StructureOperation::Insert {
+            after_block_id: None,
+            block: content,
+        }];
+        apply_structure_patch(&bundle, &patch, 1).unwrap();
+        assert_eq!(
+            bundle.manifest().unwrap().capabilities.extension_nodes,
+            Some(2)
+        );
+        assert!(!bundle
+            .read_asset_index_for_revision(1)
+            .unwrap()
+            .iter()
+            .any(|a| a.hash == asset.hash));
+        assert!(bundle
+            .read_asset_index_for_revision(2)
+            .unwrap()
+            .iter()
+            .any(|a| a.hash == asset.hash));
+        let projected = editor_projection(&Bundle::open(bundle.root()).unwrap(), Some(2)).unwrap();
+        let rich = projected
+            .blocks
+            .iter()
+            .find(|b| b.content.extension.is_some())
+            .unwrap();
+        assert_eq!(rich.content.extension.as_ref().unwrap(), &node);
+        assert_eq!(rich.content.children[0].inlines[0].text, "Editable child");
+        assert!(rich.content.children[0].inlines[0].bold);
+        crate::restore_revision(&bundle, 1, 2, None, None).unwrap();
+        assert_eq!(
+            bundle.manifest().unwrap().capabilities.extension_nodes,
+            Some(2)
+        );
+        assert!(!bundle
+            .read_asset_index_for_revision(3)
+            .unwrap()
+            .iter()
+            .any(|a| a.hash == asset.hash));
+        assert!(bundle
+            .read_asset_index_for_revision(2)
+            .unwrap()
+            .iter()
+            .any(|a| a.hash == asset.hash));
+    }
+
+    #[test]
+    fn shared_resource_restaging_preserves_revision_descriptors_and_node_metadata() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\nshared image bytes";
+        let asset = bundle
+            .stage_asset_from_reader("bin", &mut std::io::Cursor::new(bytes))
+            .unwrap();
+        let make_block = |id: u32, key: &str, name: &str, media: &str| -> EditorBlockContent {
+            let extension = serde_json::from_value(serde_json::json!({
+                "schemaVersion":"hcd.extension/2","instanceId":format!("x_{id:032x}"),
+                "type":"example.resource","version":1,"display":"block","data":{},
+                "fallback":{"text":"Resource"},"resources":[{"key":key,"hash":asset.hash,
+                    "byteLength":bytes.len(),"name":name,"mediaType":media}]
+            }))
+            .unwrap();
+            EditorBlockContent {
+                kind: EditorBlockKind::Extension,
+                extension: Some(extension),
+                inlines: vec![EditorInline {
+                    text: "Resource".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        };
+        let insert = |projection: &EditorProjection, id: &str, block: EditorBlockContent| {
+            StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: projection.document_id.clone(),
+                patch_id: id.into(),
+                base_revision: projection.revision,
+                actor: BTreeMap::new(),
+                operations: vec![StructureOperation::Insert {
+                    after_block_id: None,
+                    block,
+                }],
+            }
+        };
+        apply_structure_patch(
+            &bundle,
+            &insert(
+                &before,
+                "shared-file",
+                make_block(1, "file", "attachment.bin", "application/octet-stream"),
+            ),
+            1,
+        )
+        .unwrap();
+        let saved_file = editor_projection(&bundle, None).unwrap();
+        let repinned = bundle
+            .restage_existing_resource(&asset.hash, "png", bytes.len() as u64)
+            .unwrap()
+            .unwrap();
+        assert!(repinned.href.ends_with(".png"));
+        apply_structure_patch(
+            &bundle,
+            &insert(
+                &saved_file,
+                "shared-image",
+                make_block(2, "photo", "picture.png", "image/png"),
+            ),
+            2,
+        )
+        .unwrap();
+        let reopened = Bundle::open(bundle.root()).unwrap();
+        for revision in [2, 3] {
+            let descriptor = reopened
+                .read_asset_index_for_revision(revision)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.hash == asset.hash)
+                .unwrap();
+            assert_eq!(descriptor, asset);
+            assert_eq!(
+                fs::read(reopened.resolve_href(&descriptor.href).unwrap()).unwrap(),
+                bytes
+            );
+        }
+        let old = editor_projection(&reopened, Some(2)).unwrap();
+        let current = editor_projection(&reopened, Some(3)).unwrap();
+        let resources = |projection: &EditorProjection| {
+            projection
+                .blocks
+                .iter()
+                .filter_map(|b| b.content.extension.as_ref())
+                .flat_map(|n| n.resources.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(resources(&old).len(), 1);
+        let current_resources = resources(&current);
+        assert_eq!(current_resources.len(), 2);
+        assert!(current_resources
+            .iter()
+            .any(|r| r.name == "attachment.bin" && r.media_type == "application/octet-stream"));
+        assert!(current_resources
+            .iter()
+            .any(|r| r.name == "picture.png" && r.media_type == "image/png"));
+        assert!(crate::validate_bundle(&reopened).unwrap().valid);
+        crate::restore_revision(&reopened, 2, 3, None, None).unwrap();
+        assert_eq!(
+            resources(&editor_projection(&reopened, None).unwrap()),
+            resources(&old)
+        );
+        assert_eq!(
+            resources(&editor_projection(&reopened, Some(3)).unwrap()),
+            current_resources
+        );
+        assert!(crate::validate_bundle(&reopened).unwrap().valid);
+    }
+
+    #[test]
+    fn ordinary_edits_cannot_publish_reserved_restore_ids() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let projection = editor_projection(&bundle, None).unwrap();
+        let inline = &projection.blocks[0].content.inlines[0];
+        let patch:crate::PatchBatch=serde_json::from_value(serde_json::json!({"schemaVersion":"hcd-patch/1","documentId":projection.document_id,"patchId":"restore-0-2","baseRevision":1,"operations":[{"op":"text.splice","nodeId":inline.node_id,"start":0,"deleteCount":1,"insertText":"x","precondition":{"nodeHash":hash_bytes(inline.text.as_bytes())}}]})).unwrap();
+        assert!(matches!(
+            crate::apply_patch(&bundle, &patch, 1),
+            Err(HcdError::InvalidPatch(_))
+        ));
+        let structured = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: projection.document_id.clone(),
+            patch_id: "restore-0-2".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            operations: vec![StructureOperation::Insert {
+                after_block_id: None,
+                block: EditorBlockContent {
+                    inlines: vec![EditorInline {
+                        text: "new text".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            }],
+        };
+        assert!(matches!(
+            apply_structure_patch(&bundle, &structured, 1),
+            Err(HcdError::InvalidPatch(_))
+        ));
+        assert!(append_comment(&bundle, 1, "comment", "restore-0-2", &BTreeMap::new()).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        crate::restore_revision(&bundle, 0, 1, None, None).unwrap();
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn custom_text_marks_keep_business_values_separate_from_visible_base_formatting() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let mark:crate::CustomTextMark=serde_json::from_value(serde_json::json!({"schemaVersion":"hcd.mark/1","type":"example.review","version":77,"data":{"ticket":"T-1","future":[true,"中😀"]},"fallback":{"label":"待复核","style":{"bold":true,"backgroundColor":"#fff2a8"}}})).unwrap();
+        let content = EditorBlockContent {
+            inlines: vec![EditorInline {
+                text: "Custom 中😀".into(),
+                custom_marks: vec![mark.clone()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: before.document_id.clone(),
+            patch_id: "custom-mark-created".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            operations: vec![StructureOperation::Replace {
+                block_id: before.blocks[0].block_id.clone(),
+                block: content,
+                precondition: BlockPrecondition {
+                    block_hash: before.blocks[0].block_hash.clone(),
+                },
+            }],
+        };
+        apply_structure_patch(&bundle, &patch, 1).unwrap();
+        let current = editor_projection(&bundle, None).unwrap();
+        let inline = &current.blocks[0].content.inlines[0];
+        assert_eq!(inline.custom_marks, vec![mark]);
+        assert!(!inline.bold);
+        assert_eq!(inline.background_color, None);
+        assert_eq!(inline.text, "Custom 中😀");
+        assert_eq!(
+            bundle.manifest().unwrap().capabilities.custom_marks,
+            Some(1)
+        );
+        assert_eq!(
+            serde_json::to_value(&editor_projection(&bundle, Some(1)).unwrap().blocks[0]).unwrap(),
+            serde_json::to_value(&before.blocks[0]).unwrap()
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+        let inventory = crate::export_feature_inventory(&bundle, 2).unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].kind, crate::ExportFeatureKind::CustomMark);
+        assert_eq!(inventory[0].examples, vec!["待复核"]);
+        assert!(!serde_json::to_string(&inventory).unwrap().contains("T-1"));
+        let mut invalid = patch.clone();
+        invalid.base_revision = 2;
+        invalid.patch_id = "bad-custom-mark".into();
+        if let StructureOperation::Replace {
+            block,
+            precondition,
+            ..
+        } = &mut invalid.operations[0]
+        {
+            precondition.block_hash = current.blocks[0].block_hash.clone();
+            block.inlines[0].custom_marks[0].fallback.style.text_color =
+                Some("url(https://invalid)".into())
+        };
+        assert!(apply_structure_patch(&bundle, &invalid, 2).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn extension_atoms_preserve_unknown_data_and_history_and_reject_destructive_text_edits() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let make = |id, display, text: &str| crate::ExtensionNode {
+            schema_version: "hcd.extension/1".into(),
+            instance_id: format!("x_{id:032x}"),
+            node_type: "example.future_widget".into(),
+            version: 77,
+            display,
+            data: serde_json::json!({"future":{"values":[1,true,null,"中文<&😀"],"unrecognized":"preserve me"}}),
+            fallback: crate::ExtensionFallback { text: text.into() },
+            resources: Vec::new(),
+            content_model: None,
+            exports: Default::default(),
+        };
+        let inline = make(1, crate::ExtensionDisplay::Inline, "关联卡片 <&😀");
+        let block = make(2, crate::ExtensionDisplay::Block, "提示块：离线仍可读");
+        let inline_content = EditorBlockContent {
+            inlines: vec![EditorInline {
+                text: inline.fallback.text.clone(),
+                extension: Some(inline.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let block_content = EditorBlockContent {
+            kind: EditorBlockKind::Extension,
+            extension: Some(block.clone()),
+            inlines: vec![EditorInline {
+                text: block.fallback.text.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: before.document_id.clone(),
+            patch_id: "extension-atoms".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            operations: vec![
+                StructureOperation::Replace {
+                    block_id: before.blocks[0].block_id.clone(),
+                    block: inline_content.clone(),
+                    precondition: BlockPrecondition {
+                        block_hash: before.blocks[0].block_hash.clone(),
+                    },
+                },
+                StructureOperation::Insert {
+                    after_block_id: Some(before.blocks[0].block_id.clone()),
+                    block: block_content,
+                },
+            ],
+        };
+        apply_structure_patch(&bundle, &patch, 1).unwrap();
+        let reopened = Bundle::open(bundle.root()).unwrap();
+        let projected = editor_projection(&reopened, None).unwrap();
+        assert_eq!(
+            crate::projection_extensions(&projected).unwrap(),
+            vec![inline.clone(), block]
+        );
+        assert_eq!(
+            reopened.manifest().unwrap().capabilities.extension_nodes,
+            Some(1)
+        );
+        for content in projected.blocks.iter().filter(|block| {
+            block.content.extension.is_some()
+                || block.content.inlines.iter().any(|i| i.extension.is_some())
+        }) {
+            let span = &content.content.inlines[0];
+            let splice = crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: before.document_id.clone(),
+                patch_id: format!("cannot-flatten-{}", content.block_id),
+                metadata: BTreeMap::new(),
+                base_revision: 2,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextSplice {
+                    node_id: span.node_id.clone().unwrap(),
+                    start: 0,
+                    delete_count: 1,
+                    insert_text: "x".into(),
+                    precondition: crate::NodePrecondition {
+                        node_hash: hash_bytes(span.text.as_bytes()),
+                    },
+                }],
+            };
+            assert!(crate::apply_patch(&bundle, &splice, 2).is_err());
+        }
+        patch.patch_id = "duplicate-extension".into();
+        patch.base_revision = 2;
+        patch.operations = vec![StructureOperation::Insert {
+            after_block_id: None,
+            block: inline_content,
+        }];
+        assert!(apply_structure_patch(&bundle, &patch, 2).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+        crate::restore_revision(&bundle, 1, 2, None, None).unwrap();
+        assert!(
+            crate::projection_extensions(&editor_projection(&bundle, None).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            crate::projection_extensions(&editor_projection(&bundle, Some(2)).unwrap()).unwrap()[0],
+            inline
+        );
+    }
+
+    #[test]
+    fn inline_references_roundtrip_immutable_history_and_refuse_text_splices_or_duplicate_ids() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let reference:crate::InlineReference=serde_json::from_value(serde_json::json!({"type":"hcd.mention","version":1,"mentionId":format!("m_{:032x}",1),"target":{"kind":"person","id":"user:alice"},"snapshot":{"label":"同名 <&😀"}})).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let content = EditorBlockContent {
+            inlines: vec![EditorInline {
+                text: reference.text(),
+                reference: Some(reference.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: before.document_id,
+            patch_id: "reference-created".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            operations: vec![StructureOperation::Replace {
+                block_id: before.blocks[0].block_id.clone(),
+                block: content.clone(),
+                precondition: BlockPrecondition {
+                    block_hash: before.blocks[0].block_hash.clone(),
+                },
+            }],
+        };
+        apply_structure_patch(&bundle, &patch, 1).unwrap();
+        let current = editor_projection(&bundle, None).unwrap();
+        let refs = crate::projection_references(&current).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].reference, reference);
+        assert_eq!(
+            bundle.manifest().unwrap().capabilities.inline_references,
+            Some(1)
+        );
+        assert!(crate::document_references(&bundle, Some(1))
+            .unwrap()
+            .is_empty());
+        let inline = &current.blocks[0].content.inlines[0];
+        let text_patch = crate::PatchBatch {
+            schema_version: crate::HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: current.document_id.clone(),
+            patch_id: "cannot-split-reference".into(),
+            metadata: BTreeMap::new(),
+            base_revision: 2,
+            actor: BTreeMap::new(),
+            operations: vec![crate::PatchOperation::TextSplice {
+                node_id: inline.node_id.clone().unwrap(),
+                start: 0,
+                delete_count: 1,
+                insert_text: "x".into(),
+                precondition: crate::NodePrecondition {
+                    node_hash: hash_bytes(inline.text.as_bytes()),
+                },
+            }],
+        };
+        assert!(matches!(
+            crate::apply_patch(&bundle, &text_patch, 2),
+            Err(HcdError::InvalidPatch(_))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        patch.base_revision = 2;
+        patch.patch_id = "duplicate-reference".into();
+        patch.operations = vec![StructureOperation::Insert {
+            after_block_id: Some(current.blocks[0].block_id.clone()),
+            block: content.clone(),
+        }];
+        assert!(matches!(
+            apply_structure_patch(&bundle, &patch, 2),
+            Err(HcdError::InvalidPatch(_))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        if let StructureOperation::Insert { block, .. } = &mut patch.operations[0] {
+            block.inlines[0].reference.as_mut().unwrap().mention_id = format!("m_{:032x}", 2)
+        }
+        patch.patch_id = "copy-reference-with-new-occurrence".into();
+        apply_structure_patch(&bundle, &patch, 2).unwrap();
+        assert_eq!(crate::document_references(&bundle, None).unwrap().len(), 2);
+        crate::restore_revision(&bundle, 1, 3, None, None).unwrap();
+        assert!(crate::document_references(&bundle, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            crate::document_references(&bundle, Some(3)).unwrap().len(),
+            2
+        );
+        crate::restore_revision(&bundle, 2, 4, None, None).unwrap();
+        assert_eq!(
+            crate::document_references(&bundle, None).unwrap()[0].reference,
+            reference
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn reference_fallback_and_unknown_payloads_fail_before_publication() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let reference:crate::InlineReference=serde_json::from_value(serde_json::json!({"type":"hcd.mention","version":1,"mentionId":format!("m_{:032x}",1),"target":{"kind":"person","id":"alice"},"snapshot":{"label":"Alice"}})).unwrap();
+        let mut content = EditorBlockContent {
+            inlines: vec![EditorInline {
+                text: "wrong label".into(),
+                reference: Some(reference),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(validate_content(&content).is_err());
+        content.inlines[0].text = "@Alice".into();
+        content.kind = EditorBlockKind::CodeBlock;
+        assert!(validate_content(&content).is_err());
+        content.kind = EditorBlockKind::Paragraph;
+        content.inlines[0].reference.as_mut().unwrap().version = 2;
+        assert!(validate_content(&content).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, before.revision);
+        assert_eq!(
+            bundle.manifest().unwrap().capabilities.inline_references,
+            None
+        );
+        let mut future = bundle.manifest().unwrap();
+        future.capabilities.inline_references = Some(2);
+        bundle.write_manifest(&future).unwrap();
+        assert!(matches!(bundle.manifest(), Err(HcdError::Unsupported(_))));
+    }
 
     #[test]
     fn shortened_text_invalidates_old_annotations_and_accepts_post_patch_ranges() {
@@ -3017,6 +5188,307 @@ mod tests {
     }
 
     #[test]
+    fn replacement_preserves_owned_inline_sources_and_unchanged_annotations_through_undo() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let apply = |name: &str, content: EditorBlockContent| {
+            let before = editor_projection(&bundle, None).unwrap();
+            apply_structure_patch(
+                &bundle,
+                &StructurePatchBatch {
+                    schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                    document_id: before.document_id,
+                    patch_id: name.into(),
+                    base_revision: before.revision,
+                    actor: BTreeMap::new(),
+                    operations: vec![StructureOperation::Replace {
+                        block_id: before.blocks[0].block_id.clone(),
+                        block: content,
+                        precondition: BlockPrecondition {
+                            block_hash: before.blocks[0].block_hash.clone(),
+                        },
+                    }],
+                },
+                before.revision,
+            )
+            .unwrap();
+        };
+        apply(
+            "seed-owned-sources",
+            EditorBlockContent {
+                inlines: vec![
+                    EditorInline {
+                        text: "Before ".into(),
+                        ..Default::default()
+                    },
+                    EditorInline {
+                        text: "Repeated".into(),
+                        bold: true,
+                        ..Default::default()
+                    },
+                    EditorInline {
+                        text: " Repeated 中😀".into(),
+                        italic: true,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let baseline = editor_projection(&bundle, None).unwrap();
+        let original = baseline.blocks[0].content.clone();
+        let annotated = original.inlines[1].node_id.clone().unwrap();
+        crate::apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: baseline.document_id,
+                patch_id: "annotate-retained-source".into(),
+                base_revision: baseline.revision,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::AnnotationUpsert {
+                    annotation: crate::Annotation {
+                        annotation_id: "kept-note".into(),
+                        node_id: annotated.clone(),
+                        start: 0,
+                        end: 3,
+                        kind: "recognition".into(),
+                        rule_id: None,
+                        confidence: None,
+                        ignored: false,
+                    },
+                }],
+            },
+            baseline.revision,
+        )
+        .unwrap();
+        let mut inserted = original.clone();
+        inserted.inlines.push(EditorInline {
+            text: " new span".into(),
+            underline: true,
+            ..Default::default()
+        });
+        apply("add-with-owned-sources", inserted);
+        let added = editor_projection(&bundle, None).unwrap();
+        assert_eq!(&added.blocks[0].content.inlines[..3], &original.inlines);
+        let note: AnnotationSet = read_json_bounded(
+            &bundle
+                .resolve_href(&bundle.manifest().unwrap().annotation_href.unwrap())
+                .unwrap(),
+            MAX_CONTROL_PART_BYTES,
+            "annotations",
+        )
+        .unwrap();
+        assert_eq!(note.annotations[0].node_id, annotated);
+        apply("undo-owned-insertion", original.clone());
+        let undone = editor_projection(&bundle, None).unwrap();
+        assert_eq!(undone.blocks[0].content, original);
+        assert_eq!(undone.blocks[0].block_hash, baseline.blocks[0].block_hash);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+        let mut nested = EditorBlockContent {
+            kind: EditorBlockKind::Blockquote,
+            children: vec![original.clone()],
+            ..Default::default()
+        };
+        nested.children[0].inlines[1].bold = false;
+        apply("wrap-owned-sources", nested.clone());
+        assert_eq!(
+            editor_projection(&bundle, None).unwrap().blocks[0].content,
+            nested
+        );
+    }
+
+    #[test]
+    fn replacement_source_splits_allocate_unique_ids_and_new_atoms_cannot_borrow_text_ids() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let original = &before.blocks[0];
+        let id = original.content.inlines[0].node_id.clone().unwrap();
+        let reference: crate::InlineReference = serde_json::from_value(serde_json::json!({"type":"hcd.mention","version":1,"mentionId":format!("m_{:032x}",3),"target":{"kind":"person","id":"alice"},"snapshot":{"label":"Alice"}})).unwrap();
+        let content = EditorBlockContent {
+            inlines: vec![
+                EditorInline {
+                    text: reference.text(),
+                    reference: Some(reference),
+                    node_id: Some(id.clone()),
+                    ..Default::default()
+                },
+                EditorInline {
+                    text: "Paragraph ".into(),
+                    node_id: Some(id.clone()),
+                    ..Default::default()
+                },
+                EditorInline {
+                    text: "0".into(),
+                    node_id: Some(id.clone()),
+                    bold: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        apply_structure_patch(
+            &bundle,
+            &StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: before.document_id,
+                patch_id: "split-owned-source".into(),
+                base_revision: before.revision,
+                actor: BTreeMap::new(),
+                operations: vec![StructureOperation::Replace {
+                    block_id: original.block_id.clone(),
+                    block: content,
+                    precondition: BlockPrecondition {
+                        block_hash: original.block_hash.clone(),
+                    },
+                }],
+            },
+            before.revision,
+        )
+        .unwrap();
+        let after = editor_projection(&bundle, None).unwrap();
+        let spans = &after.blocks[0].content.inlines;
+        assert_ne!(spans[0].node_id.as_deref(), Some(id.as_str()));
+        assert_eq!(spans[1].node_id.as_deref(), Some(id.as_str()));
+        assert_ne!(spans[2].node_id.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            spans
+                .iter()
+                .filter_map(|span| span.node_id.as_ref())
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn foreign_or_forged_replacement_sources_and_insert_source_assignment_fail_before_publication()
+    {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let initial = bundle.manifest().unwrap();
+        for (number, id) in [
+            before.blocks[1].content.inlines[0].node_id.clone().unwrap(),
+            format!("n_{:032x}", 9000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut content = before.blocks[0].content.clone();
+            content.inlines[0].node_id = Some(id);
+            let patch = StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: before.document_id.clone(),
+                patch_id: format!("bad-owned-source-{number}"),
+                base_revision: before.revision,
+                actor: BTreeMap::new(),
+                operations: vec![StructureOperation::Replace {
+                    block_id: before.blocks[0].block_id.clone(),
+                    block: content,
+                    precondition: BlockPrecondition {
+                        block_hash: before.blocks[0].block_hash.clone(),
+                    },
+                }],
+            };
+            assert!(matches!(
+                apply_structure_patch(&bundle, &patch, before.revision),
+                Err(HcdError::InvalidPatch(_))
+            ));
+        }
+        let patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: before.document_id,
+            patch_id: "insert-cannot-claim-source".into(),
+            base_revision: before.revision,
+            actor: BTreeMap::new(),
+            operations: vec![StructureOperation::Insert {
+                after_block_id: None,
+                block: before.blocks[0].content.clone(),
+            }],
+        };
+        assert!(matches!(
+            apply_structure_patch(&bundle, &patch, before.revision),
+            Err(HcdError::InvalidPatch(_))
+        ));
+        assert_eq!(bundle.manifest().unwrap().root_hash, initial.root_hash);
+        assert_eq!(bundle.manifest().unwrap().revision, initial.revision);
+    }
+
+    #[test]
+    fn structural_source_transfer_preserves_joined_text_then_moves_it_into_a_new_split_root() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let first = &before.blocks[0];
+        let second = &before.blocks[1];
+        let mut joined = first.content.clone();
+        joined.inlines.extend(second.content.inlines.clone());
+        apply_structure_patch(
+            &bundle,
+            &StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: before.document_id.clone(),
+                patch_id: "join-owned-sources".into(),
+                base_revision: before.revision,
+                actor: BTreeMap::new(),
+                operations: vec![
+                    StructureOperation::Delete {
+                        block_id: second.block_id.clone(),
+                        precondition: BlockPrecondition {
+                            block_hash: second.block_hash.clone(),
+                        },
+                    },
+                    StructureOperation::Replace {
+                        block_id: first.block_id.clone(),
+                        block: joined.clone(),
+                        precondition: BlockPrecondition {
+                            block_hash: first.block_hash.clone(),
+                        },
+                    },
+                ],
+            },
+            before.revision,
+        )
+        .unwrap();
+        let merged = editor_projection(&bundle, None).unwrap();
+        assert_eq!(merged.blocks[0].content, joined);
+        apply_structure_patch(
+            &bundle,
+            &StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: before.document_id,
+                patch_id: "split-owned-sources".into(),
+                base_revision: merged.revision,
+                actor: BTreeMap::new(),
+                operations: vec![
+                    StructureOperation::Replace {
+                        block_id: first.block_id.clone(),
+                        block: first.content.clone(),
+                        precondition: BlockPrecondition {
+                            block_hash: merged.blocks[0].block_hash.clone(),
+                        },
+                    },
+                    StructureOperation::Insert {
+                        after_block_id: Some(first.block_id.clone()),
+                        block: second.content.clone(),
+                    },
+                ],
+            },
+            merged.revision,
+        )
+        .unwrap();
+        let split = editor_projection(&bundle, None).unwrap();
+        assert_eq!(split.blocks[0].content, first.content);
+        assert_eq!(split.blocks[1].content, second.content);
+        assert_ne!(split.blocks[1].block_id, second.block_id);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
     fn rich_blocks_roundtrip_canonical_html_without_a_json_body_copy() {
         let (_temp, bundle) = fixture();
         project_editor(&bundle, 0).unwrap();
@@ -3077,7 +5549,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_complex_blocks_do_not_hide_editable_paragraphs() {
+    fn declared_html_quotes_and_code_are_editable_without_reinterpreting_old_chunks() {
         let values = ["Title", "Quoted", "Body", "Code", "Cell"];
         let entries: Vec<_> = values
             .iter()
@@ -3102,8 +5574,12 @@ mod tests {
             )
         };
         let html = format!(
-            "<section><h1>{}</h1><blockquote><p>{}</p></blockquote><p>{}</p><pre><code>{}</code></pre><table><tr><td>{}</td></tr></table></section>",
+            "<section><h1>{}</h1><blockquote data-hcd-html-tree=\"1\"><p>{}</p></blockquote><p>{}</p><pre data-hcd-html-tree=\"1\"><code>{}</code></pre><table><tr><td>{}</td></tr></table></section>",
             span(0), span(1), span(2), span(3), span(4)
+        );
+        let word = html.replace(
+            &format!("<p>{}</p>", span(2)),
+            &format!("<p data-hcd-word-tree=\"1\"><br/>{}</p>", span(2)),
         );
         let chunk_id = "c_00000000000000000000000000000000".to_string();
         let descriptor = ChunkDescriptor {
@@ -3131,10 +5607,78 @@ mod tests {
         };
         let blocks = scan_chunk(&html, &map, &descriptor, "markdown-test").unwrap();
         assert_eq!(blocks.len(), 5);
-        assert_eq!(blocks.iter().filter(|block| !block.read_only).count(), 2);
+        assert_eq!(blocks.iter().filter(|block| !block.read_only).count(), 4);
         assert_eq!(blocks[0].content.kind, EditorBlockKind::Heading);
         assert_eq!(blocks[2].content.kind, EditorBlockKind::Paragraph);
-        assert!(blocks[1].read_only && blocks[3].read_only && blocks[4].read_only);
+        assert_eq!(blocks[1].content.kind, EditorBlockKind::Blockquote);
+        assert_eq!(blocks[1].content.children[0].inlines[0].text, "Quoted");
+        assert_eq!(blocks[3].content.kind, EditorBlockKind::CodeBlock);
+        assert_eq!(blocks[3].content.inlines[0].text, "Code");
+        assert!(!blocks[3].content.inlines[0].code);
+        assert!(blocks[4].read_only);
+        let old = html.replace(" data-hcd-html-tree=\"1\"", "");
+        let old = scan_chunk(&old, &map, &descriptor, "markdown-test").unwrap();
+        assert_eq!(old.iter().filter(|block| !block.read_only).count(), 2);
+        assert!(old[1].read_only && old[3].read_only);
+        let word = scan_chunk(&word, &map, &descriptor, "word-test").unwrap();
+        assert!(word[2].content.inlines[0].hard_break);
+        assert_eq!(word[2].content.inlines[1].text, "Body");
+        assert_eq!(old[2].content.inlines[0].text, "Body");
+        assert!(!old[2].content.inlines[0].hard_break);
+    }
+
+    #[test]
+    fn rewritten_imported_root_lists_keep_outer_order_start_and_source_anchors() {
+        let (_temp, bundle) = fixture();
+        let manifest = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let mut map = bundle.read_map(descriptor).unwrap();
+        map.entries.truncate(2);
+        let span = |index: usize| {
+            format!(
+                "<span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">Paragraph {index}</span>",
+                map.entries[index].node_id, map.entries[index].node_hash
+            )
+        };
+        for (tag, level) in [("ul", 0), ("ol", 1)] {
+            let html = format!(
+                "<{tag} start=\"4\"><li><p>{}</p></li></{tag}><p>{}</p>",
+                span(0),
+                span(1)
+            );
+            let parsed = scan_chunk(&html, &map, descriptor, &manifest.document_id).unwrap();
+            assert_eq!(parsed[0].content.level, Some(level));
+            let (written, _, _) = write_blocks(&bundle, &manifest, 1, &parsed).unwrap();
+            let html = bundle.read_chunk(&written[0]).unwrap();
+            let map = bundle.read_map(&written[0]).unwrap();
+            let reopened = scan_chunk(&html, &map, &written[0], &manifest.document_id).unwrap();
+            assert_eq!(reopened[0].content, parsed[0].content);
+            assert_eq!(reopened[0].id, parsed[0].id);
+            assert_eq!(reopened[0].entries, parsed[0].entries);
+            assert!(html.contains(&format!(
+                "<{tag} start=\"{}\">",
+                if level == 1 { 4 } else { 1 }
+            )));
+        }
+    }
+
+    #[test]
+    fn standalone_canonical_list_items_keep_their_explicit_order_flag() {
+        let (_temp, bundle) = fixture();
+        let manifest = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let mut map = bundle.read_map(descriptor).unwrap();
+        map.entries.truncate(1);
+        let html = format!(
+            "<li data-hcd-editor-kind=\"list_item\" data-hcd-editor-level=\"1\" data-hcd-list-start=\"7\"><p><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">Paragraph 0</span></p></li>",
+            map.entries[0].node_id, map.entries[0].node_hash
+        );
+        let parsed = scan_chunk(&html, &map, descriptor, &manifest.document_id).unwrap();
+        assert_eq!(parsed[0].content.level, Some(1));
+        assert_eq!(parsed[0].content.list_start, Some(7));
+        let wrapped = format!("<ul>{html}</ul>");
+        let parsed = scan_chunk(&wrapped, &map, descriptor, &manifest.document_id).unwrap();
+        assert_eq!(parsed[0].content.level, Some(0));
     }
 
     #[test]
@@ -3174,6 +5718,22 @@ mod tests {
             children[1].children[0].inlines[0].node_id,
             Some(map.entries[1].node_id.clone())
         );
+        let ordered = format!(
+            "<ol start=\"4\"><li>{}<ol start=\"7\"><li>{}</li><li>{}</li></ol></li></ol>",
+            span(0),
+            span(1),
+            span(2)
+        );
+        let ordered = scan_chunk(&ordered, &map, descriptor, &manifest.document_id).unwrap();
+        assert_eq!(ordered[0].content.level, Some(1));
+        assert_eq!(ordered[0].content.list_start, Some(4));
+        let nested = &ordered[0].content.children[1];
+        assert_eq!(nested.kind, EditorBlockKind::OrderedList);
+        assert_eq!(nested.list_start, Some(7));
+        assert!(nested
+            .children
+            .iter()
+            .all(|child| child.kind == EditorBlockKind::ListItem && child.level == Some(0)));
     }
 
     #[test]

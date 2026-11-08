@@ -16,6 +16,34 @@ pub(super) struct RunStyle {
     border: Option<RichBorder>,
     pub preserve: bool,
 }
+impl RunStyle {
+    /// Safe CommonMark inline HTML avoids delimiter ambiguity for formatting
+    /// within a word or immediately beside a business node. Literal input is
+    /// still escaped; code uses a fence longer than every literal backtick run.
+    pub(super) fn markdown(&self, text: &str) -> String {
+        let mut value = if self.code {
+            let fence = "`".repeat(text.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1);
+            let pad = text.starts_with('`')
+                || text.ends_with('`')
+                || text.starts_with(' ') && text.ends_with(' ') && !text.trim().is_empty();
+            let padding = if pad { " " } else { "" };
+            format!("{fence}{padding}{text}{padding}{fence}")
+        } else {
+            super::markdown_literal(text)
+        };
+        for (enabled, tag) in [
+            (self.strike, "s"),
+            (self.underline, "u"),
+            (self.italic, "em"),
+            (self.bold, "strong"),
+        ] {
+            if enabled {
+                value = format!("<{tag}>{value}</{tag}>");
+            }
+        }
+        value
+    }
+}
 #[derive(Clone, Debug)]
 pub(super) struct StyleRange {
     pub start: usize,
@@ -267,7 +295,16 @@ fn rich_runs(
     links: &[(usize, usize, &str)],
     code: bool,
     header: bool,
+    fields: &[&word_fields::Event],
 ) -> Result<Vec<RichRun>, HandlerError> {
+    if fields
+        .windows(2)
+        .any(|pair| pair[0].offset > pair[1].offset)
+    {
+        return Err(HandlerError::ValidationError(
+            "unordered Word field controls".into(),
+        ));
+    }
     let mut boundaries = BTreeSet::from([0, text.len()]);
     for range in styles {
         boundaries.extend([range.start, range.end]);
@@ -275,6 +312,7 @@ fn rich_runs(
     for (start, end, _) in links {
         boundaries.extend([*start, *end]);
     }
+    boundaries.extend(fields.iter().map(|event| event.offset));
     let boundaries: Vec<_> = boundaries.into_iter().collect();
     if boundaries
         .iter()
@@ -285,10 +323,12 @@ fn rich_runs(
         ));
     }
     let mut result = Vec::new();
+    let mut field_index = 0;
     let mut style_index = 0;
     let mut link_index = 0;
     for pair in boundaries.windows(2) {
         let (start, end) = (pair[0], pair[1]);
+        append_field_controls(&mut result, fields, &mut field_index, start);
         while style_index < styles.len() && styles[style_index].end <= start {
             style_index += 1;
         }
@@ -327,6 +367,7 @@ fn rich_runs(
             .map(first_family)
             .or_else(|| (code || style.code).then(|| "Consolas".into()));
         result.push(RichRun {
+            field: None,
             text: text[start..end].into(),
             properties,
             border: style.border.clone(),
@@ -342,7 +383,26 @@ fn rich_runs(
                 .map(|(_, _, target)| target.to_string()),
         });
     }
+    append_field_controls(&mut result, fields, &mut field_index, text.len());
     Ok(result)
+}
+
+fn append_field_controls(
+    runs: &mut Vec<RichRun>,
+    fields: &[&word_fields::Event],
+    index: &mut usize,
+    offset: usize,
+) {
+    while fields
+        .get(*index)
+        .is_some_and(|event| event.offset == offset)
+    {
+        runs.push(RichRun {
+            field: Some(fields[*index].control.clone()),
+            ..Default::default()
+        });
+        *index += 1;
+    }
 }
 
 pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
@@ -350,6 +410,26 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
     super::super::create::create_blank_docx(&output)?;
     let handler = WordHandler::open(&output, true)?;
     handler.remove("/body/p[1]")?;
+    let embedded = append_docx(document, &handler, "/body")?;
+    handler.save()?;
+    if !document.fields.is_empty() {
+        word_fields::request_update_on_open(Path::new(output.as_ref()))?;
+    }
+    Ok(embedded)
+}
+
+pub(super) fn append_docx(
+    document: &SemanticHtml,
+    handler: &WordHandler,
+    parent: &str,
+) -> Result<usize, HandlerError> {
+    let mut fields = HashMap::<_, Vec<&word_fields::Event>>::new();
+    for item in &document.fields {
+        fields
+            .entry((item.block_index, item.cell))
+            .or_default()
+            .push(&item.event);
+    }
     let mut styles = HashMap::<usize, Vec<&StyleRange>>::new();
     for item in &document.styles {
         styles
@@ -384,10 +464,12 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
     }
     let mut pending = Vec::new();
     let mut embedded = 0;
+    let mut numbering = DocxLists::default();
     for (index, block) in document.blocks.iter().enumerate() {
         let empty = Vec::new();
         let block_styles = styles.get(&index).unwrap_or(&empty);
         let no_links = Vec::new();
+        let no_fields = Vec::new();
         let block_links = links.get(&index).unwrap_or(&no_links);
         let mut paragraph = RichParagraph::default();
         let (text, code) = match block {
@@ -403,14 +485,16 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
                 ordinal,
                 text,
             } => {
-                paragraph.runs.push(RichRun {
-                    text: if *ordered {
-                        format!("{ordinal}. ")
-                    } else {
-                        "• ".into()
-                    },
-                    ..Default::default()
-                });
+                if !document.list_paragraphs.contains_key(&index) {
+                    paragraph.runs.push(RichRun {
+                        text: if *ordered {
+                            format!("{ordinal}. ")
+                        } else {
+                            "• ".into()
+                        },
+                        ..Default::default()
+                    });
+                }
                 (text.as_str(), false)
             }
             HtmlBlock::Preformatted(text) => (text.as_str(), true),
@@ -430,6 +514,7 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
                     for (column, cell) in row.iter().enumerate() {
                         let key = (index, row_index, column);
                         cells.push(RichParagraph {
+                            list_ownership: None,
                             properties: HashMap::new(),
                             runs: rich_runs(
                                 cell,
@@ -437,6 +522,9 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
                                 table_links.get(&key).unwrap_or(&no_links),
                                 false,
                                 row_index == 0,
+                                fields
+                                    .get(&(index, Some((row_index, column))))
+                                    .unwrap_or(&no_fields),
                             )?,
                         });
                     }
@@ -451,7 +539,7 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
                 geometry,
             } => {
                 if let Some(asset) = resolved_image(document, source, ImageTarget::Office) {
-                    handler.append_rich_blocks(&pending)?;
+                    handler.append_rich_blocks_to(parent, &pending)?;
                     pending.clear();
                     let properties = HashMap::from([
                         ("src".into(), asset.path.to_string_lossy().into_owned()),
@@ -460,7 +548,7 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
                         ("width".into(), geometry.width().to_string()),
                         ("height".into(), geometry.height().to_string()),
                     ]);
-                    handler.add("/body", "image", InsertPosition::Append, &properties, None)?;
+                    handler.add(parent, "image", InsertPosition::Append, &properties, None)?;
                     embedded += 1;
                 } else {
                     pending.push(RichBlock::Paragraph(RichParagraph {
@@ -474,20 +562,283 @@ pub(super) fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usiz
                 continue;
             }
         };
-        paragraph
-            .runs
-            .extend(rich_runs(text, block_styles, block_links, code, false)?);
+        if let Some(list) = document.list_paragraphs.get(&index) {
+            numbering.apply(handler, list, &mut paragraph)?;
+            if list.depth <= 8
+                && matches!(block, HtmlBlock::Paragraph(_) | HtmlBlock::ListItem { .. })
+            {
+                use oxml::semantic_lists::{ListParagraph as Ownership, ParagraphRole};
+                paragraph.list_ownership = Some(
+                    Ownership::new(
+                        list.item_id,
+                        list.depth as u8,
+                        if list.marker {
+                            ParagraphRole::Start
+                        } else {
+                            ParagraphRole::Continuation
+                        },
+                    )
+                    .map_err(|error| HandlerError::InvalidArgument(error.into()))?,
+                );
+            }
+        }
+        paragraph.runs.extend(rich_runs(
+            text,
+            block_styles,
+            block_links,
+            code,
+            false,
+            fields.get(&(index, None)).unwrap_or(&no_fields),
+        )?);
         pending.push(RichBlock::Paragraph(paragraph));
     }
-    handler.append_rich_blocks(&pending)?;
-    handler.save()?;
+    handler.append_rich_blocks_to(parent, &pending)?;
     Ok(embedded)
+}
+
+#[derive(Default)]
+struct DocxLists {
+    templates: HashMap<bool, String>,
+    instances: HashMap<usize, (String, usize)>,
+}
+
+impl DocxLists {
+    fn apply(
+        &mut self,
+        handler: &WordHandler,
+        list: &ListParagraph,
+        paragraph: &mut RichParagraph,
+    ) -> Result<(), HandlerError> {
+        let level = list.depth.min(8);
+        // Word supports nine native numbering levels. Extra depth still keeps
+        // its indentation, with an explicit conversion warning from the caller.
+        if !list.marker || list.depth > 8 {
+            paragraph
+                .properties
+                .insert("indentLeft".into(), ((list.depth + 1) * 720).to_string());
+        }
+        if !list.marker {
+            return Ok(());
+        }
+        let restart = self
+            .instances
+            .get(&list.list_id)
+            .is_none_or(|(_, next)| list.ordered && *next != list.ordinal);
+        if restart {
+            let template = if let Some(id) = self.templates.get(&list.ordered) {
+                id.clone()
+            } else {
+                let path = handler.add(
+                    "/numbering",
+                    "abstractNum",
+                    InsertPosition::Append,
+                    &HashMap::from([(
+                        "format".into(),
+                        if list.ordered { "decimal" } else { "bullet" }.into(),
+                    )]),
+                    None,
+                )?;
+                let id = numbering_path_id(&path)?;
+                self.templates.insert(list.ordered, id.clone());
+                id
+            };
+            let start = i32::try_from(list.ordinal).map_err(|_| {
+                HandlerError::InvalidArgument(
+                    "DOCX list start exceeds the signed 32-bit numbering limit".into(),
+                )
+            })?;
+            let path = handler.add(
+                "/numbering",
+                "num",
+                InsertPosition::Append,
+                &HashMap::from([
+                    ("abstractNumId".into(), template),
+                    (format!("startOverride.{level}"), start.to_string()),
+                ]),
+                None,
+            )?;
+            self.instances
+                .insert(list.list_id, (numbering_path_id(&path)?, list.ordinal));
+        }
+        let (id, next) = self
+            .instances
+            .get_mut(&list.list_id)
+            .expect("numbering instance allocated");
+        *next = list.ordinal.saturating_add(1);
+        paragraph.properties.insert("numId".into(), id.clone());
+        paragraph
+            .properties
+            .insert("numLevel".into(), level.to_string());
+        Ok(())
+    }
+}
+
+fn numbering_path_id(path: &str) -> Result<String, HandlerError> {
+    path.rsplit_once("[@id=")
+        .and_then(|(_, tail)| tail.strip_suffix(']'))
+        .filter(|id| !id.is_empty() && id.bytes().all(|ch| ch.is_ascii_digit()))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("numbering handler returned an invalid path".into())
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    #[test]
+    fn nested_lists_use_native_numbering_and_keep_continuations_styles_and_restarts() {
+        let source = r#"<ol start="4"><li><p><strong>Root 中文</strong></p><p>continued <a href="https://example.com">link</a></p><ol start="7"><li><p>child seven</p><ul><li>leaf bullet</li></ul></li><li>child eight</li></ol></li><li>root five</li></ol><ol start="10"><li>restart ten</li></ol><ul><li><ul><li>empty child</li></ul></li><li></li></ul>"#;
+        let document = parse_html(source).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("numbered.docx");
+        export_docx(&document, &path).unwrap();
+        validate_output(&path, "docx").unwrap();
+        let package = oxml::OxmlPackage::open(path.to_str().unwrap(), false).unwrap();
+        let xml = package.read_part_xml("word/document.xml").unwrap();
+        let numbers = package.read_part_xml("word/numbering.xml").unwrap();
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        let numbering = roxmltree::Document::parse(&numbers).unwrap();
+        let paragraphs: Vec<_> = parsed
+            .descendants()
+            .filter(|n| n.has_tag_name((W, "p")))
+            .collect();
+        let texts: Vec<_> = paragraphs
+            .iter()
+            .map(|p| {
+                p.descendants()
+                    .filter(|n| n.has_tag_name((W, "t")))
+                    .filter_map(|n| n.text())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Root 中文",
+                "continued link",
+                "child seven",
+                "leaf bullet",
+                "child eight",
+                "root five",
+                "restart ten",
+                "",
+                "empty child",
+                ""
+            ]
+        );
+        let binding = |index: usize| {
+            let p = paragraphs[index];
+            let value = |tag| {
+                p.descendants()
+                    .find(|n| n.has_tag_name((W, tag)))
+                    .and_then(|n| n.attribute((W, "val")))
+            };
+            (value("numId"), value("ilvl"))
+        };
+        assert_eq!(binding(0).1, Some("0"));
+        assert_eq!(binding(2).1, Some("1"));
+        assert_eq!(binding(3).1, Some("2"));
+        assert_eq!(
+            binding(0).0,
+            binding(5).0,
+            "parent resumes after nested lists"
+        );
+        assert_eq!(
+            binding(2).0,
+            binding(4).0,
+            "nested ordered sequence resumes"
+        );
+        assert_ne!(
+            binding(0).0,
+            binding(6).0,
+            "new list restarts independently"
+        );
+        assert_eq!(
+            binding(1),
+            (None, None),
+            "continuation must not receive a second marker"
+        );
+        let ownership: Vec<oxml::semantic_lists::ListParagraph> = paragraphs
+            .iter()
+            .map(|paragraph| {
+                const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+                assert_eq!(paragraph.attribute((MC, "Ignorable")), Some("hcdl"));
+                assert_eq!(
+                    paragraph.attribute((MC, "PreserveAttributes")),
+                    Some("hcdl:list")
+                );
+                paragraph
+                    .attribute((oxml::semantic_lists::NAMESPACE, "list"))
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ownership[0].item(), ownership[1].item());
+        assert_eq!(
+            ownership[1].role(),
+            oxml::semantic_lists::ParagraphRole::Continuation
+        );
+        let starts: std::collections::HashSet<_> = ownership
+            .iter()
+            .filter(|value| value.role() == oxml::semantic_lists::ParagraphRole::Start)
+            .map(|value| value.item())
+            .collect();
+        assert_eq!(starts.len(), paragraphs.len() - 1);
+        let start = |index: usize, level: &str| {
+            let id = binding(index).0.unwrap();
+            numbering
+                .descendants()
+                .find(|n| n.has_tag_name((W, "num")) && n.attribute((W, "numId")) == Some(id))
+                .unwrap()
+                .children()
+                .find(|n| {
+                    n.has_tag_name((W, "lvlOverride")) && n.attribute((W, "ilvl")) == Some(level)
+                })
+                .unwrap()
+                .descendants()
+                .find(|n| n.has_tag_name((W, "startOverride")))
+                .unwrap()
+                .attribute((W, "val"))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(start(0, "0"), "4");
+        assert_eq!(start(2, "1"), "7");
+        assert_eq!(start(6, "0"), "10");
+        assert!(paragraphs[0]
+            .descendants()
+            .any(|n| n.has_tag_name((W, "b"))));
+        assert!(paragraphs[1]
+            .descendants()
+            .any(|n| n.has_tag_name((W, "hyperlink"))));
+        assert!(package
+            .read_part_xml("word/_rels/document.xml.rels")
+            .unwrap()
+            .contains("relationships/numbering"));
+        assert!(package
+            .read_part_xml("[Content_Types].xml")
+            .unwrap()
+            .contains("wordprocessingml.numbering+xml"));
+        let preview = WordHandler::open(path.to_str().unwrap(), false)
+            .unwrap()
+            .view_as_html(handler_common::ViewOptions::default())
+            .unwrap();
+        for marker in [
+            ">4.</span>",
+            ">5.</span>",
+            ">7.</span>",
+            ">8.</span>",
+            ">10.</span>",
+        ] {
+            assert!(
+                preview.contains(marker),
+                "missing resumed native marker {marker}"
+            );
+        }
+    }
     fn xml(document: &SemanticHtml) -> (String, String) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("rich.docx");

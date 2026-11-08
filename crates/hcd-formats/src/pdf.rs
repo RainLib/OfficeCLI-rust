@@ -1,8 +1,53 @@
 mod geometry;
 mod native;
+mod native_layout;
 mod upgrade;
 use geometry::Viewport;
 pub use upgrade::{pdf_layout_needs_upgrade, upgrade_pdf_layout};
+
+/// A PDF page raster may still contain the old text under an approximate
+/// overlay. Semantic export must not embed that raster as a faithful result.
+pub fn pdf_has_unpainted_text(
+    bundle: &hcd_core::Bundle,
+    revision: u64,
+) -> Result<bool, hcd_core::HcdError> {
+    let head = bundle.manifest()?;
+    let (manifest, _) = hcd_core::manifest_at_revision(bundle, &head, Some(revision))?;
+    if manifest.source.format != "pdf" {
+        return Ok(false);
+    }
+    for index in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(&manifest, index)?.chunks {
+            let html = bundle.read_chunk_verified(&descriptor)?;
+            let mut reader = quick_xml::Reader::from_str(&html);
+            loop {
+                match reader
+                    .read_event()
+                    .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+                {
+                    quick_xml::events::Event::Start(tag) | quick_xml::events::Event::Empty(tag) => {
+                        for attribute in tag.attributes() {
+                            let attribute = attribute
+                                .map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+                            if attribute.key.as_ref() == b"data-hcd-patched"
+                                && attribute
+                                    .decode_and_unescape_value(reader.decoder())
+                                    .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+                                    .as_ref()
+                                    == "true"
+                            {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    quick_xml::events::Event::Eof => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(false)
+}
 
 use crate::common::{
     base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
@@ -955,6 +1000,7 @@ pub fn plan_pdf_page_rasters(
         return Ok(hcd_core::PdfRasterPlan {
             rasters: Vec::new(),
             skipped,
+            ..Default::default()
         });
     }
     let mut rasters = Vec::new();
@@ -969,7 +1015,11 @@ pub fn plan_pdf_page_rasters(
             Err(error) => skipped.push(raster_skip("", error.to_string())),
         }
     }
-    Ok(hcd_core::PdfRasterPlan { rasters, skipped })
+    Ok(hcd_core::PdfRasterPlan {
+        rasters,
+        skipped,
+        ..Default::default()
+    })
 }
 
 fn paint_page_raster(
@@ -1349,6 +1399,89 @@ mod tests {
     }
 
     #[test]
+    fn source_free_repaint_keeps_unpainted_peer_text_overlay() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("two-text.pdf");
+        write_simple_visual_pdf(&source);
+        let mut pdf = Document::load(&source).unwrap();
+        let page = *pdf.get_pages().get(&1).unwrap();
+        pdf.change_page_content(
+            page,
+            b"BT /F1 12 Tf 20 250 Td (First) Tj ET BT /F1 12 Tf 20 200 Td (Second) Tj ET".to_vec(),
+        )
+        .unwrap();
+        pdf.save(&source).unwrap();
+        let root = temp.path().join("bundle");
+        import_pdf(&source, &root, &ImportOptions::new("two-text"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let entries = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries;
+        let first = entries.iter().find(|entry| entry.text == "First").unwrap();
+        let second = entries.iter().find(|entry| entry.text == "Second").unwrap();
+        let edit =
+            |node: &hcd_core::TextExtractEntry, text: &str| hcd_core::PatchOperation::TextSplice {
+                node_id: node.node_id.clone(),
+                start: 0,
+                delete_count: node.text.chars().count(),
+                insert_text: text.into(),
+                precondition: hcd_core::NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            };
+        let mut patch = hcd_core::PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "two-text".into(),
+            patch_id: "both-overlaid".into(),
+            base_revision: 0,
+            actor: Default::default(),
+            metadata: Default::default(),
+            operations: vec![edit(first, "A\nB"), edit(second, "C\nD")],
+        };
+        let missing = temp.path().join("missing.pdf");
+        let plan = plan_pdf_page_rasters(&bundle, &missing, &patch.operations).unwrap();
+        assert!(plan.rasters.is_empty());
+        hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 0, plan).unwrap();
+        let first_now = hcd_core::get_text_node(&bundle, &first.node_id)
+            .unwrap()
+            .node;
+        patch.patch_id = "first-repainted".into();
+        patch.base_revision = 1;
+        patch.operations = vec![hcd_core::PatchOperation::TextSplice {
+            node_id: first.node_id.clone(),
+            start: 0,
+            delete_count: first_now.text.chars().count(),
+            insert_text: "A".into(),
+            precondition: hcd_core::NodePrecondition {
+                node_hash: first_now.node_hash,
+            },
+        }];
+        let plan = plan_pdf_page_rasters(&bundle, &missing, &patch.operations).unwrap();
+        assert_eq!(plan.rasters.len(), 1, "{:?}", plan.skipped);
+        hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 1, plan).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        let html = bundle
+            .read_chunk_verified(&bundle.read_index_page(&manifest, 0).unwrap().chunks[0])
+            .unwrap();
+        let marker = |id: &str| {
+            let at = html.find(&format!("data-hcd-id=\"{id}\"")).unwrap();
+            let start = html[..at].rfind("<span").unwrap();
+            let end = at + html[at..].find('>').unwrap();
+            html[start..=end].to_string()
+        };
+        assert!(marker(&first.node_id).contains("data-hcd-patched=\"false\""));
+        assert!(marker(&second.node_id).contains("data-hcd-patched=\"true\""));
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &second.node_id)
+                .unwrap()
+                .node
+                .text,
+            "C\nD"
+        );
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
     fn hcd_pdf_import_publishes_a_valid_lazy_page_raster() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("visual.pdf");
@@ -1664,6 +1797,25 @@ mod tests {
                 .text,
             "A\nB"
         );
+        // A later successful repaint must remove this node's old overlay;
+        // otherwise both the raster and overlay draw the new text.
+        let current = hcd_core::get_text_node(&bundle, &original.node_id).unwrap();
+        let patch = make_patch("A", 2, current.node.node_hash, 3);
+        let plan = plan_pdf_page_rasters(&bundle, &missing_source, &patch.operations).unwrap();
+        assert_eq!(plan.rasters.len(), 1, "{:?}", plan.skipped);
+        hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 2, plan).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        let html = bundle
+            .read_chunk(&bundle.read_index_page(&manifest, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(!html.contains("data-hcd-patched=\"true\""));
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &original.node_id)
+                .unwrap()
+                .node
+                .text,
+            "A"
+        );
         assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
     }
 
@@ -1864,6 +2016,159 @@ mod tests {
         assert_eq!(bundle.manifest().unwrap().revision, 2);
         let validation = hcd_core::validate_bundle(&bundle).unwrap();
         assert!(validation.valid, "{validation:?}");
+    }
+
+    #[test]
+    fn text_layout_plan_rejects_stale_roots_and_node_hashes_before_publishing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pdf");
+        write_simple_visual_pdf(&source);
+        let root = temp.path().join("bundle");
+        import_pdf(&source, &root, &ImportOptions::new("layout-fence"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let node = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|node| !node.text.is_empty())
+            .unwrap();
+        let patch = hcd_core::PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "layout-fence".into(),
+            patch_id: "layout-save".into(),
+            base_revision: 0,
+            actor: Default::default(),
+            metadata: Default::default(),
+            operations: vec![hcd_core::PatchOperation::TextSplice {
+                node_id: node.node_id.clone(),
+                start: 0,
+                delete_count: node.text.chars().count(),
+                insert_text: "Saved".into(),
+                precondition: hcd_core::NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        let plan = plan_pdf_page_rasters(&bundle, &source, &patch.operations).unwrap();
+        assert!(!plan.text_layouts.is_empty());
+        let before = fs::read(root.join("manifest.json")).unwrap();
+        let mut stale = plan.clone();
+        stale.base_root_hash = Some("bad-root".into());
+        assert!(hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 0, stale).is_err());
+        assert_eq!(fs::read(root.join("manifest.json")).unwrap(), before);
+        let mut stale = plan.clone();
+        stale.text_layouts[0].expected_hash = "bad-node".into();
+        assert!(hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 0, stale).is_err());
+        assert_eq!(fs::read(root.join("manifest.json")).unwrap(), before);
+        hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 0, plan.clone()).unwrap();
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &node.node_id)
+                .unwrap()
+                .node
+                .text,
+            "Saved"
+        );
+        let current = bundle.manifest().unwrap();
+        let index = bundle.read_index_page(&current, 0).unwrap();
+        let layouts = index
+            .chunks
+            .iter()
+            .flat_map(|chunk| {
+                hcd_core::extract_pdf_text_layouts(&bundle.read_chunk_verified(chunk).unwrap())
+                    .unwrap()
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(layouts[&node.node_id].text_hash, hash_bytes(b"Saved"));
+        let duplicate = hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 0, plan).unwrap();
+        assert_eq!(duplicate.revision, 1);
+        assert!(duplicate.idempotent_replay);
+    }
+
+    #[test]
+    fn cleared_pdf_text_retains_position_and_can_be_edited_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pdf");
+        let root = temp.path().join("bundle");
+        write_simple_visual_pdf(&source);
+        import_pdf(
+            &source,
+            &root,
+            &ImportOptions::new("empty-text"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let node = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| !entry.text.is_empty())
+            .unwrap();
+        let initial = bundle.manifest().unwrap();
+        let descriptor = bundle
+            .read_index_page(&initial, 0)
+            .unwrap()
+            .chunks
+            .remove(0);
+        let html = bundle.read_chunk_verified(&descriptor).unwrap();
+        let (x, y, width, height) = text_box(&html, &node.node_id).unwrap();
+        assert!(width > 0. && height > 0.);
+        let mut patch = hcd_core::PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "empty-text".into(),
+            patch_id: "clear".into(),
+            base_revision: 0,
+            actor: Default::default(),
+            metadata: Default::default(),
+            operations: vec![hcd_core::PatchOperation::TextSplice {
+                node_id: node.node_id.clone(),
+                start: 0,
+                delete_count: node.text.chars().count(),
+                insert_text: String::new(),
+                precondition: hcd_core::NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        let plan = plan_pdf_page_rasters(&bundle, &source, &patch.operations).unwrap();
+        let layout = plan
+            .text_layouts
+            .iter()
+            .find(|layout| layout.node_id == node.node_id)
+            .unwrap();
+        assert_eq!(
+            layout.layout.rect,
+            [x as f64, y as f64, width as f64, height as f64]
+        );
+        hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 0, plan).unwrap();
+        let empty = hcd_core::get_text_node(&bundle, &node.node_id)
+            .unwrap()
+            .node;
+        assert_eq!(empty.text, "");
+        patch.patch_id = "refill".into();
+        patch.base_revision = 1;
+        patch.operations = vec![hcd_core::PatchOperation::TextSplice {
+            node_id: node.node_id.clone(),
+            start: 0,
+            delete_count: 0,
+            insert_text: "Refilled".into(),
+            precondition: hcd_core::NodePrecondition {
+                node_hash: empty.node_hash,
+            },
+        }];
+        let plan = plan_pdf_page_rasters(&bundle, &source, &patch.operations).unwrap();
+        hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, 1, plan).unwrap();
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &node.node_id)
+                .unwrap()
+                .node
+                .text,
+            "Refilled"
+        );
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
     }
 
     #[test]

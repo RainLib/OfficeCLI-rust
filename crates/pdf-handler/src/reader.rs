@@ -1092,23 +1092,45 @@ fn decode_ascii85_bounded(
     maximum: usize,
     context: &str,
 ) -> Result<Vec<u8>, HandlerError> {
+    let invalid = || HandlerError::OpenError(format!("invalid {context} ASCII85 stream"));
+    let whitespace = |byte: u8| matches!(byte, 0 | 9 | 10 | 12 | 13 | 32);
     let mut output = Vec::with_capacity(input.len().min(maximum));
     let mut buffer: u32 = 0;
     let mut count = 0usize;
-    for &byte in input {
-        if byte == b'z' && count == 0 {
+    let mut offset = 0;
+    while offset < input.len() && whitespace(input[offset]) {
+        offset += 1;
+    }
+    // PDF streams normally omit the Adobe wrapper. Accept it only at the
+    // start; '<' and '>' elsewhere are ordinary base-85 digits.
+    if input.get(offset..offset.saturating_add(2)) == Some(b"<~") {
+        offset += 2;
+    }
+    while let Some(&byte) = input.get(offset) {
+        offset += 1;
+        if whitespace(byte) {
+            continue;
+        }
+        if byte == b'~' {
+            if input.get(offset) != Some(&b'>') {
+                return Err(invalid());
+            }
+            break;
+        }
+        if byte == b'z' {
+            if count != 0 {
+                return Err(invalid());
+            }
             append_bounded(&mut output, &[0, 0, 0, 0], maximum, context)?;
             continue;
         }
-        if byte.is_ascii_whitespace() || byte == b'~' || byte == b'>' {
-            continue;
-        }
         if !(b'!'..=b'u').contains(&byte) {
-            break;
+            return Err(invalid());
         }
         buffer = buffer
-            .saturating_mul(85)
-            .saturating_add((byte - b'!') as u32);
+            .checked_mul(85)
+            .and_then(|value| value.checked_add((byte - b'!') as u32))
+            .ok_or_else(invalid)?;
         count += 1;
         if count == 5 {
             append_bounded(&mut output, &buffer.to_be_bytes(), maximum, context)?;
@@ -1116,9 +1138,15 @@ fn decode_ascii85_bounded(
             count = 0;
         }
     }
-    if count > 0 {
+    if count == 1 {
+        return Err(invalid());
+    }
+    if count > 1 {
         for _ in count..5 {
-            buffer = buffer.saturating_mul(85).saturating_add(84);
+            buffer = buffer
+                .checked_mul(85)
+                .and_then(|value| value.checked_add(84))
+                .ok_or_else(invalid)?;
         }
         append_bounded(
             &mut output,
@@ -1268,6 +1296,83 @@ mod tests {
         assert_eq!(parsed.text_blocks.len(), 1);
         assert_eq!(parsed.text_blocks[0].text, "Hello bounded PDF");
         assert!(parsed.image_map.is_empty());
+    }
+
+    #[test]
+    fn ascii85_keeps_angle_digits_and_correct_partial_groups() {
+        // Independent known vectors, including '>' in the data alphabet.
+        for (encoded, expected) in [
+            (b"!>!!!".as_slice(), vec![0x01, 0x0f, 0xc0, 0xd9]),
+            (b"<!!!!".as_slice(), vec![0x54, 0x01, 0xfe, 0xab]),
+            (b"!!>!!".as_slice(), vec![0x00, 0x03, 0x32, 0x75]),
+            (b"rr".as_slice(), vec![255]),
+            (b"s8N".as_slice(), vec![255, 255]),
+            (b"s8W*".as_slice(), vec![255, 255, 255]),
+            (b"s8W-!".as_slice(), vec![255, 255, 255, 255]),
+            (
+                b" \0<~ !>\0! ! ! ~>ignored".as_slice(),
+                vec![0x01, 0x0f, 0xc0, 0xd9],
+            ),
+        ] {
+            assert_eq!(
+                decode_ascii85_bounded(encoded, expected.len(), "test").unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            decode_ascii85_bounded(b"zz~>", 8, "test").unwrap(),
+            vec![0; 8]
+        );
+    }
+
+    #[test]
+    fn ascii85_rejects_malformed_groups_overflow_and_expansion() {
+        for encoded in [
+            b"!~>".as_slice(),
+            b"!z",
+            b"uuuuu",
+            b"s8W-\"",
+            b"!!!!!v",
+            b"zz~x",
+            b"~",
+            b"y",
+        ] {
+            assert!(decode_ascii85_bounded(encoded, 1024, "test")
+                .unwrap_err()
+                .to_string()
+                .contains("ASCII85"));
+        }
+        assert!(decode_ascii85_bounded(b"zz~>", 7, "test")
+            .unwrap_err()
+            .to_string()
+            .contains("resource limit exceeded"));
+    }
+
+    #[test]
+    fn real_ascii85_flate_pages_decode_in_order_with_the_same_limits() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/assets/hcd-pdf-search-2026-10-25/ascii85-content-source.pdf");
+        let reader = PdfReader::open(path.to_str().unwrap()).unwrap();
+        let page = reader
+            .parse_page_text_blocks_bounded(1, 64 * 1024, 64 * 1024)
+            .unwrap();
+        let text: String = page
+            .text_blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect();
+        assert!(text.contains("Rotation 000 canonical"));
+        assert!(text.contains("离线中文搜索"));
+        assert!(reader
+            .parse_page_text_blocks_bounded(1, 200, 64 * 1024)
+            .unwrap_err()
+            .to_string()
+            .contains("resource limit exceeded"));
+        assert!(reader
+            .parse_page_text_blocks_bounded(1, 64 * 1024, 32)
+            .unwrap_err()
+            .to_string()
+            .contains("resource limit exceeded"));
     }
 
     #[test]

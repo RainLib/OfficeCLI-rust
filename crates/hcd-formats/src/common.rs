@@ -4,7 +4,9 @@ use hcd_core::{
     DEFAULT_CHUNK_SOFT_BYTES, HCD_SCHEMA_VERSION, MAX_REVISION,
 };
 use quick_xml::events::Event;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
@@ -65,6 +67,8 @@ impl XmlBudget {
 
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
+    /// Explicit preview import of Word section/story metadata; defaults off.
+    pub word_regions: bool,
     pub document_id: String,
     pub chunk_soft_bytes: usize,
     pub chunk_blocks: usize,
@@ -84,6 +88,7 @@ pub enum PdfRasterMode {
 impl ImportOptions {
     pub fn new(document_id: impl Into<String>) -> Self {
         Self {
+            word_regions: false,
             document_id: document_id.into(),
             chunk_soft_bytes: DEFAULT_CHUNK_SOFT_BYTES,
             chunk_blocks: DEFAULT_CHUNK_BLOCKS,
@@ -134,7 +139,40 @@ pub(crate) fn source_identity_with_extensions(
                 .join(" or ")
         )));
     }
-    Ok((hash_file(source)?, metadata.len()))
+    let (hash, size) = bounded_source_identity(std::fs::File::open(source)?, MAX_SOURCE_BYTES)?;
+    if size != metadata.len() {
+        return Err(HcdError::InvalidBundle(
+            "source changed while calculating its identity".into(),
+        ));
+    }
+    Ok((hash, size))
+}
+
+fn bounded_source_identity(mut input: impl Read, maximum: u64) -> Result<(String, u64), HcdError> {
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        size = size
+            .checked_add(count as u64)
+            .ok_or_else(|| HcdError::ResourceLimit("source byte count overflow".into()))?;
+        if size > maximum {
+            return Err(HcdError::ResourceLimit(format!(
+                "source exceeds the {maximum} byte limit"
+            )));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let hash = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok((hash, size))
 }
 
 pub(crate) fn base_manifest(
@@ -219,24 +257,7 @@ pub(crate) fn manifest_at_revision(
     head: &HcdManifest,
     revision: u64,
 ) -> Result<HcdManifest, HcdError> {
-    if revision == head.revision {
-        return Ok(head.clone());
-    }
-    let record = bundle.revision(revision)?;
-    let mut manifest = head.clone();
-    manifest.revision = revision;
-    manifest.root_hash = record.root_hash;
-    manifest.annotation_root_hash = record.annotation_root_hash;
-    manifest.annotation_href = (manifest.annotation_root_hash != hash_bytes(b"[]")).then(|| {
-        format!(
-            "annotations/sha256/{}.json{}",
-            manifest.annotation_root_hash,
-            manifest.storage_codec.suffix()
-        )
-    });
-    manifest.index_prefix = record.index_prefix;
-    manifest.index_root_href = record.index_root_href;
-    Ok(manifest)
+    hcd_core::manifest_at_revision(bundle, head, Some(revision)).map(|(manifest, _)| manifest)
 }
 
 pub(crate) fn dirty_state_through(
@@ -372,7 +393,7 @@ pub(crate) fn checked_export_state(
     let manifest = manifest_at_revision(bundle, &head, revision)?;
     let (dirty_parts, dirty_nodes) = dirty_state_through(bundle, revision)?;
     reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes)?;
-    if manifest.source.format != "pdf" {
+    if !matches!(manifest.source.format.as_str(), "pdf" | "pptx") {
         reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
     }
     Ok((manifest, revision, dirty_parts, dirty_nodes))
@@ -398,6 +419,65 @@ fn reject_image_source_export(
         }
     }
     Ok(())
+}
+
+/// Report the same revision-specific guards used by source-backed export.
+/// Unexpected bundle/IO failures remain errors rather than an optimistic result.
+pub fn source_export_edit_blocker(
+    bundle: &Bundle,
+    revision: u64,
+) -> Result<Option<&'static str>, HcdError> {
+    let head = bundle.manifest()?;
+    if revision > head.revision {
+        return Err(HcdError::RevisionConflict(format!(
+            "requested revision {revision} is ahead of head {}",
+            head.revision
+        )));
+    }
+    let manifest = manifest_at_revision(bundle, &head, revision)?;
+    let (dirty_parts, dirty_nodes) = match dirty_state_through(bundle, revision) {
+        Ok(state) => state,
+        // Structural revisions cannot be replayed against the retained source.
+        // Return a preflight decision, while preserving unexpected read errors.
+        Err(HcdError::Unsupported(_)) => return Ok(Some("STRUCTURE_SOURCE_UNSUPPORTED")),
+        Err(error) => return Err(error),
+    };
+    match reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes) {
+        Ok(()) => {}
+        Err(HcdError::Unsupported(_)) => return Ok(Some("STYLE_SOURCE_UNSUPPORTED")),
+        Err(error) => return Err(error),
+    }
+    if manifest.source.format == "pdf"
+        && collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_nodes)?
+            .iter()
+            .any(|entry| entry.source.node_kind != "image" && entry.text.contains(['\n', '\r']))
+    {
+        return Ok(Some("PDF_MULTILINE_SOURCE_UNSUPPORTED"));
+    }
+    if manifest.source.format != "pdf" {
+        match reject_image_source_export(bundle, &manifest, &dirty_nodes) {
+            Ok(()) => {}
+            Err(HcdError::Unsupported(_)) => return Ok(Some("IMAGE_SOURCE_UNSUPPORTED")),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+/// Source-aware preflight for the same picture checks used by PPTX export.
+pub fn source_export_edit_blocker_with_source(
+    bundle: &Bundle,
+    source: &Path,
+    revision: u64,
+) -> Result<Option<&'static str>, HcdError> {
+    let blocker = source_export_edit_blocker(bundle, revision)?;
+    if blocker == Some("IMAGE_SOURCE_UNSUPPORTED") && bundle.manifest()?.source.format == "pptx" {
+        return match crate::prepare_pptx_source_picture_geometry(bundle, source, revision) {
+            Ok(parts) if !parts.parts.is_empty() => Ok(None),
+            _ => Ok(blocker),
+        };
+    }
+    Ok(blocker)
 }
 
 fn reject_presentation_style_source_export(
@@ -465,6 +545,21 @@ mod tests {
     use quick_xml::events::BytesStart;
 
     #[test]
+    fn source_digest_counts_actual_bytes_and_rejects_over_limit() {
+        let bytes = b"actual source bytes";
+        let (hash, size) = bounded_source_identity(&bytes[..], bytes.len() as u64).unwrap();
+        assert_eq!(hash, hash_bytes(bytes));
+        assert_eq!(size, bytes.len() as u64);
+        assert!(matches!(
+            bounded_source_identity(&bytes[..], bytes.len() as u64 - 1),
+            Err(HcdError::ResourceLimit(_))
+        ));
+        let (empty_hash, empty_size) = bounded_source_identity(&b""[..], 0).unwrap();
+        assert_eq!(empty_hash, hash_bytes(b""));
+        assert_eq!(empty_size, 0);
+    }
+
+    #[test]
     fn xml_budget_rejects_excessive_depth() {
         let mut budget = XmlBudget::default();
         let start = Event::Start(BytesStart::new("nested"));
@@ -473,6 +568,117 @@ mod tests {
         }
         let error = budget.observe(&start, "test.xml").unwrap_err();
         assert!(error.to_string().contains("maximum XML depth"));
+    }
+
+    #[test]
+    fn historical_export_uses_index_counts_after_real_structural_rechunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        let source_text = "text\n".repeat(129);
+        std::fs::write(&source, &source_text).unwrap();
+        let path = temp.path().join("bundle");
+        let mut writer = BundleWriter::create(&path).unwrap();
+        writer.write_styles("").unwrap();
+        for index in 0..129u32 {
+            let node_id = format!("n_{index:032x}");
+            let chunk_id = format!("c_{index:032x}");
+            let node_hash = hash_bytes(b"text");
+            let html = format!("<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">text</span></p>");
+            let map = ChunkSourceMap {
+                schema_version: HCD_SCHEMA_VERSION.into(),
+                chunk_id: chunk_id.clone(),
+                entries: vec![NodeMapEntry {
+                    node_id,
+                    node_hash,
+                    source: SourceAnchor {
+                        part: "text/document".into(),
+                        text_ordinal: index as u64 + 1,
+                        paragraph_id: None,
+                        text_id: Some(format!("bytes:{}:{}", index * 5, index * 5 + 4)),
+                        node_kind: "text".into(),
+                        editable: true,
+                    },
+                }],
+            };
+            writer
+                .write_chunk(chunk_id, "body".into(), html, map, 1, false)
+                .unwrap();
+        }
+        let original = writer
+            .finish(base_manifest(
+                &ImportOptions::new("history-rechunk"),
+                "txt",
+                "semantic-flow",
+                hash_bytes(source_text.as_bytes()),
+                source_text.len() as u64,
+            ))
+            .unwrap();
+        assert_eq!((original.index_page_count, original.chunk_count), (2, 129));
+        let bundle = Bundle::open(path).unwrap();
+        hcd_core::apply_patch(
+            &bundle,
+            &hcd_core::PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: original.document_id.clone(),
+                patch_id: "edit-last-original-chunk".into(),
+                base_revision: 0,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![hcd_core::PatchOperation::TextSplice {
+                    node_id: format!("n_{:032x}", 128),
+                    start: 0,
+                    delete_count: 4,
+                    insert_text: "changed".into(),
+                    precondition: hcd_core::NodePrecondition {
+                        node_hash: hash_bytes(b"text"),
+                    },
+                }],
+            },
+            0,
+        )
+        .unwrap();
+        hcd_core::project_editor(&bundle, 1).unwrap();
+        let patch = hcd_core::StructurePatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: original.document_id.clone(),
+            patch_id: "insert-and-rechunk".into(),
+            base_revision: 2,
+            actor: Default::default(),
+            operations: vec![hcd_core::StructureOperation::Insert {
+                after_block_id: None,
+                block: hcd_core::EditorBlockContent::default(),
+            }],
+        };
+        hcd_core::apply_structure_patch(&bundle, &patch, 2).unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!((head.index_page_count, head.chunk_count), (1, 1));
+        let options = ExportOptions {
+            revision: Some(1),
+            ..Default::default()
+        };
+        let (historical, revision, _, _) =
+            checked_export_state(&bundle, &source, &options).unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(
+            (historical.index_page_count, historical.chunk_count),
+            (2, 129)
+        );
+        let count: usize = (0..historical.index_page_count)
+            .map(|page| {
+                bundle
+                    .read_index_page(&historical, page)
+                    .unwrap()
+                    .chunks
+                    .len()
+            })
+            .sum();
+        assert_eq!(count, 129);
+        let exported = temp.path().join("historical.txt");
+        crate::textual::export_text(&bundle, &source, &exported, &options).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(exported).unwrap(),
+            format!("{}changed\n", "text\n".repeat(128))
+        );
     }
 
     #[test]
@@ -528,6 +734,55 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_id, second_id);
         assert_eq!(nodes[0].text, "changed");
+
+        assert_eq!(source_export_edit_blocker(&bundle, 0).unwrap(), None);
+        hcd_core::apply_patch(
+            &bundle,
+            &hcd_core::PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: "test-document".into(),
+                patch_id: "edit".into(),
+                base_revision: 0,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![hcd_core::PatchOperation::TextSplice {
+                    node_id: second_id.into(),
+                    start: 0,
+                    delete_count: 7,
+                    insert_text: "new".into(),
+                    precondition: hcd_core::NodePrecondition {
+                        node_hash: hash_bytes(b"changed"),
+                    },
+                }],
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(source_export_edit_blocker(&bundle, 1).unwrap(), None);
+        hcd_core::restore_revision(&bundle, 0, 1, None, None).unwrap();
+        assert_eq!(
+            source_export_edit_blocker(&bundle, 2).unwrap(),
+            Some("STRUCTURE_SOURCE_UNSUPPORTED")
+        );
+        assert!(matches!(
+            dirty_state_through(&bundle, 2),
+            Err(HcdError::Unsupported(_))
+        ));
+
+        // A later structural revision can have a different number of chunks
+        // and index pages. Historical source exports must use revision 0's
+        // recorded counts, not the head's counts.
+        let mut later_head = bundle.manifest().unwrap();
+        later_head.index_page_count += 1;
+        later_head.chunk_count += 7;
+        let historical = manifest_at_revision(&bundle, &later_head, 0).unwrap();
+        assert_eq!(historical.index_page_count, manifest.index_page_count);
+        assert_eq!(historical.chunk_count, manifest.chunk_count);
+        assert_eq!(
+            bundle.read_index_page(&historical, 0).unwrap().chunks.len(),
+            1
+        );
+        assert!(bundle.read_index_page(&historical, 1).is_err());
     }
 
     fn test_anchor(part: &str, ordinal: u64, cell: &str) -> SourceAnchor {

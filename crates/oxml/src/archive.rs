@@ -126,6 +126,25 @@ impl StreamingOxmlRewriter {
         replacements: &HashMap<String, PathBuf>,
         required_main_part: &str,
     ) -> Result<Vec<String>, PackageError> {
+        Self::rewrite_with_additions(
+            source,
+            target,
+            replacements,
+            &HashMap::new(),
+            required_main_part,
+        )
+    }
+
+    /// Atomically rewrite existing parts and append new package parts. Added
+    /// entries must be distinct safe package paths and never replace a source
+    /// entry; the completed archive is validated before publication.
+    pub fn rewrite_with_additions(
+        source: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+        replacements: &HashMap<String, PathBuf>,
+        additions: &HashMap<String, PathBuf>,
+        required_main_part: &str,
+    ) -> Result<Vec<String>, PackageError> {
         let source = source.as_ref();
         let target = target.as_ref();
         if target.exists() {
@@ -141,6 +160,36 @@ impl StreamingOxmlRewriter {
         for replacement in replacements.keys() {
             if !names.contains(replacement.as_str()) {
                 return Err(PackageError::PartNotFound(replacement.clone()));
+            }
+        }
+        if entries.len().saturating_add(additions.len()) > MAX_ZIP_ENTRIES {
+            return Err(PackageError::ResourceLimit(
+                "added parts exceed package entry limit".into(),
+            ));
+        }
+        let mut total = entries.iter().fold(0u64, |sum, entry| {
+            sum.saturating_add(entry.uncompressed_size)
+        });
+        let mut case_folded: HashSet<String> =
+            names.iter().map(|name| name.to_ascii_lowercase()).collect();
+        for (name, path) in additions {
+            validate_entry_name(name)?;
+            if name.is_empty() || name.ends_with('/') || name.contains('\\') || name.contains("//")
+            {
+                return Err(PackageError::WritePartError(format!(
+                    "invalid added part path: {name}"
+                )));
+            }
+            if !case_folded.insert(name.to_ascii_lowercase()) || replacements.contains_key(name) {
+                return Err(PackageError::WritePartError(format!(
+                    "added part already exists: {name}"
+                )));
+            }
+            total = total.saturating_add(std::fs::metadata(path)?.len());
+            if total > MAX_UNCOMPRESSED_BYTES {
+                return Err(PackageError::ResourceLimit(
+                    "added parts exceed package size limit".into(),
+                ));
             }
         }
 
@@ -175,10 +224,20 @@ impl StreamingOxmlRewriter {
                 writer.raw_copy_file(original)?;
             }
         }
+        let mut added: Vec<_> = additions.iter().collect();
+        added.sort_by(|left, right| left.0.cmp(right.0));
+        for (name, path) in added {
+            writer.start_file(
+                name,
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+            )?;
+            std::io::copy(&mut File::open(path)?, &mut writer)?;
+            changed.push(name.clone());
+        }
         writer.finish()?.sync_all()?;
         let mut candidate = StreamingOxmlArchive::open(temp.path())?;
         candidate.validate_structure(required_main_part)?;
-        temp.persist(target)
+        temp.persist_noclobber(target)
             .map_err(|error| PackageError::SaveError(error.error.to_string()))?;
         Ok(changed)
     }
@@ -394,6 +453,72 @@ mod tests {
             raw_entry(&source, "word/document.xml"),
             raw_entry(&target, "word/document.xml")
         );
+    }
+
+    #[test]
+    fn added_parts_are_atomic_distinct_and_preserve_existing_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        write_test_package(
+            &source,
+            b"<w:document xmlns:w=\"urn:test\"><w:body/></w:document>",
+        );
+        let payload = temp.path().join("image.bin");
+        std::fs::write(&payload, b"independent image bytes").unwrap();
+        let target = temp.path().join("target.docx");
+        let additions = HashMap::from([("word/media/new.png".to_string(), payload.clone())]);
+        let changes = StreamingOxmlRewriter::rewrite_with_additions(
+            &source,
+            &target,
+            &HashMap::new(),
+            &additions,
+            "word/document.xml",
+        )
+        .unwrap();
+        assert_eq!(changes, ["word/media/new.png"]);
+        assert_eq!(
+            raw_entry(&source, "word/document.xml"),
+            raw_entry(&target, "word/document.xml")
+        );
+        let mut zip = ZipArchive::new(File::open(&target).unwrap()).unwrap();
+        let mut data = Vec::new();
+        zip.by_name("word/media/new.png")
+            .unwrap()
+            .read_to_end(&mut data)
+            .unwrap();
+        assert_eq!(data, b"independent image bytes");
+        for invalid in [
+            "word/document.xml",
+            "WORD/DOCUMENT.XML",
+            "../escape.png",
+            "word\\media\\image.png",
+            "word//media/image.png",
+        ] {
+            let bad = temp.path().join("rejected.docx");
+            let entries = HashMap::from([(invalid.to_string(), payload.clone())]);
+            assert!(StreamingOxmlRewriter::rewrite_with_additions(
+                &source,
+                &bad,
+                &HashMap::new(),
+                &entries,
+                "word/document.xml"
+            )
+            .is_err());
+            assert!(!bad.exists());
+        }
+        let malformed = temp.path().join("malformed.xml");
+        std::fs::write(&malformed, b"<unclosed>").unwrap();
+        let bad = temp.path().join("invalid-xml.docx");
+        let entries = HashMap::from([("word/custom.xml".to_string(), malformed)]);
+        assert!(StreamingOxmlRewriter::rewrite_with_additions(
+            &source,
+            &bad,
+            &HashMap::new(),
+            &entries,
+            "word/document.xml"
+        )
+        .is_err());
+        assert!(!bad.exists());
     }
 
     fn write_test_package(path: &Path, document: &[u8]) {

@@ -149,8 +149,8 @@ fn create_blank_docx_with_locale(
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>"#;
 
-    // Word permits documents without styles.xml, but Markdown headings and
-    // direct `style=HeadingN` edits must not create dangling pStyle IDs. Keep
+    // Word permits documents without styles.xml, but semantic quotes, Markdown
+    // headings and direct style edits must not create dangling pStyle IDs. Keep
     // the built-in style IDs Word itself recognizes, with concise definitions
     // sufficient for interoperable OOXML and later style mutation.
     let (latin, east_asia, complex_script) = locale_fonts(locale);
@@ -175,6 +175,7 @@ fn create_blank_docx_with_locale(
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults><w:rPrDefault><w:rPr>{}</w:rPr></w:rPrDefault>{}</w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:ind w:left="360" w:right="360"/></w:pPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>

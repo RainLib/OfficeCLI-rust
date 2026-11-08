@@ -254,8 +254,10 @@ pub fn apply_pdf_layout_upgrade(
         dirty_source_parts: vec![],
         structural_change: false,
         layout_upgrade: true,
+        word_layout_change: false,
         author_id,
         author_name,
+        reference_authors: std::collections::BTreeMap::new(),
     };
     head.revision = revision;
     head.root_hash = root_hash.clone();

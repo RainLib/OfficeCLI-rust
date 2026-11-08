@@ -86,6 +86,11 @@ window.hcdGridHitTest=(clientX,clientY)=>{const content=document.querySelector('
 pub struct HtmlPresentationOptions {
     pub revision: Option<u64>,
     pub max_output_bytes: u64,
+    /// Bound a derived chunk after transformation. Previews keep the default;
+    /// self-contained exports may explicitly allow embedded resource bytes.
+    pub max_transformed_chunk_bytes: usize,
+    /// The generic Word preview pager is separate from section-aware exporters.
+    pub paginate_docx_preview: bool,
     /// Zero-based first chunk sequence to materialize. The default starts at
     /// the beginning of the revision.
     pub chunk_start: usize,
@@ -114,6 +119,8 @@ impl Default for HtmlPresentationOptions {
         Self {
             revision: None,
             max_output_bytes: DEFAULT_HTML_PRESENTATION_MAX_BYTES,
+            max_transformed_chunk_bytes: MAX_CHUNK_BYTES.saturating_mul(4),
+            paginate_docx_preview: true,
             chunk_start: 0,
             chunk_limit: None,
             asset_base_href: None,
@@ -177,6 +184,7 @@ pub fn manifest_at_revision(
     manifest.index_root_href = record.index_root_href;
     manifest.index_page_count = record.index_page_count.unwrap_or(manifest.index_page_count);
     manifest.chunk_count = record.chunk_count.unwrap_or(manifest.chunk_count);
+    crate::flow_layout::restore_historical_flow_model(bundle, &mut manifest)?;
     Ok((manifest, revision))
 }
 
@@ -244,8 +252,9 @@ pub fn render_standalone_html_with_transform(
             .min(manifest.chunk_count),
         None => manifest.chunk_count,
     };
-    let paginate_docx_preview =
-        manifest.profile == "semantic-flow" && manifest.source.format.eq_ignore_ascii_case("docx");
+    let paginate_docx_preview = options.paginate_docx_preview
+        && manifest.profile == "semantic-flow"
+        && manifest.source.format.eq_ignore_ascii_case("docx");
     let asset_hrefs = if options.asset_base_href.is_some() {
         bundle
             .read_asset_index_for_revision(revision)?
@@ -345,11 +354,10 @@ pub fn render_standalone_html_with_transform(
                 html
             };
             let presented_html = transform(&presented_html)?;
-            if presented_html.len() > MAX_CHUNK_BYTES.saturating_mul(4) {
+            if presented_html.len() > options.max_transformed_chunk_bytes {
                 return Err(HcdError::ResourceLimit(format!(
                     "presentation transform expanded chunk {} beyond {} bytes",
-                    descriptor.chunk_id,
-                    MAX_CHUNK_BYTES.saturating_mul(4)
+                    descriptor.chunk_id, options.max_transformed_chunk_bytes
                 )));
             }
             write_bounded(

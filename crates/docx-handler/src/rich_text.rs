@@ -26,12 +26,22 @@ pub struct RichRun {
     pub font: RichFont,
     pub border: Option<RichBorder>,
     pub hyperlink: Option<String>,
+    pub field: Option<RichFieldControl>,
+}
+
+/// Typed complex-field boundaries. Cached display runs remain ordinary text;
+/// no instruction is evaluated by OfficeCLI. Boundaries may span paragraphs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RichFieldControl {
+    Begin(String),
+    End,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RichParagraph {
     pub properties: HashMap<String, String>,
     pub runs: Vec<RichRun>,
+    pub list_ownership: Option<oxml::semantic_lists::ListParagraph>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +97,24 @@ fn paragraph(
 ) -> Result<WordNode, HandlerError> {
     let mut paragraph =
         WordNode::new(Kind::Paragraph).with_attribute("paraId", crate::helpers::generate_para_id());
+    if let Some(ownership) = content.list_ownership {
+        paragraph
+            .namespace_declarations
+            .insert("hcdl".into(), oxml::semantic_lists::NAMESPACE.into());
+        paragraph.namespace_declarations.insert(
+            "mc".into(),
+            "http://schemas.openxmlformats.org/markup-compatibility/2006".into(),
+        );
+        paragraph
+            .attributes
+            .insert("hcdl:list".into(), ownership.to_string());
+        paragraph
+            .attributes
+            .insert("mc:Ignorable".into(), "hcdl".into());
+        paragraph
+            .attributes
+            .insert("mc:PreserveAttributes".into(), "hcdl:list".into());
+    }
     if let Some(properties) = crate::helpers::build_paragraph_properties(&content.properties) {
         paragraph.children.push(properties);
     }
@@ -96,6 +124,52 @@ fn paragraph(
         ));
     }
     for run in &content.runs {
+        if let Some(control) = &run.field {
+            if !run.text.is_empty()
+                || !run.properties.is_empty()
+                || run.hyperlink.is_some()
+                || run.border.is_some()
+                || run.font.latin.is_some()
+                || run.font.east_asia.is_some()
+                || run.font.bidi.is_some()
+                || run.font.size_pt.is_some()
+            {
+                return Err(HandlerError::InvalidArgument(
+                    "field controls cannot carry text, style or hyperlinks".into(),
+                ));
+            }
+            let field = |kind: &str| {
+                WordNode::new(Kind::Run)
+                    .with_children(vec![WordNode::new(Kind::Unknown("fldChar".into()))
+                        .with_attribute("fldCharType", kind)])
+            };
+            match control {
+                RichFieldControl::Begin(instruction) => {
+                    if instruction.trim().is_empty()
+                        || instruction.len() > 16384
+                        || !xml_text(instruction)
+                    {
+                        return Err(HandlerError::InvalidArgument(
+                            "invalid rich field instruction".into(),
+                        ));
+                    }
+                    let mut begin = field("begin");
+                    begin.children[0]
+                        .attributes
+                        .insert("dirty".into(), "true".into());
+                    paragraph.children.push(begin);
+                    let instruction_node = WordNode::new(Kind::Unknown("instrText".into()))
+                        .with_attribute("xml:space", "preserve")
+                        .with_text(instruction);
+                    paragraph
+                        .children
+                        .push(WordNode::new(Kind::Run).with_children(vec![instruction_node]));
+                    paragraph.children.push(field("separate"));
+                }
+                RichFieldControl::End => paragraph.children.push(field("end")),
+            }
+            continue;
+        }
         if !xml_text(&run.text) || run.properties.values().any(|value| !xml_text(value)) {
             return Err(HandlerError::InvalidArgument(
                 "invalid XML in rich text".into(),
@@ -223,4 +297,119 @@ fn text(value: &str) -> WordNode {
 
 fn xml_text(value: &str) -> bool {
     value.chars().all(|character| matches!(character, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+    #[test]
+    fn typed_field_controls_keep_cache_runs_and_can_span_paragraphs() {
+        let begin = RichRun {
+            field: Some(RichFieldControl::Begin(" NUMPAGES \\* MERGEFORMAT ".into())),
+            ..Default::default()
+        };
+        let cache = RichRun {
+            text: "12".into(),
+            properties: HashMap::from([("bold".into(), "true".into())]),
+            ..Default::default()
+        };
+        let end = RichRun {
+            field: Some(RichFieldControl::End),
+            ..Default::default()
+        };
+        let blocks = build_blocks(
+            &[
+                RichBlock::Paragraph(RichParagraph {
+                    runs: vec![begin, cache],
+                    ..Default::default()
+                }),
+                RichBlock::Paragraph(RichParagraph {
+                    runs: vec![end],
+                    ..Default::default()
+                }),
+            ],
+            &mut |_| panic!("field must not allocate a hyperlink"),
+        )
+        .unwrap();
+        assert_eq!(
+            blocks[0].children[0].children[0]
+                .attributes
+                .get("fldCharType")
+                .map(String::as_str),
+            Some("begin")
+        );
+        assert_eq!(
+            blocks[0].children[0].children[0]
+                .attributes
+                .get("dirty")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            blocks[0].children[1].children[0].text_content.as_deref(),
+            Some(" NUMPAGES \\* MERGEFORMAT ")
+        );
+        assert_eq!(
+            blocks[0].children[2].children[0]
+                .attributes
+                .get("fldCharType")
+                .map(String::as_str),
+            Some("separate")
+        );
+        assert_eq!(
+            blocks[0].children[3]
+                .children
+                .last()
+                .unwrap()
+                .text_content
+                .as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            blocks[1].children[0].children[0]
+                .attributes
+                .get("fldCharType")
+                .map(String::as_str),
+            Some("end")
+        );
+    }
+    #[test]
+    fn rich_field_controls_refuse_invalid_instruction_and_mixed_payload() {
+        for value in [
+            "".to_string(),
+            " ".into(),
+            "PAGE\u{0}".into(),
+            "x".repeat(16385),
+        ] {
+            let block = RichBlock::Paragraph(RichParagraph {
+                runs: vec![RichRun {
+                    field: Some(RichFieldControl::Begin(value)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            assert!(build_blocks(&[block], &mut |_| panic!("no hyperlink expected")).is_err());
+        }
+        for run in [
+            RichRun {
+                text: "cannot hide this".into(),
+                field: Some(RichFieldControl::End),
+                ..Default::default()
+            },
+            RichRun {
+                hyperlink: Some("https://example.com".into()),
+                field: Some(RichFieldControl::Begin("PAGE".into())),
+                ..Default::default()
+            },
+        ] {
+            assert!(build_blocks(
+                &[RichBlock::Paragraph(RichParagraph {
+                    runs: vec![run],
+                    ..Default::default()
+                })],
+                &mut |_| panic!("no hyperlink expected")
+            )
+            .is_err());
+        }
+    }
 }

@@ -38,6 +38,7 @@ ironpress = { version = "=1.6.0", default-features = false }
 unicode-segmentation = { workspace = true }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 quick-xml = { workspace = true }
+roxmltree = { workspace = true }
 zip = { workspace = true }
 jsonwebtoken = "9.3"
 sha2 = { workspace = true }
@@ -46,8 +47,10 @@ regex = "1"
 object_store = { version = "0.12", features = ["aws"] }
 tokio-postgres = "0.7"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
-roxmltree = { workspace = true }
 tokio-tungstenite = "0.28"
 assert_cmd = "2"
 predicates = "3"

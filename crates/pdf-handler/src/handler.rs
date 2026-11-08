@@ -17,6 +17,9 @@ pub struct PdfHandler {
 }
 
 impl PdfHandler {
+    pub fn mark_source_text_groups(&self, page: usize) -> Result<(), HandlerError> {
+        crate::modifier::mark_source_text_groups(self.reader.borrow_mut().document_mut(), page)
+    }
     /// Open a PDF document.
     pub fn open(path: &str, editable: bool) -> Result<Self, HandlerError> {
         let reader = PdfReader::open(path)?;
@@ -447,22 +450,26 @@ impl DocumentHandler for PdfHandler {
 
             let mut reader = self.reader.borrow_mut();
 
-            // Before the actual text edit, give the embedder a chance to add a
-            // fallback font for any character the existing page fonts can't render.
-            // The embedder itself scans page fonts and is a no-op when every char
-            // is already supported, so this is safe to call unconditionally.
-            // Skipping this check based on ASCII/CJK heuristics is wrong: PowerPoint
-            // exports use subsetted fonts that may omit even ASCII glyphs like '*'.
+            // Resolve fallback coverage before replacing text. Keep failures
+            // visible; swallowing an embedding error produces a misleading
+            // later "not encodable" error and can hide broken resource refs.
             if let Some(text_str) = text_val {
-                let chars_needed: std::collections::HashSet<char> = text_str.chars().collect();
-                let _ = crate::font_embedder::ensure_cjk_font_for_chars(
-                    reader.document_mut(),
-                    page_num,
-                    &chars_needed,
-                    font_val,
-                    font_file_val,
-                    false,
-                );
+                if font_file_val.is_some() {
+                    crate::font_embedder::ensure_cjk_font_for_chars(
+                        reader.document_mut(),
+                        page_num,
+                        &text_str.chars().collect(),
+                        font_val,
+                        font_file_val,
+                        false,
+                    )?;
+                } else {
+                    crate::font_embedder::ensure_text_fallback_fonts(
+                        reader.document_mut(),
+                        page_num,
+                        text_str,
+                    )?;
+                }
             }
 
             if let (Some(text), None, None, None, None, None, None) = (

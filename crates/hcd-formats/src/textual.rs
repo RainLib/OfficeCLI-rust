@@ -4,9 +4,9 @@ use crate::common::{
     write_fidelity_report, ExportOptions, ImportOptions,
 };
 use hcd_core::{
-    hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, CustomTextMark,
+    FidelityLevel, FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent,
+    NodeMapEntry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event as MarkdownEvent, HeadingLevel,
@@ -264,8 +264,8 @@ where
     let mut canonicalizer =
         StructuredHtmlCanonicalizer::new(&options.document_id, &mut chunks, table_plans);
     scan_html(source_text, |event| canonicalizer.event(event))?;
-    let mut ordinal = canonicalizer.finish()?;
-    if ordinal == 0 {
+    let (mut ordinal, custom_marks) = canonicalizer.finish()?;
+    if ordinal == 0 && chunks.blocks == 0 && chunks.chunk_ordinal == 0 {
         ordinal = 1;
         chunks.push(TextNode {
             text: "",
@@ -280,6 +280,9 @@ where
     chunks.flush()?;
 
     let mut manifest = base_manifest(options, "html", "semantic-flow", source_hash, source_size);
+    if custom_marks {
+        manifest.capabilities.custom_marks = Some(1);
+    }
     manifest.warnings.push(FidelityWarning {
         code: "HTML_ACTIVE_CONTENT_EXCLUDED".to_string(),
         message: "script, style, iframe, object, embed, template and noscript content is excluded from editable HCD chunks; the immutable source remains authoritative".to_string(),
@@ -291,12 +294,14 @@ where
         level: FidelityLevel::Semantic,
         preserved: vec![
             "UTF-8 visible text in source order with stable source byte ranges".to_string(),
-            "safe heading, paragraph, list and table semantics with bounded table fragments"
+            "safe headings, multi-paragraph/nested lists, quotes, code, explicit breaks and common inline marks/links, with bounded root items and table fragments"
                 .to_string(),
+            "validated hcd.mark/1 text marks and bounded inline span weight, italic, decoration and six-digit hex colors; fallback styles stay separate from ordinary formatting".to_string(),
             "the immutable HTML source as the source-backed export boundary".to_string(),
         ],
         flattened: vec![
-            "source CSS, arbitrary attributes and unsupported or nested markup are reduced to a canonical safe structure".to_string(),
+            "source CSS, arbitrary attributes, unsupported markup and nested tables are reduced to a canonical safe structure".to_string(),
+            "table-containing compound blocks remain read-only; image/resource adapters and full HTML/CSS layout fidelity are not implemented".to_string(),
         ],
         dropped: vec![
             "active and non-rendered element content from editable HCD chunks".to_string(),
@@ -1276,7 +1281,11 @@ fn safe_markdown_inline_html(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     matches!(
         trimmed.to_ascii_lowercase().as_str(),
-        "<mark>"
+        "<strong>"
+            | "</strong>"
+            | "<em>"
+            | "</em>"
+            | "<mark>"
             | "</mark>"
             | "<kbd>"
             | "</kbd>"
@@ -2526,6 +2535,7 @@ struct HtmlTag {
     attributes: HashMap<String, String>,
     closing: bool,
     self_closing: bool,
+    end: usize,
 }
 
 enum HtmlScanEvent {
@@ -2662,11 +2672,165 @@ struct HtmlSemanticBlock {
     preserve_whitespace: bool,
     html: String,
     entries: Vec<NodeMapEntry>,
+    anchor: usize,
+    list_depth: Option<usize>,
+    has_content: bool,
 }
 
 struct HtmlListContext {
     ordered: bool,
     next: usize,
+    owner_depth: Option<usize>,
+    emitted: bool,
+    series: String,
+}
+
+struct HtmlInlineFrame {
+    source_tag: String,
+    opening: String,
+    closing: String,
+    custom_marks: Vec<CustomTextMark>,
+}
+
+// Keep a bounded set of inert inline CSS. Never copy arbitrary source styles,
+// event attributes or source node identities into the canonical document.
+fn html_inline_span(style: &str) -> (String, String) {
+    let mut css = std::collections::BTreeMap::new();
+    let mut underline = false;
+    let mut strike = false;
+    for declaration in style.split(';') {
+        let Some((property, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().to_ascii_lowercase();
+        match property.trim().to_ascii_lowercase().as_str() {
+            "color" | "background-color"
+                if value.len() == 7
+                    && value.starts_with('#')
+                    && value[1..].bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                css.insert(property.trim().to_ascii_lowercase(), value);
+            }
+            "font-weight"
+                if value == "bold"
+                    || value == "normal"
+                    || value
+                        .parse::<u16>()
+                        .is_ok_and(|n| (100..=1000).contains(&n)) =>
+            {
+                css.insert("font-weight".into(), value);
+            }
+            "font-style" if value == "italic" || value == "normal" => {
+                css.insert("font-style".into(), value);
+            }
+            "text-decoration" | "text-decoration-line" => {
+                underline = value.split_whitespace().any(|part| part == "underline");
+                strike = value.split_whitespace().any(|part| part == "line-through");
+            }
+            _ => (),
+        }
+    }
+    let css = css
+        .into_iter()
+        .map(|(key, value)| format!("{key}:{value};"))
+        .collect::<String>();
+    let mut opening = format!("<span style=\"{}\">", escape_attribute(&css));
+    let mut closing = String::from("</span>");
+    for (enabled, name) in [(underline, "u"), (strike, "s")] {
+        if enabled {
+            opening.push_str(&format!("<{name}>"));
+            closing.insert_str(0, &format!("</{name}>"));
+        }
+    }
+    (opening, closing)
+}
+
+fn html_custom_mark_open(mark: &CustomTextMark) -> Result<String, HcdError> {
+    Ok(format!(
+        "<span data-hcd-custom-mark-style=\"true\" data-hcd-custom-mark=\"{}\" style=\"{}\">",
+        escape_attribute(&serde_json::to_string(mark)?),
+        escape_attribute(&mark.css())
+    ))
+}
+
+fn html_marked_text(mut html: String, marks: &[CustomTextMark]) -> Result<String, HcdError> {
+    if !marks.is_empty() {
+        let end = html.find('>').expect("generated text span");
+        html.insert_str(
+            end,
+            &format!(
+                " data-hcd-custom-marks=\"{}\"",
+                escape_attribute(&serde_json::to_string(marks)?)
+            ),
+        );
+    }
+    Ok(html)
+}
+
+fn html_inline_text(
+    html: String,
+    frames: &[HtmlInlineFrame],
+    marks: &[CustomTextMark],
+) -> Result<String, HcdError> {
+    // Resolve scopes per leaf: replacing the value of one mark type must not
+    // inherit a stale outer fallback. Ordinary explicit styles stay innermost.
+    let mut output = String::new();
+    for mark in marks {
+        output.push_str(&html_custom_mark_open(mark)?);
+    }
+    for frame in frames {
+        output.push_str(&frame.opening);
+    }
+    output.push_str(&html_marked_text(html, marks)?);
+    for frame in frames.iter().rev() {
+        output.push_str(&frame.closing);
+    }
+    for _ in marks {
+        output.push_str("</span>");
+    }
+    Ok(output)
+}
+
+trait HtmlBlockSink {
+    fn soft_bytes(&self) -> usize;
+    fn push_rendered(&mut self, block: RenderedSourceBlock, flush: bool) -> Result<(), HcdError>;
+}
+
+impl<F: FnMut(&ImportEvent) -> Result<(), HcdError>> HtmlBlockSink for FlatChunkWriter<'_, F> {
+    fn soft_bytes(&self) -> usize {
+        self.soft_bytes
+    }
+    fn push_rendered(&mut self, block: RenderedSourceBlock, flush: bool) -> Result<(), HcdError> {
+        FlatChunkWriter::push_rendered(self, block, flush)
+    }
+}
+
+struct HtmlParentSink<'a, 'w, F: FnMut(&ImportEvent) -> Result<(), HcdError>> {
+    chunks: &'a mut FlatChunkWriter<'w, F>,
+    parent: Option<&'a mut HtmlSemanticBlock>,
+}
+
+impl<F: FnMut(&ImportEvent) -> Result<(), HcdError>> HtmlBlockSink for HtmlParentSink<'_, '_, F> {
+    fn soft_bytes(&self) -> usize {
+        self.chunks.soft_bytes
+    }
+    fn push_rendered(&mut self, block: RenderedSourceBlock, flush: bool) -> Result<(), HcdError> {
+        if let Some(parent) = &mut self.parent {
+            if parent.html.len().saturating_add(block.html.len())
+                > MAX_CHUNK_BYTES.saturating_sub(2048)
+            {
+                return Err(HcdError::ResourceLimit(
+                    "NODE_TOO_LARGE: HTML container exceeds canonical chunk limit".into(),
+                ));
+            }
+            parent.html.push_str(&block.html);
+            parent.entries.extend(block.entries);
+            parent.has_content = true;
+            Ok(())
+        } else {
+            self.chunks.push_rendered(block, flush)
+        }
+    }
 }
 
 struct HtmlTableRow {
@@ -2720,10 +2884,7 @@ impl StructuredHtmlTable {
         }
     }
 
-    fn start_row<F>(&mut self, chunks: &mut FlatChunkWriter<'_, F>) -> Result<(), HcdError>
-    where
-        F: FnMut(&ImportEvent) -> Result<(), HcdError>,
-    {
+    fn start_row<S: HtmlBlockSink>(&mut self, chunks: &mut S) -> Result<(), HcdError> {
         self.finish_row(chunks)?;
         self.row = Some(HtmlTableRow {
             html: "<tr>".to_string(),
@@ -2796,10 +2957,7 @@ impl StructuredHtmlTable {
         }
     }
 
-    fn finish_row<F>(&mut self, chunks: &mut FlatChunkWriter<'_, F>) -> Result<(), HcdError>
-    where
-        F: FnMut(&ImportEvent) -> Result<(), HcdError>,
-    {
+    fn finish_row<S: HtmlBlockSink>(&mut self, chunks: &mut S) -> Result<(), HcdError> {
         self.finish_cell();
         let Some(mut row) = self.row.take() else {
             return Ok(());
@@ -2819,7 +2977,7 @@ impl StructuredHtmlTable {
         }
         if self.fragment_rows > 0
             && (self.fragment_rows >= HTML_TABLE_ROWS_PER_FRAGMENT
-                || self.fragment_html.len().saturating_add(row.html.len()) > chunks.soft_bytes)
+                || self.fragment_html.len().saturating_add(row.html.len()) > chunks.soft_bytes())
         {
             self.flush_fragment(chunks, false)?;
         }
@@ -2849,10 +3007,7 @@ impl StructuredHtmlTable {
         Ok(())
     }
 
-    fn finish<F>(mut self, chunks: &mut FlatChunkWriter<'_, F>) -> Result<(), HcdError>
-    where
-        F: FnMut(&ImportEvent) -> Result<(), HcdError>,
-    {
+    fn finish<S: HtmlBlockSink>(mut self, chunks: &mut S) -> Result<(), HcdError> {
         self.finish_row(chunks)?;
         if self.total_rows != self.plan.rows || self.max_columns != self.plan.columns {
             return Err(HcdError::InvalidBundle(format!(
@@ -2863,14 +3018,11 @@ impl StructuredHtmlTable {
         self.flush_fragment(chunks, true)
     }
 
-    fn flush_fragment<F>(
+    fn flush_fragment<S: HtmlBlockSink>(
         &mut self,
-        chunks: &mut FlatChunkWriter<'_, F>,
+        chunks: &mut S,
         final_fragment: bool,
-    ) -> Result<(), HcdError>
-    where
-        F: FnMut(&ImportEvent) -> Result<(), HcdError>,
-    {
+    ) -> Result<(), HcdError> {
         if self.fragment_rows == 0 && !(final_fragment && self.fragment_ordinal == 0) {
             return Ok(());
         }
@@ -2918,11 +3070,14 @@ where
     chunks: &'a mut FlatChunkWriter<'w, F>,
     table_plans: std::vec::IntoIter<HtmlTablePlan>,
     block: Option<HtmlSemanticBlock>,
+    containers: Vec<HtmlSemanticBlock>,
+    inlines: Vec<HtmlInlineFrame>,
     table: Option<StructuredHtmlTable>,
     lists: Vec<HtmlListContext>,
     text_ordinal: u64,
     block_ordinal: usize,
     table_ordinal: usize,
+    custom_marks_found: bool,
 }
 
 impl<'a, 'w, F> StructuredHtmlCanonicalizer<'a, 'w, F>
@@ -2939,24 +3094,57 @@ where
             chunks,
             table_plans: plans.into_iter(),
             block: None,
+            containers: Vec::new(),
+            inlines: Vec::new(),
             table: None,
             lists: Vec::new(),
             text_ordinal: 0,
             block_ordinal: 0,
             table_ordinal: 0,
+            custom_marks_found: false,
         }
     }
 
     fn event(&mut self, event: HtmlScanEvent) -> Result<(), HcdError> {
         match event {
-            HtmlScanEvent::Text(segment) => self.text(segment),
-            HtmlScanEvent::Tag(tag) => self.tag(tag),
+            HtmlScanEvent::Text(segment) => self.text(segment)?,
+            HtmlScanEvent::Tag(tag) => self.tag(tag)?,
         }
+        if self.inlines.len() > HTML_SOURCE_MAX_DEPTH {
+            return Err(HcdError::ResourceLimit(
+                "HTML inline scopes exceed nesting depth limit".into(),
+            ));
+        }
+        // All open containers share one root block budget, rather than each
+        // retaining up to MAX_CHUNK_BYTES at every nesting level.
+        let buffered = self.block.as_ref().map_or(0, |block| block.html.len())
+            + self
+                .containers
+                .iter()
+                .map(|block| block.html.len())
+                .sum::<usize>();
+        if buffered > MAX_CHUNK_BYTES.saturating_sub(2048) {
+            return Err(HcdError::ResourceLimit(
+                "NODE_TOO_LARGE: HTML root subtree exceeds canonical chunk limit".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn text(&mut self, segment: HtmlTextSegment) -> Result<(), HcdError> {
         if segment.text.is_empty() {
             return Ok(());
+        }
+        let custom_marks = self.active_custom_marks()?;
+        if !custom_marks.is_empty()
+            && self
+                .block
+                .as_ref()
+                .is_some_and(|block| block.node_kind == "pre")
+        {
+            return Err(HcdError::Unsupported(
+                "custom text marks cannot be imported inside a code block".into(),
+            ));
         }
         if self.table.is_some() {
             if self
@@ -2966,7 +3154,7 @@ where
             {
                 return Ok(());
             }
-            self.text_ordinal = self.text_ordinal.saturating_add(1);
+            self.text_ordinal += 1;
             let paragraph_id = self.table.as_ref().and_then(|table| {
                 table.row.as_ref().map(|row| {
                     format!(
@@ -2987,39 +3175,35 @@ where
                 "html-table-cell-text",
                 paragraph_id,
             )?;
+            let decorated = html_inline_text(html, &self.inlines, &custom_marks)?;
+            self.custom_marks_found |= !custom_marks.is_empty();
             self.table
                 .as_mut()
-                .expect("checked table")
-                .push_text(html, entry);
+                .expect("table")
+                .push_text(decorated, entry);
             return Ok(());
         }
         if self.block.is_none() {
-            if !segment
+            if segment
                 .text
                 .chars()
-                .any(|character| !character.is_whitespace())
+                .all(|ch| matches!(ch, ' ' | '\t' | '\r' | '\n' | '\u{c}'))
             {
                 return Ok(());
             }
-            self.start_block(
-                "__implicit",
-                "<p class=\"hcd-source-block hcd-html-text\">".to_string(),
-                "</p>".to_string(),
-                "html-text",
-                false,
-            )?;
+            self.start_simple_block("__implicit", "p", "html-text", false, segment.start)?;
         }
-        let block = self.block.as_mut().expect("created block");
+        let block = self.block.as_mut().expect("text block");
         if !block.preserve_whitespace
-            && !segment
+            && block.entries.is_empty()
+            && segment
                 .text
                 .chars()
-                .any(|character| !character.is_whitespace())
-            && block.entries.is_empty()
+                .all(|ch| matches!(ch, ' ' | '\t' | '\r' | '\n' | '\u{c}'))
         {
             return Ok(());
         }
-        self.text_ordinal = self.text_ordinal.saturating_add(1);
+        self.text_ordinal += 1;
         let (html, entry) = render_source_text_node(
             self.document_id,
             HTML_PART,
@@ -3030,28 +3214,157 @@ where
             block.node_kind,
             Some(block.paragraph_id.clone()),
         )?;
-        block.html.push_str(&html);
+        block
+            .html
+            .push_str(&html_inline_text(html, &self.inlines, &custom_marks)?);
+        self.custom_marks_found |= !custom_marks.is_empty();
         block.entries.push(entry);
-        if block.html.len() > MAX_CHUNK_BYTES {
-            return Err(HcdError::ResourceLimit(format!(
-                "NODE_TOO_LARGE: structured HTML {} block exceeds {MAX_CHUNK_BYTES} bytes",
-                block.source_tag
-            )));
-        }
         Ok(())
     }
 
+    fn active_custom_marks(&self) -> Result<Vec<CustomTextMark>, HcdError> {
+        let mut marks: Vec<CustomTextMark> = Vec::new();
+        for mark in self.inlines.iter().flat_map(|frame| &frame.custom_marks) {
+            if let Some(old) = marks.iter_mut().find(|old| old.mark_type == mark.mark_type) {
+                *old = mark.clone();
+            } else {
+                marks.push(mark.clone());
+            }
+        }
+        marks.sort_by(|a, b| a.mark_type.cmp(&b.mark_type));
+        hcd_core::validate_custom_marks(&marks)?;
+        Ok(marks)
+    }
+
+    fn inline_tag(&mut self, tag: &HtmlTag) -> Result<bool, HcdError> {
+        let recognized = [
+            "data-hcd-custom-mark",
+            "data-hcd-custom-marks",
+            "data-hcd-custom-mark-style",
+        ]
+        .iter()
+        .any(|name| tag.attributes.contains_key(*name));
+        if recognized && tag.name != "span" {
+            return Err(HcdError::Unsupported(
+                "custom text mark metadata requires an inline span".into(),
+            ));
+        }
+        let canonical = match tag.name.as_str() {
+            "strong" | "b" => "strong",
+            "em" | "i" => "em",
+            "u" => "u",
+            "s" | "strike" | "del" => "s",
+            "code" => "code",
+            "a" => "a",
+            "span" => "span",
+            _ => return Ok(false),
+        };
+        if tag.closing {
+            if let Some(index) = self
+                .inlines
+                .iter()
+                .rposition(|frame| frame.source_tag == tag.name)
+            {
+                while self.inlines.len() > index {
+                    self.inlines.pop();
+                }
+            }
+        } else {
+            let mut custom_marks = Vec::new();
+            let (opening, closing) = if canonical == "span" {
+                let singular = tag.attributes.get("data-hcd-custom-mark");
+                let plural = tag.attributes.get("data-hcd-custom-marks");
+                if singular.is_some() && plural.is_some()
+                    || singular.is_none()
+                        && tag.attributes.contains_key("data-hcd-custom-mark-style")
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "inconsistent custom text mark metadata".into(),
+                    ));
+                }
+                if let Some(raw) = singular {
+                    if raw.len() > 65536 {
+                        return Err(HcdError::ResourceLimit(
+                            "custom text mark exceeds 64 KiB".into(),
+                        ));
+                    }
+                    let mark: CustomTextMark = serde_json::from_str(raw)?;
+                    mark.validate()?;
+                    custom_marks.push(mark);
+                    ("<span>".into(), "</span>".into())
+                } else {
+                    let (opening, closing) =
+                        html_inline_span(tag.attributes.get("style").map_or("", String::as_str));
+                    if let Some(raw) = plural {
+                        if raw.len() > 8 * 65536 + 16 {
+                            return Err(HcdError::ResourceLimit(
+                                "custom text marks exceed import limit".into(),
+                            ));
+                        }
+                        let declared: Vec<CustomTextMark> = serde_json::from_str(raw)?;
+                        hcd_core::validate_custom_marks(&declared)?;
+                        let active = self.active_custom_marks()?;
+                        if !active.is_empty() {
+                            if declared != active {
+                                return Err(HcdError::InvalidBundle(
+                                    "custom text mark wrappers disagree with text metadata".into(),
+                                ));
+                            }
+                        } else {
+                            custom_marks = declared;
+                        }
+                    }
+                    (opening, closing)
+                }
+            } else if canonical == "a" {
+                let href = tag
+                    .attributes
+                    .get("href")
+                    .map(|value| value.trim())
+                    .filter(|value| {
+                        value.len() <= 4096
+                            && !value.chars().any(char::is_control)
+                            && safe_markdown_destination(value)
+                    });
+                if let Some(href) = href {
+                    (
+                        format!("<a href=\"{}\">", escape_attribute(href)),
+                        "</a>".into(),
+                    )
+                } else {
+                    ("<span>".into(), "</span>".into())
+                }
+            } else {
+                (format!("<{canonical}>"), format!("</{canonical}>"))
+            };
+            if !tag.self_closing {
+                self.inlines.push(HtmlInlineFrame {
+                    source_tag: tag.name.clone(),
+                    opening,
+                    closing,
+                    custom_marks,
+                });
+                self.active_custom_marks()?;
+            }
+        }
+        Ok(true)
+    }
+
     fn tag(&mut self, tag: HtmlTag) -> Result<(), HcdError> {
+        if self.inline_tag(&tag)? {
+            return Ok(());
+        }
         if self.table.is_some() {
             return self.table_tag(tag);
         }
         if tag.name == "table" && !tag.closing {
             self.finish_block()?;
+            self.ensure_container_paragraph()?;
             self.table_ordinal += 1;
             let plan = self
                 .table_plans
                 .next()
-                .ok_or_else(|| HcdError::InvalidBundle("HTML table plan is missing".to_string()))?;
+                .ok_or_else(|| HcdError::InvalidBundle("HTML table plan is missing".into()))?;
             self.table = Some(StructuredHtmlTable::new(
                 self.document_id,
                 self.table_ordinal,
@@ -3059,84 +3372,119 @@ where
             ));
             return Ok(());
         }
-        match (tag.closing, tag.name.as_str()) {
-            (false, "title") => self.start_simple_block("title", "p", "title", false),
+        let result = match (tag.closing, tag.name.as_str()) {
             (false, name @ ("h1" | "h2" | "h3" | "h4" | "h5" | "h6")) => {
-                self.start_simple_block(name, name, "heading", false)
+                self.finish_block()?;
+                self.ensure_container_paragraph()?;
+                self.start_simple_block(name, name, "heading", false, tag.end)
             }
-            (false, "p") => self.start_simple_block("p", "p", "paragraph", false),
-            (false, "pre") => self.start_simple_block("pre", "pre", "pre", true),
+            (false, "p") => self.start_simple_block("p", "p", "paragraph", false, tag.end),
+            (false, "pre") => {
+                self.finish_block()?;
+                self.ensure_container_paragraph()?;
+                self.start_simple_block("pre", "pre", "pre", true, tag.end)
+            }
             (false, "blockquote") => {
-                self.start_simple_block("blockquote", "blockquote", "quote", false)
+                self.finish_block()?;
+                self.ensure_container_paragraph()?;
+                self.start_container(
+                    "blockquote",
+                    "<blockquote class=\"hcd-source-block hcd-quote\" data-hcd-html-tree=\"1\">"
+                        .into(),
+                    "</blockquote>".into(),
+                    tag.end,
+                    None,
+                )
             }
-            (false, "ul") => {
-                self.finish_implicit_block()?;
-                self.lists.push(HtmlListContext {
-                    ordered: false,
-                    next: 1,
-                });
-                Ok(())
-            }
-            (false, "ol") => {
-                self.finish_implicit_block()?;
-                let start = optional_bounded_positive_attribute(
-                    &tag.attributes,
-                    "start",
-                    HTML_TABLE_MAX_ROWS,
-                )?
-                .unwrap_or(1);
-                self.lists.push(HtmlListContext {
-                    ordered: true,
-                    next: start,
-                });
-                Ok(())
-            }
-            (false, "li") => self.start_list_item(),
+            (false, "ul" | "ol") => self.start_list(&tag),
+            (false, "li") => self.start_list_item(&tag),
             (false, "br") => {
-                if let Some(block) = &mut self.block {
-                    block.html.push_str("<br/>");
+                if self.block.is_none() {
+                    self.start_simple_block("__implicit", "p", "html-text", false, tag.end)?;
                 }
+                self.block
+                    .as_mut()
+                    .expect("break block")
+                    .html
+                    .push_str("<br/>");
                 Ok(())
             }
             (true, "ul" | "ol") => {
-                self.finish_block()?;
-                self.lists.pop();
+                if let Some(index) = self
+                    .lists
+                    .iter()
+                    .rposition(|list| list.ordered == (tag.name == "ol"))
+                {
+                    while self.lists.len() > index {
+                        self.finish_list()?;
+                    }
+                }
+                Ok(())
+            }
+            (true, "li" | "blockquote") => {
+                if let Some(index) = self
+                    .containers
+                    .iter()
+                    .rposition(|block| block.source_tag == tag.name)
+                {
+                    self.close_containers(index)?;
+                }
+                Ok(())
+            }
+            (true, "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "pre") => {
+                if self
+                    .block
+                    .as_ref()
+                    .is_some_and(|block| block.source_tag == tag.name)
+                {
+                    self.finish_block()?;
+                }
                 Ok(())
             }
             (
-                true,
-                "title" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "pre" | "blockquote"
-                | "li",
-            ) => self.finish_block(),
-            (
                 _,
                 "body" | "main" | "section" | "article" | "header" | "footer" | "address"
-                | "figure" | "figcaption",
+                | "figure" | "figcaption" | "div",
             ) => self.finish_implicit_block(),
             _ => Ok(()),
+        };
+        result?;
+        if tag.self_closing && matches!(tag.name.as_str(), "li" | "blockquote") {
+            self.finish_container()?;
+        } else if tag.self_closing
+            && matches!(
+                tag.name.as_str(),
+                "p" | "pre" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            )
+        {
+            self.finish_block()?;
         }
+        Ok(())
     }
 
     fn table_tag(&mut self, tag: HtmlTag) -> Result<(), HcdError> {
-        let table = self.table.as_mut().expect("checked table");
+        let mut sink = HtmlParentSink {
+            chunks: self.chunks,
+            parent: self.containers.last_mut(),
+        };
+        let table = self.table.as_mut().expect("table");
         if tag.name == "table" {
             if tag.closing {
                 if table.nested_depth > 0 {
                     table.nested_depth -= 1;
                     return Ok(());
                 }
-                let table = self.table.take().expect("checked table");
-                return table.finish(self.chunks);
+                return self.table.take().expect("table").finish(&mut sink);
             }
-            table.nested_depth = table.nested_depth.saturating_add(1);
+            table.nested_depth += 1;
             return Ok(());
         }
         if table.nested_depth > 0 {
             return Ok(());
         }
         match (tag.closing, tag.name.as_str()) {
-            (false, "tr") => table.start_row(self.chunks),
-            (true, "tr") => table.finish_row(self.chunks),
+            (false, "tr") => table.start_row(&mut sink),
+            (true, "tr") => table.finish_row(&mut sink),
             (false, "td" | "th") => table.start_cell(&tag),
             (true, "td" | "th") => {
                 table.finish_cell();
@@ -3150,67 +3498,263 @@ where
         }
     }
 
+    fn new_block(
+        &mut self,
+        source_tag: &str,
+        opening: String,
+        closing_html: String,
+        node_kind: &'static str,
+        anchor: usize,
+        preserve_whitespace: bool,
+    ) -> HtmlSemanticBlock {
+        self.block_ordinal += 1;
+        HtmlSemanticBlock {
+            source_tag: source_tag.into(),
+            closing_html,
+            node_kind,
+            paragraph_id: format!("html-block-{}", self.block_ordinal),
+            preserve_whitespace,
+            html: opening,
+            entries: Vec::new(),
+            anchor,
+            list_depth: None,
+            has_content: false,
+        }
+    }
+
     fn start_simple_block(
         &mut self,
         source_tag: &str,
         canonical_tag: &str,
         node_kind: &'static str,
         preserve_whitespace: bool,
+        anchor: usize,
     ) -> Result<(), HcdError> {
-        self.start_block(
+        self.finish_block()?;
+        let block = self.new_block(
             source_tag,
-            format!("<{canonical_tag} class=\"hcd-source-block hcd-{node_kind}\">"),
+            format!("<{canonical_tag} class=\"hcd-source-block hcd-{node_kind}\" data-hcd-html-tree=\"1\">"),
             format!("</{canonical_tag}>"),
             node_kind,
+            anchor,
             preserve_whitespace,
-        )
+        );
+        self.block = Some(block);
+        Ok(())
     }
 
-    fn start_list_item(&mut self) -> Result<(), HcdError> {
+    fn start_container(
+        &mut self,
+        tag: &str,
+        opening: String,
+        closing: String,
+        anchor: usize,
+        list_depth: Option<usize>,
+    ) -> Result<(), HcdError> {
+        if self.containers.len() + self.lists.len() >= 22 {
+            return Err(HcdError::ResourceLimit(
+                "HTML semantic nesting exceeds editor depth limit".into(),
+            ));
+        }
+        let mut block = self.new_block(tag, opening, closing, "container", anchor, false);
+        block.list_depth = list_depth;
+        self.containers.push(block);
+        Ok(())
+    }
+
+    fn start_list(&mut self, tag: &HtmlTag) -> Result<(), HcdError> {
         self.finish_block()?;
-        let (ordered, ordinal) = self
-            .lists
-            .last_mut()
-            .map(|list| {
-                let ordinal = list.next;
-                list.next = list.next.saturating_add(1);
-                (list.ordered, ordinal)
+        self.ensure_container_paragraph()?;
+        if self.containers.len() + self.lists.len() >= 22 {
+            return Err(HcdError::ResourceLimit(
+                "HTML semantic nesting exceeds editor depth limit".into(),
+            ));
+        }
+        let next = if tag.name == "ol" {
+            optional_bounded_positive_attribute(&tag.attributes, "start", 1_000_000)?.unwrap_or(1)
+        } else {
+            1
+        };
+        let safe_series = |value: &&String| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        };
+        let series = tag
+            .attributes
+            .get("data-hcd-source-list-id")
+            .filter(safe_series)
+            .cloned()
+            .or_else(|| {
+                tag.attributes
+                    .get("data-hcd-word-list-id")
+                    .filter(safe_series)
+                    .map(|value| format!("word-{value}"))
             })
-            .unwrap_or((false, 1));
-        let (opening, closing) = if ordered {
+            .unwrap_or_else(|| format!("html-{}", tag.end));
+        self.lists.push(HtmlListContext {
+            ordered: tag.name == "ol",
+            next,
+            owner_depth: (!self.containers.is_empty()).then_some(self.containers.len()),
+            emitted: false,
+            series,
+        });
+        Ok(())
+    }
+
+    fn start_list_item(&mut self, tag: &HtmlTag) -> Result<(), HcdError> {
+        self.finish_block()?;
+        let depth = self.lists.len();
+        if let Some(index) = self
+            .containers
+            .iter()
+            .rposition(|block| block.list_depth == Some(depth))
+        {
+            self.close_containers(index)?;
+        }
+        let ordered = self
+            .lists
+            .last()
+            .map(|list| list.ordered)
+            .unwrap_or_else(|| {
+                tag.attributes
+                    .get("data-hcd-editor-level")
+                    .is_some_and(|level| level == "1")
+            });
+        let override_start = if ordered {
+            optional_bounded_positive_attribute(&tag.attributes, "value", 1_000_000)?
+        } else {
+            None
+        };
+        let (ordered, ordinal, nested, series) = if let Some(list) = self.lists.last_mut() {
+            let ordinal = override_start.unwrap_or(list.next);
+            if ordinal > 1_000_000 {
+                return Err(HcdError::ResourceLimit(
+                    "HTML list number exceeds editor limit".into(),
+                ));
+            }
+            if let Some(owner) = list.owner_depth {
+                let parent = self
+                    .containers
+                    .get_mut(owner - 1)
+                    .ok_or_else(|| HcdError::InvalidBundle("HTML list owner is absent".into()))?;
+                if !list.emitted || list.ordered && ordinal != list.next {
+                    if list.emitted {
+                        parent.html.push_str("</ol>");
+                    }
+                    parent.html.push_str(&if list.ordered {
+                        format!("<ol start=\"{ordinal}\" class=\"hcd-source-list\">")
+                    } else {
+                        "<ul class=\"hcd-source-list\">".into()
+                    });
+                }
+            }
+            list.emitted = true;
+            list.next = ordinal + 1;
             (
-                format!("<ol start=\"{ordinal}\" class=\"hcd-source-list\"><li>"),
-                "</li></ol>".to_string(),
+                list.ordered,
+                ordinal,
+                list.owner_depth.is_some(),
+                list.series.clone(),
+            )
+        } else {
+            let ordered = tag
+                .attributes
+                .get("data-hcd-editor-level")
+                .is_some_and(|level| level == "1");
+            let ordinal = override_start
+                .or(if ordered {
+                    optional_bounded_positive_attribute(
+                        &tag.attributes,
+                        "data-hcd-list-start",
+                        1_000_000,
+                    )?
+                } else {
+                    None
+                })
+                .unwrap_or(1);
+            (ordered, ordinal, false, "html-orphan".into())
+        };
+        let (opening, closing) = if nested {
+            ("<li>".into(), "</li>".into())
+        } else if ordered {
+            (
+                format!("<ol start=\"{ordinal}\" class=\"hcd-source-list\" data-hcd-source-list-id=\"{series}\"><li>"),
+                "</li></ol>".into(),
             )
         } else {
             (
-                "<ul class=\"hcd-source-list\"><li>".to_string(),
-                "</li></ul>".to_string(),
+                format!("<ul class=\"hcd-source-list\" data-hcd-source-list-id=\"{series}\"><li>"),
+                "</li></ul>".into(),
             )
         };
-        self.start_block("li", opening, closing, "list-item", false)
+        self.start_container("li", opening, closing, tag.end, Some(depth))
     }
 
-    fn start_block(
-        &mut self,
-        source_tag: &str,
-        opening_html: String,
-        closing_html: String,
-        node_kind: &'static str,
-        preserve_whitespace: bool,
-    ) -> Result<(), HcdError> {
+    fn finish_list(&mut self) -> Result<(), HcdError> {
         self.finish_block()?;
-        self.block_ordinal += 1;
-        self.block = Some(HtmlSemanticBlock {
-            source_tag: source_tag.to_string(),
-            closing_html,
-            node_kind,
-            paragraph_id: format!("html-block-{}", self.block_ordinal),
-            preserve_whitespace,
-            html: opening_html,
-            entries: Vec::new(),
-        });
+        let depth = self.lists.len();
+        if let Some(index) = self
+            .containers
+            .iter()
+            .rposition(|block| block.list_depth == Some(depth))
+        {
+            self.close_containers(index)?;
+        }
+        let list = self.lists.pop().expect("list context");
+        if let Some(owner) = list.owner_depth.filter(|_| list.emitted) {
+            self.containers
+                .get_mut(owner - 1)
+                .ok_or_else(|| HcdError::InvalidBundle("HTML list owner is absent".into()))?
+                .html
+                .push_str(if list.ordered { "</ol>" } else { "</ul>" });
+        }
         Ok(())
+    }
+
+    fn close_containers(&mut self, index: usize) -> Result<(), HcdError> {
+        while self.containers.len() > index {
+            self.finish_container()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_container_paragraph(&mut self) -> Result<(), HcdError> {
+        if self
+            .containers
+            .last()
+            .is_some_and(|block| block.source_tag == "li" && !block.has_content)
+        {
+            let anchor = self.containers.last().expect("container").anchor;
+            self.start_simple_block("p", "p", "paragraph", false, anchor)?;
+            self.finish_block()?;
+        }
+        Ok(())
+    }
+
+    fn finish_container(&mut self) -> Result<(), HcdError> {
+        self.finish_block()?;
+        while self
+            .lists
+            .last()
+            .is_some_and(|list| list.owner_depth == Some(self.containers.len()))
+        {
+            self.finish_list()?;
+        }
+        if self
+            .containers
+            .last()
+            .is_some_and(|block| !block.has_content)
+        {
+            let anchor = self.containers.last().expect("container").anchor;
+            self.start_simple_block("p", "p", "paragraph", false, anchor)?;
+            self.finish_block()?;
+        }
+        let mut block = self.containers.pop().expect("container");
+        block.html.push_str(&block.closing_html);
+        self.emit_block(block)
     }
 
     fn finish_implicit_block(&mut self) -> Result<(), HcdError> {
@@ -3229,10 +3773,35 @@ where
             return Ok(());
         };
         if block.entries.is_empty() {
-            return Ok(());
+            if block.source_tag == "__implicit" && !block.html.contains("<br") {
+                return Ok(());
+            }
+            self.text_ordinal += 1;
+            let (html, entry) = render_source_text_node(
+                self.document_id,
+                HTML_PART,
+                "",
+                self.text_ordinal,
+                block.anchor as u64,
+                block.anchor as u64,
+                block.node_kind,
+                Some(block.paragraph_id.clone()),
+            )?;
+            block
+                .html
+                .push_str(&html_inline_text(html, &self.inlines, &[])?);
+            block.entries.push(entry);
         }
         block.html.push_str(&block.closing_html);
-        self.chunks.push_rendered(
+        self.emit_block(block)
+    }
+
+    fn emit_block(&mut self, block: HtmlSemanticBlock) -> Result<(), HcdError> {
+        HtmlParentSink {
+            chunks: self.chunks,
+            parent: self.containers.last_mut(),
+        }
+        .push_rendered(
             RenderedSourceBlock {
                 html: block.html,
                 entries: block.entries,
@@ -3241,17 +3810,24 @@ where
         )
     }
 
-    fn finish(mut self) -> Result<u64, HcdError> {
+    fn finish(mut self) -> Result<(u64, bool), HcdError> {
         if let Some(table) = self.table.take() {
-            table.finish(self.chunks)?;
+            table.finish(&mut HtmlParentSink {
+                chunks: self.chunks,
+                parent: self.containers.last_mut(),
+            })?;
         }
         self.finish_block()?;
+        while !self.lists.is_empty() {
+            self.finish_list()?;
+        }
+        self.close_containers(0)?;
         if self.table_plans.next().is_some() {
             return Err(HcdError::InvalidBundle(
-                "HTML table plan was not consumed".to_string(),
+                "HTML table plan was not consumed".into(),
             ));
         }
-        Ok(self.text_ordinal)
+        Ok((self.text_ordinal, self.custom_marks_found))
     }
 }
 
@@ -3301,7 +3877,8 @@ fn scan_html(
                 "HTML tag at byte {start} exceeds {MAX_CHUNK_BYTES} bytes"
             )));
         }
-        if let Some(tag) = parse_html_tag(&source[start + 1..end]) {
+        if let Some(mut tag) = parse_html_tag(&source[start + 1..end]) {
+            tag.end = end + 1;
             element_count = element_count.saturating_add(1);
             if element_count > HTML_SOURCE_MAX_ELEMENTS {
                 return Err(HcdError::ResourceLimit(format!(
@@ -3318,6 +3895,40 @@ fn scan_html(
                     element_stack.truncate(position);
                 }
             } else if !tag.self_closing && !is_void_html_element(&tag.name) {
+                // HTML permits omitted li/p end tags. They are siblings, not
+                // ever-deeper source nesting; semantic containers close at the
+                // corresponding next start tag as well.
+                if tag.name == "li" {
+                    let scope = element_stack
+                        .iter()
+                        .rposition(|name| matches!(name.as_str(), "ul" | "ol"));
+                    if let Some(item) = element_stack
+                        .iter()
+                        .rposition(|name| name == "li")
+                        .filter(|item| scope.is_none_or(|scope| *item > scope))
+                    {
+                        element_stack.truncate(item);
+                    }
+                }
+                if matches!(
+                    tag.name.as_str(),
+                    "p" | "h1"
+                        | "h2"
+                        | "h3"
+                        | "h4"
+                        | "h5"
+                        | "h6"
+                        | "ul"
+                        | "ol"
+                        | "blockquote"
+                        | "pre"
+                        | "table"
+                        | "div"
+                ) {
+                    if let Some(paragraph) = element_stack.iter().rposition(|name| name == "p") {
+                        element_stack.truncate(paragraph);
+                    }
+                }
                 if element_stack.len() >= HTML_SOURCE_MAX_DEPTH {
                     return Err(HcdError::ResourceLimit(format!(
                         "HTML source exceeds nesting depth {HTML_SOURCE_MAX_DEPTH}"
@@ -3374,6 +3985,7 @@ fn parse_html_tag(raw: &str) -> Option<HtmlTag> {
         },
         closing,
         self_closing,
+        end: 0,
     })
 }
 
@@ -3416,10 +4028,7 @@ fn parse_html_attributes(source: &str) -> HashMap<String, String> {
                 index = (index + 1).min(bytes.len());
             } else {
                 let value_start = index;
-                while index < bytes.len()
-                    && !bytes[index].is_ascii_whitespace()
-                    && bytes[index] != b'/'
-                {
+                while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
                     index += 1;
                 }
                 value = decode_entities(&source[value_start..index]);
@@ -3459,7 +4068,7 @@ fn optional_bounded_positive_attribute(
 fn is_suppressed_html_element(name: &str) -> bool {
     matches!(
         name,
-        "script" | "style" | "iframe" | "object" | "embed" | "template" | "noscript"
+        "script" | "style" | "iframe" | "object" | "embed" | "template" | "noscript" | "title"
     )
 }
 
@@ -3550,6 +4159,10 @@ fn find_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize> 
 }
 
 #[cfg(test)]
+#[path = "html_semantic_tests.rs"]
+mod html_semantic_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use hcd_core::{
@@ -3581,6 +4194,119 @@ mod tests {
     }
 
     #[test]
+    fn html_custom_marks_reimport_keeps_payload_separate_from_base_formatting() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("marked.html");
+        let output = temp.path().join("bundle");
+        let mark: hcd_core::CustomTextMark = serde_json::from_value(serde_json::json!({
+            "schemaVersion":"hcd.mark/1", "type":"example.review", "version":17,
+            "data":{"ticket":"审查-27"},
+            "fallback":{"label":"需复核", "style":{"bold":true,"backgroundColor":"#fff2a8"}}
+        }))
+        .unwrap();
+        let encoded = escape_attribute(&serde_json::to_string(&mark).unwrap());
+        let plural = escape_attribute(&serde_json::to_string(&vec![mark.clone()]).unwrap());
+        let html = format!("<p><span data-hcd-custom-mark-style='true' data-hcd-custom-mark='{encoded}' style='font-weight:700;background-color:#fff2a8'><span data-hcd-id='foreign' data-hcd-custom-marks='{plural}' style='color:#246a4b'>中文😀</span></span><span style='font-weight:700;text-decoration:underline;color:#123456;background-color:#abcdef'>普通格式</span></p>");
+        std::fs::write(&source, &html).unwrap();
+        let manifest = import_html(&source, &output, &options("marks-html"), |_| Ok(())).unwrap();
+        assert_eq!(manifest.capabilities.custom_marks, Some(1));
+        let bundle = Bundle::open(&output).unwrap();
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let inlines = &projection.blocks[0].content.inlines;
+        assert_eq!(inlines[0].text, "中文😀");
+        assert_eq!(inlines[0].custom_marks, vec![mark]);
+        assert!(!inlines[0].bold);
+        assert_eq!(inlines[0].background_color, None);
+        assert_eq!(inlines[0].text_color.as_deref(), Some("#246a4b"));
+        assert!(inlines[1].bold && inlines[1].underline);
+        assert_eq!(inlines[1].text_color.as_deref(), Some("#123456"));
+        assert_eq!(inlines[1].background_color.as_deref(), Some("#abcdef"));
+        assert!(inlines[1].custom_marks.is_empty());
+        let page = extract_text_page(&bundle, None, 100).unwrap();
+        let entry = page
+            .entries
+            .iter()
+            .find(|entry| entry.text == "中文😀")
+            .unwrap();
+        let start = html.find("中文😀").unwrap();
+        assert_eq!(
+            entry.source.text_id.as_deref(),
+            Some(format!("bytes:{start}:{}", start + "中文😀".len()).as_str())
+        );
+        assert_ne!(inlines[0].node_id.as_deref(), Some("foreign"));
+    }
+
+    #[test]
+    fn html_plural_marks_recover_multiple_unknown_codecs_and_reject_inconsistent_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("marked.html");
+        let a = serde_json::json!({"schemaVersion":"hcd.mark/1","type":"example.a","version":99,"data":{"future":[true,"中😀"]},"fallback":{"label":"A","style":{"italic":true}}});
+        let mut b = a.clone();
+        b["type"] = serde_json::json!("example.b");
+        b["fallback"] =
+            serde_json::json!({"label":"B","style":{"underline":true,"textColor":"#abcdef"}});
+        let pair = serde_json::json!([a, b]);
+        let escaped = escape_attribute(&pair.to_string());
+        std::fs::write(&source, format!("<ul><li><p><span data-hcd-custom-marks='{escaped}'>Multiple</span> plain</p></li></ul>")).unwrap();
+        let output = temp.path().join("valid");
+        import_html(&source, &output, &options("plural"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let inline = &projection.blocks[0].content.inlines[0];
+        assert_eq!(serde_json::to_value(&inline.custom_marks).unwrap(), pair);
+        assert!(!inline.italic && !inline.underline);
+        assert!(inline.text_color.is_none());
+        for (index, html) in [
+            format!("<p><span data-hcd-custom-mark='{}'><span data-hcd-custom-marks='[]'>Mismatch</span></span></p>", escape_attribute(&a.to_string())),
+            "<p><span data-hcd-custom-mark-style='true'>Orphan</span></p>".into(),
+            format!("<p data-hcd-custom-marks='{escaped}'>Wrong location</p>"),
+            format!("<pre><span data-hcd-custom-marks='{escaped}'>Code</span></pre>"),
+            format!("<p><span data-hcd-custom-marks='{}'>Duplicate</span></p>", escape_attribute(&serde_json::json!([a,a]).to_string())),
+            format!("<p><span data-hcd-custom-marks='{}'>Unsafe</span></p>", escape_attribute(&pair.to_string().replace("#abcdef", "url(bad)"))),
+        ].into_iter().enumerate() {
+            std::fs::write(&source, html).unwrap();
+            let rejected = temp.path().join(format!("invalid-{index}"));
+            assert!(import_html(&source, &rejected, &options("invalid"), |_| Ok(())).is_err(), "case {index}");
+            assert!(!rejected.join("manifest.json").exists(), "case {index} published a head");
+        }
+    }
+
+    #[test]
+    fn html_nested_mark_override_does_not_retain_the_outer_fallback_style() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("nested.html");
+        let output = temp.path().join("bundle");
+        let outer = serde_json::json!({"schemaVersion":"hcd.mark/1","type":"example.a","version":1,"data":{},"fallback":{"label":"Outer","style":{"italic":true}}});
+        let mut inner = outer.clone();
+        inner["fallback"] = serde_json::json!({"label":"Inner","style":{"textColor":"#abcdef"}});
+        std::fs::write(&source, format!("<p><span data-hcd-custom-mark='{}'><span data-hcd-custom-mark='{}'><span style='color:#123456'>Inner only</span></span></span></p>", escape_attribute(&outer.to_string()), escape_attribute(&inner.to_string()))).unwrap();
+        import_html(&source, &output, &options("nested"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let inline = &projection.blocks[0].content.inlines[0];
+        assert_eq!(
+            serde_json::to_value(&inline.custom_marks).unwrap(),
+            serde_json::json!([inner])
+        );
+        assert_eq!(inline.text_color.as_deref(), Some("#123456"));
+        let canonical = chunk_html(&bundle).join("");
+        assert!(!canonical.contains("font-style:italic") && !canonical.contains("Outer"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn html_inline_styles_use_last_valid_declaration_without_copying_active_css() {
+        let (html, _) = html_inline_span("color:#123456;color:#ABCDEF;color:url(bad);font-weight:700;font-weight:400;font-style:italic;text-decoration:underline line-through;background-image:url(bad);position:fixed");
+        assert!(html.contains("color:#abcdef;") && !html.contains("#123456"));
+        assert!(html.contains("font-weight:400;") && html.contains("font-style:italic;"));
+        assert!(html.ends_with("<u><s>"));
+        assert!(!html.contains("url") && !html.contains("position"));
+    }
+
+    #[test]
     fn html_hcd_patch_preserves_markup_and_escapes_replacement() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.html");
@@ -3604,9 +4330,9 @@ mod tests {
         let validation = validate_bundle(&bundle).unwrap();
         assert!(validation.valid, "{:?}", validation.issues);
         let canonical_html = chunk_html(&bundle).join("");
-        assert!(canonical_html.contains("<h1 class=\"hcd-source-block hcd-heading\">"));
-        assert!(canonical_html.contains("<p class=\"hcd-source-block hcd-paragraph\">"));
-        assert!(canonical_html.contains("<ul class=\"hcd-source-list\"><li>"));
+        assert!(canonical_html.contains("<h1 class=\"hcd-source-block hcd-heading\""));
+        assert!(canonical_html.contains("<p class=\"hcd-source-block hcd-paragraph\""));
+        assert!(canonical_html.contains("<ul class=\"hcd-source-list\""));
         assert!(canonical_html.contains("<table class=\"hcd-source-table\""));
         assert!(canonical_html.contains("<th>"));
         assert!(!canonical_html.contains("<style"));

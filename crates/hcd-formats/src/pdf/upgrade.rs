@@ -647,6 +647,7 @@ mod tests {
                     font_ids: vec![],
                 }],
                 skipped: vec![],
+                ..Default::default()
             },
         )
         .unwrap();

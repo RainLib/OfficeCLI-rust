@@ -168,6 +168,18 @@ fn write_candidate_impl(
             PatchOperation::ImageGeometry { node_id, .. }
             | PatchOperation::ImageReplace { node_id, .. }
             | PatchOperation::ImageRestoreSource { node_id, .. } => {
+                if !pending_images.contains_key(node_id) {
+                    let image = hcd_core::get_image_node(bundle, node_id)?;
+                    let page = image
+                        .node
+                        .source
+                        .paragraph_id
+                        .as_deref()
+                        .and_then(image_address)
+                        .map(|(page, _)| page)
+                        .ok_or_else(|| error("PDF image has no source page"))?;
+                    pages.insert(page);
+                }
                 pending_images
                     .entry(node_id.clone())
                     .or_default()
@@ -193,9 +205,22 @@ fn write_candidate_impl(
         std::cmp::Reverse((page_number(&entry.source.part), entry.source.text_ordinal))
     });
     copy_verified_source(source, target, &manifest.source.sha256)?;
-    if !text.is_empty() {
+    let mut marked_pages = pages.clone();
+    marked_pages.extend(text.iter().filter_map(|node| {
+        node.source
+            .paragraph_id
+            .as_deref()
+            .and_then(pdf_text_address)
+            .map(|(page, _)| page)
+    }));
+    if !text.is_empty() || !marked_pages.is_empty() {
         let handler =
             pdf_handler::PdfHandler::open(&target.to_string_lossy(), true).map_err(error)?;
+        for page in marked_pages {
+            handler
+                .mark_source_text_groups(page as usize)
+                .map_err(error)?;
+        }
         for node in text {
             let path = node
                 .source
@@ -437,7 +462,7 @@ pub(super) fn plan(
     operations: &[PatchOperation],
 ) -> Result<hcd_core::PdfRasterPlan, HcdError> {
     let candidate = tempfile::Builder::new().suffix(".pdf").tempfile()?;
-    let (_, pages) = write_candidate(
+    let (manifest, pages) = write_candidate(
         bundle,
         source,
         candidate.path(),
@@ -447,6 +472,8 @@ pub(super) fn plan(
     if std::fs::metadata(candidate.path())?.len() > MAX_HCD_PDF_SOURCE_BYTES {
         return Err(error("candidate PDF exceeds source size limit"));
     }
+    let text_layouts =
+        super::native_layout::collect(bundle, &manifest, candidate.path(), &pages, operations)?;
     let pdf = Pdf::new(Arc::new(std::fs::read(candidate.path())?))
         .map_err(|e| error(format!("cannot render modified PDF: {e:?}")))?;
     let mut rasters = Vec::new();
@@ -477,5 +504,7 @@ pub(super) fn plan(
     Ok(hcd_core::PdfRasterPlan {
         rasters,
         skipped: vec![],
+        text_layouts,
+        base_root_hash: Some(manifest.root_hash),
     })
 }

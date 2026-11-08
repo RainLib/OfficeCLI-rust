@@ -1,6 +1,9 @@
 //! Authenticated local HCD core API. Bundles stay private under the configured root.
 //! The HTTP surface only returns decoded, verified objects requested by the client.
 use crate::commands::hdoc::{HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope};
+use crate::hdoc_collaboration::{
+    Metadata as CollaborationMetadata, MigrationReceipt, Protocol as CollaborationProtocol,
+};
 use crate::hdoc_remote::RemoteStore;
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
@@ -9,6 +12,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(test)]
 use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
@@ -21,7 +25,6 @@ use hcd_core::{
     HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -35,6 +38,33 @@ use tokio::sync::{broadcast, Mutex};
 #[path = "hdoc_revision_events.rs"]
 mod revision_events;
 use revision_events::{revision_events, revision_websocket};
+#[path = "hdoc_access.rs"]
+mod access_policy;
+use access_policy::{DocumentAccess, DocumentAccessPolicy, FileAccessPolicy};
+#[path = "hdoc_restore.rs"]
+mod coordinated_restore;
+#[path = "hdoc_export_capabilities.rs"]
+mod export_capabilities;
+#[path = "hdoc_export_process.rs"]
+mod export_process;
+#[path = "hdoc_people.rs"]
+mod people;
+#[path = "hdoc_recovery_archive.rs"]
+mod recovery_archive;
+#[path = "hdoc_word_checkpoints.rs"]
+mod word_checkpoints;
+#[path = "hdoc_word_link_preflight.rs"]
+mod word_link_preflight;
+#[path = "hdoc_word_link_transactions.rs"]
+mod word_link_transactions;
+#[path = "hdoc_word_owner.rs"]
+mod word_owner;
+#[path = "hdoc_word_source_proof.rs"]
+mod word_source_proof;
+#[path = "hdoc_xlsx_formula_proof.rs"]
+mod xlsx_formula_proof;
+#[path = "hdoc_xlsx_grid_create.rs"]
+mod xlsx_grid_create;
 
 #[derive(Clone)]
 struct ServerState {
@@ -43,6 +73,7 @@ struct ServerState {
     remote: Option<RemoteStore>,
     collaboration_lock: Arc<Mutex<()>>,
     revisions: RevisionHub,
+    word_owners: word_owner::WordOwners,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,9 +108,18 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
     }
     let secret = load_secret(&command.secret_env)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize;
+    if matches!(command.scope, HdocTokenScope::Manage)
+        && command
+            .user_id
+            .as_deref()
+            .is_none_or(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err(anyhow!("manage tokens require a stable --user-id"));
+    }
     let claims = Claims {
         doc: command.document_id.clone(),
         scope: match command.scope {
+            HdocTokenScope::Manage => "manage",
             HdocTokenScope::Read => "read",
             HdocTokenScope::Write => "write",
             HdocTokenScope::Upload => "upload",
@@ -99,6 +139,7 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
 }
 
 pub async fn serve(command: HdocServeCommand) -> Result<()> {
+    export_process::timeout_from_env().map_err(|error| anyhow!(error.1))?;
     let secret = Arc::new(load_secret(&command.secret_env)?);
     std::fs::create_dir_all(&command.root)?;
     let root = command.root.canonicalize()?;
@@ -116,7 +157,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         _ => {
             return Err(anyhow!(
                 "configure both PostgreSQL and S3 bucket for remote HCD storage"
-            ))
+            ));
         }
     };
     let state = ServerState {
@@ -125,14 +166,44 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         remote,
         collaboration_lock: Arc::new(Mutex::new(())),
         revisions: RevisionHub::default(),
+        word_owners: word_owner::WordOwners::default(),
     };
+    state.word_owners.start();
     let router = Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true})) }))
         .route("/v1/documents/{id}", get(manifest))
+        .route("/v1/documents/{id}/head", get(document_head))
         .route("/v1/import", post(import_document))
         .route("/v1/jobs/{job_id}", get(job_status))
         .route("/v1/documents/{id}/editor", get(editor))
+        .route(
+            "/v1/documents/{id}/xlsx/formula-audit",
+            get(xlsx_formula_audit).post(xlsx_formula_proof_create),
+        )
+        .route("/v1/documents/{id}/xlsx/source", post(xlsx_restore_source))
+        .route(
+            "/v1/documents/{id}/word/source",
+            get(word_source_status).post(word_restore_source),
+        )
+        .route("/v1/documents/{id}/word/layout", get(word_layout))
+        .route("/v1/documents/{id}/word/story-index", get(word_story_index))
+        .route(
+            "/v1/documents/{id}/word/link-preflight",
+            post(word_link_preflight::preview),
+        )
+        .route(
+            "/v1/documents/{id}/word/link-transactions",
+            post(word_link_transactions::transaction),
+        )
+        .route(
+            "/v1/documents/{id}/word/link-receipt",
+            post(word_link_transactions::receipt),
+        )
         .route("/v1/documents/{id}/export-options", get(export_options))
+        .route(
+            "/v1/documents/{id}/export-capabilities",
+            get(export_capabilities::options),
+        )
         .route("/v1/documents/{id}/project", post(project))
         .route(
             "/v1/documents/{id}/pdf/layout",
@@ -140,14 +211,70 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         )
         .route("/v1/documents/{id}/patch", post(patch))
         .route("/v1/documents/{id}/checkpoints", post(checkpoint))
+        .route(
+            "/v1/documents/{id}/word/checkpoints",
+            post(word_checkpoints::checkpoint_http),
+        )
+        .route(
+            "/v1/documents/{id}/word/checkpoint-receipt",
+            post(word_checkpoints::checkpoint_receipt),
+        )
+        .route(
+            "/v1/documents/{id}/word/layout-receipt",
+            post(word_checkpoints::layout_receipt),
+        )
+        .route(
+            "/v1/documents/{id}/word/story-receipt",
+            post(word_checkpoints::story_receipt),
+        )
+        .route(
+            "/v1/documents/{id}/word/story-transactions",
+            post(word_checkpoints::story_transaction),
+        )
+        .route(
+            "/v1/documents/{id}/word/story-preflight",
+            post(word_checkpoints::story_preflight),
+        )
+        .route(
+            "/v1/documents/{id}/word/topology-cancel",
+            post(word_checkpoints::topology_cancel),
+        )
+        .route(
+            "/v1/documents/{id}/word/checkpoint-cancel",
+            post(word_checkpoints::checkpoint_cancel),
+        )
+        .route(
+            "/v1/documents/{id}/word/layout-transactions",
+            post(word_checkpoints::layout_transaction),
+        )
+        .route(
+            "/v1/documents/{id}/word/layout-preflight",
+            post(word_checkpoints::layout_preflight),
+        )
+        .route(
+            "/v1/documents/{id}/collaboration/word-owner",
+            post(word_owner::owner),
+        )
         .route("/v1/documents/{id}/revisions", get(revisions))
         .route("/v1/documents/{id}/revisions/{revision}", get(revision))
         .route("/v1/documents/{id}/restore/{revision}", post(restore))
+        .route(
+            "/v1/documents/{id}/collaboration/restore/{revision}",
+            post(coordinated_restore::restore),
+        )
         .route("/v1/documents/{id}/index/{page}", get(index_page))
+        .route("/v1/documents/{id}/mention-options", get(people::options))
+        .route(
+            "/v1/documents/{id}/references/resolve",
+            post(people::resolve),
+        )
+        .route("/v1/documents/{id}/references", get(people::references))
         .route("/v1/documents/{id}/chunks/{sequence}", get(chunk))
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/staged-assets", post(stage_image))
         .route("/v1/documents/{id}/staged-assets/{hash}", get(staged_image))
+        .route("/v1/documents/{id}/resources", post(stage_resource))
+        .route("/v1/documents/{id}/resources/reuse", post(restage_resource))
         .route("/v1/documents/{id}/images", get(images))
         .route(
             "/v1/documents/{id}/images/{node_id}",
@@ -161,6 +288,22 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/text/{node_id}", get(text_node))
         .route("/v1/documents/{id}/edits", post(editor_edits))
         .route(
+            "/v1/documents/{id}/grid/cells",
+            post(xlsx_grid_create::create),
+        )
+        .route(
+            "/v1/documents/{id}/grid/cells/inspect",
+            post(xlsx_grid_create::inspect),
+        )
+        .route(
+            "/v1/documents/{id}/grid/cells/compare",
+            post(xlsx_grid_create::compare),
+        )
+        .route(
+            "/v1/documents/{id}/grid/cells/receipt",
+            post(xlsx_grid_create::receipt),
+        )
+        .route(
             "/v1/documents/{id}/edits/receipt",
             post(editor_edits_receipt),
         )
@@ -170,7 +313,16 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/events/ws", get(revision_websocket))
         .route("/v1/documents/{id}/styles", get(styles))
         .route("/v1/documents/{id}/export/{format}", get(export_document))
+        .route(
+            "/v1/documents/{id}/recovery/canonical/inspect",
+            post(recovery_archive::inspect)
+                .layer(DefaultBodyLimit::max(recovery_archive::MAX_ARCHIVE_BYTES)),
+        )
         .route("/v1/documents/{id}/auth", get(auth_check))
+        .route(
+            "/v1/documents/{id}/access",
+            get(get_access).post(set_access),
+        )
         .route(
             "/v1/documents/{id}/collaboration/state",
             get(collaboration_get).put(collaboration_put),
@@ -184,10 +336,18 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             get(collaboration_recovery),
         )
         .route(
+            "/v1/documents/{id}/collaboration/migrate",
+            post(collaboration_migrate),
+        )
+        .route(
             "/v1/documents/{id}/collaboration/reset",
             post(collaboration_reset),
         )
         .layer(DefaultBodyLimit::max(MAX_PATCH_JSON_BYTES as usize))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            access_gate,
+        ))
         .with_state(state);
     let address: SocketAddr = command.bind.parse().context("invalid --bind address")?;
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -212,6 +372,7 @@ fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiE
         })?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_audience(&["hcd-core"]);
+    validation.leeway = 0;
     let claims = decode::<Claims>(token, &DecodingKey::from_secret(&state.secret), &validation)
         .map_err(|_| {
             ApiError(
@@ -425,7 +586,38 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error": self.1}))).into_response()
+        let field_protected = self.0 == StatusCode::UNPROCESSABLE_ENTITY
+            && self.1.starts_with("DOCX_SOURCE_TEXT_READ_ONLY");
+        let block_id = self
+            .1
+            .strip_prefix("DOCX_SOURCE_TEXT_READ_ONLY:")
+            .filter(|id| {
+                id.len() == 34
+                    && id.starts_with("n_")
+                    && id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .and_then(|id| header::HeaderValue::from_str(id).ok());
+        let source_required =
+            self.0 == StatusCode::UNPROCESSABLE_ENTITY && self.1 == "DOCX_SOURCE_REQUIRED";
+        let mut response = (self.0, Json(json!({"error": self.1}))).into_response();
+        if source_required {
+            response.headers_mut().insert(
+                "x-hcd-error-code",
+                header::HeaderValue::from_static("DOCX_SOURCE_REQUIRED"),
+            );
+        }
+        if field_protected {
+            response.headers_mut().insert(
+                "x-hcd-error-code",
+                header::HeaderValue::from_static("DOCX_SOURCE_TEXT_READ_ONLY"),
+            );
+            if let Some(id) = block_id {
+                response.headers_mut().insert("x-hcd-protected-block", id);
+            }
+        }
+        response
     }
 }
 
@@ -519,7 +711,7 @@ fn editor_projection(bundle: &Bundle, revision: Option<u64>) -> Result<EditorPro
     hcd_core::editor_projection_with_typography_styles(bundle, revision, &styles)
 }
 
-fn claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
+fn token_claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -532,6 +724,7 @@ fn claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, 
         })?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_audience(&["hcd-core"]);
+    validation.leeway = 0;
     let claims = decode::<Claims>(token, &DecodingKey::from_secret(&state.secret), &validation)
         .map_err(|_| {
             ApiError(
@@ -540,13 +733,241 @@ fn claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, 
             )
         })?
         .claims;
-    if claims.doc != id || !matches!(claims.scope.as_str(), "read" | "write") {
+    if claims.doc != id || !matches!(claims.scope.as_str(), "read" | "write" | "manage") {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "token document or scope mismatch".to_string(),
         ));
     }
     Ok(claims)
+}
+
+fn collaboration_service(claims: &Claims) -> bool {
+    claims.scope == "write" && claims.sub.as_deref() == Some("hcd-collaboration")
+}
+fn claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
+    let claims = token_claims(state, headers, id)?;
+    let access = load_access(state, id)?;
+    if claims.scope == "manage"
+        || !collaboration_service(&claims) && !access.can_read(claims.sub.as_deref())
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "document access policy does not allow reading".into(),
+        ));
+    }
+    Ok(claims)
+}
+fn manage_claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
+    let claims = token_claims(state, headers, id)?;
+    if claims.scope != "manage"
+        || claims.sub.as_deref().is_none_or(str::is_empty)
+        || claims.sub.as_deref() == Some("hcd-collaboration")
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "policy management token required".into(),
+        ));
+    }
+    Ok(claims)
+}
+async fn access_gate(
+    State(state): State<ServerState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(rest) = request.uri().path().strip_prefix("/v1/documents/") else {
+        return next.run(request).await;
+    };
+    let (id, route) = rest
+        .split_once('/')
+        .map_or((rest, ""), |(id, route)| (id, route));
+    if !valid_id(id) {
+        return bad("invalid document ID").into_response();
+    }
+    // The management handlers own the exclusive gate; never upgrade a read lock.
+    if matches!(route, "access" | "collaboration/migrate")
+        || route.starts_with("collaboration/restore/")
+    {
+        return next.run(request).await;
+    }
+    let guard = access_policy::gate(&state.root, id).read_owned().await;
+    if route == "events/ws" && request.method() == axum::http::Method::GET {
+        let response = next.run(request).await;
+        drop(guard);
+        return response;
+    }
+    let identity = match claims(&state, request.headers(), id) {
+        Ok(claims) => claims,
+        Err(error) => return error.into_response(),
+    };
+    let story_receipt = route == "word/story-receipt"
+        && request.method() == axum::http::Method::POST
+        && collaboration_service(&identity);
+    let story_recovery_owner = route == "collaboration/word-owner"
+        && request.method() == axum::http::Method::POST
+        && collaboration_service(&identity)
+        && request
+            .headers()
+            .get("x-hcd-word-story-recovery")
+            .and_then(|value| value.to_str().ok())
+            == Some("1");
+    let story_transaction = matches!(
+        route,
+        "word/story-transactions"
+            | "word/story-preflight"
+            | "word/topology-cancel"
+            | "word/checkpoint-cancel"
+    ) && request.method() == axum::http::Method::POST
+        && collaboration_service(&identity)
+        && request
+            .headers()
+            .get("x-hcd-coordinator-version")
+            .and_then(|value| value.to_str().ok())
+            == Some("7")
+        && request
+            .headers()
+            .get("x-hcd-word-story-version")
+            .and_then(|value| value.to_str().ok())
+            == Some("1");
+    // Story-aware layout requests remain subject to the handler's epoch,
+    // owner, actor and current-head capability checks.
+    let story_layout = matches!(
+        route,
+        "word/layout-preflight"
+            | "word/layout-transactions"
+            | "word/layout-receipt"
+            | "word/link-preflight"
+            | "word/link-transactions"
+            | "word/link-receipt"
+    ) && request.method() == axum::http::Method::POST
+        && collaboration_service(&identity)
+        && request
+            .headers()
+            .get("x-hcd-coordinator-version")
+            .and_then(|v| v.to_str().ok())
+            == Some("7")
+        && request
+            .headers()
+            .get("x-hcd-word-story-version")
+            .and_then(|v| v.to_str().ok())
+            == Some("1")
+        && request
+            .headers()
+            .get("x-hcd-word-layout-version")
+            .and_then(|v| v.to_str().ok())
+            == Some("1")
+        && (!matches!(
+            route,
+            "word/link-preflight" | "word/link-transactions" | "word/link-receipt"
+        ) || request
+            .headers()
+            .get("x-hcd-word-link-version")
+            .and_then(|v| v.to_str().ok())
+            == Some("1"));
+    // The actual checkpoint handlers still verify document capability,
+    // collaboration epoch, owner lease, journal and all contributors.
+    let story_checkpoint = matches!(route, "word/checkpoints" | "word/checkpoint-receipt")
+        && request.method() == axum::http::Method::POST
+        && collaboration_service(&identity)
+        && request
+            .headers()
+            .get("x-hcd-coordinator-version")
+            .and_then(|v| v.to_str().ok())
+            == Some("7")
+        && request
+            .headers()
+            .get("x-hcd-word-story-version")
+            .and_then(|v| v.to_str().ok())
+            == Some("1");
+    if request.method() != axum::http::Method::GET
+        && route != "collaboration/recovery"
+        && !story_receipt
+        && !story_recovery_owner
+        && !story_transaction
+        && !story_checkpoint
+        && !story_layout
+    {
+        match open(&state, id)
+            .and_then(|bundle| bundle.manifest().map_err(hcd_error))
+            .and_then(|head| require_story_link_editor_safe(&head))
+        {
+            Ok(()) => {}
+            Err(error) => return error.into_response(),
+        }
+    }
+    if request.method() != axum::http::Method::GET && coordinated_restore::pending(&state, id).await
+    {
+        return ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "document restore is being reconciled".into(),
+        )
+        .into_response();
+    }
+    if collaboration_service(&identity) && request.method() != axum::http::Method::GET {
+        let allowed = matches!(
+            (request.method().as_str(), route),
+            ("PUT", "collaboration/state")
+                | (
+                    "POST",
+                    "checkpoints"
+                        | "word/checkpoints"
+                        | "word/checkpoint-receipt"
+                        | "word/layout-receipt"
+                        | "word/story-receipt"
+                        | "word/story-transactions"
+                        | "word/story-preflight"
+                        | "word/link-preflight"
+                        | "word/link-transactions"
+                        | "word/link-receipt"
+                        | "word/topology-cancel"
+                        | "word/checkpoint-cancel"
+                        | "word/layout-transactions"
+                        | "word/layout-preflight"
+                        | "collaboration/word-owner"
+                        | "collaboration/recovery"
+                        | "project"
+                )
+        );
+        if !allowed {
+            return ApiError(
+                StatusCode::FORBIDDEN,
+                "collaboration service cannot use this mutation route".into(),
+            )
+            .into_response();
+        }
+    }
+    if collaboration_service(&identity)
+        && request.method() == axum::http::Method::POST
+        && route == "project"
+    {
+        match collaboration_metadata(&state, id).await {
+            Ok(metadata) if metadata.protocol != CollaborationProtocol::Default1 => {
+                if let Err(error) = check_collaboration_epoch(&state, id, request.headers()).await {
+                    return error.into_response();
+                }
+            }
+            Err(error) => return error.into_response(),
+            _ => {}
+        }
+    }
+    let private_references = route == "mention-options"
+        || route == "references"
+        || route.starts_with("references/")
+        || route == "collaboration/word-owner";
+    let mut response = next.run(request).await;
+    if private_references {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            "no-store".parse().expect("static cache directive"),
+        );
+        response.headers_mut().insert(
+            header::VARY,
+            "Authorization".parse().expect("static vary directive"),
+        );
+    }
+    drop(guard);
+    response
 }
 
 fn authorize(
@@ -556,13 +977,50 @@ fn authorize(
     write: bool,
 ) -> Result<(), ApiError> {
     let claims = claims(state, headers, id)?;
-    if write && claims.scope != "write" {
+    if write {
+        require_write(state, id, &claims)?;
+    }
+    Ok(())
+}
+
+fn load_access(state: &ServerState, id: &str) -> Result<DocumentAccess, ApiError> {
+    FileAccessPolicy::new(&state.root)
+        .load(id)
+        .map_err(internal)
+}
+#[cfg(test)]
+fn store_access(state: &ServerState, id: &str, access: &DocumentAccess) -> Result<(), ApiError> {
+    if !FileAccessPolicy::new(&state.root)
+        .compare_replace(id, access.generation.saturating_sub(1), access)
+        .map_err(internal)?
+    {
+        return Err(ApiError(StatusCode::CONFLICT, "policy changed".into()));
+    }
+    Ok(())
+}
+fn write_allowed(claims: &Claims, access: &DocumentAccess) -> bool {
+    claims.scope == "write" && access.can_write(claims.sub.as_deref())
+}
+fn require_write(state: &ServerState, id: &str, claims: &Claims) -> Result<(), ApiError> {
+    if collaboration_service(claims) {
+        return Ok(());
+    }
+    if !write_allowed(claims, &load_access(state, id)?) {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
-            "read-only token cannot write".to_string(),
+            "document access policy does not allow this token to write".into(),
         ));
     }
     Ok(())
+}
+#[cfg(test)]
+fn update_access(
+    current: &DocumentAccess,
+    writers: Option<Vec<String>>,
+) -> Result<DocumentAccess, ApiError> {
+    current
+        .replace(current.readers.clone(), writers)
+        .map_err(bad)
 }
 
 async fn auth_check(
@@ -572,10 +1030,99 @@ async fn auth_check(
 ) -> Result<Json<Value>, ApiError> {
     let claims = claims(&state, &headers, &id)?;
     open(&state, &id)?;
-    let epoch = collaboration_epoch(&state, &id).await?;
+    let access = load_access(&state, &id)?;
+    let revoked = !collaboration_service(&claims)
+        && claims.scope == "write"
+        && !write_allowed(&claims, &access);
+    let scope = if revoked {
+        "read"
+    } else {
+        claims.scope.as_str()
+    };
+    let collaboration = collaboration_metadata(&state, &id).await?;
     Ok(Json(
-        json!({"documentId": id, "scope": claims.scope, "userId": claims.sub,
-        "displayName": claims.name, "expiresAt": claims.exp, "collaborationEpoch": epoch}),
+        json!({"documentId": id, "scope": scope, "access": if revoked { "revoked" } else { "active" },
+        "accessGeneration": access.generation, "userId": claims.sub,
+        "displayName": claims.name, "expiresAt": claims.exp, "collaborationEpoch": collaboration.epoch,"collaborationProtocol":collaboration.protocol,"coordinatedRestore":state.remote.is_none(),
+        "wordNumericFields":if state.remote.is_none() && collaboration.protocol==CollaborationProtocol::WordRegions2 {Some("inline-v1")}else{None}}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccessUpdate {
+    expected_generation: u64,
+    readers: Option<Vec<String>>,
+    writers: Option<Vec<String>>,
+}
+async fn get_access(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    manage_claims(&state, &headers, &id)?;
+    let _guard = access_policy::gate(&state.root, &id).read_owned().await;
+    manage_claims(&state, &headers, &id)?;
+    open(&state, &id)?;
+    Ok(Json(
+        json!({"schemaVersion":"hcd-access/1","policy":load_access(&state,&id)?,"collaborationEpoch":collaboration_epoch(&state,&id).await?}),
+    ))
+}
+async fn set_access(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    manage_claims(&state, &headers, &id)?;
+    if state.remote.is_some() {
+        return Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            "remote access policy requires a shared atomic policy/epoch adapter".into(),
+        ));
+    }
+    if !value.as_object().is_some_and(|value| {
+        ["expectedGeneration", "readers", "writers"]
+            .iter()
+            .all(|key| value.contains_key(*key))
+    }) {
+        return Err(bad(
+            "expectedGeneration, readers and writers are required; null explicitly retains token-based membership",
+        ));
+    }
+    let update: AccessUpdate = serde_json::from_value(value).map_err(bad)?;
+    let _gate = access_policy::gate(&state.root, &id).write_owned().await;
+    manage_claims(&state, &headers, &id)?;
+    open(&state, &id)?;
+    let current = load_access(&state, &id)?;
+    if current.generation != update.expected_generation {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "document access generation changed".into(),
+        ));
+    }
+    let next = current
+        .replace(update.readers, update.writers)
+        .map_err(bad)?;
+    let _guard = state.collaboration_lock.lock().await;
+    // Fence old owners before publishing membership. Failure leaves old access
+    // in place, with a safe epoch advance and preserved recovery if necessary.
+    let epoch = if next.revokes(&current) {
+        reset_collaboration_locked(&state, &id).await?
+    } else {
+        collaboration_epoch(&state, &id).await?
+    };
+    if !FileAccessPolicy::new(&state.root)
+        .compare_replace(&id, current.generation, &next)
+        .map_err(internal)?
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "document access generation changed".into(),
+        ));
+    }
+    Ok(Json(
+        json!({"schemaVersion":"hcd-access/1","policy":next,"collaborationEpoch":epoch}),
     ))
 }
 
@@ -588,15 +1135,25 @@ async fn collaboration_current_path(
     id: &str,
     epoch: u64,
 ) -> Result<PathBuf, ApiError> {
+    let metadata = collaboration_metadata(state, id).await?;
+    let name = if metadata.epoch == epoch {
+        metadata
+            .migration
+            .as_ref()
+            .map(|receipt| format!("{id}.epoch-{epoch}.{}.bin", receipt.id))
+    } else {
+        None
+    };
     let path = state
         .root
         .join("collaboration")
-        .join(format!("{id}.epoch-{epoch}.bin"));
+        .join(name.unwrap_or_else(|| format!("{id}.epoch-{epoch}.bin")));
     let legacy = collaboration_path(state, id);
     // Called under the collaboration lock. Migrate the old unversioned name
     // once; subsequent epochs cannot accidentally load an older binary after
     // a crash between generation advancement and file deletion.
-    if !tokio::fs::try_exists(&path).await.map_err(internal)?
+    if metadata.protocol == CollaborationProtocol::Default1
+        && !tokio::fs::try_exists(&path).await.map_err(internal)?
         && tokio::fs::try_exists(&legacy).await.map_err(internal)?
     {
         tokio::fs::rename(legacy, &path).await.map_err(internal)?;
@@ -621,15 +1178,56 @@ fn collaboration_epoch_path(state: &ServerState, id: &str) -> PathBuf {
     state.root.join("collaboration").join(format!("{id}.epoch"))
 }
 
-async fn collaboration_epoch(state: &ServerState, id: &str) -> Result<u64, ApiError> {
+async fn collaboration_metadata(
+    state: &ServerState,
+    id: &str,
+) -> Result<CollaborationMetadata, ApiError> {
     if let Some(remote) = &state.remote {
-        return remote.collaboration_epoch(id).await.map_err(internal);
+        return remote.collaboration_metadata(id).await.map_err(internal);
     }
     match tokio::fs::read_to_string(collaboration_epoch_path(state, id)).await {
-        Ok(value) => value.trim().parse().map_err(internal),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Ok(value) => CollaborationMetadata::decode(&value).map_err(internal),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(CollaborationMetadata::default())
+        }
         Err(error) => Err(internal(error)),
     }
+}
+async fn collaboration_epoch(state: &ServerState, id: &str) -> Result<u64, ApiError> {
+    Ok(collaboration_metadata(state, id).await?.epoch)
+}
+async fn write_collaboration_metadata(
+    state: &ServerState,
+    id: &str,
+    metadata: &CollaborationMetadata,
+) -> Result<(), ApiError> {
+    let path = collaboration_epoch_path(state, id);
+    durable_collaboration_file(&path, metadata.encode().map_err(internal)?.as_bytes()).await
+}
+async fn durable_collaboration_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), ApiError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| internal("collaboration parent missing"))?;
+    tokio::fs::create_dir_all(directory)
+        .await
+        .map_err(internal)?;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = async {
+        let mut file = tokio::fs::File::create(&temporary)
+            .await
+            .map_err(internal)?;
+        file.write_all(bytes).await.map_err(internal)?;
+        file.sync_all().await.map_err(internal)?;
+        tokio::fs::rename(&temporary, path)
+            .await
+            .map_err(internal)?;
+        sync_collaboration_directory(directory).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
 }
 
 fn requested_collaboration_epoch(headers: &HeaderMap) -> Result<u64, ApiError> {
@@ -646,11 +1244,62 @@ async fn check_collaboration_epoch(
     headers: &HeaderMap,
 ) -> Result<u64, ApiError> {
     let requested = requested_collaboration_epoch(headers)?;
-    if requested != collaboration_epoch(state, id).await? {
+    let metadata = collaboration_metadata(state, id).await?;
+    if requested != metadata.epoch {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "collaboration generation changed; reload the editor".to_string(),
+            "collaboration generation changed; reload the editor".into(),
         ));
+    }
+    if headers
+        .get("x-hcd-node-edits-version")
+        .is_some_and(|value| {
+            !matches!(
+                value.to_str().ok(),
+                Some("1" | "2" | "3" | "4" | "5" | "6" | "7")
+            )
+        })
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "unsupported collaboration node edit model".into(),
+        ));
+    }
+    if metadata.node_edits.is_some_and(|required| {
+        headers
+            .get("x-hcd-node-edits-version")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_none_or(|version| version < required)
+    }) {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "node-edit-aware coordinator required; shared drafts were not changed".into(),
+        ));
+    }
+    let protocol = headers
+        .get("x-hcd-collaboration-protocol")
+        .and_then(|value| value.to_str().ok());
+    if (metadata.protocol != CollaborationProtocol::Default1 || protocol.is_some())
+        && protocol != Some(metadata.protocol.name())
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "collaboration protocol changed; reload a compatible editor".into(),
+        ));
+    }
+    if metadata.protocol == CollaborationProtocol::Inline1 {
+        require_inline_containers_support(true, headers)?;
+        if headers
+            .get("x-hcd-extension-version")
+            .and_then(|value| value.to_str().ok())
+            != Some("3")
+        {
+            return Err(ApiError(
+                StatusCode::UPGRADE_REQUIRED,
+                "inline collaboration envelope 3 required".into(),
+            ));
+        }
     }
     Ok(requested)
 }
@@ -664,34 +1313,20 @@ async fn reset_collaboration_locked(state: &ServerState, id: &str) -> Result<u64
     if let Some(remote) = &state.remote {
         return remote.collaboration_reset(id).await.map_err(internal);
     }
-    let current = collaboration_epoch(state, id).await?;
-    let previous_state = collaboration_current_path(state, id, current).await?;
+    let metadata = collaboration_metadata(state, id).await?;
+    let previous_state = collaboration_current_path(state, id, metadata.epoch).await?;
     match tokio::fs::read(&previous_state).await {
         Ok(bytes) => {
-            save_collaboration_recovery(state, id, current, &bytes).await?;
+            save_collaboration_recovery(state, id, metadata.epoch, &bytes).await?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(internal(error)),
     }
-    let next = current
-        .checked_add(1)
+    let next = metadata
+        .reset()
         .ok_or_else(|| internal("collaboration epoch limit reached"))?;
-    let path = collaboration_epoch_path(state, id);
-    tokio::fs::create_dir_all(path.parent().expect("epoch parent"))
-        .await
-        .map_err(internal)?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = tokio::fs::File::create(&temporary)
-        .await
-        .map_err(internal)?;
-    file.write_all(next.to_string().as_bytes())
-        .await
-        .map_err(internal)?;
-    file.sync_all().await.map_err(internal)?;
-    tokio::fs::rename(&temporary, &path)
-        .await
-        .map_err(internal)?;
-    sync_collaboration_directory(path.parent().expect("epoch parent")).await?;
+    write_collaboration_metadata(state, id, &next).await?;
+    let next = next.epoch;
     Ok(next)
 }
 
@@ -848,6 +1483,212 @@ async fn collaboration_recovery(
         .into_response())
 }
 
+fn migration_response(metadata: &CollaborationMetadata, replayed: bool) -> Json<Value> {
+    Json(
+        json!({"collaborationEpoch":metadata.epoch,"collaborationProtocol":metadata.protocol,"migration":metadata.migration,"idempotentReplay":replayed}),
+    )
+}
+
+/// The trusted sidecar must quiesce its old room before calling this CAS. This
+/// endpoint does not parse Yjs or declare an in-memory room migration complete.
+async fn collaboration_migrate(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let _authority = access_policy::gate(&state.root, &id).write_owned().await;
+    let claims = authorize_claims(&state, &headers, &id)?;
+    require_story_link_editor_safe(&open(&state, &id)?.manifest().map_err(hcd_error)?)?;
+    if !collaboration_service(&claims)
+        || headers
+            .get("x-hcd-coordinator-version")
+            .and_then(|value| value.to_str().ok())
+            != Some("4")
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "migration requires the collaboration coordinator".into(),
+        ));
+    }
+    let target = match headers
+        .get("x-hcd-target-protocol")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("hcd-semantic-blocks/3") => CollaborationProtocol::Structure3,
+        Some("hcd-semantic-inline/1") => CollaborationProtocol::Inline1,
+        _ => return Err(bad("unsupported target collaboration protocol")),
+    };
+    if target == CollaborationProtocol::Inline1 {
+        require_inline_containers_support(true, &headers)?;
+        if headers
+            .get("x-hcd-extension-version")
+            .and_then(|value| value.to_str().ok())
+            != Some("3")
+            || headers
+                .get("x-hcd-node-edits-version")
+                .and_then(|value| value.to_str().ok())
+                != Some("7")
+        {
+            return Err(ApiError(
+                StatusCode::UPGRADE_REQUIRED,
+                "inline bootstrap model acknowledgement required".into(),
+            ));
+        }
+        if state.remote.is_some() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "inline bootstrap requires the local coordinator".into(),
+            ));
+        }
+    }
+    if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+        return Err(bad("migration state must be 1-8 MiB"));
+    }
+    let hex = |value: &str, size| {
+        value.len() == size
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let field = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let request = MigrationReceipt {
+        id: field("x-hcd-migration-id")
+            .filter(|value| hex(value, 32))
+            .ok_or_else(|| bad("X-HCD-Migration-Id required"))?
+            .into(),
+        from_epoch: requested_collaboration_epoch(&headers)?,
+        source_hash: field("x-hcd-state-hash")
+            .filter(|value| *value == "none" || hex(value, 64))
+            .ok_or_else(|| bad("X-HCD-State-Hash required"))?
+            .into(),
+        base_revision: field("x-hcd-base-revision")
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| bad("X-HCD-Base-Revision required"))?,
+        state_hash: hash_bytes(&bytes),
+    };
+    let _guard = state.collaboration_lock.lock().await;
+    open(&state, &id)?;
+    if field("x-hcd-collaboration-protocol")
+        .is_some_and(|value| value != CollaborationProtocol::Default1.name())
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "migration requires the legacy source protocol".into(),
+        ));
+    }
+    if let Some(remote) = &state.remote {
+        use crate::hdoc_remote::MigrationResult;
+        return match remote
+            .collaboration_migrate(&id, &request, &bytes)
+            .await
+            .map_err(internal)?
+        {
+            MigrationResult::Saved(metadata, replayed) => {
+                Ok(migration_response(&metadata, replayed))
+            }
+            MigrationResult::SourceChanged => Err(ApiError(
+                StatusCode::PRECONDITION_FAILED,
+                "migration source state changed".into(),
+            )),
+            MigrationResult::HeadChanged => Err(ApiError(
+                StatusCode::CONFLICT,
+                "migration canonical head changed".into(),
+            )),
+            MigrationResult::SessionChanged => Err(ApiError(
+                StatusCode::CONFLICT,
+                "migration session or request changed".into(),
+            )),
+        };
+    }
+    let metadata = collaboration_metadata(&state, &id).await?;
+    if metadata
+        .migration
+        .as_ref()
+        .is_some_and(|receipt| receipt.id == request.id)
+    {
+        if metadata.migration.as_ref() != Some(&request) || metadata.protocol != target {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "migration request ID reused with different contents".into(),
+            ));
+        }
+        return Ok(migration_response(&metadata, true));
+    }
+    check_collaboration_epoch(&state, &id, &headers).await?;
+    if metadata.protocol != CollaborationProtocol::Default1 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "collaboration protocol already migrated".into(),
+        ));
+    }
+    let bundle = open(&state, &id)?;
+    if bundle.manifest().map_err(internal)?.revision != request.base_revision {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "migration canonical head changed".into(),
+        ));
+    }
+    let previous =
+        match tokio::fs::read(collaboration_current_path(&state, &id, metadata.epoch).await?).await
+        {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(internal(error)),
+        };
+    let actual = previous
+        .as_ref()
+        .map(|bytes| hash_bytes(bytes))
+        .unwrap_or_else(|| "none".into());
+    if actual != request.source_hash {
+        return Err(ApiError(
+            StatusCode::PRECONDITION_FAILED,
+            "migration source state changed".into(),
+        ));
+    }
+    if target == CollaborationProtocol::Inline1 {
+        let head = bundle.manifest().map_err(internal)?;
+        if request.source_hash != "none" || previous.is_some() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "inline initialization cannot replace an existing collaboration state".into(),
+            ));
+        }
+        if head.capabilities.extension_nodes != Some(3)
+            || hcd_core::read_flow_document_layout(&bundle, &head)
+                .map_err(hcd_error)?
+                .is_some()
+        {
+            return Err(ApiError(StatusCode::UPGRADE_REQUIRED, "inline initialization requires an explicit non-regional canonical model 3 document".into()));
+        }
+    }
+    let next = CollaborationMetadata {
+        epoch: metadata
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| internal("collaboration epoch limit reached"))?,
+        protocol: target,
+        node_edits: if target == CollaborationProtocol::Inline1 {
+            Some(7)
+        } else {
+            metadata.node_edits
+        },
+        migration: Some(request.clone()),
+    };
+    if let Some(previous) = previous {
+        save_collaboration_recovery(&state, &id, metadata.epoch, &previous).await?;
+    }
+    // An unpublished state uses an owner-specific filename. If publication
+    // fails, a later reset must never adopt that orphan as its legacy state.
+    let destination = state
+        .root
+        .join("collaboration")
+        .join(format!("{id}.epoch-{}.{}.bin", next.epoch, request.id));
+    durable_collaboration_file(&destination, &bytes).await?;
+    write_collaboration_metadata(&state, &id, &next).await?;
+    Ok(migration_response(&next, false))
+}
+
 async fn collaboration_reset(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -947,12 +1788,25 @@ async fn collaboration_put(
     open(&state, &id)?;
     let _guard = state.collaboration_lock.lock().await;
     let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
+    if matches!(
+        collaboration_metadata(&state, &id).await?.protocol,
+        CollaborationProtocol::WordRegions1 | CollaborationProtocol::WordRegions2
+    ) {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "regional room persistence requires its private checkpoint journal".into(),
+        ));
+    }
     if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
         return Err(bad("collaboration state must be 1-8 MiB"));
     }
+    let node_edits = headers
+        .get("x-hcd-node-edits-version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok());
     if let Some(remote) = &state.remote {
         match remote
-            .collaboration_put(&id, epoch, expected_hash, &bytes)
+            .collaboration_put(&id, epoch, expected_hash, &bytes, node_edits)
             .await
             .map_err(internal)?
         {
@@ -960,13 +1814,19 @@ async fn collaboration_put(
                 return Err(ApiError(
                     StatusCode::CONFLICT,
                     "collaboration generation changed; reload the editor".to_string(),
-                ))
+                ));
             }
             crate::hdoc_remote::CollaborationPut::StateChanged => {
                 return Err(ApiError(
                     StatusCode::PRECONDITION_FAILED,
                     "collaboration state changed in another owner".into(),
-                ))
+                ));
+            }
+            crate::hdoc_remote::CollaborationPut::ModelRequired => {
+                return Err(ApiError(
+                    StatusCode::UPGRADE_REQUIRED,
+                    "node-edit-aware coordinator required".into(),
+                ));
             }
             crate::hdoc_remote::CollaborationPut::Saved => {}
         }
@@ -989,6 +1849,13 @@ async fn collaboration_put(
             StatusCode::PRECONDITION_FAILED,
             "collaboration state changed in another owner".into(),
         ));
+    }
+    if let Some(version) = node_edits {
+        let mut metadata = collaboration_metadata(&state, &id).await?;
+        if metadata.node_edits.is_none_or(|current| current < version) {
+            metadata.node_edits = Some(version);
+            write_collaboration_metadata(&state, &id, &metadata).await?;
+        }
     }
     tokio::fs::create_dir_all(destination.parent().expect("state parent"))
         .await
@@ -1022,12 +1889,58 @@ struct ExpectedRevision {
 async fn manifest(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    Ok(Json(
-        serde_json::to_value(open(&state, &id)?.manifest().map_err(internal)?).map_err(internal)?,
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+    Ok(Json(serde_json::to_value(manifest).map_err(internal)?))
+}
+
+/// Small, non-cacheable head check for actions that must not mistake a
+/// delayed revision event for the current saved document.
+async fn document_head(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let head = open(&state, &id)?.manifest().map_err(internal)?;
+    Ok((
+        [(header::CACHE_CONTROL, "private, no-store")],
+        Json(json!({
+            "documentId": head.document_id, "revision": head.revision, "sourceSha256": head.source.sha256
+        })),
     ))
+}
+
+/// Bounded layout metadata only. Navigation must not load the full editor
+/// projection merely to discover Word sections and shared story bindings.
+async fn word_layout(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(hcd_error)?;
+    let (manifest, revision) =
+        manifest_at_revision(&bundle, &head, query.revision).map_err(hcd_error)?;
+    let layout = hcd_core::read_flow_document_layout(&bundle, &manifest).map_err(hcd_error)?;
+    require_flow_layout_support(layout.as_ref().map(flow_layout_protocol), &headers)?;
+    let layout_hash = layout
+        .as_ref()
+        .map(hcd_core::flow_layout_hash)
+        .transpose()
+        .map_err(hcd_error)?;
+    Ok((
+        [(header::CACHE_CONTROL, "private, no-store")],
+        Json(json!({"revision":revision,"layout":layout,"layoutHash":layout_hash})),
+    )
+        .into_response())
 }
 
 async fn pdf_layout_status(
@@ -1041,6 +1954,330 @@ async fn pdf_layout_status(
     let needs_upgrade = hcd_formats::pdf_layout_needs_upgrade(&bundle).map_err(hcd_error)?;
     Ok(Json(
         json!({"revision":head.revision,"needsUpgrade":needs_upgrade}),
+    ))
+}
+
+async fn xlsx_formula_audit(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let source = state.root.join("sources").join(format!("{id}.xlsx"));
+    let outcome = tokio::task::spawn_blocking(move || {
+        let snapshot = hcd_core::create_portable_snapshot(&bundle, query.revision)?;
+        if snapshot.manifest.source.format != "xlsx" {
+            return Err(HcdError::Unsupported(
+                "XLSX formula audit requires a workbook".into(),
+            ));
+        }
+        if !source.try_exists()? {
+            return Err(HcdError::InvalidPatch("XLSX_SOURCE_MISSING".into()));
+        }
+        let frozen = Bundle::open(snapshot.directory.path())?;
+        let count = hcd_formats::audit_xlsx_editable_formula_map(&frozen, &source)?;
+        Ok((snapshot.manifest.revision, count))
+    })
+    .await
+    .map_err(internal)?;
+    authorize(&state, &headers, &id, false)?;
+    let result = outcome.map_err(|error: HcdError| match error {
+        HcdError::InvalidPatch(reason) if reason.starts_with("XLSX_MERGED_CELL_READ_ONLY") => {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "XLSX_MERGED_CELL_READ_ONLY".into(),
+            )
+        }
+        HcdError::InvalidPatch(reason) if reason == "XLSX_SHEET_PROTECTED" => {
+            ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)
+        }
+        HcdError::InvalidPatch(reason) if reason.starts_with("XLSX_FORMULA_READ_ONLY") => ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "XLSX_FORMULA_READ_ONLY".into(),
+        ),
+        HcdError::InvalidPatch(reason) if reason == "XLSX_SOURCE_CHANGED" => {
+            ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)
+        }
+        HcdError::InvalidPatch(reason) if reason == "XLSX_SOURCE_MISSING" => {
+            ApiError(StatusCode::NOT_FOUND, "XLSX_SOURCE_MISSING".into())
+        }
+        other => hcd_error(other),
+    })?;
+    Ok((
+        [(header::CACHE_CONTROL, "private, no-store")],
+        Json(json!({"revision":result.0,"editableCellsChecked":result.1,"sourceFreeEditsAuthorized":false})),
+    ).into_response())
+}
+
+/// Restore only the exact imported source. Existing files are never replaced;
+/// a competing identical restore is idempotent and a conflicting one fails.
+async fn xlsx_restore_source(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Value>, ApiError> {
+    restore_imported_source(state, id, headers, body, "xlsx").await
+}
+
+async fn word_restore_source(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Value>, ApiError> {
+    restore_imported_source(state, id, headers, body, "docx").await
+}
+
+async fn word_source_status(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let manifest = open(&state, &id)?.manifest().map_err(internal)?;
+    if manifest.source.format != "docx" {
+        return Err(bad("Word source status requires a DOCX"));
+    }
+    if state.remote.is_some() {
+        return Ok((
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({"status":"unavailable"})),
+        ));
+    }
+    let path = state.root.join("sources").join(format!("{id}.docx"));
+    let source = manifest.source;
+    let status = tokio::task::spawn_blocking(move || match std::fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing"),
+        Err(error) => Err(error),
+        Ok(metadata)
+            if !metadata.is_file()
+                || metadata.len() != source.size_bytes
+                || metadata.len() > 256 * 1024 * 1024 =>
+        {
+            Ok("invalid")
+        }
+        Ok(_) => hash_file(&path)
+            .map(|hash| {
+                if hash == source.sha256 {
+                    "present"
+                } else {
+                    "invalid"
+                }
+            })
+            .map_err(|error| std::io::Error::other(error.to_string())),
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    let source_free_protected = if status == "missing" {
+        let bundle = open(&state, &id)?;
+        let root = state.root.clone();
+        let secret = state.secret.clone();
+        tokio::task::spawn_blocking(move || {
+            word_source_proof::read(&bundle, &root, &secret)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .await
+        .map_err(internal)?
+    } else {
+        false
+    };
+    authorize(&state, &headers, &id, false)?;
+    Ok((
+        [(header::CACHE_CONTROL, "private, no-store")],
+        Json(json!({"status":status,"sourceFreeProtected":source_free_protected})),
+    ))
+}
+
+async fn restore_imported_source(
+    state: ServerState,
+    id: String,
+    headers: HeaderMap,
+    body: Body,
+    format: &'static str,
+) -> Result<Json<Value>, ApiError> {
+    use sha2::{Digest, Sha256};
+    use std::sync::OnceLock;
+    static UPLOADS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    authorize(&state, &headers, &id, true)?;
+    if state.remote.is_some() {
+        return Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            format!(
+                "{} source restore requires shared source storage",
+                format.to_uppercase()
+            ),
+        ));
+    }
+    let bundle = open(&state, &id)?;
+    let initial = bundle.manifest().map_err(internal)?;
+    if initial.source.format != format {
+        return Err(bad("source format does not match the document"));
+    }
+    if initial.source.size_bytes == 0 || initial.source.size_bytes > 256 * 1024 * 1024 {
+        return Err(bad("source size exceeds limit"));
+    }
+    let _slot = UPLOADS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many source uploads".into(),
+            )
+        })?;
+    let directory = state.root.join("sources");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .map_err(internal)?;
+    let temp = tempfile::Builder::new()
+        .prefix(".hcd-source-")
+        .tempfile_in(&directory)
+        .map_err(internal)?;
+    let mut output = tokio::fs::File::from_std(temp.reopen().map_err(internal)?);
+    let mut stream = body.into_data_stream();
+    let mut size = 0u64;
+    let mut digest = Sha256::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    while let Some(chunk) = tokio::time::timeout_at(deadline, stream.next())
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::REQUEST_TIMEOUT,
+                "source upload timed out".into(),
+            )
+        })?
+    {
+        let chunk = chunk.map_err(bad)?;
+        size = size
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| bad("source size overflow"))?;
+        if size > initial.source.size_bytes {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{}_SOURCE_CHANGED", format.to_uppercase()),
+            ));
+        }
+        digest.update(&chunk);
+        output.write_all(&chunk).await.map_err(internal)?;
+    }
+    output.sync_all().await.map_err(internal)?;
+    drop(output);
+    if size != initial.source.size_bytes
+        || format!("{:x}", digest.finalize()) != initial.source.sha256
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("{}_SOURCE_CHANGED", format.to_uppercase()),
+        ));
+    }
+    authorize(&state, &headers, &id, true)?;
+    let latest = bundle.manifest().map_err(internal)?;
+    if latest.source != initial.source {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("{}_SOURCE_IDENTITY_CHANGED", format.to_uppercase()),
+        ));
+    }
+    let target = directory.join(format!("{id}.{format}"));
+    let already_present = match temp.persist_noclobber(&target) {
+        Ok(_) => false,
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let expected_hash = initial.source.sha256.clone();
+            let existing = target.clone();
+            let valid = tokio::task::spawn_blocking(move || {
+                std::fs::metadata(&existing)
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == size)
+                    && hash_file(&existing).is_ok_and(|hash| hash == expected_hash)
+            })
+            .await
+            .map_err(internal)?;
+            if !valid {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!("{}_SOURCE_CONFLICT", format.to_uppercase()),
+                ));
+            }
+            true
+        }
+        Err(error) => return Err(internal(error.error)),
+    };
+    Ok(Json(
+        json!({"revision":latest.revision,"sourceRestored":true,"alreadyPresent":already_present}),
+    ))
+}
+
+/// Create a local proof only after the exact saved revision and retained
+/// source have been independently audited. Never accept a proof from a client.
+async fn xlsx_formula_proof_create(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ExpectedRevision>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, true)?;
+    if state.remote.is_some() {
+        return Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            "XLSX proof storage is not shared across hosts".into(),
+        ));
+    }
+    let bundle = open(&state, &id)?;
+    if bundle.manifest().map_err(internal)?.revision != request.expected_revision {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "XLSX_AUDIT_REVISION_CHANGED".into(),
+        ));
+    }
+    let source = state.root.join("sources").join(format!("{id}.xlsx"));
+    if !source.is_file() {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "XLSX_SOURCE_MISSING".into(),
+        ));
+    }
+    let root = state.root.clone();
+    let secret = state.secret.clone();
+    let checked = bundle.clone();
+    let count = tokio::task::spawn_blocking(move || {
+        xlsx_formula_proof::create(&checked, &source, &root, &secret, request.expected_revision)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(|error| match error {
+        HcdError::InvalidPatch(reason) if reason.starts_with("XLSX_MERGED_CELL_READ_ONLY") => {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "XLSX_MERGED_CELL_READ_ONLY".into(),
+            )
+        }
+        HcdError::InvalidPatch(reason) if reason == "XLSX_SHEET_PROTECTED" => {
+            ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)
+        }
+        HcdError::InvalidPatch(reason) if reason.starts_with("XLSX_FORMULA_READ_ONLY") => ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "XLSX_FORMULA_READ_ONLY".into(),
+        ),
+        HcdError::InvalidPatch(reason) if reason == "XLSX_SOURCE_CHANGED" => {
+            ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)
+        }
+        other => hcd_error(other),
+    })?;
+    authorize(&state, &headers, &id, true)?;
+    if bundle.manifest().map_err(internal)?.revision != request.expected_revision {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "XLSX_AUDIT_REVISION_CHANGED".into(),
+        ));
+    }
+    Ok(Json(
+        json!({"revision":request.expected_revision,"editableCellsChecked":count,"sourceFreeEditsAuthorized":true,"scope":"this-server"}),
     ))
 }
 
@@ -1077,7 +2314,104 @@ async fn editor(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    let projection = editor_projection(&open(&state, &id)?, query.revision).map_err(bad)?;
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let current_story_head = head.capabilities.word_layout_edits == Some(3)
+        && query
+            .revision
+            .is_none_or(|revision| revision >= head.revision);
+    if !current_story_head
+        && query
+            .revision
+            .is_none_or(|revision| revision >= head.revision)
+    {
+        require_story_link_editor_safe(&head)?;
+    }
+    // Pin the implicit head to the revision whose capabilities were checked.
+    // A concurrent commit must not turn this into a different projection.
+    let revision = query.revision.or(Some(head.revision));
+    let layout_aware_head = head.capabilities.word_layout_edits.is_some()
+        && query
+            .revision
+            .is_none_or(|revision| revision >= head.revision);
+    // Only a fenced layout-aware coordinator can read the current projection
+    // after a layout revision. Legacy clients retain their existing history
+    // reads, but cannot mistake the new head for a writable old-model room.
+    let _guard = if layout_aware_head {
+        Some(state.collaboration_lock.lock().await)
+    } else {
+        None
+    };
+    let _owner = if layout_aware_head {
+        let claims = claims(&state, &headers, &id)?;
+        let coordinator = headers
+            .get("x-hcd-coordinator-version")
+            .and_then(|v| v.to_str().ok());
+        let story_aware = current_story_head
+            && coordinator == Some("7")
+            && headers
+                .get("x-hcd-word-story-version")
+                .and_then(|v| v.to_str().ok())
+                == Some("1");
+        if claims.sub.as_deref() != Some("hcd-collaboration")
+            || !(story_aware || !current_story_head && coordinator == Some("6"))
+            || headers
+                .get("x-hcd-word-layout-version")
+                .and_then(|v| v.to_str().ok())
+                != Some("1")
+        {
+            return Err(ApiError(
+                StatusCode::UPGRADE_REQUIRED,
+                "layout-aware Word coordinator required".into(),
+            ));
+        }
+        require_write(&state, &id, &claims)?;
+        let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
+        if collaboration_metadata(&state, &id).await?.protocol
+            != CollaborationProtocol::WordRegions2
+        {
+            return Err(ApiError(
+                StatusCode::UPGRADE_REQUIRED,
+                "layout-aware Word room required".into(),
+            ));
+        }
+        Some(
+            if headers
+                .get("x-hcd-word-bootstrap")
+                .and_then(|v| v.to_str().ok())
+                == Some("1")
+            {
+                state.word_owners.guard_bootstrap(&id, epoch, &headers)?
+            } else {
+                state.word_owners.guard(&id, epoch, &headers)?
+            },
+        )
+    } else {
+        None
+    };
+    require_inline_containers_support(
+        bundle
+            .manifest()
+            .map_err(internal)?
+            .capabilities
+            .extension_nodes
+            == Some(3),
+        &headers,
+    )?;
+    require_custom_marks_support(
+        bundle
+            .manifest()
+            .map_err(internal)?
+            .capabilities
+            .custom_marks
+            .is_some(),
+        &headers,
+    )?;
+    let projection = editor_projection(&bundle, revision).map_err(bad)?;
+    require_flow_layout_support(
+        projection.flow_layout.as_ref().map(flow_layout_protocol),
+        &headers,
+    )?;
     Ok(Json(serde_json::to_value(projection).map_err(internal)?))
 }
 
@@ -1089,6 +2423,15 @@ async fn project(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, true)?;
     let bundle = open(&state, &id)?;
+    if hcd_core::read_flow_document_layout(&bundle, &bundle.manifest().map_err(internal)?)
+        .map_err(hcd_error)?
+        .is_some()
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "region-aware structural protocol required; no content was saved".into(),
+        ));
+    }
     let result = project_editor(&bundle, request.expected_revision).map_err(hcd_error)?;
     publish_mutation(&state, &id, &bundle, request.expected_revision).await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
@@ -1098,19 +2441,225 @@ async fn patch(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(patch): Json<StructurePatchBatch>,
+    Json(mut patch): Json<StructurePatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&state, &headers, &id, true)?;
+    let identity = authorize_claims(&state, &headers, &id)?;
+    patch.actor = author_actor(&identity, &[]);
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
     let bundle = open(&state, &id)?;
+    if hcd_core::read_flow_document_layout(&bundle, &bundle.manifest().map_err(internal)?)
+        .map_err(hcd_error)?
+        .is_some()
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "region-aware structural protocol required; no content was saved".into(),
+        ));
+    }
+    let existing_extensions = hcd_core::projection_extensions(
+        &hcd_core::editor_projection(&bundle, None).map_err(hcd_error)?,
+    )
+    .map_err(hcd_error)?;
+    let mut custom_marks = bundle
+        .manifest()
+        .map_err(internal)?
+        .capabilities
+        .custom_marks
+        .is_some();
+    let mut proposed_extensions = Vec::new();
+    for operation in &patch.operations {
+        if let StructureOperation::Insert { block, .. }
+        | StructureOperation::Replace { block, .. } = operation
+        {
+            custom_marks |= hcd_core::content_custom_marks(block).map_err(hcd_error)?;
+            proposed_extensions.extend(hcd_core::content_extensions(block).map_err(hcd_error)?);
+        }
+    }
+    require_custom_marks_support(custom_marks, &headers)?;
+    let required_extension = existing_extensions
+        .iter()
+        .chain(&proposed_extensions)
+        .map(|n| n.envelope_version())
+        .max()
+        .unwrap_or(0);
+    if required_extension > 0
+        && headers
+            .get("x-hcd-extension-version")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u32>().ok())
+            .is_none_or(|v| ![1, 2, 3].contains(&v) || v < required_extension)
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "extension-aware client required; no content was saved".into(),
+        ));
+    }
+    require_inline_containers_support(required_extension == 3, &headers)?;
+    let before = hcd_core::document_references(&bundle, None).map_err(hcd_error)?;
+    let mut after = Vec::new();
+    if !before.is_empty()
+        && headers
+            .get("x-hcd-reference-version")
+            .and_then(|v| v.to_str().ok())
+            != Some("1")
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "reference-aware patch client required".into(),
+        ));
+    }
+    for operation in &patch.operations {
+        if let StructureOperation::Insert { block, .. }
+        | StructureOperation::Replace { block, .. } = operation
+        {
+            after.extend(hcd_core::content_references("", block).map_err(hcd_error)?);
+        }
+    }
+    if !after.is_empty() {
+        let identity = claims(&state, &headers, &id)?;
+        let actor = identity
+            .sub
+            .as_deref()
+            .ok_or_else(|| bad("reference writes require a stable actor"))?;
+        people::validate_targets(&state, &id, actor, &before, &after)?;
+    }
+    let head = bundle.manifest().map_err(internal)?;
+    if patch.base_revision == head.revision
+        && patch.operations.iter().any(|operation| {
+            matches!(
+                operation,
+                StructureOperation::Delete { .. }
+                    | StructureOperation::Move { .. }
+                    | StructureOperation::Replace { .. }
+            )
+        })
+    {
+        let protected = legacy_word_protected_nodes(&state, &id, &bundle, &head).await?;
+        if !protected.is_empty() {
+            let current = editor_projection(&bundle, None).map_err(hcd_error)?;
+            let protected_blocks: HashSet<_> = current
+                .blocks
+                .iter()
+                .filter(|block| {
+                    snapshot_source_inlines(&block.content)
+                        .iter()
+                        .any(|inline| {
+                            inline
+                                .node_id
+                                .as_ref()
+                                .is_some_and(|node| protected.contains(node))
+                        })
+                })
+                .map(|block| block.block_id.as_str())
+                .collect();
+            if patch.operations.iter().any(|operation| match operation {
+                StructureOperation::Delete { block_id, .. }
+                | StructureOperation::Move { block_id, .. }
+                | StructureOperation::Replace { block_id, .. } => {
+                    protected_blocks.contains(block_id.as_str())
+                }
+                _ => false,
+            }) {
+                return Err(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "DOCX_SOURCE_TEXT_READ_ONLY".into(),
+                ));
+            }
+        }
+    }
     let result = apply_structure_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
     if !result.idempotent_replay {
         publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
         reset_collaboration(&state, &id).await?;
     }
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
+}
+
+fn require_custom_marks_support(required: bool, headers: &HeaderMap) -> Result<(), ApiError> {
+    let version = headers
+        .get("x-hcd-custom-marks-version")
+        .and_then(|value| value.to_str().ok());
+    if version.is_some_and(|v| v != "1") || required && version != Some("1") {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "custom-text-mark-aware client required; no content was saved".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn flow_layout_protocol(layout: &hcd_core::FlowDocumentLayout) -> u32 {
+    if layout.schema_version == hcd_core::FLOW_REGION_LAYOUT_SCHEMA {
+        2
+    } else {
+        1
+    }
+}
+
+// Layout-only revisions need a new coordinated room protocol. A legacy room
+// cannot adopt the new fence or preserve its pending edits safely, even if it
+// happens to supply the older flow-layout/2 header. Keep recovery and export
+// reads available until that protocol is implemented.
+fn require_legacy_word_layout_safe(manifest: &hcd_core::HcdManifest) -> Result<(), ApiError> {
+    if manifest.capabilities.word_layout_edits.is_some() {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "Word layout revision requires a coordinated layout-aware editor; no content was saved"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_story_link_editor_safe(manifest: &hcd_core::HcdManifest) -> Result<(), ApiError> {
+    if matches!(manifest.capabilities.word_layout_edits, Some(2 | 3)) {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "Word story link history requires a newer collaboration protocol; no content was saved"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn require_legacy_word_room_safe(state: &ServerState, id: &str) -> Result<(), ApiError> {
+    if collaboration_metadata(state, id).await?.protocol == CollaborationProtocol::WordRegions2 {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "layout-aware Word coordinator required; no content was saved".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_flow_layout_support(required: Option<u32>, headers: &HeaderMap) -> Result<(), ApiError> {
+    let version = headers
+        .get("x-hcd-flow-layout-version")
+        .and_then(|value| value.to_str().ok());
+    if version.is_some_and(|value| !["1", "2"].contains(&value))
+        || required.is_some_and(|required| version != Some(if required == 2 { "2" } else { "1" }))
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "section/story-aware client required; no content was saved".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_inline_containers_support(required: bool, headers: &HeaderMap) -> Result<(), ApiError> {
+    let version = headers
+        .get("x-hcd-inline-containers-version")
+        .and_then(|value| value.to_str().ok());
+    if version.is_some_and(|value| value != "1") || required && version != Some("1") {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "editable-inline-container-aware client required; no content was saved".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1132,6 +2681,19 @@ struct SnapshotRequest {
     images: Vec<SnapshotImage>,
     #[serde(default)]
     contributors: Vec<Contributor>,
+    #[serde(default)]
+    reference_authors: Vec<ReferenceAuthor>,
+    #[serde(default)]
+    reference_version: Option<u32>,
+    #[serde(default)]
+    extension_version: Option<u32>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReferenceAuthor {
+    mention_id: String,
+    user_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1144,24 +2706,33 @@ struct SnapshotImage {
     precondition: VisualPrecondition,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Contributor {
     user_id: String,
     display_name: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SnapshotBlock {
     block_id: Option<String>,
     content: EditorBlockContent,
 }
 
-fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
+fn normalized(content: EditorBlockContent) -> EditorBlockContent {
+    normalize_content(content, false)
+}
+
+fn normalize_content(mut content: EditorBlockContent, retain_sources: bool) -> EditorBlockContent {
     let mut inlines: Vec<EditorInline> = Vec::new();
     for mut inline in content.inlines {
-        inline.node_id = None;
+        if let Some(body) = inline.content.take() {
+            inline.content = Some(Box::new(normalize_content(*body, retain_sources)));
+        }
+        if !retain_sources {
+            inline.node_id = None;
+        }
         if inline
             .typography
             .as_ref()
@@ -1169,11 +2740,13 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
         {
             inline.typography = None;
         }
-        if inline.text.is_empty() {
+        if inline.text.is_empty() && inline.content.is_none() {
             continue;
         }
         if let Some(previous) = inlines.last_mut() {
-            if previous.bold == inline.bold
+            if (!retain_sources || previous.node_id == inline.node_id)
+                && previous.custom_marks == inline.custom_marks
+                && previous.bold == inline.bold
                 && previous.italic == inline.italic
                 && previous.link == inline.link
                 && previous.text_color == inline.text_color
@@ -1186,6 +2759,12 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
                 && previous.code == inline.code
                 && !previous.hard_break
                 && !inline.hard_break
+                && previous.extension.is_none()
+                && inline.extension.is_none()
+                && previous.reference.is_none()
+                && inline.reference.is_none()
+                && previous.content.is_none()
+                && inline.content.is_none()
             {
                 previous.text.push_str(&inline.text);
                 continue;
@@ -1194,8 +2773,236 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
         inlines.push(inline);
     }
     content.inlines = inlines;
-    content.children = content.children.into_iter().map(normalized).collect();
+    content.children = content
+        .children
+        .into_iter()
+        .map(|child| normalize_content(child, retain_sources))
+        .collect();
     content
+}
+
+fn snapshot_source_inlines(content: &EditorBlockContent) -> Vec<&EditorInline> {
+    fn visit<'a>(content: &'a EditorBlockContent, output: &mut Vec<&'a EditorInline>) {
+        for inline in &content.inlines {
+            output.push(inline);
+            if let Some(body) = &inline.content {
+                visit(body, output);
+            }
+        }
+        for child in &content.children {
+            visit(child, output);
+        }
+    }
+    let mut output = Vec::new();
+    visit(content, &mut output);
+    output
+}
+
+fn validate_legacy_word_snapshot(
+    current: &EditorProjection,
+    requested: &[SnapshotBlock],
+    protected: &HashSet<String>,
+) -> Result<(), ApiError> {
+    for block in editor_surface(current) {
+        if !snapshot_source_inlines(&block.content)
+            .iter()
+            .any(|inline| {
+                inline
+                    .node_id
+                    .as_ref()
+                    .is_some_and(|id| protected.contains(id))
+            })
+        {
+            continue;
+        }
+        let mut matching = requested
+            .iter()
+            .filter(|candidate| candidate.block_id.as_deref() == Some(block.block_id.as_str()));
+        let preserved = matching.next().is_some_and(|candidate| {
+            normalized(candidate.content.clone()) == normalized(block.content.clone())
+        }) && matching.next().is_none();
+        if !preserved {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("DOCX_SOURCE_TEXT_READ_ONLY:{}", block.block_id),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn legacy_word_protected_nodes(
+    state: &ServerState,
+    id: &str,
+    bundle: &Bundle,
+    manifest: &hcd_core::HcdManifest,
+) -> Result<HashSet<String>, ApiError> {
+    if manifest.source.format != "docx" || manifest.capabilities.flow_layout.is_some() {
+        return Ok(HashSet::new());
+    }
+    let source = state.root.join("sources").join(format!("{id}.docx"));
+    match std::fs::metadata(&source) {
+        Ok(metadata) if metadata.is_file() => {
+            let bundle = bundle.clone();
+            let root = state.root.clone();
+            let secret = state.secret.clone();
+            let local = state.remote.is_none();
+            tokio::task::spawn_blocking(move || {
+                let protected = hcd_docx::legacy_read_only_nodes(&bundle, &source)?;
+                // Failure to record a proof must not block a source-verified save.
+                if local
+                    && !matches!(word_source_proof::read(&bundle, &root, &secret), Ok(Some(existing)) if existing == protected)
+                {
+                    let _ = word_source_proof::create(&bundle, &source, &root, &secret);
+                }
+                Ok::<_, HcdError>(protected)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(hcd_error)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if state.remote.is_none() {
+                let bundle = bundle.clone();
+                let root = state.root.clone();
+                let secret = state.secret.clone();
+                if let Some(protected) = tokio::task::spawn_blocking(move || {
+                    word_source_proof::read(&bundle, &root, &secret)
+                })
+                .await
+                .map_err(internal)?
+                .map_err(hcd_error)?
+                {
+                    return Ok(protected);
+                }
+            }
+            Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "DOCX_SOURCE_REQUIRED".into(),
+            ))
+        }
+        Ok(_) => Err(internal("DOCX source is not a file")),
+        Err(error) => Err(internal(error)),
+    }
+}
+
+/// Source ownership may move only out of roots changed by this snapshot. An
+/// existing owner keeps a shared split ID; otherwise the first target keeps it.
+/// All other fragments receive fresh IDs, and native apply validates the same
+/// changed-root scope and final global uniqueness before publication.
+fn snapshot_source_plans(
+    current: &EditorProjection,
+    requested: &[SnapshotBlock],
+) -> Result<HashMap<usize, EditorBlockContent>, HcdError> {
+    let originals: HashMap<_, _> = current
+        .blocks
+        .iter()
+        .filter(|block| block.region == "body")
+        .map(|block| (block.block_id.as_str(), block))
+        .collect();
+    let retained: HashSet<_> = requested
+        .iter()
+        .filter_map(|block| block.block_id.as_deref())
+        .filter(|id| originals.contains_key(id))
+        .collect();
+    let marginal_ids: HashSet<_> = current
+        .blocks
+        .iter()
+        .filter(|block| marginal_region(&block.region))
+        .map(|block| block.block_id.as_str())
+        .collect();
+    let indices: Vec<_> = requested
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| {
+            if let Some(original) = block.block_id.as_deref().and_then(|id| originals.get(id)) {
+                normalized(block.content.clone()) != normalized(original.content.clone())
+            } else {
+                !block
+                    .block_id
+                    .as_deref()
+                    .is_some_and(|id| marginal_ids.contains(id))
+            }
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let changed: HashSet<_> = indices
+        .iter()
+        .filter_map(|index| requested[*index].block_id.as_deref())
+        .filter(|id| originals.contains_key(id))
+        .collect();
+    let wanted: HashSet<_> = indices
+        .iter()
+        .flat_map(|index| {
+            snapshot_source_inlines(&requested[*index].content)
+                .into_iter()
+                .filter_map(|inline| inline.node_id.clone())
+        })
+        .collect();
+    let scope = hcd_core::ReplacementSources::capture(
+        current
+            .blocks
+            .iter()
+            .filter(|block| {
+                block.region == "body"
+                    && (!retained.contains(block.block_id.as_str())
+                        || changed.contains(block.block_id.as_str()))
+            })
+            .map(|block| &block.content),
+        &wanted,
+    );
+    let mut plans = HashMap::new();
+    for index in &indices {
+        plans.insert(
+            *index,
+            scope.retain(normalize_content(requested[*index].content.clone(), true))?,
+        );
+    }
+    let mut owners = HashMap::new();
+    for block in originals.values() {
+        for inline in snapshot_source_inlines(&block.content) {
+            if let Some(id) = &inline.node_id {
+                owners.insert(id.as_str(), block.block_id.as_str());
+            }
+        }
+    }
+    let mut winners: HashMap<String, usize> = HashMap::new();
+    for index in indices {
+        for inline in snapshot_source_inlines(&plans[&index]) {
+            if let Some(id) = &inline.node_id {
+                if owners.get(id.as_str()).copied() == requested[index].block_id.as_deref() {
+                    winners.insert(id.clone(), index);
+                } else {
+                    winners.entry(id.clone()).or_insert(index);
+                }
+            }
+        }
+    }
+    fn clear_other(
+        content: &mut EditorBlockContent,
+        index: usize,
+        winners: &HashMap<String, usize>,
+    ) {
+        for inline in &mut content.inlines {
+            if let Some(body) = &mut inline.content {
+                clear_other(body, index, winners);
+            }
+            if inline
+                .node_id
+                .as_ref()
+                .is_some_and(|id| winners.get(id) != Some(&index))
+            {
+                inline.node_id = None;
+            }
+        }
+        for child in &mut content.children {
+            clear_other(child, index, winners);
+        }
+    }
+    for (index, content) in &mut plans {
+        clear_other(content, *index, &winners);
+    }
+    Ok(plans)
 }
 
 // Keep source anchors when the editor changed only text inside the same runs.
@@ -1223,6 +3030,7 @@ fn editor_inline_pairs<'a, 'b>(
         || before.language != after.language
         || before.list_start != after.list_start
         || before.inlines.len() != after.inlines.len()
+        || before.extension != after.extension
         || before.children.len() != after.children.len()
     {
         return false;
@@ -1284,8 +3092,12 @@ fn text_only_operations(
         }
         for (before, after) in pairs {
             if before.bold != after.bold
+                || before.content != after.content
+                || before.custom_marks != after.custom_marks
                 || before.italic != after.italic
                 || before.link != after.link
+                || before.reference != after.reference
+                || before.extension != after.extension
                 || before.text_color != after.text_color
                 || before.background_color != after.background_color
                 || before.border != after.border
@@ -1300,6 +3112,9 @@ fn text_only_operations(
             }
             if before.text == after.text {
                 continue;
+            }
+            if before.reference.is_some() || before.extension.is_some() {
+                return None;
             }
             if original.read_only && before.node_id.is_none() {
                 return None;
@@ -1358,6 +3173,11 @@ fn source_changes(
     after: &EditorBlockContent,
     output: &mut BTreeMap<String, SourceTextChange>,
 ) -> Result<bool, HcdError> {
+    // A block atom's fallback is not independently editable source text. Any
+    // envelope change must take the complete structural replacement path.
+    if before.extension.is_some() || after.extension.is_some() {
+        return Ok(false);
+    }
     if before.kind != after.kind
         || before.level != after.level
         || before.language != after.language
@@ -1395,6 +3215,8 @@ fn source_changes(
             desired.entry(id.clone()).or_default().push(inline.clone());
         } else {
             if !inline.hard_break
+                && inline.reference.is_none()
+                && inline.extension.is_none()
                 && !inline.text.is_empty()
                 && !before
                     .inlines
@@ -1413,6 +3235,13 @@ fn source_changes(
     }
     for (id, before) in original {
         let after = desired.remove(&id).unwrap_or_default();
+        if before
+            .iter()
+            .any(|inline| inline.reference.is_some() || inline.extension.is_some())
+            && before != after
+        {
+            return Ok(false);
+        }
         let style = inline_without_size(&before[0]);
         if before
             .iter()
@@ -1643,6 +3472,7 @@ fn presentation_style_operations(
         }
         if desired.kind != original.content.kind
             || desired.level != original.content.level
+            || desired.extension != original.content.extension
             || desired.children != normalized(original.content.clone()).children
             || desired.language != original.content.language
             || desired.list_start != original.content.list_start
@@ -1667,9 +3497,13 @@ fn presentation_style_operations(
         }
         for (before, after) in original.content.inlines.iter().zip(&desired.inlines) {
             if before.text != after.text
+                || before.content != after.content
+                || before.custom_marks != after.custom_marks
                 || before.bold != after.bold
                 || before.italic != after.italic
                 || before.link != after.link
+                || before.reference != after.reference
+                || before.extension != after.extension
                 || before.underline != after.underline
                 || before.strike != after.strike
                 || before.code != after.code
@@ -1722,7 +3556,11 @@ fn author_actor(claims: &Claims, contributors: &[Contributor]) -> BTreeMap<Strin
     let mut people = Vec::new();
     let service = claims.sub.as_deref() == Some("hcd-collaboration");
     if !service {
-        if let Some(id) = claims.sub.clone().filter(|id| valid_id(id)) {
+        if let Some(id) = claims
+            .sub
+            .clone()
+            .filter(|id| access_policy::valid_subject(id))
+        {
             let name = claims
                 .name
                 .clone()
@@ -1732,7 +3570,9 @@ fn author_actor(claims: &Claims, contributors: &[Contributor]) -> BTreeMap<Strin
         }
     } else {
         for person in contributors.iter().take(16) {
-            if !valid_id(&person.user_id) || !valid_display_name(&person.display_name) {
+            if !access_policy::valid_subject(&person.user_id)
+                || !valid_display_name(&person.display_name)
+            {
                 continue;
             }
             if people.iter().any(|(id, _)| id == &person.user_id) {
@@ -1774,9 +3614,13 @@ fn require_typography_support(
     fn has_typography(content: &EditorBlockContent) -> bool {
         content.inlines.iter().any(|inline| {
             inline
-                .typography
+                .content
                 .as_ref()
-                .is_some_and(|font| !font.is_empty())
+                .is_some_and(|body| has_typography(body))
+                || inline
+                    .typography
+                    .as_ref()
+                    .is_some_and(|font| !font.is_empty())
         }) || content.children.iter().any(has_typography)
     }
     if version.is_some_and(|value| value != 2)
@@ -1816,7 +3660,11 @@ fn coordinator_patch_id(
         .ok_or_else(|| bad("invalid coordinatorDigest"))?;
     // Preserve existing text-only signed receipts. New combined attempts bind
     // both exact bodies, so a retry cannot silently replace image properties.
-    let body = if request.images.is_empty() {
+    let body = if !request.reference_authors.is_empty() {
+        serde_json::to_vec(
+            &json!({"blocks":request.blocks,"images":request.images,"referenceAuthors":request.reference_authors}),
+        )
+    } else if request.images.is_empty() {
         serde_json::to_vec(&request.blocks)
     } else {
         serde_json::to_vec(&json!({"blocks": request.blocks, "images": request.images}))
@@ -1886,8 +3734,32 @@ async fn checkpoint(
     }
     let _guard = state.collaboration_lock.lock().await;
     let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
+    let access = load_access(&state, &id)?;
+    if access.restricted()
+        && (request.contributors.is_empty()
+            || request
+                .contributors
+                .iter()
+                .any(|person| !access.can_write(Some(&person.user_id))))
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "checkpoint contributors no longer have document write access".into(),
+        ));
+    }
     let checkpoint_id = coordinator_patch_id(&state, &id, epoch, &request)?;
-    let actor = author_actor(&claims, &request.contributors);
+    let mut actor = author_actor(&claims, &request.contributors);
+    if !request.reference_authors.is_empty() {
+        let authors: BTreeMap<_, _> = request
+            .reference_authors
+            .iter()
+            .map(|entry| (entry.mention_id.clone(), entry.user_id.clone()))
+            .collect();
+        actor.insert(
+            "referenceAuthors".into(),
+            serde_json::to_string(&authors).map_err(internal)?,
+        );
+    }
     if request.images.len() > 1000 {
         return Err(bad("snapshot image limit exceeded"));
     }
@@ -1904,6 +3776,26 @@ async fn checkpoint(
     }
     let bundle = open(&state, &id)?;
     let head = bundle.manifest().map_err(internal)?;
+    if hcd_core::read_flow_document_layout(&bundle, &head)
+        .map_err(hcd_error)?
+        .is_some()
+    {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "region-aware coordinated snapshot required; no content was saved".into(),
+        ));
+    }
+    let mut custom_marks = head.capabilities.custom_marks.is_some();
+    let mut inline_containers = head.capabilities.extension_nodes == Some(3);
+    for block in &request.blocks {
+        custom_marks |= hcd_core::content_custom_marks(&block.content).map_err(hcd_error)?;
+        inline_containers |= hcd_core::content_extensions(&block.content)
+            .map_err(hcd_error)?
+            .iter()
+            .any(|node| node.envelope_version() == 3);
+    }
+    require_inline_containers_support(inline_containers, &headers)?;
+    require_custom_marks_support(custom_marks, &headers)?;
     if let Some(number) = request
         .expected_revision
         .checked_add(1)
@@ -1919,6 +3811,7 @@ async fn checkpoint(
         }
     }
     let current = editor_projection(&bundle, None).map_err(bad)?;
+    people::validate_snapshot(&state, &id, &current, &request)?;
     require_typography_support(&current, request.typography_version)?;
     if current.revision != request.expected_revision {
         return Err(ApiError(
@@ -1929,6 +3822,11 @@ async fn checkpoint(
             ),
         ));
     }
+    // Older imports did not mark field caches read-only. Authenticate the
+    // retained original and check the whole snapshot before choosing either
+    // the text or structural save path. Replays have already returned above.
+    let protected = legacy_word_protected_nodes(&state, &id, &bundle, &head).await?;
+    validate_legacy_word_snapshot(&current, &request.blocks, &protected)?;
     let mut image_operations = Vec::new();
     for image in &request.images {
         let original = get_image_node(&bundle, &image.node_id).map_err(hcd_error)?;
@@ -2036,141 +3934,7 @@ async fn checkpoint(
         )
         .await;
     }
-    let existing: HashMap<&str, _> = current
-        .blocks
-        .iter()
-        .filter(|block| block.region == "body")
-        .map(|block| (block.block_id.as_str(), block))
-        .collect();
-    let marginal: HashMap<&str, _> = current
-        .blocks
-        .iter()
-        .filter(|block| marginal_region(&block.region))
-        .map(|block| (block.block_id.as_str(), block))
-        .collect();
-    let mut desired_seen = HashSet::new();
-    let mut desired_known = Vec::new();
-    for block in &request.blocks {
-        if let Some(block_id) = &block.block_id {
-            if let Some(original) = marginal.get(block_id.as_str()) {
-                if !desired_seen.insert(block_id.as_str()) {
-                    return Err(bad("duplicate block ID in snapshot"));
-                }
-                if normalized(block.content.clone()) != normalized(original.content.clone()) {
-                    return Err(bad(
-                        "header, footer, and note text must be saved as a text splice",
-                    ));
-                }
-                continue;
-            }
-            if let Some(original) = existing.get(block_id.as_str()) {
-                if !desired_seen.insert(block_id.as_str()) {
-                    return Err(bad("duplicate block ID in snapshot"));
-                }
-                if original.read_only
-                    && normalized(block.content.clone()) != normalized(original.content.clone())
-                {
-                    return Err(bad("read-only block was changed"));
-                }
-                desired_known.push(block_id.clone());
-            } else if !block_id.starts_with("tmp_") {
-                return Err(bad("unknown canonical block ID"));
-            }
-        }
-    }
-    if current.blocks.iter().any(|block| {
-        block.region == "body" && block.read_only && !desired_seen.contains(block.block_id.as_str())
-    }) {
-        return Err(bad("read-only block was removed"));
-    }
-    if marginal
-        .keys()
-        .any(|block_id| !desired_seen.contains(block_id))
-    {
-        return Err(bad("header, footer, or note block was removed"));
-    }
-    let mut operations = Vec::new();
-    let mut live: Vec<String> = current
-        .blocks
-        .iter()
-        .filter(|block| block.region == "body")
-        .map(|block| block.block_id.clone())
-        .collect();
-    for original in current.blocks.iter().filter(|block| block.region == "body") {
-        if !desired_seen.contains(original.block_id.as_str()) {
-            operations.push(StructureOperation::Delete {
-                block_id: original.block_id.clone(),
-                precondition: BlockPrecondition {
-                    block_hash: original.block_hash.clone(),
-                },
-            });
-            live.retain(|id| id != &original.block_id);
-        }
-    }
-    for (target, block_id) in desired_known.iter().enumerate() {
-        let position = live
-            .iter()
-            .position(|value| value == block_id)
-            .ok_or_else(|| internal("snapshot retained block disappeared"))?;
-        if position != target {
-            let original = existing[block_id.as_str()];
-            if original.read_only {
-                return Err(bad("read-only block cannot move"));
-            }
-            let previous = target
-                .checked_sub(1)
-                .map(|index| desired_known[index].clone());
-            operations.push(StructureOperation::Move {
-                block_id: block_id.clone(),
-                after_block_id: previous,
-                precondition: BlockPrecondition {
-                    block_hash: original.block_hash.clone(),
-                },
-            });
-            live.remove(position);
-            live.insert(target, block_id.clone());
-        }
-    }
-    for block in &request.blocks {
-        let Some(block_id) = block.block_id.as_deref() else {
-            continue;
-        };
-        let Some(original) = existing.get(block_id) else {
-            continue;
-        };
-        let desired = normalized(block.content.clone());
-        if desired != normalized(original.content.clone()) {
-            if original.read_only {
-                return Err(bad("read-only block cannot be replaced"));
-            }
-            operations.push(StructureOperation::Replace {
-                block_id: block_id.to_string(),
-                block: desired,
-                precondition: BlockPrecondition {
-                    block_hash: original.block_hash.clone(),
-                },
-            });
-        }
-    }
-    for index in (0..request.blocks.len()).rev() {
-        let block = &request.blocks[index];
-        if block.block_id.as_ref().is_some_and(|value| {
-            existing.contains_key(value.as_str()) || marginal.contains_key(value.as_str())
-        }) {
-            continue;
-        }
-        let previous = request.blocks[..index].iter().rev().find_map(|value| {
-            value
-                .block_id
-                .as_ref()
-                .filter(|id| existing.contains_key(id.as_str()))
-                .cloned()
-        });
-        operations.push(StructureOperation::Insert {
-            after_block_id: previous,
-            block: normalized(block.content.clone()),
-        });
-    }
+    let mut operations = plan_snapshot_structure(&current, &request.blocks)?;
     operations.extend(request.images.iter().map(|image| match &image.asset_hash {
         Some(asset_hash) => StructureOperation::ImageReplace {
             node_id: image.node_id.clone(),
@@ -2210,20 +3974,274 @@ async fn checkpoint(
     .await
 }
 
+/// Shared structural planning for a complete semantic surface. Regional
+/// callers provide one validated scope, never a body assembled across stories.
+fn plan_snapshot_structure(
+    current: &EditorProjection,
+    requested: &[SnapshotBlock],
+) -> Result<Vec<StructureOperation>, ApiError> {
+    let existing: HashMap<&str, _> = current
+        .blocks
+        .iter()
+        .filter(|block| block.region == "body")
+        .map(|block| (block.block_id.as_str(), block))
+        .collect();
+    let marginal: HashMap<&str, _> = current
+        .blocks
+        .iter()
+        .filter(|block| marginal_region(&block.region))
+        .map(|block| (block.block_id.as_str(), block))
+        .collect();
+    let mut desired_seen = HashSet::new();
+    let mut desired_known = Vec::new();
+    for block in requested {
+        if let Some(block_id) = &block.block_id {
+            if let Some(original) = marginal.get(block_id.as_str()) {
+                if !desired_seen.insert(block_id.as_str()) {
+                    return Err(bad("duplicate block ID in snapshot"));
+                }
+                if normalized(block.content.clone()) != normalized(original.content.clone()) {
+                    return Err(bad(
+                        "header, footer, and note text must be saved as a text splice",
+                    ));
+                }
+                continue;
+            }
+            if let Some(original) = existing.get(block_id.as_str()) {
+                if !desired_seen.insert(block_id.as_str()) {
+                    return Err(bad("duplicate block ID in snapshot"));
+                }
+                if original.read_only
+                    && normalized(block.content.clone()) != normalized(original.content.clone())
+                {
+                    return Err(bad("read-only block was changed"));
+                }
+                desired_known.push(block_id.clone());
+            } else if !block_id.starts_with("tmp_") {
+                return Err(bad("unknown canonical block ID"));
+            }
+        }
+    }
+    if current.blocks.iter().any(|block| {
+        block.region == "body" && block.read_only && !desired_seen.contains(block.block_id.as_str())
+    }) {
+        return Err(bad("read-only block was removed"));
+    }
+    if marginal
+        .keys()
+        .any(|block_id| !desired_seen.contains(block_id))
+    {
+        return Err(bad("header, footer, or note block was removed"));
+    }
+    let source_plans = snapshot_source_plans(current, requested).map_err(hcd_error)?;
+    let mut operations = Vec::new();
+    let live: Vec<String> = current
+        .blocks
+        .iter()
+        .filter(|block| block.region == "body" && desired_seen.contains(block.block_id.as_str()))
+        .map(|block| block.block_id.clone())
+        .collect();
+    for original in current.blocks.iter().filter(|block| block.region == "body") {
+        if !desired_seen.contains(original.block_id.as_str()) {
+            operations.push(StructureOperation::Delete {
+                block_id: original.block_id.clone(),
+                precondition: BlockPrecondition {
+                    block_hash: original.block_hash.clone(),
+                },
+            });
+        }
+    }
+    // Plan reorders as a linked sequence. Repeated Vec::position would turn
+    // a text edit in a large, otherwise unchanged document into quadratic work.
+    let mut previous: HashMap<String, Option<String>> = live
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id.clone(),
+                index.checked_sub(1).map(|index| live[index].clone()),
+            )
+        })
+        .collect();
+    let mut next: HashMap<String, Option<String>> = live
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.clone(), live.get(index + 1).cloned()))
+        .collect();
+    let mut first = live.first().cloned();
+    for (target, block_id) in desired_known.iter().enumerate() {
+        let anchor = target
+            .checked_sub(1)
+            .map(|index| desired_known[index].clone());
+        let old_previous = previous
+            .get(block_id)
+            .ok_or_else(|| internal("snapshot retained block disappeared"))?
+            .clone();
+        if old_previous == anchor {
+            continue;
+        }
+        let original = existing[block_id.as_str()];
+        if original.read_only {
+            return Err(bad("read-only block cannot move"));
+        }
+        operations.push(StructureOperation::Move {
+            block_id: block_id.clone(),
+            after_block_id: anchor.clone(),
+            precondition: BlockPrecondition {
+                block_hash: original.block_hash.clone(),
+            },
+        });
+        let old_next = next[block_id].clone();
+        if let Some(id) = &old_previous {
+            next.insert(id.clone(), old_next.clone());
+        } else {
+            first = old_next.clone();
+        }
+        if let Some(id) = old_next {
+            previous.insert(id, old_previous);
+        }
+        let following = if let Some(id) = &anchor {
+            next[id].clone()
+        } else {
+            first.clone()
+        };
+        if let Some(id) = &anchor {
+            next.insert(id.clone(), Some(block_id.clone()));
+        } else {
+            first = Some(block_id.clone());
+        }
+        if let Some(id) = &following {
+            previous.insert(id.clone(), Some(block_id.clone()));
+        }
+        previous.insert(block_id.clone(), anchor);
+        next.insert(block_id.clone(), following);
+    }
+    for (request_index, block) in requested.iter().enumerate() {
+        let Some(block_id) = block.block_id.as_deref() else {
+            continue;
+        };
+        let Some(original) = existing.get(block_id) else {
+            continue;
+        };
+        let desired = normalized(block.content.clone());
+        if desired != normalized(original.content.clone()) {
+            if original.read_only {
+                return Err(bad("read-only block cannot be replaced"));
+            }
+            operations.push(StructureOperation::Replace {
+                block_id: block_id.to_string(),
+                block: source_plans
+                    .get(&request_index)
+                    .ok_or_else(|| internal("replacement source plan missing"))?
+                    .clone(),
+                precondition: BlockPrecondition {
+                    block_hash: original.block_hash.clone(),
+                },
+            });
+        }
+    }
+    for index in (0..requested.len()).rev() {
+        let block = &requested[index];
+        if block.block_id.as_ref().is_some_and(|value| {
+            existing.contains_key(value.as_str()) || marginal.contains_key(value.as_str())
+        }) {
+            continue;
+        }
+        let previous = requested[..index].iter().rev().find_map(|value| {
+            value
+                .block_id
+                .as_ref()
+                .filter(|id| existing.contains_key(id.as_str()))
+                .cloned()
+        });
+        operations.push(StructureOperation::Insert {
+            after_block_id: previous,
+            block: source_plans
+                .get(&index)
+                .ok_or_else(|| internal("insert source plan missing"))?
+                .clone(),
+        });
+    }
+    Ok(operations)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AssetExtensionQuery {
     extension: String,
 }
 
-fn image_magic(extension: &str, bytes: &[u8]) -> bool {
-    match extension {
-        "png" => bytes.len() >= 8 && bytes[..8] == [137, 80, 78, 71, 13, 10, 26, 10],
-        "jpg" | "jpeg" => bytes.len() >= 3 && bytes[..3] == [0xff, 0xd8, 0xff],
-        "gif" => bytes.len() >= 6 && matches!(&bytes[..6], b"GIF87a" | b"GIF89a"),
-        "webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
-        _ => false,
+use crate::hdoc_asset_mime::image_magic;
+
+fn resource_stage_error(error: HcdError) -> ApiError {
+    match error {
+        HcdError::RevisionConflict(ref reason)
+            if reason == "another local HCD mutation is already in progress" =>
+        {
+            ApiError(StatusCode::CONFLICT, "HCD_RESOURCE_BUSY".into())
+        }
+        other => hcd_error(other),
     }
+}
+
+async fn stage_resource(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<AssetExtensionQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, true)?;
+    let extension = query.extension.to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "bin" | "png" | "jpg" | "jpeg" | "gif" | "webp"
+    ) || body.is_empty()
+        || body.len() > 8 * 1024 * 1024
+        || extension != "bin" && !image_magic(&extension, &body)
+    {
+        return Err(bad("invalid resource type, size or image signature"));
+    }
+    let descriptor = open(&state, &id)?
+        .stage_asset_from_reader(&extension, &mut std::io::Cursor::new(body.as_ref()))
+        .map_err(resource_stage_error)?;
+    Ok(Json(serde_json::to_value(descriptor).map_err(internal)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResourceReuseRequest {
+    hash: String,
+    extension: String,
+    byte_length: u64,
+}
+
+async fn restage_resource(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ResourceReuseRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, true)?;
+    let bundle = open(&state, &id)?;
+    let descriptor = tokio::task::spawn_blocking(move || {
+        bundle.restage_existing_resource(
+            &request.hash,
+            &request.extension.to_ascii_lowercase(),
+            request.byte_length,
+        )
+    })
+    .await
+    .map_err(internal)?
+    .map_err(resource_stage_error)?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            "resource not found in this document".into(),
+        )
+    })?;
+    authorize(&state, &headers, &id, true)?;
+    Ok(Json(serde_json::to_value(descriptor).map_err(internal)?))
 }
 
 async fn stage_image(
@@ -2247,7 +4265,7 @@ async fn stage_image(
     let bundle = open(&state, &id)?;
     let descriptor = bundle
         .stage_asset_from_reader(&extension, &mut std::io::Cursor::new(body.as_ref()))
-        .map_err(hcd_error)?;
+        .map_err(resource_stage_error)?;
     Ok(Json(serde_json::to_value(descriptor).map_err(internal)?))
 }
 
@@ -2329,8 +4347,10 @@ async fn replace_image(
     Json(request): Json<ImageReplaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let claims = authorize_claims(&state, &headers, &id)?;
+    require_legacy_word_room_safe(&state, &id).await?;
     let bundle = open(&state, &id)?;
     let head = bundle.manifest().map_err(internal)?;
+    require_legacy_word_layout_safe(&head)?;
     if head.revision != request.expected_revision {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -2429,8 +4449,10 @@ async fn move_image(
     Json(request): Json<ImageGeometryRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let claims = authorize_claims(&state, &headers, &id)?;
+    require_legacy_word_room_safe(&state, &id).await?;
     let bundle = open(&state, &id)?;
     let head = bundle.manifest().map_err(internal)?;
+    require_legacy_word_layout_safe(&head)?;
     if head.revision != request.expected_revision {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -2495,6 +4517,14 @@ async fn text_patch(
     Json(request): Json<PatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
     let claims = authorize_claims(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    require_flow_layout_support(
+        hcd_core::read_flow_document_layout(&bundle, &bundle.manifest().map_err(internal)?)
+            .map_err(hcd_error)?
+            .as_ref()
+            .map(flow_layout_protocol),
+        &headers,
+    )?;
     let patch = prepare_text_patch(request, &id, author_actor(&claims, &[]))?;
     apply_editor_edits(&state, &id, patch).await
 }
@@ -2551,6 +4581,14 @@ async fn editor_edits(
     Json(request): Json<PatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
     let claims = authorize_claims(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    require_flow_layout_support(
+        hcd_core::read_flow_document_layout(&bundle, &bundle.manifest().map_err(internal)?)
+            .map_err(hcd_error)?
+            .as_ref()
+            .map(flow_layout_protocol),
+        &headers,
+    )?;
     let patch = prepare_editor_edits(request, &id, author_actor(&claims, &[]))?;
     apply_editor_edits(&state, &id, patch).await
 }
@@ -2639,11 +4677,13 @@ fn editor_edits_saved_response(
     }
     let mut hashes = serde_json::Map::new();
     let mut formats = serde_json::Map::new();
-    for id in text_ids {
-        let node =
-            hcd_core::get_text_node_in_manifest(bundle, id, &saved_manifest).map_err(hcd_error)?;
-        hashes.insert(id.clone(), json!(node.node.node_hash));
-        formats.insert(id.clone(), json!(node.format_hash));
+    let text_ids: Vec<String> = text_ids.into_iter().cloned().collect();
+    for (id, node) in
+        hcd_core::get_text_node_receipts_in_manifest(bundle, &text_ids, &saved_manifest)
+            .map_err(hcd_error)?
+    {
+        hashes.insert(id.clone(), json!(node.node_hash));
+        formats.insert(id, json!(node.format_hash));
     }
     body["nodeHashes"] = Value::Object(hashes);
     body["formatHashes"] = Value::Object(formats);
@@ -2656,11 +4696,36 @@ async fn apply_editor_edits(
     id: &str,
     patch: PatchBatch,
 ) -> Result<Json<Value>, ApiError> {
+    require_legacy_word_room_safe(state, id).await?;
     let bundle = open(state, id)?;
     let previous = patch.base_revision;
     let manifest = bundle.manifest().map_err(internal)?;
+    require_legacy_word_layout_safe(&manifest)?;
     let (base_manifest, _) =
         manifest_at_revision(&bundle, &manifest, Some(previous)).map_err(hcd_error)?;
+    if previous == manifest.revision
+        && patch.operations.iter().any(|operation| {
+            matches!(
+                operation,
+                PatchOperation::TextSplice { .. }
+                    | PatchOperation::TextRuns { .. }
+                    | PatchOperation::NodeStyle { .. }
+            )
+        })
+    {
+        let protected = legacy_word_protected_nodes(state, id, &bundle, &manifest).await?;
+        if patch
+            .operations
+            .iter()
+            .filter_map(PatchOperation::node_id)
+            .any(|node| protected.contains(node))
+        {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "DOCX_SOURCE_TEXT_READ_ONLY".into(),
+            ));
+        }
+    }
     // Capture the receipt from the same base as the requested transaction.
     // The core checks revision + visualHash again under its document write lock.
     for operation in &patch.operations {
@@ -2697,6 +4762,78 @@ async fn apply_editor_edits(
                     geometry.clone(),
                     BTreeMap::new(),
                 )?;
+            }
+        }
+    }
+    // Older XLSX projections may mark formula results editable. When the
+    // original source is retained, verify its formula cells and ranges before
+    // publishing a new version. The core still performs the final CAS under
+    // its write lock; old-base requests must reach its idempotent replay path.
+    if manifest.source.format == "xlsx" && previous == manifest.revision {
+        let source = state.root.join("sources").join(format!("{id}.xlsx"));
+        let source_present = match std::fs::metadata(&source) {
+            Ok(metadata) if metadata.is_file() => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Ok(_) => return Err(internal("XLSX source is not a file")),
+            Err(error) => return Err(internal(error)),
+        };
+        if source_present {
+            let checked_bundle = bundle.clone();
+            let operations = patch.operations.clone();
+            tokio::task::spawn_blocking(move || {
+                hcd_formats::validate_xlsx_source_text_edits(&checked_bundle, &source, &operations)
+            })
+            .await
+            .map_err(internal)?
+            .map_err(|error| match error {
+                HcdError::InvalidPatch(reason)
+                    if reason.starts_with("XLSX_MERGED_CELL_READ_ONLY") =>
+                {
+                    ApiError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "XLSX_MERGED_CELL_READ_ONLY".into(),
+                    )
+                }
+                HcdError::InvalidPatch(reason) if reason == "XLSX_SHEET_PROTECTED" => {
+                    ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)
+                }
+                HcdError::InvalidPatch(reason) if reason.starts_with("XLSX_FORMULA_READ_ONLY") => {
+                    ApiError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "XLSX_FORMULA_READ_ONLY".into(),
+                    )
+                }
+                HcdError::InvalidPatch(reason) if reason == "XLSX_SOURCE_CHANGED" => {
+                    ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)
+                }
+                other => hcd_error(other),
+            })?;
+        } else if patch.operations.iter().any(|operation| {
+            matches!(
+                operation,
+                PatchOperation::TextSplice { .. } | PatchOperation::TextRuns { .. }
+            )
+        }) {
+            if state.remote.is_some() {
+                return Err(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "XLSX_FORMULA_PROOF_REQUIRED".into(),
+                ));
+            }
+            let checked_bundle = bundle.clone();
+            let root = state.root.clone();
+            let secret = state.secret.clone();
+            let verified = tokio::task::spawn_blocking(move || {
+                xlsx_formula_proof::matches(&checked_bundle, &root, &secret)
+            })
+            .await
+            .map_err(internal)?
+            .unwrap_or(false);
+            if !verified {
+                return Err(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "XLSX_FORMULA_PROOF_REQUIRED".into(),
+                ));
             }
         }
     }
@@ -2755,12 +4892,14 @@ async fn resolve_change(
     Json(request): Json<TrackedChangeRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let claims = authorize_claims(&state, &headers, &id)?;
+    require_legacy_word_room_safe(&state, &id).await?;
     let accept = match request.action.as_str() {
         "accept" => true,
         "reject" => false,
         _ => return Err(bad("action must be accept or reject")),
     };
     let bundle = open(&state, &id)?;
+    require_legacy_word_layout_safe(&bundle.manifest().map_err(internal)?)?;
     let result = resolve_tracked_change(
         &bundle,
         request.expected_revision,
@@ -2784,7 +4923,9 @@ async fn reply_comment(
     Json(request): Json<CommentReplyRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let claims = authorize_claims(&state, &headers, &id)?;
+    require_legacy_word_room_safe(&state, &id).await?;
     let bundle = open(&state, &id)?;
+    require_legacy_word_layout_safe(&bundle.manifest().map_err(internal)?)?;
     let result = append_comment(
         &bundle,
         request.expected_revision,
@@ -2851,12 +4992,7 @@ fn authorize_claims(
     id: &str,
 ) -> Result<Claims, ApiError> {
     let claims = claims(state, headers, id)?;
-    if claims.scope != "write" {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "read-only token cannot write".to_string(),
-        ));
-    }
+    require_write(state, id, &claims)?;
     Ok(claims)
 }
 
@@ -2913,6 +5049,12 @@ async fn restore(
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, true)?;
+    if collaboration_metadata(&state, &id).await?.protocol != CollaborationProtocol::Default1 {
+        return Err(ApiError(
+            StatusCode::UPGRADE_REQUIRED,
+            "restore requires the collaboration coordinator".into(),
+        ));
+    }
     let bundle = open(&state, &id)?;
     let (author_id, author_name) =
         revision_author(&author_actor(&claims(&state, &headers, &id)?, &[])).map_err(bad)?;
@@ -2958,10 +5100,66 @@ async fn publish_mutation(
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexPageQuery {
+    revision: Option<u64>,
+    word_regions: Option<bool>,
+    word_bodies: Option<bool>,
+}
+
+/// Locate stories without transferring the entire body index to the client.
+async fn word_story_index(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(hcd_error)?;
+    let (manifest, revision) =
+        manifest_at_revision(&bundle, &head, query.revision).map_err(hcd_error)?;
+    require_flow_layout_support(manifest.capabilities.flow_layout, &headers)?;
+    let result = tokio::task::spawn_blocking(move || {
+        if manifest.index_page_count != manifest.chunk_count.div_ceil(hcd_core::INDEX_PAGE_SIZE) {
+            return Err(HcdError::InvalidBundle("invalid Word index page count".into()));
+        }
+        let catalog = hcd_core::WordRegionIndex::new(&bundle, &manifest)?;
+        let mut stories = Vec::new();
+        for page in 0..manifest.index_page_count {
+            let index = bundle.read_index_page(&manifest, page)?;
+            let start = page.checked_mul(hcd_core::INDEX_PAGE_SIZE)
+                .ok_or_else(|| HcdError::InvalidBundle("invalid index page".into()))?;
+            let expected = manifest.chunk_count.checked_sub(start)
+                .ok_or_else(|| HcdError::InvalidBundle("invalid index count".into()))?
+                .min(hcd_core::INDEX_PAGE_SIZE);
+            if index.page != page || index.chunks.len() != expected
+                || index.chunks.iter().enumerate().any(|(offset, chunk)| chunk.sequence != start + offset) {
+                return Err(HcdError::InvalidBundle("invalid Word story index page".into()));
+            }
+            let regions = catalog.page(&index)?;
+            for (chunk, region) in index.chunks.iter().zip(regions) {
+                if ["header", "footer"].contains(&chunk.region.as_str()) && region.is_none() {
+                    return Err(HcdError::InvalidBundle("missing Word story identity".into()));
+                }
+                if let Some(region) = region {
+                    if stories.len() >= 65_536 {
+                        return Err(HcdError::ResourceLimit("Word story index limit".into()));
+                    }
+                    stories.push(json!({"sequence":chunk.sequence,"region":chunk.region,"wordRegionId":region}));
+                }
+            }
+        }
+        Ok::<_, HcdError>(json!({"schemaVersion":"hcd-word-story-index/1","revision":revision,"chunkCount":manifest.chunk_count,"wordRegionsVerified":true,"stories":stories}))
+    }).await.map_err(internal)?.map_err(hcd_error)?;
+    Ok(([(header::CACHE_CONTROL, "private, no-store")], Json(result)).into_response())
+}
+
 async fn index_page(
     State(state): State<ServerState>,
     Path((id, page)): Path<(String, usize)>,
-    Query(query): Query<RevisionQuery>,
+    Query(query): Query<IndexPageQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
@@ -2969,7 +5167,34 @@ async fn index_page(
     let head = bundle.manifest().map_err(internal)?;
     let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
     let index = bundle.read_index_page(&manifest, page).map_err(bad)?;
-    Ok(Json(serde_json::to_value(index).map_err(internal)?))
+    if query.word_regions != Some(true) {
+        return Ok(Json(serde_json::to_value(index).map_err(internal)?));
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let regions = if query.word_bodies == Some(true) {
+            hcd_core::WordRegionIndex::new(&bundle, &manifest)?.page_all(&index)?
+        } else {
+            hcd_core::word_region_index_page(&bundle, &manifest, &index)?
+        };
+        let mut value = serde_json::to_value(index)?;
+        let chunks = value["chunks"]
+            .as_array_mut()
+            .ok_or_else(|| HcdError::InvalidBundle("invalid index".into()))?;
+        for (chunk, region) in chunks.iter_mut().zip(regions) {
+            if let Some(region) = region {
+                chunk["wordRegionId"] = json!(region);
+            }
+        }
+        value["wordRegionsVerified"] = json!(true);
+        if query.word_bodies == Some(true) {
+            value["wordBodiesVerified"] = json!(true);
+        }
+        Ok::<_, HcdError>(value)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
+    Ok(Json(result))
 }
 
 async fn chunk(
@@ -3074,22 +5299,19 @@ async fn asset_response(
     if bytes.len() as u64 != descriptor.byte_length {
         return Err(internal("asset length mismatch"));
     }
-    let mime = match path
+    let extension = path
         .extension()
         .and_then(|value| value.to_str())
-        .unwrap_or_default()
-    {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        _ => "application/octet-stream",
-    }
-    .parse::<axum::http::HeaderValue>()
-    .map_err(internal)?;
+        .unwrap_or_default();
+    let mime = crate::hdoc_asset_mime::asset_mime(extension, &bytes)
+        .parse::<axum::http::HeaderValue>()
+        .map_err(internal)?;
     let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(header::CONTENT_TYPE, mime);
+    response.headers_mut().insert(
+        "x-content-type-options",
+        "nosniff".parse().map_err(internal)?,
+    );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         "private, immutable, max-age=31536000"
@@ -3102,11 +5324,13 @@ async fn asset_response(
 async fn styles(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    let manifest = bundle.manifest().map_err(internal)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
     let path = bundle.resolve_href(&manifest.styles_href).map_err(bad)?;
     let bytes = tokio::fs::read(path).await.map_err(internal)?;
     if bytes.len() > 1024 * 1024 {
@@ -3138,22 +5362,83 @@ async fn export_options(
     if revision > manifest.revision {
         return Err(bad("revision ahead of head"));
     }
-    let source_available = state
+    let (selected, _) =
+        manifest_at_revision(&bundle, &manifest, Some(revision)).map_err(hcd_error)?;
+    let pdf_overlay_blocked =
+        hcd_formats::pdf_has_unpainted_text(&bundle, revision).map_err(hcd_error)?;
+    let flow_model = hcd_core::read_flow_document_layout(&bundle, &selected).map_err(hcd_error)?;
+    let flow_layout = flow_model.is_some();
+    let region_docx = flow_layout;
+    let region_html = flow_model
+        .as_ref()
+        .is_some_and(|layout| layout.schema_version == hcd_core::FLOW_REGION_LAYOUT_SCHEMA);
+    let source_path = state
         .root
         .join("sources")
-        .join(format!("{id}.{}", manifest.source.format))
-        .is_file();
-    let requires_rebuild = if manifest.source.format == "docx" {
-        tokio::task::spawn_blocking(move || hcd_docx::requires_semantic_rebuild(&bundle, revision))
-            .await
-            .map_err(internal)?
-            .map_err(hcd_error)?
+        .join(format!("{id}.{}", manifest.source.format));
+    let source_available = source_path.is_file();
+    let blocker = if manifest.source.format == "docx" {
+        let story_link_candidate = (2..=4097).contains(&revision)
+            && selected.capabilities.word_layout_edits == Some(2)
+            && source_available
+            && bundle
+                .revision(revision)
+                .map_err(hcd_error)?
+                .patch_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("word-story-link-"));
+        let region_text_candidate =
+            region_docx && source_available && (1..=4097).contains(&revision);
+        let slot = if story_link_candidate || region_text_candidate {
+            Some(export_process::reserve_slot()?)
+        } else {
+            None
+        };
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let blocked = hcd_docx::requires_semantic_rebuild(&bundle, revision)?;
+            if blocked
+                && ((story_link_candidate
+                    && hcd_docx::verify_source_story_link(&bundle, &source_path, revision).is_ok())
+                    || (region_text_candidate
+                        && hcd_docx::verify_source_region_text_export(
+                            &bundle,
+                            &source_path,
+                            revision,
+                        )
+                        .is_ok()))
+            {
+                Ok(None)
+            } else {
+                Ok(blocked.then_some("DOCX_REBUILD_REQUIRED"))
+            }
+        })
+        .await
+        .map_err(internal)?
+        .map_err(hcd_error)?
+    } else if matches!(manifest.source.format.as_str(), "pptx" | "xlsx" | "pdf") {
+        let pptx_source =
+            (manifest.source.format == "pptx" && source_available).then_some(source_path);
+        tokio::task::spawn_blocking(move || {
+            if let Some(source) = pptx_source {
+                hcd_formats::source_export_edit_blocker_with_source(&bundle, &source, revision)
+            } else {
+                hcd_formats::source_export_edit_blocker(&bundle, revision)
+            }
+        })
+        .await
+        .map_err(internal)?
+        .map_err(hcd_error)?
     } else {
-        false
+        None
     };
     Ok(Json(
-        json!({"revision":revision,"sourceAvailable":source_available,"sourceEditsSupported":!requires_rebuild,
-        "reasonCode": if !source_available { Some("SOURCE_UNAVAILABLE") } else if requires_rebuild { Some("DOCX_REBUILD_REQUIRED") } else { None }}),
+        json!({"revision":revision,"sourceAvailable":source_available,"sourceEditsSupported":blocker.is_none(),
+        "semanticExportSupported":!flow_layout && !pdf_overlay_blocked,
+        "semanticWordFields":if region_html {Some("numeric-v1")} else {None},
+        "semanticFormats":if pdf_overlay_blocked {vec![]} else if !flow_layout {vec!["docx","xlsx","pptx","pdf","html","md","txt"]} else if region_html {vec!["docx","html","txt"]} else if region_docx {vec!["docx"]} else {vec![]},
+        "semanticReasonCode":if pdf_overlay_blocked {Some("PDF_UNPAINTED_TEXT")} else if region_docx {Some("WORD_REGION_EXPORT_PARTIAL")} else if flow_layout{Some("WORD_REGION_LAYOUT_UNSUPPORTED")}else{None},
+        "reasonCode": if !source_available { Some("SOURCE_UNAVAILABLE") } else { blocker }}),
     ))
 }
 
@@ -3172,7 +5457,7 @@ async fn export_document(
     }
     if !matches!(
         format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcdz"
     ) {
         return Err(bad("unsupported export format"));
     }
@@ -3181,89 +5466,91 @@ async fn export_document(
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "pdf" => "application/pdf",
+        "hcdz" => "application/vnd.officecli.hcd+zip",
         "html" => "text/html; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
         _ => "text/plain; charset=utf-8",
     };
     let source_backed = query.source.unwrap_or(false);
-    let (bytes, fidelity_level) = if format == "html" && !source_backed {
+    let (selected, _) = manifest_at_revision(&bundle, &head, Some(requested)).map_err(hcd_error)?;
+    if format != "hcdz"
+        && !(source_backed && format == "pdf" && selected.source.format == "pdf")
+        && hcd_formats::pdf_has_unpainted_text(&bundle, requested).map_err(hcd_error)?
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PDF_UNPAINTED_TEXT".into(),
+        ));
+    }
+    let flow_layout = hcd_core::read_flow_document_layout(&bundle, &selected).map_err(hcd_error)?;
+    let regional_docx = format == "docx" && flow_layout.is_some();
+    let regional_html = format == "html"
+        && flow_layout
+            .as_ref()
+            .is_some_and(|layout| layout.schema_version == hcd_core::FLOW_REGION_LAYOUT_SCHEMA);
+    let regional_text = format == "txt"
+        && flow_layout
+            .as_ref()
+            .is_some_and(|layout| layout.schema_version == hcd_core::FLOW_REGION_LAYOUT_SCHEMA);
+    if format != "hcdz"
+        && !(source_backed && format == "docx" && head.source.format == "docx")
+        && flow_layout.is_some()
+        && !regional_docx
+        && !regional_html
+        && !regional_text
+    {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY,"This Word region format is not supported yet. Project Word regions for semantic DOCX export, or use an offline HCD archive to retain all regions".into()));
+    }
+    if format == "hcdz" && source_backed {
+        return Err(bad("offline archives use saved canonical content"));
+    }
+    let (bytes, fidelity_level) = if format == "hcdz" {
+        let _slot = export_process::reserve_slot()?;
+        let temp = tempfile::tempdir().map_err(internal)?;
+        let output = temp.path().join("document.hcdz");
+        let mut command = tokio::process::Command::new(std::env::current_exe().map_err(internal)?);
+        command
+            .env("TMPDIR", temp.path())
+            .env("TMP", temp.path())
+            .env("TEMP", temp.path())
+            .arg("hdoc")
+            .arg("pack")
+            .arg(bundle.root())
+            .arg("--output")
+            .arg(&output)
+            .arg("--revision")
+            .arg(requested.to_string());
+        let result = export_process::run(&mut command, export_process::timeout_from_env()?).await?;
+        if !result.status.success() {
+            return Err(bad(format!(
+                "offline archive failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            )));
+        }
+        if tokio::fs::metadata(&output).await.map_err(internal)?.len() > 256 * 1024 * 1024 {
+            return Err(bad("export exceeds 256 MiB HTTP limit"));
+        }
+        (
+            tokio::fs::read(&output).await.map_err(internal)?,
+            "NATIVE".to_owned(),
+        )
+    } else if format == "html" && !source_backed {
         let mut output = Vec::new();
-        let assets = bundle
-            .read_asset_index_for_revision(requested)
-            .map_err(bad)?;
-        let known: HashMap<String, _> = assets
-            .into_iter()
-            .map(|asset| (asset.hash.clone(), asset))
-            .collect();
-        let pattern = Regex::new(r"asset://sha256/([0-9a-f]{64})").map_err(internal)?;
-        let mut cache = HashMap::<String, String>::new();
-        let options = hcd_core::HtmlPresentationOptions {
-            revision: Some(requested),
-            max_output_bytes: 256 * 1024 * 1024,
-            ..Default::default()
-        };
-        hcd_core::render_standalone_html_with_transform(&bundle, &options, &mut output, |html| {
-            let mut transformed = String::with_capacity(html.len());
-            let mut previous = 0;
-            for matched in pattern.captures_iter(html) {
-                let full = matched.get(0).expect("regex match");
-                let hash = matched.get(1).expect("regex hash").as_str();
-                transformed.push_str(&html[previous..full.start()]);
-                if !cache.contains_key(hash) {
-                    let asset = known.get(hash).ok_or_else(|| {
-                        hcd_core::HcdError::InvalidBundle(format!("unknown asset {hash}"))
-                    })?;
-                    if asset.byte_length > 64 * 1024 * 1024 {
-                        return Err(hcd_core::HcdError::ResourceLimit(
-                            "asset exceeds HTML export limit".to_string(),
-                        ));
-                    }
-                    let path = bundle.resolve_href(&asset.href)?;
-                    if hash_file(&path)? != hash {
-                        return Err(hcd_core::HcdError::InvalidBundle(format!(
-                            "asset {hash} hash mismatch"
-                        )));
-                    }
-                    let bytes = std::fs::read(&path)?;
-                    if bytes.len() as u64 != asset.byte_length {
-                        return Err(hcd_core::HcdError::InvalidBundle(format!(
-                            "asset {hash} length mismatch"
-                        )));
-                    }
-                    let mime = match path
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or_default()
-                    {
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        "svg" => "image/svg+xml",
-                        _ => "application/octet-stream",
-                    };
-                    cache.insert(
-                        hash.to_string(),
-                        format!(
-                            "data:{mime};base64,{}",
-                            base64::engine::general_purpose::STANDARD.encode(bytes)
-                        ),
-                    );
-                }
-                transformed.push_str(&cache[hash]);
-                previous = full.end();
-            }
-            transformed.push_str(&html[previous..]);
-            Ok(transformed)
-        })
-        .map_err(bad)?;
+        crate::hdoc_export_html::render(&bundle, requested, &mut output).map_err(bad)?;
         (output, "SEMANTIC".to_string())
     } else {
+        let _export_slot = export_process::reserve_slot()?;
         let temp = tempfile::tempdir().map_err(internal)?;
         let output = temp.path().join(format!("export.{format}"));
         let fidelity_path = temp.path().join("fidelity.json");
         let mut command = tokio::process::Command::new(std::env::current_exe().map_err(internal)?);
         command
+            // Validation/layout can create its own scratch directories. Keep
+            // all child-owned temporary files inside the request's directory,
+            // so killing an exporter cannot strand them in the system temp.
+            .env("TMPDIR", temp.path())
+            .env("TMP", temp.path())
+            .env("TEMP", temp.path())
             .arg("hdoc")
             .arg("export")
             .arg(bundle.root())
@@ -3289,7 +5576,7 @@ async fn export_document(
                 command.arg("--typography-source").arg(font_source);
             }
         }
-        let result = command.output().await.map_err(internal)?;
+        let result = export_process::run(&mut command, export_process::timeout_from_env()?).await?;
         if !result.status.success() {
             return Err(bad(format!(
                 "export failed: {}",
@@ -3308,7 +5595,16 @@ async fn export_document(
             format!("{:?}", report.level).to_ascii_uppercase(),
         )
     };
+    authorize(&state, &headers, &id, false)?;
     let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "private, no-store".parse().map_err(internal)?,
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        "nosniff".parse().map_err(internal)?,
+    );
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, mime.parse().map_err(internal)?);
@@ -3329,6 +5625,65 @@ async fn export_document(
 mod tests {
     use super::*;
     use hcd_core::{get_text_node, EditorBlockKind, EditorBlockView};
+
+    #[tokio::test]
+    async fn head_check_is_authorized_non_cacheable_and_identifies_source() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        let response = document_head(
+            State(state.clone()),
+            Path("doc".into()),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(body["documentId"], "doc");
+        assert_eq!(body["revision"], head.revision);
+        assert_eq!(body["sourceSha256"], head.source.sha256);
+        assert!(matches!(
+            document_head(State(state), Path("doc".into()), HeaderMap::new()).await,
+            Err(ApiError(StatusCode::UNAUTHORIZED, _))
+        ));
+    }
+
+    #[test]
+    fn calculated_field_save_error_has_a_stable_code() {
+        let response = ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "DOCX_SOURCE_TEXT_READ_ONLY: a calculated field cannot be changed or removed".into(),
+        )
+        .into_response();
+        assert_eq!(
+            response.headers()["x-hcd-error-code"],
+            "DOCX_SOURCE_TEXT_READ_ONLY"
+        );
+        let id = format!("n_{}", "a".repeat(32));
+        let response = ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("DOCX_SOURCE_TEXT_READ_ONLY:{id}"),
+        )
+        .into_response();
+        assert_eq!(response.headers()["x-hcd-protected-block"], id);
+        let invalid = ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "DOCX_SOURCE_TEXT_READ_ONLY:n_invalid".into(),
+        )
+        .into_response();
+        assert!(!invalid.headers().contains_key("x-hcd-protected-block"));
+        let other = ApiError(StatusCode::UNPROCESSABLE_ENTITY, "other".into()).into_response();
+        assert!(!other.headers().contains_key("x-hcd-error-code"));
+    }
 
     fn image_bundle(root: &std::path::Path) -> Bundle {
         use std::io::Write;
@@ -3422,6 +5777,245 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_feature_declarations_are_authorized_revision_pinned_and_do_not_publish() {
+        use axum::body::to_bytes;
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let projection = editor_projection(&bundle, None).unwrap();
+        let payload = json!({"schemaVersion":"hcd.extension/1","instanceId":format!("x_{:032x}",1),"type":"future.business","version":77,"display":"block","data":{"private":"never-return-this-data"},"fallback":{"text":"可读业务节点"}});
+        let block: EditorBlockContent = serde_json::from_value(
+            json!({"kind":"extension","extension":payload,"inlines":[{"text":"可读业务节点"}]}),
+        )
+        .unwrap();
+        apply_structure_patch(
+            &bundle,
+            &StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: "doc".into(),
+                patch_id: "export-inventory-test".into(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                operations: vec![StructureOperation::Insert {
+                    after_block_id: Some(projection.blocks[0].block_id.clone()),
+                    block,
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let state = edit_state(root.path());
+        let head = std::fs::read(root.path().join("doc.hcd/manifest.json")).unwrap();
+        assert!(export_capabilities::options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            HeaderMap::new()
+        )
+        .await
+        .is_err());
+        for (revision, count) in [(1, 0), (2, 1)] {
+            let response = export_capabilities::options(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(RevisionQuery {
+                    revision: Some(revision),
+                }),
+                edit_headers(&state, "read"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "private, no-store"
+            );
+            let value: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(value["revision"], revision);
+            assert_eq!(value["features"].as_array().unwrap().len(), count);
+            assert!(!value.to_string().contains("never-return-this-data"));
+            if count > 0 {
+                assert_eq!(value["features"][0]["formats"]["docx"]["support"], "static");
+                assert_eq!(
+                    value["features"][0]["formats"]["html"]["dataRetention"],
+                    "embedded"
+                );
+                assert_eq!(value["features"][0]["source"]["support"], "unsupported");
+            }
+        }
+        assert!(export_capabilities::options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(3) }),
+            edit_headers(&state, "read")
+        )
+        .await
+        .is_err());
+        let policy = load_access(&state, "doc")
+            .unwrap()
+            .replace(Some(vec!["another-reader".into()]), None)
+            .unwrap();
+        store_access(&state, "doc", &policy).unwrap();
+        assert!(export_capabilities::options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            edit_headers(&state, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read(root.path().join("doc.hcd/manifest.json")).unwrap(),
+            head
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_manifest_and_styles_read_the_requested_revision_without_changing_head() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.revision, 1);
+        let Json(historical) = manifest(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(0) }),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(historical["revision"], 0);
+        assert_eq!(
+            historical["rootHash"],
+            bundle.revision(0).unwrap().root_hash
+        );
+        let Json(current) = manifest(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: None }),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current["revision"], head.revision);
+        let css = styles(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(0) }),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            css.headers()[header::CONTENT_TYPE],
+            "text/css; charset=utf-8"
+        );
+        assert!(!axum::body::to_bytes(css.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(manifest(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            edit_headers(&state, "read")
+        )
+        .await
+        .is_err());
+        assert!(styles(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            edit_headers(&state, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, head.revision);
+    }
+
+    #[tokio::test]
+    async fn regional_identity_retains_service_scope_and_fences_legacy_persistence() {
+        let root = tempfile::tempdir().unwrap();
+        word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        let access = DocumentAccess::default()
+            .replace(None, Some(vec!["alice".into()]))
+            .unwrap();
+        store_access(&state, "doc", &access).unwrap();
+        write_collaboration_metadata(
+            &state,
+            "doc",
+            &CollaborationMetadata {
+                epoch: 1,
+                protocol: CollaborationProtocol::WordRegions1,
+                node_edits: Some(7),
+                migration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut headers = edit_headers_for(&state, "write", "hcd-collaboration");
+        let Json(auth) = auth_check(State(state.clone()), Path("doc".into()), headers.clone())
+            .await
+            .unwrap();
+        assert_eq!(auth["scope"], "write");
+        assert_eq!(auth["collaborationProtocol"], "hcd-word-regions/1");
+        headers.insert("x-hcd-collaboration-epoch", "1".parse().unwrap());
+        headers.insert(
+            "x-hcd-collaboration-protocol",
+            "hcd-word-regions/1".parse().unwrap(),
+        );
+        headers.insert("x-hcd-coordinator-version", "4".parse().unwrap());
+        headers.insert("x-hcd-state-hash", "none".parse().unwrap());
+        let error = collaboration_put(
+            State(state),
+            Path("doc".into()),
+            headers,
+            Bytes::from_static(b"legacy"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn generic_assets_use_safe_raster_signatures_without_enabling_active_content() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let baseline = bundle.manifest().unwrap();
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+        for (bytes, expected) in [
+            (png.as_slice(), "image/png"),
+            (
+                b"<svg xmlns='http://www.w3.org/2000/svg'/>".as_slice(),
+                "application/octet-stream",
+            ),
+            (
+                b"ordinary attachment".as_slice(),
+                "application/octet-stream",
+            ),
+        ] {
+            let asset = bundle
+                .stage_asset_from_reader("bin", &mut std::io::Cursor::new(bytes))
+                .unwrap();
+            let response = asset_response(&bundle, &asset, &asset.hash).await.unwrap();
+            assert_eq!(response.headers()[header::CONTENT_TYPE], expected);
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                bytes
+            );
+        }
+        let after = bundle.manifest().unwrap();
+        assert_eq!(after.revision, baseline.revision);
+        assert_eq!(after.root_hash, baseline.root_hash);
+    }
+
+    #[tokio::test]
     async fn staged_image_previews_are_document_scoped_verified_and_do_not_publish_a_revision() {
         let root = tempfile::tempdir().unwrap();
         let bundle = word_image_bundle(root.path());
@@ -3502,6 +6096,12 @@ mod tests {
         {
             let root = tempfile::tempdir().unwrap();
             let bundle = word_image_bundle(root.path());
+            std::fs::create_dir(root.path().join("sources")).unwrap();
+            std::fs::copy(
+                root.path().join("source.docx"),
+                root.path().join("sources/doc.docx"),
+            )
+            .unwrap();
             let projection = editor_projection(&bundle, None).unwrap();
             let text = hcd_core::extract_text_page(&bundle, None, 50)
                 .unwrap()
@@ -4017,14 +6617,2002 @@ mod tests {
             remote: None,
             collaboration_lock: Arc::new(Mutex::new(())),
             revisions: RevisionHub::default(),
+            word_owners: word_owner::WordOwners::default(),
         }
+    }
+
+    #[test]
+    fn resource_busy_code_is_limited_to_local_lock_contention() {
+        let busy = resource_stage_error(HcdError::RevisionConflict(
+            "another local HCD mutation is already in progress".into(),
+        ));
+        assert_eq!(busy.0, StatusCode::CONFLICT);
+        assert_eq!(busy.1, "HCD_RESOURCE_BUSY");
+        let other = resource_stage_error(HcdError::RevisionConflict("different conflict".into()));
+        assert_eq!(other.0, StatusCode::CONFLICT);
+        assert_ne!(other.1, "HCD_RESOURCE_BUSY");
+    }
+
+    #[tokio::test]
+    async fn resource_reuse_repins_only_verified_document_owned_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = image_bundle(root.path());
+        let state = edit_state(root.path());
+        let write = edit_headers_for(&state, "write", "alice");
+        let read = edit_headers_for(&state, "read", "alice");
+        let canonical = bundle
+            .read_asset_index_for_revision(0)
+            .unwrap()
+            .into_iter()
+            .find(|asset| asset.source_part.ends_with("image.png"))
+            .unwrap();
+        let Json(reused_canonical) = restage_resource(
+            State(state.clone()),
+            Path("doc".into()),
+            write.clone(),
+            Json(ResourceReuseRequest {
+                hash: canonical.hash.clone(),
+                extension: "png".into(),
+                byte_length: canonical.byte_length,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reused_canonical["hash"], canonical.hash);
+        assert_eq!(
+            bundle.staged_asset(&canonical.hash).unwrap().byte_length,
+            canonical.byte_length
+        );
+        let bytes = b"private attachment";
+        let staged = bundle
+            .stage_asset_from_reader("bin", &mut std::io::Cursor::new(bytes))
+            .unwrap();
+        let request = || ResourceReuseRequest {
+            hash: staged.hash.clone(),
+            extension: "bin".into(),
+            byte_length: bytes.len() as u64,
+        };
+        let initial = bundle.manifest().unwrap().revision;
+        assert!(matches!(
+            restage_resource(
+                State(state.clone()),
+                Path("doc".into()),
+                read,
+                Json(request())
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        let Json(result) = restage_resource(
+            State(state.clone()),
+            Path("doc".into()),
+            write.clone(),
+            Json(request()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["hash"], staged.hash);
+        assert_eq!(result["byteLength"], bytes.len());
+        assert_eq!(
+            bundle.staged_asset(&staged.hash).unwrap().byte_length,
+            bytes.len() as u64
+        );
+        let missing = ResourceReuseRequest {
+            hash: "a".repeat(64),
+            extension: "bin".into(),
+            byte_length: 1,
+        };
+        assert!(matches!(
+            restage_resource(
+                State(state.clone()),
+                Path("doc".into()),
+                write.clone(),
+                Json(missing)
+            )
+            .await,
+            Err(ApiError(StatusCode::NOT_FOUND, _))
+        ));
+        let wrong_type = ResourceReuseRequest {
+            extension: "png".into(),
+            ..request()
+        };
+        assert!(restage_resource(
+            State(state.clone()),
+            Path("doc".into()),
+            write.clone(),
+            Json(wrong_type)
+        )
+        .await
+        .is_err());
+        std::fs::write(
+            bundle.resolve_href(&staged.href).unwrap(),
+            b"tampered bytes!",
+        )
+        .unwrap();
+        assert!(
+            restage_resource(State(state), Path("doc".into()), write, Json(request()))
+                .await
+                .is_err()
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, initial);
+    }
+
+    #[tokio::test]
+    async fn recovery_repin_survives_current_revision_restoring_away_the_resource() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = image_bundle(root.path());
+        let image = hcd_core::extract_image_page(&bundle, None, 10)
+            .unwrap()
+            .entries
+            .remove(0)
+            .node;
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC").unwrap();
+        let staged = bundle
+            .stage_asset_from_reader("png", &mut std::io::Cursor::new(png))
+            .unwrap();
+        assert_ne!(Some(&staged.hash), image.asset_hash.as_ref());
+        let replace = |id: &str, base: u64, visual: String| PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+            document_id: "doc".into(),
+            patch_id: id.into(),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::ImageReplace {
+                node_id: image.node_id.clone(),
+                asset_hash: staged.hash.clone(),
+                precondition: VisualPrecondition {
+                    visual_hash: visual,
+                },
+            }],
+        };
+        apply_patch(
+            &bundle,
+            &replace("first-image", 0, image.visual_hash.clone()),
+            0,
+        )
+        .unwrap();
+        let pin = bundle
+            .resolve_href(&format!("assets/staged/{}.json", staged.hash))
+            .unwrap();
+        std::fs::remove_file(&pin).unwrap();
+        let state = edit_state(root.path());
+        let Json(_) = restage_resource(
+            State(state.clone()),
+            Path("doc".into()),
+            edit_headers_for(&state, "write", "alice"),
+            Json(ResourceReuseRequest {
+                hash: staged.hash.clone(),
+                extension: "png".into(),
+                byte_length: staged.byte_length,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(pin.exists());
+        restore_revision(&bundle, 0, 1, None, None).unwrap();
+        assert!(!bundle
+            .read_asset_index_for_revision(2)
+            .unwrap()
+            .iter()
+            .any(|asset| asset.hash == staged.hash));
+        let current = get_image_node(&bundle, &image.node_id).unwrap().node;
+        apply_patch(
+            &bundle,
+            &replace("recovered-image", 2, current.visual_hash),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            get_image_node(&bundle, &image.node_id)
+                .unwrap()
+                .node
+                .asset_hash,
+            Some(staged.hash)
+        );
+    }
+
+    #[tokio::test]
+    async fn region_text_export_options_verify_actual_source_rewrite() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("sources");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("doc.docx");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/assets/hcd-flow-regions-2026-10-26/image-source.docx"),
+            &source,
+        )
+        .unwrap();
+        let path = root.path().join("doc.hcd");
+        let mut options = hcd_docx::ImportOptions::new("doc");
+        options.flow_layout = true;
+        hcd_docx::import_docx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let entry = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.editable && entry.source.node_kind == "text")
+            .unwrap();
+        let other = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|candidate| {
+                candidate.source.editable
+                    && candidate.source.node_kind == "text"
+                    && candidate.node_id != entry.node_id
+            })
+            .unwrap();
+        let patch = hcd_core::PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "doc".into(),
+            patch_id: "text-edit".into(),
+            base_revision: 1,
+            actor: Default::default(),
+            metadata: Default::default(),
+            operations: vec![hcd_core::PatchOperation::TextSplice {
+                node_id: entry.node_id,
+                start: 0,
+                delete_count: entry.text.chars().count(),
+                insert_text: "Changed".into(),
+                precondition: hcd_core::NodePrecondition {
+                    node_hash: entry.node_hash,
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &patch, 1).unwrap();
+        let state = edit_state(root.path());
+        let headers = edit_headers_for(&state, "read", "alice");
+        let Json(initial) = export_options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(1) }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initial["sourceEditsSupported"], true);
+        assert!(initial["reasonCode"].is_null());
+        let Json(available) = export_options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(available["sourceEditsSupported"], true);
+        assert!(available["reasonCode"].is_null());
+        let stale = hcd_core::PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "doc".into(),
+            patch_id: "stale-other-edit".into(),
+            base_revision: 1,
+            actor: Default::default(),
+            metadata: Default::default(),
+            operations: vec![hcd_core::PatchOperation::TextSplice {
+                node_id: other.node_id,
+                start: 0,
+                delete_count: other.text.chars().count(),
+                insert_text: "Other changed".into(),
+                precondition: hcd_core::NodePrecondition {
+                    node_hash: other.node_hash,
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &stale, 2).unwrap();
+        let Json(merged) = export_options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(3) }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged["sourceEditsSupported"], true);
+        std::fs::write(&source, b"wrong source").unwrap();
+        let Json(blocked) = export_options(
+            State(state),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            headers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(blocked["sourceEditsSupported"], false);
+    }
+
+    #[tokio::test]
+    async fn story_link_export_options_verify_retained_source_and_styles() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("sources");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("doc.docx");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/assets/hcd-flow-regions-2026-10-26/image-source.docx"),
+            &source,
+        )
+        .unwrap();
+        let path = root.path().join("doc.hcd");
+        let mut options = hcd_docx::ImportOptions::new("doc");
+        options.flow_layout = true;
+        hcd_docx::import_docx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let layout = hcd_core::editor_projection(&bundle, None)
+            .unwrap()
+            .flow_layout
+            .unwrap();
+        hcd_core::apply_flow_story_link_transaction(
+            &bundle,
+            &hcd_core::FlowStoryLinkTransaction {
+                schema_version: hcd_core::FLOW_STORY_LINK_TRANSACTION_SCHEMA.into(),
+                document_id: "doc".into(),
+                transaction_id: "0123456789abcdef0123456789abcdef".into(),
+                expected_revision: 1,
+                actor: Default::default(),
+                link: hcd_core::FlowStoryLinkRequest {
+                    base_layout_hash: hcd_core::flow_layout_hash(&layout).unwrap(),
+                    section_id: layout.sections[1].id.clone(),
+                    kind: hcd_core::FlowStoryKind::Header,
+                    variant: hcd_core::FlowStoryVariant::Even,
+                    expected_direct_story_id: layout.sections[1].headers.even.clone().unwrap(),
+                },
+            },
+        )
+        .unwrap();
+        let state = edit_state(root.path());
+        let headers = edit_headers_for(&state, "read", "alice");
+        let Json(available) = export_options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(available["sourceEditsSupported"], true);
+        assert!(available["reasonCode"].is_null());
+        let current = hcd_core::editor_projection(&bundle, None)
+            .unwrap()
+            .flow_layout
+            .unwrap();
+        hcd_core::apply_flow_story_link_transaction(
+            &bundle,
+            &hcd_core::FlowStoryLinkTransaction {
+                schema_version: hcd_core::FLOW_STORY_LINK_TRANSACTION_SCHEMA.into(),
+                document_id: "doc".into(),
+                transaction_id: "1123456789abcdef0123456789abcdef".into(),
+                expected_revision: 2,
+                actor: Default::default(),
+                link: hcd_core::FlowStoryLinkRequest {
+                    base_layout_hash: hcd_core::flow_layout_hash(&current).unwrap(),
+                    section_id: current.sections[1].id.clone(),
+                    kind: hcd_core::FlowStoryKind::Footer,
+                    variant: hcd_core::FlowStoryVariant::First,
+                    expected_direct_story_id: current.sections[1].footers.first.clone().unwrap(),
+                },
+            },
+        )
+        .unwrap();
+        let Json(second_available) = export_options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(3) }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second_available["sourceEditsSupported"], true);
+        let styles = bundle
+            .resolve_href(&bundle.manifest().unwrap().styles_href)
+            .unwrap();
+        std::fs::write(styles, "body { color: red; }").unwrap();
+        let Json(blocked) = export_options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(3) }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(blocked["sourceEditsSupported"], false);
+        assert_eq!(blocked["reasonCode"], "DOCX_REBUILD_REQUIRED");
+        std::fs::remove_file(source).unwrap();
+        let Json(missing) = export_options(
+            State(state),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            headers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(missing["reasonCode"], "SOURCE_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn xlsx_save_checks_legacy_mapped_formula_ranges_against_retained_source() {
+        use std::io::Write;
+        fn workbook(path: &std::path::Path, formula: bool, merged: bool, protected: bool) {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            let parts = [
+                (
+                    "[Content_Types].xml",
+                    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+                ),
+                (
+                    "_rels/.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+                ),
+                (
+                    "xl/workbook.xml",
+                    r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+                ),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+                ),
+            ];
+            for (name, value) in parts {
+                zip.start_file(name, options).unwrap();
+                zip.write_all(value.as_bytes()).unwrap();
+            }
+            let anchor = if formula {
+                r#"<c r="A1"><f t="array" ref="A1:B1">1</f><v>1</v></c>"#
+            } else {
+                r#"<c r="A1"><v>1</v></c>"#
+            };
+            let merges = if merged {
+                r#"<mergeCells><mergeCell ref="A1:B1"/></mergeCells>"#
+            } else {
+                ""
+            };
+            let protection = if protected {
+                r#"<sheetProtection sheet="1"/>"#
+            } else {
+                ""
+            };
+            zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
+            write!(zip, r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">{anchor}<c r="B1"><v>4</v></c><c r="C1" t="inlineStr"><is><t>original</t></is></c></row></sheetData>{protection}{merges}</worksheet>"#).unwrap();
+            zip.finish().unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.xlsx");
+        workbook(&source, false, false, false);
+        let path = root.path().join("doc.hcd");
+        hcd_formats::import_document(
+            &source,
+            &path,
+            &hcd_formats::ImportOptions::new("doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        // Simulate an old importer that incorrectly mapped B1 as editable.
+        workbook(&source, true, false, false);
+        let bytes = std::fs::read(&source).unwrap();
+        let manifest_path = path.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["source"]["sha256"] = json!(hash_bytes(&bytes));
+        manifest["source"]["sizeBytes"] = json!(bytes.len());
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::create_dir(root.path().join("sources")).unwrap();
+        std::fs::copy(&source, root.path().join("sources/doc.xlsx")).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let page = hcd_core::extract_text_page(&bundle, None, 20).unwrap();
+        let make_patch = |address: &str, patch_id: &str| {
+            let node = page
+                .entries
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some(address))
+                .unwrap();
+            assert!(node.source.editable);
+            PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+                document_id: "doc".into(),
+                patch_id: patch_id.into(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: node.node_id.clone(),
+                    start: 0,
+                    delete_count: 0,
+                    insert_text: "new".into(),
+                    precondition: hcd_core::NodePrecondition {
+                        node_hash: node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            }
+        };
+        let state = edit_state(root.path());
+        let headers = edit_headers(&state, "read");
+        assert!(matches!(
+            xlsx_formula_audit(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(RevisionQuery { revision: Some(0) }),
+                headers.clone(),
+            ).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_FORMULA_READ_ONLY"
+        ));
+        assert!(matches!(
+            xlsx_formula_audit(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(RevisionQuery { revision: None }),
+                HeaderMap::new(),
+            )
+            .await,
+            Err(ApiError(StatusCode::UNAUTHORIZED, _))
+        ));
+        // The same policy applies to retained sources, audits and proof creation.
+        let protected_source = root.path().join("protected.xlsx");
+        workbook(&protected_source, false, false, false);
+        let protected_path = root.path().join("protected.hcd");
+        hcd_formats::import_document(
+            &protected_source,
+            &protected_path,
+            &hcd_formats::ImportOptions::new("protected"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        // Simulate an older import whose protected cells were mapped editable.
+        workbook(&protected_source, false, false, true);
+        let bytes = std::fs::read(&protected_source).unwrap();
+        let manifest_path = protected_path.join("manifest.json");
+        let mut metadata: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        metadata["source"]["sha256"] = json!(hash_bytes(&bytes));
+        metadata["source"]["sizeBytes"] = json!(bytes.len());
+        std::fs::write(&manifest_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        std::fs::copy(
+            &protected_source,
+            root.path().join("sources/protected.xlsx"),
+        )
+        .unwrap();
+        let protected_bundle = Bundle::open(&protected_path).unwrap();
+        let protected_node = hcd_core::extract_text_page(&protected_bundle, None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("C1"))
+            .unwrap();
+        let protected_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+            document_id: "protected".into(),
+            patch_id: "protected-edit".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: protected_node.node_id,
+                start: 0,
+                delete_count: 0,
+                insert_text: "local".into(),
+                precondition: NodePrecondition {
+                    node_hash: protected_node.node_hash,
+                },
+            }],
+        };
+        let protected_read = edit_headers_for_doc(&state, "protected", "read", "reader");
+        let protected_write = edit_headers_for_doc(&state, "protected", "write", "editor");
+        assert!(
+            matches!(xlsx_formula_audit(State(state.clone()), Path("protected".into()), Query(RevisionQuery { revision: Some(0) }), protected_read).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_SHEET_PROTECTED")
+        );
+        assert!(
+            matches!(xlsx_formula_proof_create(State(state.clone()), Path("protected".into()), protected_write, Json(ExpectedRevision { expected_revision: 0 })).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_SHEET_PROTECTED")
+        );
+        assert!(
+            matches!(apply_editor_edits(&state, "protected", protected_patch).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_SHEET_PROTECTED")
+        );
+        assert_eq!(protected_bundle.manifest().unwrap().revision, 0);
+        // Simulate a legacy editable B1 mapping against a source where B1 is
+        // covered by a merged range. All three API paths return the same code.
+        let merged_source = root.path().join("merged.xlsx");
+        workbook(&merged_source, false, false, false);
+        let merged_path = root.path().join("merged.hcd");
+        hcd_formats::import_document(
+            &merged_source,
+            &merged_path,
+            &hcd_formats::ImportOptions::new("merged"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        workbook(&merged_source, false, true, false);
+        let merged_bytes = std::fs::read(&merged_source).unwrap();
+        let merged_manifest = merged_path.join("manifest.json");
+        let mut metadata: Value =
+            serde_json::from_slice(&std::fs::read(&merged_manifest).unwrap()).unwrap();
+        metadata["source"]["sha256"] = json!(hash_bytes(&merged_bytes));
+        metadata["source"]["sizeBytes"] = json!(merged_bytes.len());
+        std::fs::write(&merged_manifest, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        std::fs::copy(&merged_source, root.path().join("sources/merged.xlsx")).unwrap();
+        let merged_bundle = Bundle::open(&merged_path).unwrap();
+        let merged_node = hcd_core::extract_text_page(&merged_bundle, None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("B1"))
+            .unwrap();
+        let merged_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+            document_id: "merged".into(),
+            patch_id: "merged-covered".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: merged_node.node_id,
+                start: 0,
+                delete_count: 0,
+                insert_text: "local".into(),
+                precondition: NodePrecondition {
+                    node_hash: merged_node.node_hash,
+                },
+            }],
+        };
+        let merged_read = edit_headers_for_doc(&state, "merged", "read", "reader");
+        let merged_write = edit_headers_for_doc(&state, "merged", "write", "editor");
+        assert!(
+            matches!(xlsx_formula_audit(State(state.clone()), Path("merged".into()), Query(RevisionQuery { revision: Some(0) }), merged_read).await, Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_MERGED_CELL_READ_ONLY")
+        );
+        assert!(
+            matches!(xlsx_formula_proof_create(State(state.clone()), Path("merged".into()), merged_write, Json(ExpectedRevision { expected_revision: 0 })).await, Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_MERGED_CELL_READ_ONLY")
+        );
+        assert!(
+            matches!(apply_editor_edits(&state, "merged", merged_patch).await, Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_MERGED_CELL_READ_ONLY")
+        );
+        assert_eq!(merged_bundle.manifest().unwrap().revision, 0);
+        let clean_source = root.path().join("clean.xlsx");
+        workbook(&clean_source, false, false, false);
+        hcd_formats::import_document(
+            &clean_source,
+            &root.path().join("clean.hcd"),
+            &hcd_formats::ImportOptions::new("clean"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        std::fs::copy(&clean_source, root.path().join("sources/clean.xlsx")).unwrap();
+        let clean_headers = edit_headers_for_doc(&state, "clean", "read", "editor");
+        let response = xlsx_formula_audit(
+            State(state.clone()),
+            Path("clean".into()),
+            Query(RevisionQuery { revision: None }),
+            clean_headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["revision"], 0);
+        assert_eq!(body["sourceFreeEditsAuthorized"], false);
+        assert!(matches!(
+            xlsx_formula_proof_create(
+                State(state.clone()),
+                Path("clean".into()),
+                clean_headers.clone(),
+                Json(ExpectedRevision {
+                    expected_revision: 0
+                }),
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        let write = edit_headers_for_doc(&state, "clean", "write", "editor");
+        let Json(proof) = xlsx_formula_proof_create(
+            State(state.clone()),
+            Path("clean".into()),
+            write,
+            Json(ExpectedRevision {
+                expected_revision: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(proof["sourceFreeEditsAuthorized"], true);
+        std::fs::remove_file(root.path().join("sources/clean.xlsx")).unwrap();
+        assert!(matches!(xlsx_formula_audit(
+            State(state.clone()), Path("clean".into()),
+            Query(RevisionQuery { revision: None }), clean_headers,
+        ).await, Err(ApiError(StatusCode::NOT_FOUND, code)) if code == "XLSX_SOURCE_MISSING"));
+        let clean = Bundle::open(root.path().join("clean.hcd")).unwrap();
+        let clean_node = hcd_core::extract_text_page(&clean, None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("C1"))
+            .unwrap();
+        let clean_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+            document_id: "clean".into(),
+            patch_id: "safe-sourceless".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: clean_node.node_id.clone(),
+                start: 0,
+                delete_count: 0,
+                insert_text: "offline ".into(),
+                precondition: NodePrecondition {
+                    node_hash: clean_node.node_hash.clone(),
+                },
+            }],
+        };
+        let proof_path = root.path().join("xlsx-formula-proofs/clean.jwt");
+        let signed = std::fs::read(&proof_path).unwrap();
+        xlsx_formula_proof::downgrade_for_test(root.path(), "clean", &state.secret);
+        assert!(
+            matches!(apply_editor_edits(&state, "clean", clean_patch.clone()).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_FORMULA_PROOF_REQUIRED")
+        );
+        assert_eq!(clean.manifest().unwrap().revision, 0);
+        std::fs::write(&proof_path, b"tampered").unwrap();
+        assert!(
+            matches!(apply_editor_edits(&state, "clean", clean_patch.clone()).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_FORMULA_PROOF_REQUIRED")
+        );
+        assert_eq!(clean.manifest().unwrap().revision, 0);
+        std::fs::write(proof_path, signed).unwrap();
+        let Json(saved_clean) = apply_editor_edits(&state, "clean", clean_patch.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved_clean["revision"], 1);
+        let Json(replayed_clean) = apply_editor_edits(&state, "clean", clean_patch)
+            .await
+            .unwrap();
+        assert_eq!(replayed_clean["idempotentReplay"], true);
+        let latest_node = hcd_core::get_text_node(&clean, &clean_node.node_id).unwrap();
+        let latest_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+            document_id: "clean".into(),
+            patch_id: "different-secret".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: clean_node.node_id.clone(),
+                start: 0,
+                delete_count: 0,
+                insert_text: "more ".into(),
+                precondition: NodePrecondition {
+                    node_hash: latest_node.node.node_hash,
+                },
+            }],
+        };
+        let mut changed_key = state.clone();
+        changed_key.secret = Arc::new(vec![b'y'; 32]);
+        assert!(
+            matches!(apply_editor_edits(&changed_key, "clean", latest_patch.clone()).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_FORMULA_PROOF_REQUIRED")
+        );
+        assert_eq!(clean.manifest().unwrap().revision, 1);
+        let Json(second_save) = apply_editor_edits(&state, "clean", latest_patch)
+            .await
+            .unwrap();
+        assert_eq!(second_save["revision"], 2);
+        let original = std::fs::read(&clean_source).unwrap();
+        let clean_read = edit_headers_for_doc(&state, "clean", "read", "editor");
+        let clean_write = edit_headers_for_doc(&state, "clean", "write", "editor");
+        assert!(matches!(
+            xlsx_restore_source(
+                State(state.clone()),
+                Path("clean".into()),
+                clean_read,
+                Body::from(original.clone())
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        assert!(
+            matches!(xlsx_restore_source(State(state.clone()), Path("clean".into()), clean_write.clone(), Body::from("wrong source")).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_SOURCE_CHANGED")
+        );
+        assert!(!root.path().join("sources/clean.xlsx").exists());
+        let Json(restored) = xlsx_restore_source(
+            State(state.clone()),
+            Path("clean".into()),
+            clean_write.clone(),
+            Body::from(original.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored["revision"], 2);
+        assert_eq!(restored["alreadyPresent"], false);
+        let Json(repeated) = xlsx_restore_source(
+            State(state.clone()),
+            Path("clean".into()),
+            clean_write.clone(),
+            Body::from(original.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated["alreadyPresent"], true);
+        assert_eq!(
+            std::fs::read(root.path().join("sources/clean.xlsx")).unwrap(),
+            original
+        );
+        std::fs::remove_file(root.path().join("sources/clean.xlsx")).unwrap();
+        let (left, right) = tokio::join!(
+            xlsx_restore_source(
+                State(state.clone()),
+                Path("clean".into()),
+                clean_write.clone(),
+                Body::from(original.clone())
+            ),
+            xlsx_restore_source(
+                State(state.clone()),
+                Path("clean".into()),
+                clean_write.clone(),
+                Body::from(original.clone())
+            )
+        );
+        assert_ne!(
+            left.unwrap().0["alreadyPresent"],
+            right.unwrap().0["alreadyPresent"]
+        );
+        std::fs::write(root.path().join("sources/clean.xlsx"), b"existing mismatch").unwrap();
+        assert!(
+            matches!(xlsx_restore_source(State(state.clone()), Path("clean".into()), clean_write, Body::from(original)).await,
+            Err(ApiError(StatusCode::CONFLICT, code)) if code == "XLSX_SOURCE_CONFLICT")
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("sources/clean.xlsx")).unwrap(),
+            b"existing mismatch"
+        );
+        let doc_write = edit_headers_for_doc(&state, "doc", "write", "editor");
+        assert!(
+            matches!(xlsx_formula_proof_create(State(state.clone()), Path("doc".into()), doc_write,
+            Json(ExpectedRevision { expected_revision: 0 })).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_FORMULA_READ_ONLY")
+        );
+        assert!(
+            matches!(apply_editor_edits(&state, "doc", make_patch("B1", "formula-edit")).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_FORMULA_READ_ONLY")
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let ordinary = make_patch("C1", "ordinary-edit");
+        let retained_source = root.path().join("sources/doc.xlsx");
+        std::fs::remove_file(&retained_source).unwrap();
+        assert!(
+            matches!(apply_editor_edits(&state, "doc", ordinary.clone()).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_FORMULA_PROOF_REQUIRED")
+        );
+        std::fs::copy(&source, &retained_source).unwrap();
+        std::fs::write(&retained_source, b"changed source").unwrap();
+        assert!(matches!(xlsx_formula_audit(
+            State(state.clone()), Path("doc".into()),
+            Query(RevisionQuery { revision: None }), headers,
+        ).await, Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_SOURCE_CHANGED"));
+        assert!(
+            matches!(apply_editor_edits(&state, "doc", ordinary.clone()).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_SOURCE_CHANGED")
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        std::fs::copy(&source, &retained_source).unwrap();
+        let Json(saved) = apply_editor_edits(&state, "doc", ordinary.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved["revision"], 1);
+        // A stale recovered request must reach receipt/CAS handling even when
+        // the source disappeared. Only an exact committed request may replay;
+        // a different stale request targeting the formula range must not edit it.
+        std::fs::remove_file(&retained_source).unwrap();
+        assert!(matches!(
+            apply_editor_edits(&state, "doc", make_patch("B1", "stale-formula-recovery")).await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        let Json(replayed) = apply_editor_edits(&state, "doc", ordinary).await.unwrap();
+        assert_eq!(replayed["revision"], 1);
+        assert_eq!(replayed["idempotentReplay"], true);
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        std::fs::copy(&source, &retained_source).unwrap();
+        let part = "xl/worksheets/sheet1.xml";
+        let create_request = hcd_core::GridCreateRequest {
+            document_id: "doc".into(),
+            patch_id: "create-blank".into(),
+            base_revision: 1,
+            source_sha256: bundle.manifest().unwrap().source.sha256,
+            actor: BTreeMap::new(),
+            cells: vec![hcd_core::GridCellCreate {
+                sheet_id: hcd_core::stable_node_id(&["doc", part, "worksheet"])
+                    .replacen("n_", "s_", 1),
+                sheet_part: part.into(),
+                row: 3,
+                column: 3,
+                text: "created".into(),
+            }],
+        };
+        let writer = edit_headers_for_doc(&state, "doc", "write", "alice");
+        let reader = edit_headers_for_doc(&state, "doc", "read", "alice");
+        let other = edit_headers_for_doc(&state, "doc", "read", "bob");
+        assert!(matches!(
+            xlsx_grid_create::create(
+                State(state.clone()),
+                Path("doc".into()),
+                reader.clone(),
+                Json(create_request.clone())
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        let Json(missing) = xlsx_grid_create::receipt(
+            State(state.clone()),
+            Path("doc".into()),
+            reader.clone(),
+            Json(create_request.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(missing["status"], "missing");
+        let mut events = state.revisions.subscribe("doc");
+        let Json(created) = xlsx_grid_create::create(
+            State(state.clone()),
+            Path("doc".into()),
+            writer.clone(),
+            Json(create_request.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created["revision"], 2);
+        assert_eq!(events.try_recv().unwrap(), 2);
+        let Json(receipt) = xlsx_grid_create::receipt(
+            State(state.clone()),
+            Path("doc".into()),
+            reader.clone(),
+            Json(create_request.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt["status"], "committed");
+        assert_eq!(receipt["revision"], 2);
+        let compare_request = serde_json::from_value(json!({"expectedRevision":2,"sourceSha256":create_request.source_sha256,"cells":[{"sheetId":create_request.cells[0].sheet_id,"row":3,"column":3},{"sheetId":create_request.cells[0].sheet_id,"row":3,"column":4}]})).unwrap();
+        let Json(compared) = xlsx_grid_create::compare(
+            State(state.clone()),
+            Path("doc".into()),
+            reader.clone(),
+            Json(compare_request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(compared["revision"], 2);
+        assert_eq!(compared["cells"][0]["mapped"]["text"], "created");
+        assert!(compared["cells"][1]["mapped"].is_null());
+        let stale_compare = serde_json::from_value(json!({"expectedRevision":1,"sourceSha256":create_request.source_sha256,"cells":[{"sheetId":create_request.cells[0].sheet_id,"row":3,"column":3}]})).unwrap();
+        assert!(matches!(
+            xlsx_grid_create::compare(
+                State(state.clone()),
+                Path("doc".into()),
+                reader.clone(),
+                Json(stale_compare)
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        let mut superseded = create_request.clone();
+        superseded.patch_id = "stale-uncommitted".into();
+        superseded.cells[0].column = 4;
+        let Json(expired) = xlsx_grid_create::receipt(
+            State(state.clone()),
+            Path("doc".into()),
+            reader.clone(),
+            Json(superseded.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(expired["status"], "superseded");
+        assert_eq!(expired["baseRevision"], 1);
+        assert_eq!(expired["observedRevision"], 2);
+        assert!(xlsx_grid_create::create(
+            State(state.clone()),
+            Path("doc".into()),
+            writer.clone(),
+            Json(superseded)
+        )
+        .await
+        .is_err());
+        assert!(matches!(
+            xlsx_grid_create::receipt(
+                State(state.clone()),
+                Path("doc".into()),
+                other,
+                Json(create_request.clone())
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        let mut changed = create_request.clone();
+        changed.cells[0].text = "different".into();
+        assert!(matches!(
+            xlsx_grid_create::receipt(
+                State(state.clone()),
+                Path("doc".into()),
+                reader,
+                Json(changed)
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        std::fs::remove_file(&retained_source).unwrap();
+        let mut missing_source = create_request.clone();
+        missing_source.patch_id = "create-without-source".into();
+        missing_source.base_revision = 2;
+        missing_source.cells[0].column = 4;
+        assert!(
+            matches!(xlsx_grid_create::create(State(state.clone()), Path("doc".into()), writer.clone(), Json(missing_source)).await, Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code)) if code == "XLSX_SOURCE_REQUIRED")
+        );
+        let Json(replay) = xlsx_grid_create::create(
+            State(state.clone()),
+            Path("doc".into()),
+            writer,
+            Json(create_request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay["idempotentReplay"], true);
+        assert_eq!(replay["revision"], 2);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn independent_story_head_blocks_legacy_editor_and_writes_but_retains_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/assets/hcd-flow-regions-2026-10-26/image-source.docx");
+        let mut options = hcd_docx::ImportOptions::new("doc");
+        options.flow_layout = true;
+        let path = temp.path().join("doc.hcd");
+        hcd_docx::import_docx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let projection = hcd_core::editor_projection(&bundle, Some(1)).unwrap();
+        let layout = projection.flow_layout.as_ref().unwrap();
+        let request = hcd_core::FlowStoryUnlinkRequest {
+            base_layout_hash: projection.flow_layout_hash.clone().unwrap(),
+            section_id: layout.sections[1].id.clone(),
+            kind: hcd_core::FlowStoryKind::Header,
+            variant: hcd_core::FlowStoryVariant::First,
+            expected_inherited_story_id: layout.sections[0].headers.first.clone(),
+        };
+        let story = hcd_core::FlowStory {
+            id: format!("n_{:032x}", 999995),
+            kind: hcd_core::FlowStoryKind::Header,
+            source_part: "word/independent-server.xml".into(),
+        };
+        let candidate = hcd_docx::prepare_source_story_unlink(
+            &bundle,
+            &source,
+            1,
+            &request,
+            &story,
+            |_| unreachable!(),
+            |_| unreachable!(),
+        )
+        .unwrap();
+        hcd_core::apply_prepared_story_unlink(
+            &bundle,
+            &candidate.prepared,
+            "cccccccccccccccccccccccccccccccc",
+            &Default::default(),
+        )
+        .unwrap();
+        let before = std::fs::read(bundle.root().join("manifest.json")).unwrap();
+        let state = edit_state(temp.path());
+        let mut headers = edit_headers(&state, "read");
+        headers.insert("x-hcd-flow-layout-version", "2".parse().unwrap());
+        assert!(matches!(
+            editor(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(RevisionQuery { revision: None }),
+                headers.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        assert!(editor(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(1) }),
+            headers.clone()
+        )
+        .await
+        .is_ok());
+        assert!(word_layout(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: None }),
+            headers
+        )
+        .await
+        .is_ok());
+        let stale = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "doc".into(),
+            patch_id: "legacy-write".into(),
+            base_revision: 2,
+            actor: Default::default(),
+            operations: vec![],
+            metadata: Default::default(),
+        };
+        assert!(matches!(
+            apply_editor_edits(&state, "doc", stale).await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        assert_eq!(
+            std::fs::read(bundle.root().join("manifest.json")).unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn word_layout_reads_only_bounded_metadata_and_negotiates_historical_models() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/assets/hcd-flow-layout-2026-10-26/source.docx");
+        let mut options = hcd_docx::ImportOptions::new("doc");
+        options.flow_layout = true;
+        let path = temp.path().join("doc.hcd");
+        hcd_docx::import_docx(source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let state = edit_state(temp.path());
+        let mut headers = edit_headers(&state, "read");
+        let manifest_path = bundle.root().join("manifest.json");
+        let original_manifest = std::fs::read(&manifest_path).unwrap();
+        let mut link_manifest: Value = serde_json::from_slice(&original_manifest).unwrap();
+        link_manifest["capabilities"]["wordLayoutEdits"] = json!(2);
+        std::fs::write(&manifest_path, serde_json::to_vec(&link_manifest).unwrap()).unwrap();
+        assert!(matches!(
+            editor(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(RevisionQuery { revision: None }),
+                headers.clone(),
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        std::fs::write(&manifest_path, original_manifest).unwrap();
+        assert!(matches!(
+            word_layout(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(RevisionQuery { revision: None }),
+                headers.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        headers.insert("x-hcd-flow-layout-version", "2".parse().unwrap());
+        let Json(legacy_index) = index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(1),
+                word_regions: None,
+                word_bodies: None,
+            }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(legacy_index.get("wordRegionsVerified").is_none());
+        let Json(index) = index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(1),
+                word_regions: Some(true),
+                word_bodies: None,
+            }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(index["wordRegionsVerified"], true);
+        let Json(body_index) = index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(1),
+                word_regions: Some(true),
+                word_bodies: Some(true),
+            }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body_index["wordBodiesVerified"], true);
+        assert!(body_index["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|chunk| chunk["region"] == "body")
+            .all(|chunk| chunk["wordRegionId"].as_str().is_some()));
+        let story_response = word_story_index(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(1) }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        let story_body = axum::body::to_bytes(story_response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let story_index: Value = serde_json::from_slice(&story_body).unwrap();
+        assert_eq!(story_index["revision"], 1);
+        assert_eq!(story_index["wordRegionsVerified"], true);
+        assert!(story_index["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|story| story["region"] == "header"));
+        assert!(story_index["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|story| story["region"] != "body"));
+        assert!(word_story_index(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(1) }),
+            HeaderMap::new()
+        )
+        .await
+        .is_err());
+        assert!(word_story_index(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(0) }),
+            headers.clone()
+        )
+        .await
+        .is_err());
+        let layout = hcd_core::read_flow_document_layout(&bundle, &bundle.manifest().unwrap())
+            .unwrap()
+            .unwrap();
+        let scopes: std::collections::HashSet<_> = hcd_core::flow_regions(&layout)
+            .into_iter()
+            .map(|region| region.id)
+            .collect();
+        let chunks = index["chunks"].as_array().unwrap();
+        assert!(chunks.iter().any(|chunk| chunk["region"] == "header"));
+        for chunk in chunks
+            .iter()
+            .filter(|chunk| ["header", "footer"].contains(&chunk["region"].as_str().unwrap()))
+        {
+            assert!(scopes.contains(chunk["wordRegionId"].as_str().unwrap()));
+        }
+        assert!(index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(0),
+                word_regions: Some(true),
+                word_bodies: None,
+            }),
+            headers.clone()
+        )
+        .await
+        .is_err());
+        assert!(chunks
+            .iter()
+            .filter(|chunk| chunk["region"] == "body")
+            .all(|chunk| chunk.get("wordRegionId").is_none()));
+        let descriptors = bundle
+            .read_index_page(&bundle.manifest().unwrap(), 0)
+            .unwrap()
+            .chunks;
+        // A multi-page scan retains one validated layout snapshot; each page
+        // still verifies the story chunks against that same catalog.
+        let manifest = bundle.manifest().unwrap();
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        let catalog = hcd_core::WordRegionIndex::new(&bundle, &manifest).unwrap();
+        let expected_regions = catalog.page(&page).unwrap();
+        let asset = bundle
+            .read_asset_index_for_revision(manifest.revision)
+            .unwrap()
+            .into_iter()
+            .find(|asset| asset.source_part == "word/_hcd/flow-layout-v2.json")
+            .unwrap();
+        let layout_path = bundle.root().join(&asset.href);
+        let layout_bytes = std::fs::read(&layout_path).unwrap();
+        std::fs::write(&layout_path, b"corrupt layout").unwrap();
+        assert_eq!(catalog.page(&page).unwrap(), expected_regions);
+        assert!(hcd_core::WordRegionIndex::new(&bundle, &manifest).is_err());
+        std::fs::write(layout_path, layout_bytes).unwrap();
+        let body = descriptors
+            .iter()
+            .find(|chunk| chunk.region == "body")
+            .unwrap();
+        let body_path = bundle.root().join(&body.html_href);
+        let original_body = std::fs::read(&body_path).unwrap();
+        std::fs::write(&body_path, b"corrupted body").unwrap();
+        assert!(index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(1),
+                word_regions: Some(true),
+                word_bodies: Some(true)
+            }),
+            headers.clone()
+        )
+        .await
+        .is_err());
+        assert!(word_story_index(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(1) }),
+            headers.clone()
+        )
+        .await
+        .is_ok());
+        assert!(index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(1),
+                word_regions: Some(true),
+                word_bodies: None,
+            }),
+            headers.clone()
+        )
+        .await
+        .is_ok());
+        std::fs::write(body_path, original_body).unwrap();
+        let first = descriptors
+            .into_iter()
+            .find(|chunk| chunk.region == "header")
+            .unwrap();
+        let chunk_path = bundle.root().join(first.html_href);
+        let original_chunk = std::fs::read(&chunk_path).unwrap();
+        std::fs::write(&chunk_path, b"corrupted").unwrap();
+        assert!(word_story_index(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(1) }),
+            headers.clone()
+        )
+        .await
+        .is_err());
+        assert!(index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(1),
+                word_regions: Some(true),
+                word_bodies: None,
+            }),
+            headers.clone()
+        )
+        .await
+        .is_err());
+        std::fs::write(chunk_path, original_chunk).unwrap();
+        // Removing body chunks proves this endpoint does not materialize the
+        // editor just to discover page geometry and story bindings.
+        std::fs::remove_dir_all(bundle.root().join("chunks")).unwrap();
+        let response = word_layout(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: None }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        let bytes = axum::body::to_bytes(
+            response.into_body(),
+            hcd_core::MAX_FLOW_LAYOUT_BYTES as usize + 4096,
+        )
+        .await
+        .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["revision"], 1);
+        assert_eq!(value["layout"]["schemaVersion"], "hcd-flow-layout/2");
+        assert_eq!(value["layout"]["stories"].as_array().unwrap().len(), 6);
+        assert!(matches!(
+            word_layout(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(RevisionQuery { revision: Some(0) }),
+                headers.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        headers.insert("x-hcd-flow-layout-version", "1".parse().unwrap());
+        assert!(word_layout(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(RevisionQuery { revision: Some(0) }),
+            headers
+        )
+        .await
+        .is_ok());
+        assert!(matches!(
+            word_layout(
+                State(state),
+                Path("doc".into()),
+                Query(RevisionQuery { revision: None }),
+                HeaderMap::new()
+            )
+            .await,
+            Err(ApiError(StatusCode::UNAUTHORIZED, _))
+        ));
     }
 
     fn edit_headers(state: &ServerState, scope: &str) -> HeaderMap {
         edit_headers_for(state, scope, "editor")
     }
 
+    fn people_fixture(root: &std::path::Path) {
+        std::fs::create_dir_all(root.join("people")).unwrap();
+        std::fs::write(root.join("people/doc.json"),serde_json::to_vec(&json!({"schemaVersion":"hcd-people/1","generation":1,"people":[
+            {"id":"person-a","label":"同名","detail":"一部","active":true,"visibleTo":["alice"],"mentionableBy":["alice"]},
+            {"id":"person-b","label":"同名","detail":"二部","active":true,"visibleTo":["bob"]},
+            {"id":"offline","label":"Offline person","active":true},
+            {"id":"disabled","label":"Disabled secret","active":false},
+            {"id":"outsider","label":"Private outsider","active":true}
+        ]})).unwrap()).unwrap();
+    }
+    fn people_query(limit: usize, cursor: Option<String>) -> people::OptionsQuery {
+        people::OptionsQuery {
+            kind: Some("person".into()),
+            q: None,
+            limit: Some(limit),
+            cursor,
+        }
+    }
+    #[test]
+    fn reference_event_source_requires_an_immutable_restore_receipt_not_a_patch_id_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let mut record = bundle.revision(1).unwrap();
+        record.revision = 2;
+        record.parent_revision = Some(1);
+        record.patch_id = Some("restore-0-2".into());
+        record.patch_hash = Some(hash_bytes(b"an ordinary client patch"));
+        assert_eq!(people::reference_source(&record), "content");
+        record.patch_hash = Some(hash_bytes(b"restore:0:1"));
+        assert_eq!(people::reference_source(&record), "restore");
+    }
+    #[tokio::test]
+    async fn people_search_scopes_offline_candidates_and_binds_paging_to_the_actor_and_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let _bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        people_fixture(root.path());
+        let policy = DocumentAccess::default()
+            .replace(
+                Some(vec![
+                    "alice".into(),
+                    "bob".into(),
+                    "person-a".into(),
+                    "person-b".into(),
+                    "offline".into(),
+                    "disabled".into(),
+                ]),
+                None,
+            )
+            .unwrap();
+        store_access(&state, "doc", &policy).unwrap();
+        let alice = edit_headers_for(&state, "write", "alice");
+        let bob = edit_headers_for(&state, "write", "bob");
+        let Json(first) = people::options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(people_query(1, None)),
+            alice.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        let cursor = first["nextCursor"].as_str().unwrap().to_string();
+        let Json(second) = people::options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(people_query(1, Some(cursor.clone()))),
+            alice.clone(),
+        )
+        .await
+        .unwrap();
+        let ids = [
+            first["items"][0]["id"].as_str().unwrap(),
+            second["items"][0]["id"].as_str().unwrap(),
+        ];
+        assert!(ids.contains(&"person-a") && ids.contains(&"offline"));
+        assert!(second["nextCursor"].is_null());
+        assert!(matches!(
+            people::options(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(people_query(1, Some(cursor.clone()))),
+                bob.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::BAD_REQUEST, _))
+        ));
+        let Json(other) = people::options(
+            State(state.clone()),
+            Path("doc".into()),
+            Query(people_query(50, None)),
+            bob,
+        )
+        .await
+        .unwrap();
+        let ids: Vec<_> = other["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"person-b"));
+        assert!(!ids.contains(&"person-a"));
+        let path = root.path().join("people/doc.json");
+        let bytes = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path, bytes.replace("一部", "已改名")).unwrap();
+        assert!(matches!(
+            people::options(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(people_query(1, Some(cursor))),
+                alice
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        assert_eq!(load_access(&state, "doc").unwrap(), policy);
+    }
+    #[tokio::test]
+    async fn people_resolution_hides_restricted_names_and_does_not_invent_an_online_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let _bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        let alice = edit_headers_for(&state, "read", "alice");
+        assert!(matches!(
+            people::options(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(people_query(20, None)),
+                alice.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, _))
+        ));
+        people_fixture(root.path());
+        let request=serde_json::from_value(json!({"targets":[{"kind":"person","id":"person-b"},{"kind":"person","id":"missing"},{"kind":"person","id":"disabled"},{"kind":"document","id":"reserved"},{"kind":"person","id":"offline"}]})).unwrap();
+        let Json(result) = people::resolve(
+            State(state.clone()),
+            Path("doc".into()),
+            alice,
+            Json(request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["items"][0]["status"], "restricted");
+        assert_eq!(result["items"][1]["status"], "restricted");
+        assert_eq!(result["items"][2]["status"], "inactive");
+        assert_eq!(result["items"][3]["status"], "unsupported");
+        assert_eq!(result["items"][4]["status"], "active");
+        assert_eq!(result["items"][4]["canMention"], false);
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("Disabled secret"));
+        assert!(result["items"][0].get("label").is_none());
+        let path = root.path().join("people/doc.json");
+        std::fs::write(path,"{\"schemaVersion\":\"hcd-people/1\",\"generation\":1,\"people\":[{\"id\":\"a\",\"label\":\"A\",\"active\":true},{\"id\":\"a\",\"label\":\"B\",\"active\":true}]}").unwrap();
+        assert!(matches!(
+            people::options(
+                State(state.clone()),
+                Path("doc".into()),
+                Query(people_query(20, None)),
+                edit_headers_for(&state, "read", "alice")
+            )
+            .await,
+            Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, _))
+        ));
+    }
+    #[test]
+    fn new_references_need_per_occurrence_authority_and_unaware_snapshots_cannot_remove_them() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        people_fixture(root.path());
+        let mut current = editor_projection(&bundle, None).unwrap();
+        let content:EditorBlockContent=serde_json::from_value(json!({"kind":"paragraph","inlines":[{"text":"@同名","reference":{"type":"hcd.mention","version":1,"mentionId":format!("m_{:032x}",1),"target":{"kind":"person","id":"person-a"},"snapshot":{"label":"同名"}}}]})).unwrap();
+        let mut request:SnapshotRequest=serde_json::from_value(json!({"expectedRevision":1,"referenceVersion":1,"blocks":[{"blockId":null,"content":content}],"contributors":[{"userId":"alice","displayName":"Alice"},{"userId":"bob","displayName":"Bob"}]})).unwrap();
+        assert!(matches!(
+            people::validate_snapshot(&state, "doc", &current, &request),
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        request.reference_authors = vec![ReferenceAuthor {
+            mention_id: format!("m_{:032x}", 1),
+            user_id: "bob".into(),
+        }];
+        assert!(matches!(
+            people::validate_snapshot(&state, "doc", &current, &request),
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        request.reference_authors[0].user_id = "alice".into();
+        people::validate_snapshot(&state, "doc", &current, &request).unwrap();
+        current.blocks[0].content = content;
+        request.blocks.clear();
+        request.reference_version = None;
+        assert!(matches!(
+            people::validate_snapshot(&state, "doc", &current, &request),
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        request.reference_version = Some(1);
+        request.blocks = vec![SnapshotBlock {
+            block_id: Some(current.blocks[0].block_id.clone()),
+            content: current.blocks[0].content.clone(),
+        }];
+        request.reference_authors.clear();
+        std::fs::remove_file(root.path().join("people/doc.json")).unwrap();
+        people::validate_snapshot(&state, "doc", &current, &request).unwrap();
+    }
+
+    #[tokio::test]
+    async fn coordinated_restore_replays_after_head_commit_and_rotates_epoch_once() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        write_collaboration_metadata(
+            &state,
+            "doc",
+            &CollaborationMetadata {
+                epoch: 0,
+                protocol: CollaborationProtocol::Structure3,
+                node_edits: Some(1),
+                migration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let bytes = b"persisted shared content before restore";
+        let path = collaboration_current_path(&state, "doc", 0).await.unwrap();
+        durable_collaboration_file(&path, bytes).await.unwrap();
+        let request = coordinated_restore::Request {
+            request_id: "a".repeat(32),
+            expected_revision: 1,
+            from_epoch: 0,
+            from_protocol: None,
+            source_hash: hash_bytes(bytes),
+            author_id: "alice".into(),
+            author_name: "Alice".into(),
+        };
+        let dir = root.path().join("collaboration/doc.restores");
+        let intent = serde_json::to_vec(&json!({"target":0,"request":request})).unwrap();
+        durable_collaboration_file(&dir.join("pending.json"), &intent)
+            .await
+            .unwrap();
+        // Crash after appending the canonical head, before publishing the epoch.
+        restore_revision(&bundle, 0, 1, Some("alice".into()), Some("Alice".into())).unwrap();
+        assert!(coordinated_restore::pending(&state, "doc").await);
+        let restarted = edit_state(root.path());
+        let mut service = edit_headers_for(&restarted, "write", "hcd-collaboration");
+        service.insert("x-hcd-coordinator-version", "4".parse().unwrap());
+        service.insert("x-hcd-node-edits-version", "1".parse().unwrap());
+        service.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+        service.insert(
+            "x-hcd-collaboration-protocol",
+            CollaborationProtocol::Structure3.name().parse().unwrap(),
+        );
+        for _ in 0..2 {
+            let Json(receipt) = coordinated_restore::restore(
+                State(restarted.clone()),
+                Path(("doc".into(), 0)),
+                service.clone(),
+                Json(request.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(receipt["revision"], 2);
+            assert_eq!(receipt["collaborationEpoch"], 1);
+            assert_eq!(bundle.manifest().unwrap().revision, 2);
+        }
+        assert!(!coordinated_restore::pending(&restarted, "doc").await);
+        // Crash after recording success, before removing the native fence.
+        durable_collaboration_file(&dir.join("pending.json"), &intent)
+            .await
+            .unwrap();
+        let _ = coordinated_restore::restore(
+            State(restarted.clone()),
+            Path(("doc".into(), 0)),
+            service.clone(),
+            Json(request.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(!coordinated_restore::pending(&restarted, "doc").await);
+        assert_eq!(collaboration_epoch(&restarted, "doc").await.unwrap(), 1);
+        assert_eq!(
+            collaboration_metadata(&restarted, "doc")
+                .await
+                .unwrap()
+                .node_edits,
+            Some(1)
+        );
+        let mut changed = request;
+        changed.author_id = "bob".into();
+        assert!(matches!(
+            coordinated_restore::restore(
+                State(restarted),
+                Path(("doc".into(), 0)),
+                service,
+                Json(changed)
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        assert_eq!(
+            bundle.manifest().unwrap().root_hash,
+            bundle.revision(0).unwrap().root_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_coordinated_restore_pins_model_and_preserves_epoch_wire_on_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        write_collaboration_metadata(
+            &state,
+            "doc",
+            &CollaborationMetadata {
+                epoch: 0,
+                protocol: CollaborationProtocol::Inline1,
+                node_edits: Some(7),
+                migration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let bytes = b"inline room before restore";
+        durable_collaboration_file(
+            &collaboration_current_path(&state, "doc", 0).await.unwrap(),
+            bytes,
+        )
+        .await
+        .unwrap();
+        let request = coordinated_restore::Request {
+            request_id: "c".repeat(32),
+            expected_revision: 1,
+            from_epoch: 0,
+            from_protocol: Some(CollaborationProtocol::Inline1),
+            source_hash: hash_bytes(bytes),
+            author_id: "alice".into(),
+            author_name: "Alice".into(),
+        };
+        let mut service = edit_headers_for(&state, "write", "hcd-collaboration");
+        for (key, value) in [
+            ("x-hcd-coordinator-version", "4"),
+            ("x-hcd-collaboration-epoch", "0"),
+            ("x-hcd-collaboration-protocol", "hcd-semantic-inline/1"),
+            ("x-hcd-inline-containers-version", "1"),
+            ("x-hcd-extension-version", "3"),
+            ("x-hcd-node-edits-version", "7"),
+            ("x-hcd-custom-marks-version", "1"),
+        ] {
+            service.insert(key, value.parse().unwrap());
+        }
+        for key in [
+            "x-hcd-inline-containers-version",
+            "x-hcd-extension-version",
+            "x-hcd-node-edits-version",
+            "x-hcd-custom-marks-version",
+        ] {
+            let mut old = service.clone();
+            old.remove(key);
+            assert!(matches!(
+                coordinated_restore::restore(
+                    State(state.clone()),
+                    Path(("doc".into(), 0)),
+                    old,
+                    Json(request.clone())
+                )
+                .await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+        }
+        // An old durable intent cannot be silently upgraded by current metadata.
+        let mut legacy = request.clone();
+        legacy.from_protocol = None;
+        let dir = root.path().join("collaboration/doc.restores");
+        durable_collaboration_file(
+            &dir.join("pending.json"),
+            &serde_json::to_vec(&json!({"target":0,"request":legacy})).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut old = service.clone();
+        old.insert(
+            "x-hcd-collaboration-protocol",
+            "hcd-semantic-blocks/3".parse().unwrap(),
+        );
+        assert!(matches!(
+            coordinated_restore::restore(
+                State(state.clone()),
+                Path(("doc".into(), 0)),
+                old,
+                Json(legacy)
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        tokio::fs::remove_file(dir.join("pending.json"))
+            .await
+            .unwrap();
+        // Recover a crash after canonical append, retaining the exact inline intent.
+        durable_collaboration_file(
+            &dir.join("pending.json"),
+            &serde_json::to_vec(&json!({"target":0,"request":request})).unwrap(),
+        )
+        .await
+        .unwrap();
+        restore_revision(&bundle, 0, 1, Some("alice".into()), Some("Alice".into())).unwrap();
+        for _ in 0..2 {
+            let Json(receipt) = coordinated_restore::restore(
+                State(edit_state(root.path())),
+                Path(("doc".into(), 0)),
+                service.clone(),
+                Json(request.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(receipt["collaborationProtocol"], "hcd-semantic-inline/1");
+            assert_eq!(receipt["collaborationEpoch"], 1);
+            assert_eq!(receipt["revision"], 2);
+        }
+        let metadata = collaboration_metadata(&state, "doc").await.unwrap();
+        assert_eq!(metadata.protocol, CollaborationProtocol::Inline1);
+        assert_eq!(metadata.node_edits, Some(7));
+        assert_eq!(metadata.epoch, 1);
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert!(!coordinated_restore::pending(&state, "doc").await);
+        assert_eq!(
+            bundle.manifest().unwrap().root_hash,
+            bundle.revision(0).unwrap().root_hash
+        );
+        // A downgraded client cannot even claim a committed inline receipt.
+        service.remove("x-hcd-inline-containers-version");
+        assert!(matches!(
+            coordinated_restore::restore(
+                State(state),
+                Path(("doc".into(), 0)),
+                service,
+                Json(request)
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+    }
+
+    #[tokio::test]
+    async fn coordinated_restore_requires_matching_room_head_and_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        write_collaboration_metadata(
+            &state,
+            "doc",
+            &CollaborationMetadata {
+                epoch: 0,
+                protocol: CollaborationProtocol::Structure3,
+                node_edits: None,
+                migration: None,
+            },
+        )
+        .await
+        .unwrap();
+        durable_collaboration_file(
+            &collaboration_current_path(&state, "doc", 0).await.unwrap(),
+            b"source",
+        )
+        .await
+        .unwrap();
+        let mut service = edit_headers_for(&state, "write", "hcd-collaboration");
+        service.insert("x-hcd-coordinator-version", "4".parse().unwrap());
+        service.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+        service.insert(
+            "x-hcd-collaboration-protocol",
+            CollaborationProtocol::Structure3.name().parse().unwrap(),
+        );
+        let mut request = coordinated_restore::Request {
+            request_id: "b".repeat(32),
+            expected_revision: 1,
+            from_epoch: 0,
+            from_protocol: None,
+            source_hash: hash_bytes(b"wrong source"),
+            author_id: "alice".into(),
+            author_name: "Alice".into(),
+        };
+        assert!(matches!(
+            coordinated_restore::restore(
+                State(state.clone()),
+                Path(("doc".into(), 0)),
+                service.clone(),
+                Json(request.clone())
+            )
+            .await,
+            Err(ApiError(StatusCode::PRECONDITION_FAILED, _))
+        ));
+        request.source_hash = hash_bytes(b"source");
+        request.expected_revision = 2;
+        assert!(matches!(
+            coordinated_restore::restore(
+                State(state.clone()),
+                Path(("doc".into(), 0)),
+                service.clone(),
+                Json(request.clone())
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        request.expected_revision = 1;
+        let mut policy = load_access(&state, "doc").unwrap();
+        policy = policy.replace(None, Some(vec!["bob".into()])).unwrap();
+        store_access(&state, "doc", &policy).unwrap();
+        assert!(matches!(
+            coordinated_restore::restore(
+                State(state.clone()),
+                Path(("doc".into(), 0)),
+                service.clone(),
+                Json(request.clone())
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        assert!(!coordinated_restore::pending(&state, "doc").await);
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        assert!(matches!(
+            restore(
+                State(state),
+                Path(("doc".into(), 0)),
+                service,
+                Json(ExpectedRevision {
+                    expected_revision: 1
+                })
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+    }
+
     fn edit_headers_for(state: &ServerState, scope: &str, user: &str) -> HeaderMap {
+        edit_headers_for_doc(state, "doc", scope, user)
+    }
+
+    fn edit_headers_for_doc(
+        state: &ServerState,
+        document: &str,
+        scope: &str,
+        user: &str,
+    ) -> HeaderMap {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -4032,7 +8620,7 @@ mod tests {
         let token = encode(
             &Header::new(Algorithm::HS256),
             &Claims {
-                doc: "doc".into(),
+                doc: document.into(),
                 scope: scope.into(),
                 sub: Some(user.into()),
                 name: None,
@@ -4049,6 +8637,129 @@ mod tests {
             format!("Bearer {token}").parse().unwrap(),
         );
         headers
+    }
+
+    #[tokio::test]
+    async fn access_policy_requires_manager_and_fences_only_revocations() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = text_bundle(root.path());
+        let initial_revision = bundle.manifest().unwrap().revision;
+        let state = edit_state(root.path());
+        let policy = json!({"expectedGeneration":0,"readers":null,"writers":["alice"]});
+        for scope in ["read", "write"] {
+            let headers = edit_headers_for(&state, scope, "alice");
+            assert!(matches!(
+                set_access(
+                    State(state.clone()),
+                    Path("doc".into()),
+                    headers,
+                    Json(policy.clone())
+                )
+                .await,
+                Err(ApiError(StatusCode::FORBIDDEN, _))
+            ));
+        }
+        let manager = edit_headers_for(&state, "manage", "owner");
+        assert!(authorize(&state, &manager, "doc", false).is_err());
+        let Json(saved) = set_access(
+            State(state.clone()),
+            Path("doc".into()),
+            manager.clone(),
+            Json(policy.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["collaborationEpoch"], 1);
+        assert_eq!(saved["policy"]["generation"], 1);
+        assert!(matches!(
+            set_access(
+                State(state.clone()),
+                Path("doc".into()),
+                manager.clone(),
+                Json(policy)
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        let grant = json!({"expectedGeneration":1,"readers":null,"writers":["alice","bob"]});
+        let Json(saved) = set_access(
+            State(state.clone()),
+            Path("doc".into()),
+            manager.clone(),
+            Json(grant),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["collaborationEpoch"], 1);
+        let revoke = json!({"expectedGeneration":2,"readers":["bob"],"writers":["bob"]});
+        let Json(saved) = set_access(
+            State(state.clone()),
+            Path("doc".into()),
+            manager,
+            Json(revoke),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["collaborationEpoch"], 2);
+        assert!(authorize(
+            &state,
+            &edit_headers_for(&state, "write", "alice"),
+            "doc",
+            false
+        )
+        .is_err());
+        authorize(
+            &state,
+            &edit_headers_for(&state, "write", "bob"),
+            "doc",
+            true,
+        )
+        .unwrap();
+        assert_eq!(bundle.manifest().unwrap().revision, initial_revision);
+    }
+
+    #[test]
+    fn revoked_access_rejects_the_same_write_token_and_keeps_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let state = edit_state(root.path());
+        let headers = edit_headers_for(&state, "write", "alice");
+        authorize_claims(&state, &headers, "doc").unwrap();
+        store_access(
+            &state,
+            "doc",
+            &update_access(&load_access(&state, "doc").unwrap(), Some(vec![])).unwrap(),
+        )
+        .unwrap();
+        let denied = authorize_claims(&state, &headers, "doc").unwrap_err();
+        assert_eq!(denied.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            authorize_claims(&state, &headers, "doc").unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        authorize(&state, &headers, "doc", false).unwrap();
+        let expired = encode(
+            &Header::new(Algorithm::HS256),
+            &Claims {
+                doc: "doc".into(),
+                scope: "write".into(),
+                sub: Some("alice".into()),
+                name: None,
+                aud: "hcd-core".into(),
+                iat: 0,
+                exp: 1,
+            },
+            &EncodingKey::from_secret(&state.secret),
+        )
+        .unwrap();
+        let mut stale = HeaderMap::new();
+        stale.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {expired}").parse().unwrap(),
+        );
+        assert_eq!(
+            authorize_claims(&state, &stale, "doc").unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     fn text_bundle(root: &std::path::Path) -> Bundle {
@@ -4316,6 +9027,289 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_edit_storage_fence_rejects_unaware_reads_writes_and_checkpoints_and_survives_reset(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = text_bundle(root.path());
+        let baseline = bundle.manifest().unwrap();
+        let state = edit_state(root.path());
+        let mut storage = edit_headers_for(&state, "write", "hcd-collaboration");
+        storage.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+        storage.insert("x-hcd-coordinator-version", "4".parse().unwrap());
+        storage.insert("x-hcd-state-hash", "none".parse().unwrap());
+        storage.insert("x-hcd-node-edits-version", "1".parse().unwrap());
+        let body = Bytes::from_static(b"retained node property candidates");
+        let _ = collaboration_put(
+            State(state.clone()),
+            Path("doc".into()),
+            storage.clone(),
+            body.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            collaboration_metadata(&state, "doc")
+                .await
+                .unwrap()
+                .node_edits,
+            Some(1)
+        );
+        let path = collaboration_current_path(&state, "doc", 0).await.unwrap();
+        let previous = tokio::fs::read(&path).await.unwrap();
+        let mut unaware = storage.clone();
+        unaware.remove("x-hcd-node-edits-version");
+        unaware.insert("x-hcd-state-hash", hash_bytes(&body).parse().unwrap());
+        assert!(matches!(
+            collaboration_get(State(state.clone()), Path("doc".into()), unaware.clone()).await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        assert!(matches!(
+            collaboration_put(
+                State(state.clone()),
+                Path("doc".into()),
+                unaware.clone(),
+                Bytes::from_static(b"must not replace candidates")
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        let request: SnapshotRequest = serde_json::from_value(
+            json!({"expectedRevision":baseline.revision,"coordinatorVersion":4,"blocks":[]}),
+        )
+        .unwrap();
+        assert!(matches!(
+            checkpoint(
+                State(state.clone()),
+                Path("doc".into()),
+                unaware.clone(),
+                Json(request)
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        let mut future = storage.clone();
+        future.insert("x-hcd-node-edits-version", "8".parse().unwrap());
+        assert!(matches!(
+            collaboration_get(State(state.clone()), Path("doc".into()), future).await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), previous);
+        assert_eq!(bundle.manifest().unwrap().root_hash, baseline.root_hash);
+        assert_eq!(reset_collaboration(&state, "doc").await.unwrap(), 1);
+        assert_eq!(
+            collaboration_metadata(&state, "doc")
+                .await
+                .unwrap()
+                .node_edits,
+            Some(1)
+        );
+        unaware.insert("x-hcd-collaboration-epoch", "1".parse().unwrap());
+        assert!(matches!(
+            collaboration_get(State(state), Path("doc".into()), unaware).await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+    }
+
+    #[test]
+    fn snapshot_normalization_keeps_inline_bodies_and_never_uses_a_text_only_shortcut() {
+        let content: EditorBlockContent = serde_json::from_value(json!({
+            "kind":"paragraph","inlines":[{"text":"","content":{"kind":"extension","extension":{
+                "schemaVersion":"hcd.extension/3","instanceId":format!("x_{:032x}",1),"type":"example.inline","version":1,
+                "display":"inline","contentModel":"inline","data":{},"fallback":{"text":"Label"}
+            },"inlines":[{"text":"Body","nodeId":format!("n_{:032x}",2)}]}}]
+        })).unwrap();
+        let plain = normalized(content.clone());
+        assert!(plain.inlines[0].content.is_some());
+        assert!(plain.inlines[0].content.as_ref().unwrap().inlines[0]
+            .node_id
+            .is_none());
+        assert_eq!(normalize_content(content.clone(), true), content);
+        let current = EditorProjection {
+            flow_layout: None,
+            flow_layout_hash: None,
+            document_id: "inline".into(),
+            revision: 1,
+            blocks: vec![hcd_core::EditorBlockView {
+                flow_region_id: None,
+                block_id: format!("n_{:032x}", 1),
+                block_hash: "hash".into(),
+                region: "body".into(),
+                read_only: false,
+                content: content.clone(),
+                read_only_html: None,
+            }],
+            tracked_changes: vec![],
+            comments: vec![],
+        };
+        let mut after = content;
+        after.inlines[0].content.as_mut().unwrap().inlines[0].text = "Edited".into();
+        let requested = vec![SnapshotBlock {
+            block_id: Some(current.blocks[0].block_id.clone()),
+            content: after,
+        }];
+        assert!(text_only_operations(&current, &requested).is_none());
+        assert!(presentation_style_operations(&current, &requested).is_none());
+    }
+
+    #[test]
+    fn editable_inline_containers_require_explicit_model_acknowledgement() {
+        let mut headers = HeaderMap::new();
+        assert!(require_inline_containers_support(false, &headers).is_ok());
+        assert!(matches!(
+            require_inline_containers_support(true, &headers),
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        for version in ["0", "2", "3", "unknown"] {
+            headers.insert("x-hcd-inline-containers-version", version.parse().unwrap());
+            assert!(require_inline_containers_support(false, &headers).is_err());
+        }
+        headers.insert("x-hcd-inline-containers-version", "1".parse().unwrap());
+        assert!(require_inline_containers_support(true, &headers).is_ok());
+    }
+
+    #[test]
+    fn flow_layout_requires_explicit_acknowledgement_without_enabling_structural_snapshots() {
+        let mut headers = HeaderMap::new();
+        assert!(require_flow_layout_support(None, &headers).is_ok());
+        assert!(matches!(
+            require_flow_layout_support(Some(1), &headers),
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        for version in ["0", "3", "unknown"] {
+            headers.insert("x-hcd-flow-layout-version", version.parse().unwrap());
+            assert!(require_flow_layout_support(None, &headers).is_err());
+        }
+        headers.insert("x-hcd-flow-layout-version", "1".parse().unwrap());
+        assert!(require_flow_layout_support(Some(1), &headers).is_ok());
+        assert!(require_flow_layout_support(Some(2), &headers).is_err());
+        headers.insert("x-hcd-flow-layout-version", "2".parse().unwrap());
+        assert!(require_flow_layout_support(Some(2), &headers).is_ok());
+        assert!(require_flow_layout_support(Some(1), &headers).is_err());
+    }
+
+    #[test]
+    fn custom_text_marks_require_explicit_model_acknowledgement() {
+        let mut headers = HeaderMap::new();
+        assert!(require_custom_marks_support(false, &headers).is_ok());
+        assert!(matches!(
+            require_custom_marks_support(true, &headers),
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        headers.insert("x-hcd-custom-marks-version", "2".parse().unwrap());
+        assert!(require_custom_marks_support(false, &headers).is_err());
+        headers.insert("x-hcd-custom-marks-version", "1".parse().unwrap());
+        assert!(require_custom_marks_support(true, &headers).is_ok());
+    }
+
+    #[tokio::test]
+    async fn schema_transition_model_cannot_be_downgraded_by_a_property_only_coordinator() {
+        for (required, older) in [
+            (2, "1"),
+            (3, "2"),
+            (4, "3"),
+            (4, "2"),
+            (4, "1"),
+            (5, "4"),
+            (5, "3"),
+            (5, "1"),
+            (6, "5"),
+            (6, "4"),
+            (6, "3"),
+            (6, "2"),
+            (6, "1"),
+            (7, "6"),
+            (7, "5"),
+            (7, "1"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let bundle = text_bundle(root.path());
+            let before = bundle.manifest().unwrap();
+            let state = edit_state(root.path());
+            let mut headers = edit_headers_for(&state, "write", "hcd-collaboration");
+            for (key, value) in [
+                ("x-hcd-collaboration-epoch", "0"),
+                ("x-hcd-coordinator-version", "4"),
+                ("x-hcd-state-hash", "none"),
+                (
+                    "x-hcd-node-edits-version",
+                    match required {
+                        2 => "2",
+                        3 => "3",
+                        4 => "4",
+                        5 => "5",
+                        6 => "6",
+                        _ => "7",
+                    },
+                ),
+            ] {
+                headers.insert(key, value.parse().unwrap());
+            }
+            let body = Bytes::from_static(b"retained schema transition and old-version candidates");
+            let _ = collaboration_put(
+                State(state.clone()),
+                Path("doc".into()),
+                headers.clone(),
+                body.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                collaboration_metadata(&state, "doc")
+                    .await
+                    .unwrap()
+                    .node_edits,
+                Some(required)
+            );
+            let path = collaboration_current_path(&state, "doc", 0).await.unwrap();
+            headers.insert("x-hcd-state-hash", hash_bytes(&body).parse().unwrap());
+            headers.insert("x-hcd-node-edits-version", older.parse().unwrap());
+            assert!(matches!(
+                collaboration_get(State(state.clone()), Path("doc".into()), headers.clone()).await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+            assert!(matches!(
+                collaboration_put(
+                    State(state.clone()),
+                    Path("doc".into()),
+                    headers.clone(),
+                    Bytes::from_static(b"must not flatten schema candidates")
+                )
+                .await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+            let request = serde_json::from_value(
+                json!({"expectedRevision":before.revision,"coordinatorVersion":4,"blocks":[]}),
+            )
+            .unwrap();
+            assert!(matches!(
+                checkpoint(
+                    State(state.clone()),
+                    Path("doc".into()),
+                    headers.clone(),
+                    Json(request)
+                )
+                .await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), body);
+            assert_eq!(bundle.manifest().unwrap().root_hash, before.root_hash);
+            assert_eq!(reset_collaboration(&state, "doc").await.unwrap(), 1);
+            assert_eq!(
+                collaboration_metadata(&state, "doc")
+                    .await
+                    .unwrap()
+                    .node_edits,
+                Some(required)
+            );
+            headers.insert("x-hcd-collaboration-epoch", "1".parse().unwrap());
+            assert!(matches!(
+                collaboration_get(State(state), Path("doc".into()), headers).await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn room_reset_archives_old_states_and_old_epoch_recovery_cannot_change_the_current_room()
     {
         let root = tempfile::tempdir().unwrap();
@@ -4459,6 +9453,8 @@ mod tests {
             .entries[0]
             .node_id
             .clone();
+        std::fs::create_dir(root.path().join("sources")).unwrap();
+        std::fs::copy(&source, root.path().join("sources/doc.docx")).unwrap();
         let state = edit_state(root.path());
         let Json(original) = text_node(
             State(state.clone()),
@@ -5002,11 +9998,73 @@ mod tests {
         assert_eq!(bundle.manifest().unwrap().revision, 1);
     }
 
+    #[test]
+    fn snapshot_source_plans_support_join_split_and_prefer_the_surviving_owner_over_shared_fragments(
+    ) {
+        let mut current = projection();
+        let first_id = format!("n_{:032x}", 1);
+        let second_id = format!("n_{:032x}", 2);
+        current.blocks[0].content.inlines[0].node_id = Some(first_id.clone());
+        let mut second = current.blocks[0].clone();
+        second.block_id = "second".into();
+        second.content.inlines[0].text = "Second".into();
+        second.content.inlines[0].node_id = Some(second_id.clone());
+        current.blocks.push(second);
+        let first = current.blocks[0].content.clone();
+        let second = current.blocks[1].content.clone();
+        let mut joined = first.clone();
+        joined.inlines.extend(second.inlines.clone());
+        let joined_request = vec![SnapshotBlock {
+            block_id: Some(current.blocks[0].block_id.clone()),
+            content: joined.clone(),
+        }];
+        let plan = snapshot_source_plans(&current, &joined_request).unwrap();
+        assert_eq!(plan[&0].inlines[1].node_id, Some(second_id.clone()));
+        current.blocks.truncate(1);
+        current.blocks[0].content = joined;
+        let split_request = vec![
+            SnapshotBlock {
+                block_id: Some(current.blocks[0].block_id.clone()),
+                content: first.clone(),
+            },
+            SnapshotBlock {
+                block_id: None,
+                content: second,
+            },
+        ];
+        let plan = snapshot_source_plans(&current, &split_request).unwrap();
+        assert_eq!(plan[&1].inlines[0].node_id, Some(second_id));
+        current.blocks[0].content = first.clone();
+        let mut prefix = first.clone();
+        prefix.inlines[0].text = "Prefix".into();
+        let mut suffix = first;
+        suffix.inlines[0].text = "Suffix".into();
+        let plan = snapshot_source_plans(
+            &current,
+            &[
+                SnapshotBlock {
+                    block_id: Some(current.blocks[0].block_id.clone()),
+                    content: prefix,
+                },
+                SnapshotBlock {
+                    block_id: None,
+                    content: suffix,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(plan[&0].inlines[0].node_id, Some(first_id));
+        assert_eq!(plan[&1].inlines[0].node_id, None);
+    }
+
     fn projection() -> EditorProjection {
         EditorProjection {
+            flow_layout: None,
+            flow_layout_hash: None,
             document_id: "doc".to_string(),
             revision: 1,
             blocks: vec![EditorBlockView {
+                flow_region_id: None,
                 block_id: "block".to_string(),
                 block_hash: "block-hash".to_string(),
                 region: "body".to_string(),
@@ -5032,6 +10090,291 @@ mod tests {
             tracked_changes: Vec::new(),
             comments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn legacy_field_snapshot_cannot_change_or_remove_protected_block() {
+        let current = projection();
+        let protected = HashSet::from([current.blocks[0].content.inlines[0]
+            .node_id
+            .clone()
+            .unwrap()]);
+        let original = SnapshotBlock {
+            block_id: Some("block".into()),
+            content: current.blocks[0].content.clone(),
+        };
+        assert!(validate_legacy_word_snapshot(&current, &[original.clone()], &protected).is_ok());
+        let mut edited = original.clone();
+        edited.content.inlines[0].text = "changed".into();
+        assert!(validate_legacy_word_snapshot(&current, &[edited], &protected).is_err());
+        assert!(validate_legacy_word_snapshot(&current, &[], &protected).is_err());
+        assert!(
+            validate_legacy_word_snapshot(&current, &[original.clone(), original], &protected)
+                .is_err()
+        );
+        assert!(validate_legacy_word_snapshot(&current, &[], &HashSet::new()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn legacy_docx_source_guard_rejects_field_patch_and_replays_normal_save() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("sources")).unwrap();
+        let source = root.path().join("sources/doc.docx");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+        for (name, data) in [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Normal</w:t></w:r></w:p><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:body></w:document>"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(data.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let fresh_path = root.path().join("fresh.hcd");
+        let manifest = hcd_docx::import_docx(
+            &source,
+            &fresh_path,
+            &hcd_docx::ImportOptions::new("doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let fresh = Bundle::open(fresh_path).unwrap();
+        let descriptor = &fresh.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let mut map = fresh.read_map_verified(descriptor).unwrap();
+        let field = map
+            .entries
+            .iter_mut()
+            .find(|entry| entry.source.text_ordinal == 2)
+            .unwrap();
+        field.source.editable = true;
+        let field_id = field.node_id.clone();
+        let field_hash = field.node_hash.clone();
+        let normal = map
+            .entries
+            .iter()
+            .find(|entry| entry.source.text_ordinal == 1)
+            .unwrap();
+        let normal_id = normal.node_id.clone();
+        let normal_hash = normal.node_hash.clone();
+        let html = fresh
+            .read_chunk_verified(descriptor)
+            .unwrap()
+            .replace(" data-hcd-computed-field=\"1\"", "");
+        let mut writer = hcd_core::BundleWriter::create(root.path().join("doc.hcd")).unwrap();
+        writer.write_styles("").unwrap();
+        writer
+            .write_chunk(map.chunk_id.clone(), "body".into(), html, map, 2, false)
+            .unwrap();
+        writer.finish(manifest).unwrap();
+        let state = edit_state(root.path());
+        let original_source = std::fs::read(&source).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let reader = edit_headers(&state, "read");
+        let writer_headers = edit_headers(&state, "write");
+        let status = word_source_status(State(state.clone()), Path("doc".into()), reader.clone())
+            .await
+            .unwrap()
+            .into_response();
+        let bytes = axum::body::to_bytes(status.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+            "missing"
+        );
+        assert!(matches!(
+            word_restore_source(
+                State(state.clone()),
+                Path("doc".into()),
+                reader,
+                Body::from(original_source.clone())
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        assert!(
+            matches!(word_restore_source(State(state.clone()), Path("doc".into()), writer_headers.clone(), Body::from("wrong file")).await, Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)) if reason == "DOCX_SOURCE_CHANGED")
+        );
+        assert!(!source.exists());
+        let Json(restored) = word_restore_source(
+            State(state.clone()),
+            Path("doc".into()),
+            writer_headers.clone(),
+            Body::from(original_source.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored["alreadyPresent"], false);
+        let Json(replayed) = word_restore_source(
+            State(state.clone()),
+            Path("doc".into()),
+            writer_headers.clone(),
+            Body::from(original_source.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed["alreadyPresent"], true);
+        let status = word_source_status(
+            State(state.clone()),
+            Path("doc".into()),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let bytes = axum::body::to_bytes(status.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+            "present"
+        );
+        let mut wrong_existing = original_source.clone();
+        wrong_existing[0] ^= 1;
+        std::fs::write(&source, &wrong_existing).unwrap();
+        let status = word_source_status(
+            State(state.clone()),
+            Path("doc".into()),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let bytes = axum::body::to_bytes(status.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+            "invalid"
+        );
+        assert!(
+            matches!(word_restore_source(State(state.clone()), Path("doc".into()), writer_headers, Body::from(original_source.clone())).await,
+            Err(ApiError(StatusCode::CONFLICT, reason)) if reason == "DOCX_SOURCE_CONFLICT")
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), wrong_existing);
+        std::fs::write(&source, &original_source).unwrap();
+        let bundle = Bundle::open(root.path().join("doc.hcd")).unwrap();
+        let current = editor_projection(&bundle, None).unwrap();
+        let protected = hcd_docx::legacy_read_only_nodes(&bundle, &source).unwrap();
+        let field_block = current
+            .blocks
+            .iter()
+            .find(|block| {
+                snapshot_source_inlines(&block.content)
+                    .iter()
+                    .any(|inline| inline.node_id.as_deref() == Some(field_id.as_str()))
+            })
+            .unwrap();
+        let block_id = field_block.block_id.clone();
+        let mut snapshot: Vec<_> = editor_surface(&current)
+            .into_iter()
+            .map(|block| SnapshotBlock {
+                block_id: Some(block.block_id.clone()),
+                content: block.content.clone(),
+            })
+            .collect();
+        snapshot
+            .iter_mut()
+            .find(|block| block.block_id.as_deref() == Some(block_id.as_str()))
+            .unwrap()
+            .content
+            .inlines[0]
+            .text = "changed".into();
+        let response = validate_legacy_word_snapshot(&current, &snapshot, &protected)
+            .unwrap_err()
+            .into_response();
+        assert_eq!(response.headers()["x-hcd-protected-block"], block_id);
+        let patch = |id: String, hash: String, patch_id: &str| PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_3.into(),
+            document_id: "doc".into(),
+            patch_id: patch_id.into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: id,
+                start: 0,
+                delete_count: 0,
+                insert_text: "new ".into(),
+                precondition: NodePrecondition { node_hash: hash },
+            }],
+        };
+        std::fs::remove_file(&source).unwrap();
+        let missing = apply_editor_edits(
+            &state,
+            "doc",
+            patch(normal_id.clone(), normal_hash.clone(), "missing-source"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.0, StatusCode::UNPROCESSABLE_ENTITY);
+        let missing = missing.into_response();
+        assert_eq!(
+            missing.headers()["x-hcd-error-code"],
+            "DOCX_SOURCE_REQUIRED"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        std::fs::write(&source, original_source.clone()).unwrap();
+        assert!(
+            matches!(apply_editor_edits(&state, "doc", patch(field_id.clone(), field_hash.clone(), "field")).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)) if reason == "DOCX_SOURCE_TEXT_READ_ONLY")
+        );
+        let proof = word_source_proof::read(&bundle, root.path(), &state.secret)
+            .unwrap()
+            .unwrap();
+        assert!(proof.contains(&field_id));
+        // The freshly imported map has the same source identity but a different
+        // editable flag; an attestation for the legacy map cannot authorize it.
+        assert!(word_source_proof::read(&fresh, root.path(), &state.secret)
+            .unwrap()
+            .is_none());
+        assert!(
+            word_source_proof::read(&bundle, root.path(), b"different secret")
+                .unwrap()
+                .is_none()
+        );
+        let proof_path = root.path().join("word-source-proofs/doc.jwt");
+        let saved_proof = std::fs::read(&proof_path).unwrap();
+        std::fs::write(&proof_path, [0xff, 0xfe]).unwrap();
+        assert!(word_source_proof::read(&bundle, root.path(), &state.secret)
+            .unwrap()
+            .is_none());
+        std::fs::remove_file(&source).unwrap();
+        assert!(
+            matches!(apply_editor_edits(&state, "doc", patch(normal_id.clone(), normal_hash.clone(), "corrupt-proof")).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)) if reason == "DOCX_SOURCE_REQUIRED")
+        );
+        std::fs::write(&proof_path, saved_proof).unwrap();
+        assert!(
+            matches!(apply_editor_edits(&state, "doc", patch(field_id, field_hash, "field-unsourced")).await,
+            Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, reason)) if reason == "DOCX_SOURCE_TEXT_READ_ONLY")
+        );
+        let normal = patch(normal_id.clone(), normal_hash, "normal");
+        let Json(saved) = apply_editor_edits(&state, "doc", normal.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved["revision"], 1);
+        assert!(word_source_proof::read(&bundle, root.path(), &state.secret)
+            .unwrap()
+            .is_some());
+        let current = hcd_core::get_text_node(&bundle, &normal_id).unwrap().node;
+        let mut second = patch(normal_id, current.node_hash, "unsourced-second");
+        second.base_revision = 1;
+        let Json(next) = apply_editor_edits(&state, "doc", second).await.unwrap();
+        assert_eq!(next["revision"], 2);
+        let Json(replayed) = apply_editor_edits(&state, "doc", normal).await.unwrap();
+        assert_eq!(replayed["idempotentReplay"], true);
     }
 
     #[tokio::test]
@@ -5062,6 +10405,7 @@ mod tests {
             remote: None,
             collaboration_lock: Arc::new(Mutex::new(())),
             revisions: RevisionHub::default(),
+            word_owners: word_owner::WordOwners::default(),
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -5110,6 +10454,89 @@ mod tests {
         }];
         assert!(text_only_operations(&current, &snapshot).is_none());
         assert!(presentation_style_operations(&current, &snapshot).is_none());
+    }
+
+    #[test]
+    fn structural_snapshot_normalization_preserves_distinct_sources_and_splits_only_one_binding() {
+        let source = |number| format!("n_{number:032x}");
+        let before = EditorBlockContent {
+            inlines: vec![
+                EditorInline {
+                    text: "Repeated ".into(),
+                    node_id: Some(source(1)),
+                    ..Default::default()
+                },
+                EditorInline {
+                    text: "Repeated".into(),
+                    node_id: Some(source(2)),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(normalized(before.clone()).inlines.len(), 1);
+        let mut desired = before.clone();
+        desired.kind = EditorBlockKind::Heading;
+        desired.level = Some(2);
+        desired.inlines.push(EditorInline {
+            text: " tail".into(),
+            node_id: Some(source(2)),
+            italic: true,
+            ..Default::default()
+        });
+        let replacement =
+            hcd_core::retain_replacement_sources(&before, normalize_content(desired, true))
+                .unwrap();
+        assert_eq!(replacement.inlines[0].node_id, Some(source(1)));
+        assert_eq!(replacement.inlines[1].node_id, Some(source(2)));
+        assert_eq!(replacement.inlines[2].node_id, None);
+        let mut unknown = before.clone();
+        unknown.kind = EditorBlockKind::Heading;
+        unknown.level = Some(1);
+        unknown.inlines[1].node_id = Some(source(3));
+        assert!(
+            hcd_core::retain_replacement_sources(&before, normalize_content(unknown, true))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn extension_payload_edits_never_use_text_only_or_source_run_shortcuts() {
+        let envelope: hcd_core::ExtensionNode = serde_json::from_value(json!({
+            "schemaVersion":"hcd.extension/1", "instanceId":format!("x_{}", "1".repeat(32)),
+            "type":"example.task", "version":1, "display":"inline", "data":{"done":false},
+            "fallback":{"text":"Task"}
+        }))
+        .unwrap();
+        let mut current = projection();
+        current.blocks[0].content.inlines[0].text = "Task".into();
+        current.blocks[0].content.inlines[0].extension = Some(envelope.clone());
+        let mut desired = current.blocks[0].content.clone();
+        // Even when visible text is identical, changed business fields must be saved.
+        desired.inlines[0].extension.as_mut().unwrap().data = json!({"done":true});
+        let requested = vec![SnapshotBlock {
+            block_id: Some("block".into()),
+            content: desired.clone(),
+        }];
+        assert!(text_only_operations(&current, &requested).is_none());
+        assert!(
+            !source_changes(&current.blocks[0].content, &desired, &mut BTreeMap::new()).unwrap()
+        );
+        let mut before = current.blocks[0].content.clone();
+        before.kind = EditorBlockKind::Extension;
+        before.extension = Some(hcd_core::ExtensionNode {
+            display: hcd_core::ExtensionDisplay::Block,
+            ..envelope
+        });
+        before.inlines[0].extension = None;
+        let mut after = before.clone();
+        after.extension.as_mut().unwrap().data = json!({"done":true});
+        after.extension.as_mut().unwrap().fallback.text = "Changed task".into();
+        after.inlines[0].text = "Changed task".into();
+        after.inlines[0].node_id = None;
+        // A changed fallback has no source receipt yet, but is a valid atom.
+        // Return structural fallback instead of rejecting missing text identity.
+        assert!(!source_changes(&before, &after, &mut BTreeMap::new()).unwrap());
     }
 
     #[test]
@@ -5227,6 +10654,7 @@ mod tests {
     fn header_text_stays_on_the_source_splice_path() {
         let mut current = projection();
         current.blocks.push(EditorBlockView {
+            flow_region_id: None,
             block_id: "header-block".to_string(),
             block_hash: "header-hash".to_string(),
             region: "header".to_string(),
@@ -5450,5 +10878,439 @@ mod tests {
         hub.publish("doc", 4);
         assert_eq!(first.try_recv().unwrap(), 4);
         assert!(other.try_recv().is_err());
+    }
+    fn protocol_migration_headers(state: &ServerState, source_hash: &str, id: &str) -> HeaderMap {
+        let mut headers = edit_headers_for(state, "write", "hcd-collaboration");
+        for (name, value) in [
+            ("x-hcd-coordinator-version", "4"),
+            ("x-hcd-collaboration-epoch", "0"),
+            ("x-hcd-state-hash", source_hash),
+            ("x-hcd-target-protocol", "hcd-semantic-blocks/3"),
+            ("x-hcd-base-revision", "1"),
+            ("x-hcd-migration-id", id),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        headers
+    }
+    fn inline_bootstrap_headers(state: &ServerState) -> HeaderMap {
+        let mut headers = protocol_migration_headers(state, "none", &"c".repeat(32));
+        for (key, value) in [
+            ("x-hcd-target-protocol", "hcd-semantic-inline/1"),
+            ("x-hcd-inline-containers-version", "1"),
+            ("x-hcd-extension-version", "3"),
+            ("x-hcd-node-edits-version", "7"),
+        ] {
+            headers.insert(key, value.parse().unwrap());
+        }
+        headers
+    }
+    #[tokio::test]
+    async fn inline_bootstrap_acknowledges_model_and_replays_without_replacing_newer_state() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = text_bundle(root.path());
+        let state = edit_state(root.path());
+        let mut manifest = bundle.manifest().unwrap();
+        manifest.capabilities.extension_nodes = Some(3);
+        bundle.write_manifest(&manifest).unwrap();
+        let headers = inline_bootstrap_headers(&state);
+        let bytes = Bytes::from_static(b"inline state validated by sidecar");
+        for key in [
+            "x-hcd-inline-containers-version",
+            "x-hcd-extension-version",
+            "x-hcd-node-edits-version",
+        ] {
+            let mut old = headers.clone();
+            old.remove(key);
+            assert!(matches!(
+                collaboration_migrate(State(state.clone()), Path("doc".into()), old, bytes.clone())
+                    .await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+        }
+        let Json(result) = collaboration_migrate(
+            State(state.clone()),
+            Path("doc".into()),
+            headers.clone(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["collaborationProtocol"], "hcd-semantic-inline/1");
+        assert_eq!(result["collaborationEpoch"], 1);
+        let metadata = collaboration_metadata(&state, "doc").await.unwrap();
+        assert_eq!(metadata.node_edits, Some(7));
+        let Json(auth) = auth_check(
+            State(state.clone()),
+            Path("doc".into()),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(auth["coordinatedRestore"], true);
+        let mut current = headers.clone();
+        current.insert("x-hcd-collaboration-epoch", "1".parse().unwrap());
+        current.insert(
+            "x-hcd-collaboration-protocol",
+            "hcd-semantic-inline/1".parse().unwrap(),
+        );
+        let mut old = current.clone();
+        old.remove("x-hcd-inline-containers-version");
+        assert!(matches!(
+            collaboration_get(State(state.clone()), Path("doc".into()), old).await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        let newer = Bytes::from_static(b"newer inline peer input");
+        current.insert("x-hcd-state-hash", hash_bytes(&bytes).parse().unwrap());
+        let _ = collaboration_put(
+            State(state.clone()),
+            Path("doc".into()),
+            current.clone(),
+            newer.clone(),
+        )
+        .await
+        .unwrap();
+        let Json(replay) = collaboration_migrate(
+            State(state.clone()),
+            Path("doc".into()),
+            headers.clone(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay["idempotentReplay"], true);
+        let response = collaboration_get(State(state.clone()), Path("doc".into()), current)
+            .await
+            .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            newer
+        );
+        let mut cross = headers;
+        cross.insert(
+            "x-hcd-target-protocol",
+            "hcd-semantic-blocks/3".parse().unwrap(),
+        );
+        assert!(matches!(
+            collaboration_migrate(State(state.clone()), Path("doc".into()), cross, bytes).await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+    }
+    #[tokio::test]
+    async fn inline_bootstrap_never_discards_durable_drafts_or_infers_model_three() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = text_bundle(root.path());
+        let state = edit_state(root.path());
+        let headers = inline_bootstrap_headers(&state);
+        let bytes = Bytes::from_static(b"inline candidate");
+        assert!(matches!(
+            collaboration_migrate(
+                State(state.clone()),
+                Path("doc".into()),
+                headers.clone(),
+                bytes.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        let mut manifest = bundle.manifest().unwrap();
+        manifest.capabilities.extension_nodes = Some(3);
+        bundle.write_manifest(&manifest).unwrap();
+        let old = Bytes::from_static(b"uncommitted existing draft");
+        let _ = collaboration_put(
+            State(state.clone()),
+            Path("doc".into()),
+            headers.clone(),
+            old.clone(),
+        )
+        .await
+        .unwrap();
+        let mut attempt = headers;
+        attempt.insert("x-hcd-state-hash", hash_bytes(&old).parse().unwrap());
+        assert!(matches!(
+            collaboration_migrate(State(state.clone()), Path("doc".into()), attempt, bytes).await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        assert_eq!(
+            collaboration_metadata(&state, "doc").await.unwrap().epoch,
+            0
+        );
+        assert_eq!(
+            std::fs::read(collaboration_current_path(&state, "doc", 0).await.unwrap()).unwrap(),
+            old
+        );
+    }
+    #[tokio::test]
+    async fn protocol_migration_fences_old_writers_preserves_recovery_and_replays_lost_responses() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = text_bundle(root.path());
+        let state = edit_state(root.path());
+        let old = Bytes::from_static(b"legacy durable draft");
+        let new = Bytes::from_static(b"structural durable draft");
+        let mut headers = protocol_migration_headers(&state, "none", &"a".repeat(32));
+        let _ = collaboration_put(
+            State(state.clone()),
+            Path("doc".into()),
+            headers.clone(),
+            old.clone(),
+        )
+        .await
+        .unwrap();
+        headers.insert("x-hcd-state-hash", hash_bytes(&old).parse().unwrap());
+        let Json(result) = collaboration_migrate(
+            State(state.clone()),
+            Path("doc".into()),
+            headers.clone(),
+            new.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["collaborationEpoch"], 1);
+        assert_eq!(result["collaborationProtocol"], "hcd-semantic-blocks/3");
+        assert_eq!(result["idempotentReplay"], false);
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        let Json(access) = auth_check(
+            State(state.clone()),
+            Path("doc".into()),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(access["collaborationProtocol"], "hcd-semantic-blocks/3");
+        assert!(matches!(
+            collaboration_put(
+                State(state.clone()),
+                Path("doc".into()),
+                headers.clone(),
+                old.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        let mut current = headers.clone();
+        current.insert("x-hcd-collaboration-epoch", "1".parse().unwrap());
+        assert!(matches!(
+            collaboration_get(State(state.clone()), Path("doc".into()), current.clone()).await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        let snapshot = serde_json::from_value(
+            json!({"typographyVersion":2,"coordinatorVersion":4,"expectedRevision":1,"blocks":[]}),
+        )
+        .unwrap();
+        assert!(matches!(
+            checkpoint(
+                State(state.clone()),
+                Path("doc".into()),
+                current.clone(),
+                Json(snapshot)
+            )
+            .await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        current.insert(
+            "x-hcd-collaboration-protocol",
+            "hcd-default/1".parse().unwrap(),
+        );
+        assert!(matches!(
+            collaboration_get(State(state.clone()), Path("doc".into()), current.clone()).await,
+            Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+        ));
+        current.insert(
+            "x-hcd-collaboration-protocol",
+            "hcd-semantic-blocks/3".parse().unwrap(),
+        );
+        current.insert("x-hcd-state-hash", hash_bytes(&new).parse().unwrap());
+        let response = collaboration_get(State(state.clone()), Path("doc".into()), current.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            new
+        );
+        let Json(recoveries) = collaboration_recoveries(
+            State(state.clone()),
+            Path("doc".into()),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap();
+        let id = recoveries["recoveries"][0].as_str().unwrap().to_string();
+        let response = collaboration_recovery(
+            State(state.clone()),
+            Path(("doc".into(), id)),
+            edit_headers(&state, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            old
+        );
+        let newer = Bytes::from_static(b"structural newer peer input");
+        let _ = collaboration_put(
+            State(state.clone()),
+            Path("doc".into()),
+            current.clone(),
+            newer.clone(),
+        )
+        .await
+        .unwrap();
+        let Json(replay) = collaboration_migrate(
+            State(state.clone()),
+            Path("doc".into()),
+            headers.clone(),
+            new.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay["idempotentReplay"], true);
+        let response = collaboration_get(State(state.clone()), Path("doc".into()), current.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            newer
+        );
+        assert!(matches!(
+            collaboration_migrate(
+                State(state.clone()),
+                Path("doc".into()),
+                headers.clone(),
+                Bytes::from_static(b"different body")
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        let _ = collaboration_reset(State(state.clone()), Path("doc".into()), current)
+            .await
+            .unwrap();
+        let metadata = collaboration_metadata(&state, "doc").await.unwrap();
+        assert_eq!(metadata.epoch, 2);
+        assert_eq!(metadata.protocol, CollaborationProtocol::Structure3);
+        assert!(metadata.migration.is_none());
+        assert!(matches!(
+            collaboration_migrate(State(state), Path("doc".into()), headers, new).await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+    }
+    #[tokio::test]
+    async fn protocol_migration_has_one_cas_winner_and_rejects_changed_heads_and_sources() {
+        let root = tempfile::tempdir().unwrap();
+        text_bundle(root.path());
+        let state = edit_state(root.path());
+        let new = Bytes::from_static(b"new structure");
+        let headers = protocol_migration_headers(&state, "none", &"a".repeat(32));
+        let mut invalid = headers.clone();
+        invalid.insert("x-hcd-base-revision", "0".parse().unwrap());
+        assert!(matches!(
+            collaboration_migrate(
+                State(state.clone()),
+                Path("doc".into()),
+                invalid,
+                new.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        let mut invalid = headers.clone();
+        invalid.insert("x-hcd-state-hash", "b".repeat(64).parse().unwrap());
+        assert!(matches!(
+            collaboration_migrate(
+                State(state.clone()),
+                Path("doc".into()),
+                invalid,
+                new.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::PRECONDITION_FAILED, _))
+        ));
+        let mut unauthorized = headers.clone();
+        unauthorized.insert(
+            header::AUTHORIZATION,
+            edit_headers(&state, "write")[header::AUTHORIZATION].clone(),
+        );
+        assert!(matches!(
+            collaboration_migrate(
+                State(state.clone()),
+                Path("doc".into()),
+                unauthorized,
+                new.clone()
+            )
+            .await,
+            Err(ApiError(StatusCode::FORBIDDEN, _))
+        ));
+        assert!(matches!(
+            collaboration_migrate(
+                State(state.clone()),
+                Path("doc".into()),
+                headers.clone(),
+                Bytes::new()
+            )
+            .await,
+            Err(ApiError(StatusCode::BAD_REQUEST, _))
+        ));
+        assert_eq!(
+            collaboration_metadata(&state, "doc").await.unwrap(),
+            CollaborationMetadata::default()
+        );
+        let other = protocol_migration_headers(&state, "none", &"b".repeat(32));
+        let (a, b) = tokio::join!(
+            collaboration_migrate(
+                State(state.clone()),
+                Path("doc".into()),
+                headers,
+                new.clone()
+            ),
+            collaboration_migrate(State(state.clone()), Path("doc".into()), other, new)
+        );
+        assert!(a.is_ok() ^ b.is_ok());
+        assert_eq!(collaboration_epoch(&state, "doc").await.unwrap(), 1);
+        assert!(matches!(
+            a.err().or(b.err()),
+            Some(ApiError(StatusCode::CONFLICT, _))
+        ));
+    }
+    #[tokio::test]
+    async fn unpublished_migration_state_is_never_adopted_by_a_later_reset() {
+        let root = tempfile::tempdir().unwrap();
+        text_bundle(root.path());
+        let state = edit_state(root.path());
+        let orphan = state
+            .root
+            .join("collaboration")
+            .join(format!("doc.epoch-1.{}.bin", "a".repeat(32)));
+        durable_collaboration_file(&orphan, b"unpublished structural state")
+            .await
+            .unwrap();
+        let epoch = reset_collaboration(&state, "doc").await.unwrap();
+        assert_eq!(epoch, 1);
+        assert_eq!(
+            collaboration_metadata(&state, "doc")
+                .await
+                .unwrap()
+                .protocol,
+            CollaborationProtocol::Default1
+        );
+        assert_ne!(
+            collaboration_current_path(&state, "doc", epoch)
+                .await
+                .unwrap(),
+            orphan
+        );
+        let mut reader = edit_headers(&state, "read");
+        reader.insert("x-hcd-collaboration-epoch", "1".parse().unwrap());
+        assert!(matches!(
+            collaboration_get(State(state), Path("doc".into()), reader).await,
+            Err(ApiError(StatusCode::NOT_FOUND, _))
+        ));
     }
 }

@@ -5,6 +5,9 @@
 )]
 
 mod commands;
+mod hdoc_asset_mime;
+mod hdoc_collaboration;
+mod hdoc_export_html;
 mod hdoc_remote;
 mod hdoc_server;
 mod mcp;

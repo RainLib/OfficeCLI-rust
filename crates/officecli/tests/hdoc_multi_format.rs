@@ -241,17 +241,21 @@ fn apply_text_patch(
         .unwrap(),
     )
     .unwrap();
-    officecli()
-        .args([
-            "hdoc",
-            "apply",
-            bundle.to_string_lossy().as_ref(),
-            "--patch",
-            patch.to_string_lossy().as_ref(),
-            "--expected-revision",
-            "0",
-            "--json",
-        ])
+    let mut command = officecli();
+    command.args([
+        "hdoc",
+        "apply",
+        bundle.to_string_lossy().as_ref(),
+        "--patch",
+        patch.to_string_lossy().as_ref(),
+        "--expected-revision",
+        "0",
+        "--json",
+    ]);
+    if document_id == "xlsx-doc" {
+        command.arg("--source").arg(root.join("source.xlsx"));
+    }
+    command
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""revision": 1"#));
@@ -367,11 +371,117 @@ fn xlsx_hcd_formula_nodes_are_read_only() {
             patch.to_string_lossy().as_ref(),
             "--expected-revision",
             "0",
+            "--source",
+            source.to_string_lossy().as_ref(),
             "--json",
         ])
         .assert()
         .failure()
-        .stdout(predicate::str::contains("read-only"));
+        .stdout(predicate::str::contains("XLSX_FORMULA_READ_ONLY"));
+}
+
+#[test]
+fn xlsx_cli_requires_verified_source_and_preserves_receipt_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("original.xlsx");
+    let bundle_path = temp.path().join("book.hcd");
+    officecli()
+        .args(["create", source.to_str().unwrap()])
+        .assert()
+        .success();
+    for (cell, value) in [("/Sheet1/A1", "value=legacy"), ("/Sheet1/B1", "value=safe")] {
+        officecli()
+            .args(["set", source.to_str().unwrap(), cell, value])
+            .assert()
+            .success();
+    }
+    let extracted = import_and_extract(&source, &bundle_path, "legacy-xlsx");
+    let entries = extracted["data"]["entries"].as_array().unwrap();
+    let a = entries
+        .iter()
+        .find(|entry| entry["source"]["paragraphId"] == "A1")
+        .unwrap();
+    let b = entries
+        .iter()
+        .find(|entry| entry["source"]["paragraphId"] == "B1")
+        .unwrap();
+    let wrong = temp.path().join("wrong.xlsx");
+    std::fs::copy(&source, &wrong).unwrap();
+    // Reproduce a legacy editable mapping against a source where A1 is a formula.
+    officecli()
+        .args(["set", source.to_str().unwrap(), "/Sheet1/A1", "formula=1+2"])
+        .assert()
+        .success();
+    let bytes = std::fs::read(&source).unwrap();
+    let manifest_path = bundle_path.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["source"]["sha256"] = hcd_core::hash_bytes(&bytes).into();
+    manifest["source"]["sizeBytes"] = bytes.len().into();
+    std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let patch = temp.path().join("patch.json");
+    let write_patch = |entry: &Value, id: &str| {
+        std::fs::write(&patch, serde_json::to_vec(&serde_json::json!({
+        "schemaVersion":"hcd-patch/1", "documentId":"legacy-xlsx", "patchId":id, "baseRevision":0,
+        "operations":[{"op":"text.splice","nodeId":entry["nodeId"],"start":0,"deleteCount":0,
+          "insertText":"edited ","precondition":{"nodeHash":entry["nodeHash"]}}]
+    })).unwrap()).unwrap()
+    };
+    let run = |src: Option<&Path>| {
+        let mut command = officecli();
+        command.args([
+            "hdoc",
+            "apply",
+            bundle_path.to_str().unwrap(),
+            "--patch",
+            patch.to_str().unwrap(),
+            "--expected-revision",
+            "0",
+            "--json",
+        ]);
+        if let Some(src) = src {
+            command.arg("--source").arg(src);
+        }
+        command
+    };
+    write_patch(a, "formula");
+    run(None)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("XLSX_SOURCE_MISSING"));
+    run(Some(&wrong))
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("XLSX_SOURCE_CHANGED"));
+    run(Some(&source))
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("XLSX_FORMULA_READ_ONLY"));
+    assert_eq!(
+        hcd_core::Bundle::open(&bundle_path)
+            .unwrap()
+            .manifest()
+            .unwrap()
+            .revision,
+        0
+    );
+    write_patch(b, "ordinary");
+    run(Some(&source))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""revision": 1"#));
+    run(None)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""idempotentReplay": true"#));
+    assert_eq!(
+        hcd_core::Bundle::open(bundle_path)
+            .unwrap()
+            .manifest()
+            .unwrap()
+            .revision,
+        1
+    );
 }
 
 #[test]
@@ -859,6 +969,22 @@ fn source_free_pdf_font_fallback_never_exports_a_partial_page_raster() {
         );
         let output = temp.path().join("export.pdf");
         let report = temp.path().join("fidelity.json");
+        if !visual {
+            officecli()
+                .args([
+                    "hdoc",
+                    "export",
+                    bundle.to_str().unwrap(),
+                    "--output",
+                    output.to_str().unwrap(),
+                    "--json",
+                ])
+                .assert()
+                .failure()
+                .stdout(predicate::str::contains("PDF_UNPAINTED_TEXT"));
+            assert!(!output.exists());
+            continue;
+        }
         officecli()
             .args([
                 "hdoc",
@@ -874,16 +1000,7 @@ fn source_free_pdf_font_fallback_never_exports_a_partial_page_raster() {
             .success();
         let fidelity: Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
         assert_eq!(fidelity["level"] == "VISUAL", visual, "{fidelity}");
-        if visual {
-            assert!(pdf_contains_image_xobject(&output));
-        } else {
-            officecli()
-                .args(["view", output.to_str().unwrap()])
-                .assert()
-                .success()
-                .stdout(predicate::str::contains("FIRST"))
-                .stdout(predicate::str::contains("SECOND"));
-        }
+        assert!(pdf_contains_image_xobject(&output));
     }
 }
 

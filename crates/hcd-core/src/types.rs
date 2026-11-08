@@ -13,6 +13,8 @@ pub struct SourceDescriptor {
 pub struct PdfRasterPlan {
     pub rasters: Vec<PdfPageRaster>,
     pub skipped: Vec<FidelityWarning>,
+    pub text_layouts: Vec<crate::PdfNodeTextLayout>,
+    pub base_root_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +41,20 @@ pub struct AssetDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HcdCapabilities {
+    /// Required reader model for versioned Word layout-only transactions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_layout_edits: Option<u32>,
+    /// Required section/story model. Older deny-unknown readers must not flatten it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_layout: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_marks: Option<u32>,
+    /// Omitted for older documents. A binary that does not understand this
+    /// required model fails closed instead of flattening references on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_references: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_nodes: Option<u32>,
     pub text_patch: bool,
     pub annotations: bool,
     pub structure_patch: bool,
@@ -49,6 +65,11 @@ pub struct HcdCapabilities {
 impl Default for HcdCapabilities {
     fn default() -> Self {
         Self {
+            word_layout_edits: None,
+            flow_layout: None,
+            custom_marks: None,
+            inline_references: None,
+            extension_nodes: None,
             text_patch: true,
             annotations: true,
             structure_patch: false,
@@ -453,30 +474,30 @@ pub struct RevisionRecord {
     /// Renderer-only PDF coordinate upgrade; canonical content stays unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub layout_upgrade: bool,
+    /// Word layout asset changed while immutable body chunks were retained.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub word_layout_change: bool,
     /// Caller identity copied from patch actor keys `userId` and `displayName`.
     /// Older revisions omit both fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_name: Option<String>,
+    /// Verified checkpoint authors for individual reference transitions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reference_authors: BTreeMap<String, String>,
 }
 
 pub fn revision_author(
     actor: &BTreeMap<String, String>,
 ) -> Result<(Option<String>, Option<String>), crate::HcdError> {
     let author_id = match actor.get("userId") {
-        Some(id)
-            if !id.is_empty()
-                && id.len() <= 128
-                && id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') =>
-        {
+        Some(id) if !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control) => {
             Some(id.clone())
         }
         Some(_) => {
             return Err(crate::HcdError::InvalidPatch(
-                "actor.userId must be 1-128 ASCII letters, digits, _ or -".to_string(),
+                "actor.userId must be 1-256 UTF-8 bytes without control characters".to_string(),
             ))
         }
         None => None,
@@ -495,6 +516,38 @@ pub fn revision_author(
         None => None,
     };
     Ok((author_id, author_name))
+}
+
+pub fn revision_reference_authors(
+    actor: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, crate::HcdError> {
+    let Some(raw) = actor.get("referenceAuthors") else {
+        return Ok(BTreeMap::new());
+    };
+    if raw.len() > 4 * 1024 * 1024 {
+        return Err(crate::HcdError::InvalidPatch(
+            "reference author metadata too large".into(),
+        ));
+    }
+    let values: BTreeMap<String, String> = serde_json::from_str(raw)
+        .map_err(|_| crate::HcdError::InvalidPatch("invalid reference author metadata".into()))?;
+    if values.len() > 10000
+        || values.iter().any(|(id, author)| {
+            id.len() != 34
+                || !id.starts_with("m_")
+                || !id[2..]
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                || author.is_empty()
+                || author.len() > 256
+                || author.chars().any(char::is_control)
+        })
+    {
+        return Err(crate::HcdError::InvalidPatch(
+            "invalid reference author identity".into(),
+        ));
+    }
+    Ok(values)
 }
 
 fn is_false(value: &bool) -> bool {
@@ -658,4 +711,36 @@ pub enum ImportEvent {
         document_id: String,
         error: String,
     },
+}
+
+#[cfg(test)]
+mod reference_author_tests {
+    use super::*;
+    #[test]
+    fn reference_and_revision_authors_use_stable_unicode_subjects() {
+        let mut actor = BTreeMap::from([
+            ("userId".into(), "org:人员/甲".into()),
+            ("displayName".into(), "甲".into()),
+        ]);
+        assert_eq!(
+            revision_author(&actor).unwrap().0.as_deref(),
+            Some("org:人员/甲")
+        );
+        let id = format!("m_{:032x}", 1);
+        actor.insert(
+            "referenceAuthors".into(),
+            serde_json::to_string(&BTreeMap::from([(id.clone(), "org:人员/甲")])).unwrap(),
+        );
+        assert_eq!(
+            revision_reference_authors(&actor)
+                .unwrap()
+                .get(&id)
+                .map(String::as_str),
+            Some("org:人员/甲")
+        );
+        actor.insert("referenceAuthors".into(), "{\"bad\":\"actor\"}".into());
+        assert!(revision_reference_authors(&actor).is_err());
+        actor.insert("userId".into(), "bad\nactor".into());
+        assert!(revision_author(&actor).is_err());
+    }
 }

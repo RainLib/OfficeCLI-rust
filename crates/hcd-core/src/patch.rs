@@ -70,6 +70,9 @@ pub fn apply_patch_with_pdf_rasters(
             crate::MAX_REVISION
         )));
     }
+    // Required document models must be understood even for mapped text/style
+    // writes, before any objects or receipts can be committed.
+    crate::read_flow_document_layout(bundle, &manifest)?;
     validate_patch_identity(&manifest, patch)?;
     let patch_bytes = serde_json::to_vec(patch)?;
     if patch_bytes.len() as u64 > MAX_PATCH_JSON_BYTES {
@@ -83,6 +86,27 @@ pub fn apply_patch_with_pdf_rasters(
         return Ok(result);
     }
     validate_patch_header(&manifest, patch, expected_revision)?;
+    if raster_plan
+        .base_root_hash
+        .as_ref()
+        .is_some_and(|root| root != &manifest.root_hash)
+    {
+        return Err(HcdError::RevisionConflict(
+            "PDF renderer plan is from a different document state".into(),
+        ));
+    }
+    let mut layout_plans = HashMap::new();
+    for layout in &raster_plan.text_layouts {
+        if layout_plans
+            .insert(layout.node_id.clone(), layout)
+            .is_some()
+        {
+            return Err(HcdError::InvalidPatch(
+                "duplicate PDF text layout plan".into(),
+            ));
+        }
+    }
+    let mut applied_layouts = HashSet::new();
 
     let mut stale_content_nodes = HashSet::new();
     if patch.base_revision < manifest.revision {
@@ -235,6 +259,21 @@ pub fn apply_patch_with_pdf_rasters(
             let mut image_nodes = extract_html_image_nodes(&html)?;
             let mut chunk_changed = false;
             for entry in &mut source_map.entries {
+                if let Some(layout) = layout_plans.get(&entry.node_id) {
+                    if layout.expected_hash != entry.node_hash
+                        || html_nodes
+                            .get(&entry.node_id)
+                            .is_none_or(|text| hash_bytes(text.as_bytes()) != entry.node_hash)
+                        || entry.source.node_kind != "pdf-text"
+                        || !raster
+                            .as_ref()
+                            .is_some_and(|raster| raster.source_composited)
+                    {
+                        return Err(HcdError::PreconditionFailed(
+                            "PDF text layout source changed or is not recomposed".into(),
+                        ));
+                    }
+                }
                 if !target_node_ids.contains(&entry.node_id) {
                     continue;
                 }
@@ -444,6 +483,13 @@ pub fn apply_patch_with_pdf_rasters(
                         )?;
                     }
                     if manifest.source.format == "pdf" {
+                        if !layout_plans.contains_key(&entry.node_id) {
+                            html = crate::pdf_text_layout::update_pdf_text_layout(
+                                &html,
+                                &entry.node_id,
+                                None,
+                            )?;
+                        }
                         let page = pdf_page_number(&entry.source.part);
                         if page.is_some_and(|page| recomposed_pages.contains(&page)) {
                             recomposed_nodes.insert(entry.node_id.clone());
@@ -470,6 +516,14 @@ pub fn apply_patch_with_pdf_rasters(
                     chunk_changed = true;
                 }
                 if let Some(change) = style_change {
+                    if manifest.source.format == "pdf" && !layout_plans.contains_key(&entry.node_id)
+                    {
+                        html = crate::pdf_text_layout::update_pdf_text_layout(
+                            &html,
+                            &entry.node_id,
+                            None,
+                        )?;
+                    }
                     apply_node_style(&mut html, &entry.node_id, &change.style)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
@@ -477,6 +531,21 @@ pub fn apply_patch_with_pdf_rasters(
                 }
             }
 
+            for entry in &source_map.entries {
+                if let Some(plan) = layout_plans.get(&entry.node_id) {
+                    plan.layout
+                        .validate(html_nodes.get(&entry.node_id).ok_or_else(|| {
+                            HcdError::InvalidBundle("layout canonical text missing".into())
+                        })?)?;
+                    html = crate::pdf_text_layout::update_pdf_text_layout(
+                        &html,
+                        &entry.node_id,
+                        Some(&plan.layout),
+                    )?;
+                    applied_layouts.insert(entry.node_id.clone());
+                    chunk_changed = true;
+                }
+            }
             if !rich_replacements.is_empty() {
                 let spans = crate::text_runs::spans(&html)?;
                 let mut replacements = Vec::new();
@@ -523,6 +592,23 @@ pub fn apply_patch_with_pdf_rasters(
                         }
                     }
                     chunk_changed = true;
+                } else {
+                    // The fallback raster includes only the text nodes that
+                    // were repainted in this patch. Clear their old overlays
+                    // without hiding other approximate, unpainted edits.
+                    for entry in &source_map.entries {
+                        if recomposed_nodes.contains(&entry.node_id) {
+                            let (start, end) = element_start_tag_range(&html, &entry.node_id)?;
+                            if html[start..=end].contains("data-hcd-patched=\"") {
+                                set_element_attribute(
+                                    &mut html,
+                                    &entry.node_id,
+                                    "data-hcd-patched",
+                                    "false",
+                                )?;
+                            }
+                        }
+                    }
                 }
                 if html.contains("class=\"hcd-pdf-page-raster\"") {
                     replace_page_raster(&mut html, &raster)?;
@@ -560,6 +646,11 @@ pub fn apply_patch_with_pdf_rasters(
         }
     }
 
+    if applied_layouts.len() != layout_plans.len() {
+        return Err(HcdError::InvalidPatch(
+            "PDF text layout plan targets missing nodes".into(),
+        ));
+    }
     for node_id in &target_node_ids {
         if !found_nodes.contains_key(node_id) {
             return Err(HcdError::NodeNotFound(node_id.clone()));
@@ -659,12 +750,15 @@ pub fn apply_patch_with_pdf_rasters(
         dirty_source_parts: result.dirty_source_parts.clone(),
         structural_change: false,
         layout_upgrade: false,
+        word_layout_change: false,
         author_id: None,
         author_name: None,
+        reference_authors: std::collections::BTreeMap::new(),
     };
     let (author_id, author_name) = crate::revision_author(&patch.actor)?;
     record.author_id = author_id;
     record.author_name = author_name;
+    record.reference_authors = crate::revision_reference_authors(&patch.actor)?;
     if !styles.is_empty() || !rich.is_empty() {
         manifest.capabilities.style_patch = true;
     }
@@ -811,6 +905,138 @@ pub fn get_text_node_in_manifest(
         font_size_runs,
         node,
     })
+}
+
+/// Resolve a bounded batch against one immutable manifest. Each relevant map
+/// and HTML chunk is verified and parsed at most once, even when a paste
+/// targets many nodes in the same chunk. Duplicate occurrences still fail.
+pub fn get_text_node_sources_in_manifest(
+    bundle: &Bundle,
+    node_ids: &[String],
+    manifest: &crate::HcdManifest,
+) -> Result<BTreeMap<String, crate::SourceAnchor>, HcdError> {
+    Ok(scan_text_nodes(bundle, node_ids, manifest, false)?
+        .into_iter()
+        .map(|(id, value)| (id, value.source))
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextNodeReceipt {
+    pub node_hash: String,
+    pub format_hash: Option<String>,
+}
+
+/// Return hashes for an immutable saved revision, verifying each requested node
+/// and computing formatting once per chunk. Text is not retained in the result.
+pub fn get_text_node_receipts_in_manifest(
+    bundle: &Bundle,
+    node_ids: &[String],
+    manifest: &crate::HcdManifest,
+) -> Result<BTreeMap<String, TextNodeReceipt>, HcdError> {
+    Ok(scan_text_nodes(bundle, node_ids, manifest, true)?
+        .into_iter()
+        .map(|(id, value)| {
+            (
+                id,
+                TextNodeReceipt {
+                    node_hash: value.node_hash,
+                    format_hash: value.format_hash,
+                },
+            )
+        })
+        .collect())
+}
+
+struct ScannedTextNode {
+    source: crate::SourceAnchor,
+    node_hash: String,
+    format_hash: Option<String>,
+}
+
+fn scan_text_nodes(
+    bundle: &Bundle,
+    node_ids: &[String],
+    manifest: &crate::HcdManifest,
+    include_formats: bool,
+) -> Result<BTreeMap<String, ScannedTextNode>, HcdError> {
+    if node_ids.len() > MAX_PATCH_OPERATIONS {
+        return Err(HcdError::ResourceLimit("too many text node lookups".into()));
+    }
+    let requested: BTreeSet<&str> = node_ids.iter().map(String::as_str).collect();
+    for id in &requested {
+        validate_node_id(id)?;
+    }
+    let mut result = BTreeMap::new();
+    if requested.is_empty() {
+        return Ok(result);
+    }
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in &page.chunks {
+            // Small lookups benefit from the bloom filter. Large batches scan
+            // each map once instead of hashing every ID for every chunk.
+            if requested.len() <= 16
+                && !requested
+                    .iter()
+                    .any(|id| node_bloom_might_contain(&descriptor.node_bloom, id))
+            {
+                continue;
+            }
+            let map = bundle.read_map_verified(descriptor)?;
+            let entries: Vec<_> = map
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.source.node_kind != "image" && requested.contains(entry.node_id.as_str())
+                })
+                .collect();
+            if entries.is_empty() {
+                continue;
+            }
+            let html = bundle.read_chunk_verified(descriptor)?;
+            let html_nodes = extract_html_text_nodes(&html)?;
+            let mut formats = if include_formats {
+                crate::text_format_hashes(&html)?
+            } else {
+                HashMap::new()
+            };
+            for entry in entries {
+                let text = html_nodes.get(&entry.node_id).ok_or_else(|| {
+                    HcdError::InvalidBundle(format!(
+                        "mapped node {} is missing from canonical HTML",
+                        entry.node_id
+                    ))
+                })?;
+                if hash_bytes(text.as_bytes()) != entry.node_hash {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "node {} HTML hash does not match source-map hash",
+                        entry.node_id
+                    )));
+                }
+                if result
+                    .insert(
+                        entry.node_id.clone(),
+                        ScannedTextNode {
+                            source: entry.source.clone(),
+                            node_hash: entry.node_hash.clone(),
+                            format_hash: formats.remove(&entry.node_id),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "node ID {} occurs in more than one source map",
+                        entry.node_id
+                    )));
+                }
+            }
+        }
+    }
+    if let Some(missing) = requested.iter().find(|id| !result.contains_key(**id)) {
+        return Err(HcdError::NodeNotFound((*missing).to_string()));
+    }
+    Ok(result)
 }
 
 pub fn get_image_node(bundle: &Bundle, node_id: &str) -> Result<ImageNodeLookup, HcdError> {
@@ -978,6 +1204,11 @@ fn validate_patch_identity(
     }
     if patch.patch_id.trim().is_empty() {
         return Err(HcdError::InvalidPatch("patchId is required".to_string()));
+    }
+    if patch.patch_id.starts_with("restore-") {
+        return Err(HcdError::InvalidPatch(
+            "restore- patch IDs are reserved for the core restore operation".into(),
+        ));
     }
     if patch.patch_id.len() > MAX_IDENTIFIER_BYTES {
         return Err(HcdError::ResourceLimit(format!(
@@ -1449,6 +1680,17 @@ fn replace_node_text(
         .find("</span>")
         .map(|offset| content_start + offset)
         .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has no closing span")))?;
+    let opening = html[..content_start].rfind('<').unwrap_or(attribute);
+    if (html[opening..content_start].contains("data-hcd-reference=")
+        || html[opening..content_start].contains("data-hcd-extension=")
+        || html[opening..content_start].contains("data-hcd-extension-fallback="))
+        && html[content_start..content_end] != escape_text(text)
+    {
+        return Err(HcdError::InvalidPatch(
+            "edit an atomic reference/extension through its semantic node, not a text splice"
+                .into(),
+        ));
+    }
     html.replace_range(content_start..content_end, &escape_text(text));
     let tag_start = html[..attribute].rfind('<').unwrap_or(attribute);
     let tag_end = html[attribute..]
@@ -2467,6 +2709,52 @@ mod tests {
         forged.map_hash = "f".repeat(64);
         assert!(bundle.read_map_verified(&forged).is_err());
         let first = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        let ids: Vec<_> = (0..=crate::INDEX_PAGE_SIZE)
+            .map(|index| format!("n_{index:032x}"))
+            .collect();
+        let batch = get_text_node_sources_in_manifest(&bundle, &ids, &original).unwrap();
+        assert_eq!(batch.len(), ids.len());
+        assert_eq!(batch[&ids[0]], first.node.source);
+        let receipts = get_text_node_receipts_in_manifest(&bundle, &ids, &original).unwrap();
+        assert_eq!(receipts.len(), ids.len());
+        for id in [&ids[0], &ids[crate::INDEX_PAGE_SIZE]] {
+            let individual = get_text_node_in_manifest(&bundle, id, &original).unwrap();
+            assert_eq!(receipts[id].node_hash, individual.node.node_hash);
+            assert_eq!(receipts[id].format_hash, individual.format_hash);
+        }
+        assert_eq!(
+            batch[&ids[crate::INDEX_PAGE_SIZE]].text_ordinal,
+            crate::INDEX_PAGE_SIZE as u64 + 1
+        );
+        let duplicates = vec![ids[0].clone(), ids[0].clone()];
+        assert_eq!(
+            get_text_node_sources_in_manifest(&bundle, &duplicates, &original)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            get_text_node_sources_in_manifest(
+                &bundle,
+                &["n_ffffffffffffffffffffffffffffffff".into()],
+                &original
+            ),
+            Err(HcdError::NodeNotFound(_))
+        ));
+        assert!(matches!(
+            get_text_node_sources_in_manifest(
+                &bundle,
+                &vec![ids[0].clone(); MAX_PATCH_OPERATIONS + 1],
+                &original
+            ),
+            Err(HcdError::ResourceLimit(_))
+        ));
+        let protected = bundle.read_index_page(&original, 0).unwrap().chunks[0].clone();
+        let chunk_path = bundle.root().join(&protected.html_href);
+        let bytes = std::fs::read(&chunk_path).unwrap();
+        std::fs::write(&chunk_path, b"corrupt").unwrap();
+        assert!(get_text_node_sources_in_manifest(&bundle, &[ids[0].clone()], &original).is_err());
+        std::fs::write(&chunk_path, bytes).unwrap();
         apply_patch(
             &bundle,
             &crate::PatchBatch {

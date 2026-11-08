@@ -4,14 +4,34 @@ mod common;
 mod mermaid;
 mod pdf;
 mod pptx;
+mod pptx_image_geometry;
+mod pptx_picture_plan;
 mod textual;
 mod xlsx;
 
 use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
-pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
-pub use pdf::{pdf_layout_needs_upgrade, plan_pdf_page_rasters, upgrade_pdf_layout};
+pub use common::{
+    source_export_edit_blocker, source_export_edit_blocker_with_source, ExportOptions,
+    ImportOptions, PdfRasterMode,
+};
+pub use pdf::{
+    pdf_has_unpainted_text, pdf_layout_needs_upgrade, plan_pdf_page_rasters, upgrade_pdf_layout,
+};
+pub use pptx::verify_source_picture_asset;
+pub use pptx_image_geometry::{
+    rewrite_checked_source_picture_geometry, rewrite_checked_source_picture_with_relationship,
+    rewrite_source_picture_geometry, SourcePictureGeometry,
+};
+pub use pptx_picture_plan::{prepare_pptx_source_picture_geometry, PptxPicturePlan};
+pub use xlsx::{
+    apply_xlsx_patch_with_source, audit_xlsx_editable_formula_map,
+    audit_xlsx_formula_mapping_snapshot, create_xlsx_virtual_cells, inspect_xlsx_virtual_blank,
+    inspect_xlsx_virtual_blanks, preview_xlsx_virtual_cell, preview_xlsx_virtual_cells,
+    validate_xlsx_source_text_edits, xlsx_formula_mapping_fingerprint, XlsxFormulaMappingAudit,
+    XlsxVirtualBlankInspection, XlsxVirtualCell,
+};
 
 /// Expand presentation-only Markdown features without changing canonical HCD.
 /// The transform is bounded to one chunk and safe to call after every revision.
@@ -29,12 +49,18 @@ where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
     let source = source.as_ref();
+    if options.word_regions && extension(source)? != "docx" {
+        return Err(HcdError::Unsupported(
+            "--word-regions requires a DOCX source".into(),
+        ));
+    }
     match extension(source)?.as_str() {
         "docx" => {
             let mut docx_options = hcd_docx::ImportOptions::new(&options.document_id);
             docx_options.chunk_soft_bytes = options.chunk_soft_bytes;
             docx_options.chunk_blocks = options.chunk_blocks;
             docx_options.storage_codec = options.storage_codec;
+            docx_options.flow_layout = options.word_regions;
             hcd_docx::import_docx(source, output, &docx_options, emit)
         }
         "xlsx" => xlsx::import_xlsx(source, output.as_ref(), options, emit),

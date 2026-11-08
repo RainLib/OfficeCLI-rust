@@ -46,11 +46,48 @@ impl Bundle {
     }
 
     pub fn manifest(&self) -> Result<HcdManifest, HcdError> {
-        read_json_bounded(
+        let manifest: HcdManifest = read_json_bounded(
             &self.resolve_href("manifest.json")?,
             MAX_CONTROL_PART_BYTES,
             "manifest",
-        )
+        )?;
+        if manifest
+            .capabilities
+            .word_layout_edits
+            .is_some_and(|version| ![1, 2, 3].contains(&version))
+        {
+            return Err(HcdError::Unsupported(
+                "unsupported Word layout edit history model; content was retained".into(),
+            ));
+        }
+        if manifest
+            .capabilities
+            .custom_marks
+            .is_some_and(|version| version != 1)
+        {
+            return Err(HcdError::Unsupported(
+                "unsupported custom text mark model; content was retained".into(),
+            ));
+        }
+        if manifest
+            .capabilities
+            .inline_references
+            .is_some_and(|version| version != 1)
+        {
+            return Err(HcdError::Unsupported(
+                "unsupported inline reference model; content was retained".into(),
+            ));
+        }
+        if manifest
+            .capabilities
+            .extension_nodes
+            .is_some_and(|version| ![1, 2, 3].contains(&version))
+        {
+            return Err(HcdError::Unsupported(
+                "unsupported extension envelope model; content was retained".into(),
+            ));
+        }
+        Ok(manifest)
     }
 
     pub fn read_index_page(
@@ -179,6 +216,75 @@ impl Bundle {
         self.replace_index_path(root, page_number, &page_href, codec, 0)
     }
 
+    /// Build an immutable index for a complete ordered descriptor list.
+    /// Unchanged pages of a tree-backed manifest are reused; new pages can be
+    /// appended without changing any previous revision's index objects.
+    pub(crate) fn rebuild_index(
+        &self,
+        manifest: &HcdManifest,
+        revision: u64,
+        descriptors: &[ChunkDescriptor],
+        previous: &[ChunkDescriptor],
+    ) -> Result<Option<String>, HcdError> {
+        if descriptors.len().div_ceil(INDEX_PAGE_SIZE) > 10_000 {
+            return Err(HcdError::ResourceLimit(
+                "index page limit exceeded".to_string(),
+            ));
+        }
+        if descriptors
+            .iter()
+            .enumerate()
+            .any(|(i, item)| item.sequence != i)
+        {
+            return Err(HcdError::InvalidBundle(
+                "index descriptor sequence mismatch".into(),
+            ));
+        }
+        let mut pages = Vec::new();
+        for (page_number, chunk) in descriptors.chunks(INDEX_PAGE_SIZE).enumerate() {
+            if chunk
+                == previous
+                    .chunks(INDEX_PAGE_SIZE)
+                    .nth(page_number)
+                    .unwrap_or_default()
+            {
+                if let Some(root) = &manifest.index_root_href {
+                    pages.push(self.index_page_href(root, page_number)?);
+                    continue;
+                }
+            }
+            let page = ChunkIndexPage {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                revision,
+                page: page_number,
+                chunks: chunk.to_vec(),
+            };
+            pages.push(self.write_json_object("indexes/pages", &page)?.0);
+        }
+        let mut children = pages;
+        let mut child_span = 1usize;
+        while !children.is_empty() {
+            let mut parents = Vec::new();
+            for (group, entries) in children.chunks(INDEX_TREE_FANOUT).enumerate() {
+                let first_page = group * INDEX_TREE_FANOUT * child_span;
+                let node = IndexTreeNode {
+                    first_page,
+                    child_span,
+                    children: entries.to_vec(),
+                };
+                parents.push(self.write_json_object("indexes/nodes", &node)?.0);
+            }
+            if parents.len() == 1 {
+                return Ok(parents.pop());
+            }
+            children = parents;
+            child_span = child_span
+                .checked_mul(INDEX_TREE_FANOUT)
+                .ok_or_else(|| HcdError::ResourceLimit("index tree span overflow".to_string()))?;
+        }
+        Ok(None)
+    }
+
     fn replace_index_path(
         &self,
         href: &str,
@@ -284,6 +390,87 @@ impl Bundle {
         let path = self.root.join("assets/staged").join(format!("{hash}.json"));
         atomic_write_json(&path, &descriptor)?;
         Ok(descriptor)
+    }
+
+    /// Re-pin bytes already owned by this document without trusting a client
+    /// claim. Lookup, integrity check and the new staging pin share the GC lock.
+    pub fn restage_existing_resource(
+        &self,
+        hash: &str,
+        extension: &str,
+        expected_length: u64,
+    ) -> Result<Option<AssetDescriptor>, HcdError> {
+        use std::io::{Seek, SeekFrom};
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !matches!(extension, "bin" | "png" | "jpg" | "jpeg" | "gif" | "webp")
+            || expected_length == 0
+            || expected_length > 8 * 1024 * 1024
+        {
+            return Err(HcdError::InvalidPatch(
+                "invalid resource reuse request".into(),
+            ));
+        }
+        let _guard = self.acquire_write_lock()?;
+        let manifest = self.manifest()?;
+        let existing = self
+            .read_asset_index_for_revision(manifest.revision)?
+            .into_iter()
+            .find(|asset| asset.hash == hash);
+        let existing = match existing {
+            Some(asset) => asset,
+            None => match self.staged_asset(hash) {
+                Ok(asset) => asset,
+                Err(HcdError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None)
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        if existing.byte_length != expected_length {
+            return Err(HcdError::InvalidPatch(
+                "resource reuse length mismatch".into(),
+            ));
+        }
+        crate::patch::validate_staged_asset(self, &existing, hash)?;
+        let mut input = fs::File::open(self.resolve_href(&existing.href)?)?;
+        let mut header = Vec::with_capacity(12);
+        (&mut input).take(12).read_to_end(&mut header)?;
+        let count = header.len();
+        let valid = match extension {
+            "bin" => true,
+            "png" => count >= 8 && header[..8] == [137, 80, 78, 71, 13, 10, 26, 10],
+            "jpg" | "jpeg" => count >= 3 && header[..3] == [0xff, 0xd8, 0xff],
+            "gif" => count >= 6 && matches!(&header[..6], b"GIF87a" | b"GIF89a"),
+            "webp" => count >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP",
+            _ => false,
+        };
+        if !valid {
+            return Err(HcdError::InvalidPatch(
+                "resource reuse type mismatch".into(),
+            ));
+        }
+        input.seek(SeekFrom::Start(0))?;
+        let (href, actual, length) =
+            write_asset_payload(&self.root, extension, &mut input, 8 * 1024 * 1024)?;
+        if actual != hash || length != expected_length {
+            return Err(HcdError::InvalidBundle(
+                "resource changed while restaging".into(),
+            ));
+        }
+        let descriptor = AssetDescriptor {
+            source_part: format!("html/uploads/{hash}"),
+            hash: hash.into(),
+            href,
+            byte_length: length,
+        };
+        atomic_write_json(
+            &self.root.join("assets/staged").join(format!("{hash}.json")),
+            &descriptor,
+        )?;
+        Ok(Some(descriptor))
     }
 
     pub fn staged_asset(&self, hash: &str) -> Result<AssetDescriptor, HcdError> {
@@ -409,7 +596,7 @@ impl Bundle {
 
     pub(crate) fn acquire_write_lock(&self) -> Result<BundleWriteGuard, HcdError> {
         let path = self.root.join(".hcd-write-lock");
-        let mut lock = fs::OpenOptions::new()
+        let lock = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
@@ -425,20 +612,30 @@ impl Bundle {
             }
             Err(fs::TryLockError::Error(error)) => return Err(HcdError::Io(error)),
         }
-        lock.set_len(0)?;
+        let mut guard = BundleWriteGuard { lock };
+        guard.lock.set_len(0)?;
         writeln!(
-            lock,
+            guard.lock,
             "pid={} epochMs={}",
             std::process::id(),
             now_epoch_ms()
         )?;
-        lock.sync_all()?;
-        Ok(BundleWriteGuard { _lock: lock })
+        guard.lock.sync_all()?;
+        Ok(guard)
     }
 }
 
 pub(crate) struct BundleWriteGuard {
-    _lock: fs::File,
+    lock: fs::File,
+}
+
+impl Drop for BundleWriteGuard {
+    fn drop(&mut self) {
+        // Closing one descriptor does not release a lock while a concurrent
+        // fork/dup still references its open description. End this operation's
+        // ownership explicitly; close remains the fallback if unlock fails.
+        let _ = self.lock.unlock();
+    }
 }
 
 pub struct BundleWriter {
@@ -709,8 +906,10 @@ impl BundleWriter {
             dirty_source_parts: Vec::new(),
             structural_change: false,
             layout_upgrade: false,
+            word_layout_change: false,
             author_id: None,
             author_name: None,
+            reference_authors: std::collections::BTreeMap::new(),
         };
         atomic_write_json(
             &self.root.join("revisions/00000000000000000000.json"),
@@ -1114,6 +1313,81 @@ mod tests {
     }
 
     #[test]
+    fn rebuilding_index_can_append_pages_without_changing_previous_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("doc.hcd");
+        let mut writer = BundleWriter::create(&root).unwrap();
+        writer.write_styles("").unwrap();
+        let mut original = Vec::new();
+        for sequence in 0..INDEX_PAGE_SIZE {
+            let chunk_id = format!("c_{sequence:032x}");
+            let map = ChunkSourceMap {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                chunk_id: chunk_id.clone(),
+                entries: Vec::new(),
+            };
+            original.push(
+                writer
+                    .write_chunk(chunk_id, "body".into(), "<p></p>".into(), map, 1, false)
+                    .unwrap(),
+            );
+        }
+        let before = writer.finish(test_manifest()).unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let old_root = before.index_root_href.as_ref().unwrap();
+        let old_page = bundle.index_page_href(old_root, 0).unwrap();
+        let mut next = original.clone();
+        let mut appended = next[0].clone();
+        appended.sequence = INDEX_PAGE_SIZE;
+        appended.chunk_id = format!("c_{:032x}", INDEX_PAGE_SIZE);
+        next.push(appended);
+        let new_root = bundle
+            .rebuild_index(&before, 1, &next, &original)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bundle.index_page_href(&new_root, 0).unwrap(), old_page);
+        assert_ne!(new_root, *old_root);
+        let mut after = before.clone();
+        after.index_root_href = Some(new_root);
+        after.index_page_count = 2;
+        after.chunk_count = next.len();
+        assert_eq!(
+            bundle.read_index_page(&after, 1).unwrap().chunks,
+            next[INDEX_PAGE_SIZE..]
+        );
+        assert_eq!(bundle.read_index_page(&before, 0).unwrap().chunks, original);
+        assert_eq!(bundle.manifest().unwrap().revision, before.revision);
+        next[INDEX_PAGE_SIZE].sequence += 1;
+        assert!(bundle.rebuild_index(&before, 1, &next, &original).is_err());
+
+        // Crossing a full tree level must still preserve page ordering and
+        // reuse the first immutable page.
+        let mut deep = original.clone();
+        while deep.len() <= INDEX_PAGE_SIZE * INDEX_TREE_FANOUT {
+            let mut descriptor = original[0].clone();
+            descriptor.sequence = deep.len();
+            descriptor.chunk_id = format!("c_{:032x}", descriptor.sequence);
+            deep.push(descriptor);
+        }
+        let deep_root = bundle
+            .rebuild_index(&before, 1, &deep, &original)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bundle.index_page_href(&deep_root, 0).unwrap(), old_page);
+        let mut deep_manifest = before.clone();
+        deep_manifest.index_root_href = Some(deep_root);
+        deep_manifest.index_page_count = deep.len().div_ceil(INDEX_PAGE_SIZE);
+        deep_manifest.chunk_count = deep.len();
+        assert_eq!(
+            bundle
+                .read_index_page(&deep_manifest, INDEX_TREE_FANOUT)
+                .unwrap()
+                .chunks,
+            deep[INDEX_PAGE_SIZE * INDEX_TREE_FANOUT..]
+        );
+    }
+
+    #[test]
     fn body_root_covers_styles_and_the_asset_manifest() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("doc.hcd");
@@ -1249,6 +1523,21 @@ mod tests {
         ));
         drop(first);
         assert!(bundle.acquire_write_lock().is_ok());
+    }
+
+    #[test]
+    fn mutation_guard_releases_the_lock_even_if_a_duplicate_descriptor_survives() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = Bundle::open(temp.path()).unwrap();
+        let first = bundle.acquire_write_lock().unwrap();
+        // A concurrent fork can briefly inherit the same open description
+        // before exec closes CLOEXEC handles. Mutation ownership ends with
+        // this guard, independently of that unrelated descriptor lifetime.
+        let duplicate = first.lock.try_clone().unwrap();
+        drop(first);
+        let next = bundle.acquire_write_lock().unwrap();
+        drop(next);
+        drop(duplicate);
     }
 
     #[test]

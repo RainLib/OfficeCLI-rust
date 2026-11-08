@@ -13,13 +13,16 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use time::{Date, Duration, Month};
 
 const MAX_CONTROL_BYTES: u64 = 16 * 1024 * 1024;
+/// Reserved source-map marker for a cell created after the original import.
+/// The source exporter still checks that the original cell is actually absent.
+const VIRTUAL_CELL_SOURCE: &str = hcd_core::XLSX_VIRTUAL_CELL_SOURCE;
 const ROWS_PER_WINDOW: usize = 128;
 const MAX_MERGED_RANGES: usize = 1_000_000;
 const MAX_FORMAT_CODE_BYTES: usize = 1_024;
@@ -119,6 +122,7 @@ struct CellBuilder {
     value_type: String,
     style_index: Option<usize>,
     formula: bool,
+    sheet_protected: bool,
     value: String,
     inline_text: String,
     capture: Capture,
@@ -143,6 +147,7 @@ struct RenderedRow {
     merge_covers: Vec<MergeRange>,
     first_column: Option<u32>,
     last_column: Option<u32>,
+    optional_blank_columns: BTreeSet<u32>,
 }
 
 struct RenderedCell {
@@ -174,7 +179,9 @@ struct MergeCursor {
 }
 
 struct WorksheetScan {
+    protected: bool,
     merged_ranges: MergeCursor,
+    formula_ranges: MergeCursor,
     view: WorksheetViewMetadata,
 }
 
@@ -413,6 +420,7 @@ struct XlsxStyleCatalog {
 struct XlsxFormatStats {
     formatted_cells: u64,
     approximate_cells: u64,
+    skipped_blank_cells: u64,
 }
 
 struct FormattedCell {
@@ -485,6 +493,8 @@ where
     last_column: Option<u32>,
     html: String,
     entries: Vec<NodeMapEntry>,
+    pending_rows: Vec<RenderedRow>,
+    compacted_blank_cells: u64,
     column_markup: String,
     default_column_width: Option<f64>,
     default_row_height: Option<f64>,
@@ -522,6 +532,8 @@ where
             last_column: None,
             html: String::new(),
             entries: Vec::new(),
+            pending_rows: Vec::new(),
+            compacted_blank_cells: 0,
             column_markup: String::new(),
             default_column_width: None,
             default_row_height: None,
@@ -530,15 +542,7 @@ where
         }
     }
 
-    fn push(&mut self, row: RenderedRow) -> Result<(), HcdError> {
-        if row.html.len() > MAX_CHUNK_BYTES {
-            return Err(HcdError::ResourceLimit(format!(
-                "NODE_TOO_LARGE: XLSX row {} in {} is {} bytes",
-                row.number,
-                self.part,
-                row.html.len()
-            )));
-        }
+    fn push(&mut self, mut row: RenderedRow) -> Result<(), HcdError> {
         if self
             .hold_until_row
             .is_some_and(|end_row| row.number > u64::from(end_row))
@@ -554,7 +558,49 @@ where
         {
             self.flush()?;
         }
-        if self.html.len() + row.html.len() > MAX_CHUNK_BYTES {
+        // Reserve the exact serialized wrapper size, including column markup.
+        let reserve = self
+            .wrap_rows(self.first_row.unwrap_or(row.number), row.number, "")
+            .len();
+        let budget = MAX_CHUNK_BYTES.saturating_sub(reserve);
+        // A mapped empty cell needs space for later text edits. Leave modest
+        // room where possible, but never reject otherwise valid existing data
+        // merely because it cannot meet this optional headroom.
+        const EDIT_HEADROOM: usize = 128 * 1024;
+        let has_optional = !row.optional_blank_columns.is_empty()
+            || self
+                .pending_rows
+                .iter()
+                .any(|item| !item.optional_blank_columns.is_empty());
+        let target = if has_optional {
+            budget.saturating_sub(EDIT_HEADROOM)
+        } else {
+            budget
+        };
+        if self.html.len() + row.html.len() > target && has_optional {
+            // Keep earlier rows and as many blank mappings as fit. Compact
+            // later rows first, without splitting a vertical merge group.
+            let excess = self.html.len() + row.html.len() - target;
+            let row_budget = row.html.len().saturating_sub(excess);
+            self.compacted_blank_cells += compact_worksheet_row(&mut row, row_budget)?;
+            let mut total = self.html.len() + row.html.len();
+            for previous in self.pending_rows.iter_mut().rev() {
+                if total <= target {
+                    break;
+                }
+                let before = previous.html.len();
+                self.compacted_blank_cells +=
+                    compact_worksheet_row(previous, before.saturating_sub(total - target))?;
+                total = total - before + previous.html.len();
+            }
+            self.html.clear();
+            self.entries.clear();
+            for previous in &self.pending_rows {
+                self.html.push_str(&previous.html);
+                self.entries.extend(previous.entries.iter().cloned());
+            }
+        }
+        if self.html.len() + row.html.len() > budget {
             return Err(HcdError::ResourceLimit(format!(
                 "NODE_TOO_LARGE: XLSX merged row group ending at row {} in {} exceeds 2 MiB",
                 self.hold_until_row
@@ -581,7 +627,8 @@ where
         }
         self.rows += 1;
         self.html.push_str(&row.html);
-        self.entries.extend(row.entries);
+        self.entries.extend(row.entries.iter().cloned());
+        self.pending_rows.push(row);
         Ok(())
     }
 
@@ -598,27 +645,7 @@ where
             &self.ordinal.to_string(),
         ])
         .replacen("n_", "c_", 1);
-        let default_width = self
-            .default_column_width
-            .map(|width| format!(" data-hcd-default-column-width=\"{width:.2}\""))
-            .unwrap_or_default();
-        let default_height = self
-            .default_row_height
-            .map(|height| format!(" data-hcd-default-row-height-points=\"{height:.2}\""))
-            .unwrap_or_default();
-        let html = format!(
-            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\" data-hcd-row-start=\"{}\" data-hcd-row-end=\"{}\"{}{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody>{}</tbody></table></section>",
-            escape_attribute(self.sheet_name),
-            self.sheet_index,
-            self.sheet_state,
-            first,
-            last,
-            default_width,
-            default_height,
-            self.view_attributes,
-            self.column_markup,
-            self.html
-        );
+        let html = self.wrap_rows(first, last, &self.html);
         let map = ChunkSourceMap {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             chunk_id: chunk_id.clone(),
@@ -653,7 +680,32 @@ where
         self.last_column = None;
         self.hold_until_row = None;
         self.html.clear();
+        self.pending_rows.clear();
         Ok(())
+    }
+
+    fn wrap_rows(&self, first: u64, last: u64, rows: &str) -> String {
+        let default_width = self
+            .default_column_width
+            .map(|width| format!(" data-hcd-default-column-width=\"{width:.2}\""))
+            .unwrap_or_default();
+        let default_height = self
+            .default_row_height
+            .map(|height| format!(" data-hcd-default-row-height-points=\"{height:.2}\""))
+            .unwrap_or_default();
+        format!(
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\" data-hcd-row-start=\"{}\" data-hcd-row-end=\"{}\"{}{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody>{}</tbody></table></section>",
+            escape_attribute(self.sheet_name),
+            self.sheet_index,
+            self.sheet_state,
+            first,
+            last,
+            default_width,
+            default_height,
+            self.view_attributes,
+            self.column_markup,
+            rows
+        )
     }
 
     fn finish(&mut self) -> Result<(), HcdError> {
@@ -2022,6 +2074,27 @@ fn xlsx_vertical(value: &str) -> Option<&'static str> {
     }
 }
 
+fn snapshot_xlsx_source(
+    source: &Path,
+    expected: Option<(&str, u64)>,
+) -> Result<(tempfile::TempDir, PathBuf, String, u64), HcdError> {
+    let (source_hash, source_size) = source_identity(source, "xlsx")?;
+    if expected.is_some_and(|(hash, size)| hash != source_hash || size != source_size) {
+        return Err(HcdError::InvalidPatch("XLSX_SOURCE_CHANGED".into()));
+    }
+    let snapshot_dir = tempfile::tempdir()?;
+    let snapshot = snapshot_dir.path().join("source.xlsx");
+    let mut input = File::open(source)?.take(source_size + 1);
+    let mut output_file = File::create(&snapshot)?;
+    let copied = std::io::copy(&mut input, &mut output_file)?;
+    drop(output_file);
+    let (snapshot_hash, snapshot_size) = source_identity(&snapshot, "xlsx")?;
+    if copied != source_size || snapshot_size != source_size || snapshot_hash != source_hash {
+        return Err(HcdError::InvalidPatch("XLSX_SOURCE_CHANGED".into()));
+    }
+    Ok((snapshot_dir, snapshot, source_hash, source_size))
+}
+
 pub(crate) fn import_xlsx<F>(
     source: &Path,
     output: &Path,
@@ -2031,9 +2104,24 @@ pub(crate) fn import_xlsx<F>(
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
-    let (source_hash, source_size) = source_identity(source, "xlsx")?;
+    // A private copy makes the bytes hashed here the bytes parsed below.
+    let (_snapshot_dir, snapshot, source_hash, source_size) = snapshot_xlsx_source(source, None)
+        .map_err(|error| match error {
+            HcdError::InvalidPatch(reason) if reason == "XLSX_SOURCE_CHANGED" => {
+                HcdError::InvalidBundle("XLSX source changed during import".into())
+            }
+            other => other,
+        })?;
     emit_started(&mut emit, options, &source_hash)?;
-    let result = import_xlsx_inner(source, output, options, source_hash, source_size, &mut emit);
+    let result = import_xlsx_inner(
+        &snapshot,
+        source,
+        output,
+        options,
+        source_hash,
+        source_size,
+        &mut emit,
+    );
     if let Err(error) = &result {
         emit_failed(&mut emit, options, error);
     }
@@ -2041,6 +2129,7 @@ where
 }
 
 fn import_xlsx_inner<F>(
+    snapshot: &Path,
     source: &Path,
     output: &Path,
     options: &ImportOptions,
@@ -2051,7 +2140,7 @@ fn import_xlsx_inner<F>(
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
-    let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let mut archive = StreamingOxmlArchive::open(snapshot).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
     let scratch = tempfile::tempdir()?;
     let mut shared_strings = SharedStringStore::build(&mut archive, scratch.path())?;
@@ -2059,17 +2148,23 @@ where
     let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(&rendered_styles)?;
     let mut format_stats = XlsxFormatStats::default();
+    let mut protected_sheet_count = 0usize;
 
     for sheet in &workbook.sheets {
         let WorksheetScan {
             mut merged_ranges,
+            mut formula_ranges,
             view,
+            protected,
         } = archive
             .with_part(&sheet.part, |source| {
                 scan_worksheet_metadata(source, &sheet.part)
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
+        if protected {
+            protected_sheet_count += 1;
+        }
         let mut chunks = SheetChunkWriter::new(
             &options.document_id,
             sheet,
@@ -2086,6 +2181,8 @@ where
                     sheet,
                     &mut shared_strings,
                     &mut merged_ranges,
+                    &mut formula_ranges,
+                    protected,
                     &style_catalog,
                     workbook.date_1904,
                     &mut format_stats,
@@ -2095,6 +2192,9 @@ where
             })
             .map_err(package_error)?;
         chunks.finish()?;
+        format_stats.skipped_blank_cells = format_stats
+            .skipped_blank_cells
+            .saturating_add(chunks.compacted_blank_cells);
     }
 
     // Worksheet text is the progressive primary representation. Media is
@@ -2123,6 +2223,16 @@ where
         serde_json::to_vec(&assets)?,
     )?;
 
+    // The archive is read progressively, after its source identity was
+    // captured. Do not publish a manifest tying those results to a source
+    // which was replaced or changed during import.
+    let (final_hash, final_size) = source_identity(source, "xlsx")?;
+    if final_hash != source_hash || final_size != source_size {
+        return Err(HcdError::InvalidBundle(
+            "XLSX source changed during import".into(),
+        ));
+    }
+
     let mut manifest = base_manifest(options, "xlsx", "grid", source_hash, source_size);
     manifest.warnings.push(FidelityWarning {
         code: "XLSX_ADVANCED_VISUALS_EXTERNAL".to_string(),
@@ -2130,6 +2240,14 @@ where
         node_id: None,
         source_part: Some("xl/styles.xml".to_string()),
     });
+    if protected_sheet_count > 0 {
+        manifest.warnings.push(FidelityWarning {
+            code: "XLSX_PROTECTED_SHEET_READ_ONLY".to_string(),
+            message: format!("{protected_sheet_count} protected worksheets were imported read-only; unlocked cells are not yet distinguished"),
+            node_id: None,
+            source_part: None,
+        });
+    }
     if format_stats.approximate_cells > 0 {
         manifest.warnings.push(FidelityWarning {
             code: "XLSX_NUMFMT_PARTIAL".to_string(),
@@ -2139,6 +2257,14 @@ where
             ),
             node_id: None,
             source_part: Some("xl/styles.xml".to_string()),
+        });
+    }
+    if format_stats.skipped_blank_cells > 0 {
+        manifest.warnings.push(FidelityWarning {
+            code: "XLSX_STORED_BLANK_MAPPING_LIMIT".to_string(),
+            message: format!("{} stored blank cells were not made editable to keep worksheet fragments within size limits and leave room for edits; original cells remain in the source file", format_stats.skipped_blank_cells),
+            node_id: None,
+            source_part: None,
         });
     }
     manifest.fidelity = Some(FidelityReport {
@@ -3530,6 +3656,8 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
     reader.config_mut().check_end_names = true;
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut ranges = Vec::new();
+    let mut formula_ranges = Vec::new();
+    let mut protected = false;
     let mut selected_view: Option<WorksheetViewMetadata> = None;
     let mut current_view: Option<WorksheetViewMetadata> = None;
     let mut budget = XmlBudget::default();
@@ -3539,6 +3667,43 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
             .map_err(|error| HcdError::InvalidBundle(format!("worksheet {part} XML: {error}")))?;
         budget.observe(&event, part)?;
         match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "sheetProtection" =>
+            {
+                protected |= !attribute(element, "sheet")
+                    .is_some_and(|value| matches!(value.as_str(), "0" | "false"));
+            }
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "f"
+                    && matches!(
+                        attribute(element, "t").as_deref(),
+                        Some("array" | "dataTable")
+                    ) =>
+            {
+                if formula_ranges.len() >= MAX_MERGED_RANGES {
+                    return Err(HcdError::ResourceLimit(format!(
+                        "worksheet {part} has too many formula ranges"
+                    )));
+                }
+                let reference = attribute(element, "ref").ok_or_else(|| {
+                    HcdError::InvalidBundle(format!("worksheet {part} formula range has no ref"))
+                })?;
+                let range = parse_merge_reference(&reference)
+                    .or_else(|| {
+                        cell_coordinates(&reference).map(|(row, col)| MergeRange {
+                            start_row: row,
+                            end_row: row,
+                            start_col: col,
+                            end_col: col,
+                        })
+                    })
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle(format!(
+                            "worksheet {part} has invalid formula range {reference}"
+                        ))
+                    })?;
+                formula_ranges.push(range);
+            }
             Event::Start(ref element) if local_name(element.name().as_ref()) == "sheetView" => {
                 if current_view.is_some() {
                     return Err(HcdError::InvalidBundle(format!(
@@ -3599,7 +3764,9 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
         buffer.clear();
     }
     Ok(WorksheetScan {
+        protected,
         merged_ranges: MergeCursor::new(ranges),
+        formula_ranges: MergeCursor::new(formula_ranges),
         view: selected_view.unwrap_or_default(),
     })
 }
@@ -3817,6 +3984,7 @@ fn begin_worksheet_row(
         merge_covers: merged_ranges.current_row_covers(),
         first_column: None,
         last_column: None,
+        optional_blank_columns: BTreeSet::new(),
     })
 }
 
@@ -3861,7 +4029,7 @@ fn finish_worksheet_row(mut row: RenderedRow) -> Result<RenderedRow, HcdError> {
         .map(|cell| cell.column.saturating_add(cell.span.max(1) - 1))
         .max();
     let mut logical_column = 1u32;
-    for cell in row.cells.drain(..) {
+    for cell in &row.cells {
         while logical_column < cell.column {
             let covered = row
                 .merge_covers
@@ -3883,6 +4051,78 @@ fn finish_worksheet_row(mut row: RenderedRow) -> Result<RenderedRow, HcdError> {
     Ok(row)
 }
 
+fn compact_worksheet_row(row: &mut RenderedRow, budget: usize) -> Result<u64, HcdError> {
+    if row.html.len() <= budget || row.optional_blank_columns.is_empty() {
+        return Ok(0);
+    }
+    let count = row.optional_blank_columns.len();
+    let columns: Vec<u32> = row.optional_blank_columns.iter().copied().collect();
+    let prefix_end = row
+        .html
+        .find('>')
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX row has no start tag".into()))?
+        + 1;
+    // The row has already been rendered and sorted. Measure candidate suffix
+    // removal without cloning its map or allocating a complete HTML string.
+    let length = |remove: usize| {
+        let cutoff = columns[count - remove];
+        let mut size = prefix_end + "</tr>".len();
+        let mut logical_column = 1u32;
+        for cell in &row.cells {
+            if cell.column >= cutoff && row.optional_blank_columns.contains(&cell.column) {
+                continue;
+            }
+            while logical_column < cell.column {
+                let covered = row.merge_covers.iter().any(|range| {
+                    range.start_col <= logical_column && logical_column <= range.end_col
+                });
+                if !covered {
+                    size += "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"".len()
+                        + (logical_column.ilog10() as usize + 1)
+                        + "\"></td>".len();
+                }
+                logical_column += 1;
+            }
+            size += cell.html.len();
+            logical_column = cell.column.saturating_add(cell.span.max(1));
+        }
+        size
+    };
+    let mut low = 1usize;
+    let mut high = count;
+    // A fully compacted row can still exceed the requested group budget; in
+    // that case return it and let the caller compact earlier rows as well.
+    if length(count) <= budget {
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if length(middle) <= budget {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+    }
+    let expected_length = length(high);
+    let cutoff = columns[count - high];
+    let removed: BTreeSet<u32> = columns[count - high..].iter().copied().collect();
+    row.html.truncate(prefix_end);
+    row.cells
+        .retain(|cell| cell.column < cutoff || !removed.contains(&cell.column));
+    row.entries.retain(|entry| {
+        entry
+            .source
+            .paragraph_id
+            .as_deref()
+            .and_then(cell_coordinates)
+            .is_none_or(|(_, column)| !removed.contains(&column))
+    });
+    row.optional_blank_columns
+        .retain(|column| !removed.contains(column));
+    *row = finish_worksheet_row(std::mem::take(row))?;
+    debug_assert_eq!(row.html.len(), expected_length);
+    Ok(high as u64)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_worksheet<F>(
     source: &mut dyn Read,
@@ -3890,6 +4130,8 @@ fn parse_worksheet<F>(
     sheet: &SheetPart,
     shared_strings: &mut SharedStringStore,
     merged_ranges: &mut MergeCursor,
+    formula_ranges: &mut MergeCursor,
+    sheet_protected: bool,
     styles: &XlsxStyleCatalog,
     date_1904: bool,
     format_stats: &mut XlsxFormatStats,
@@ -3919,11 +4161,14 @@ where
                     merged_ranges,
                     &mut last_row_number,
                 )?);
+                formula_ranges.begin_row(last_row_number)?;
             }
             Event::Empty(ref start) if local_name(start.name().as_ref()) == "row" => {
                 let finished =
                     begin_worksheet_row(start, sheet, merged_ranges, &mut last_row_number)?;
-                chunks.push(finish_worksheet_row(finished)?)?;
+                formula_ranges.begin_row(last_row_number)?;
+                let finished = finish_worksheet_row(finished)?;
+                chunks.push(finished)?;
             }
             Event::Start(ref start) | Event::Empty(ref start)
                 if local_name(start.name().as_ref()) == "sheetFormatPr" =>
@@ -3945,16 +4190,21 @@ where
                     reference: attribute(start, "r").unwrap_or_default(),
                     value_type: attribute(start, "t").unwrap_or_default(),
                     style_index: attribute(start, "s").and_then(|value| value.parse().ok()),
+                    sheet_protected,
                     ..Default::default()
                 });
             }
             Event::Empty(ref start) if local_name(start.name().as_ref()) == "c" => {
-                let finished = CellBuilder {
+                let mut finished = CellBuilder {
                     reference: attribute(start, "r").unwrap_or_default(),
                     value_type: attribute(start, "t").unwrap_or_default(),
                     style_index: attribute(start, "s").and_then(|value| value.parse().ok()),
+                    sheet_protected,
                     ..Default::default()
                 };
+                if let Some((row, column)) = cell_coordinates(&finished.reference) {
+                    finished.formula |= formula_ranges.classify(row, column).is_some();
+                }
                 append_finished_cell_if_visible(
                     &mut row,
                     document_id,
@@ -3968,7 +4218,7 @@ where
                     format_stats,
                 )?;
             }
-            Event::Start(ref start)
+            Event::Start(ref start) | Event::Empty(ref start)
                 if cell.is_some() && local_name(start.name().as_ref()) == "f" =>
             {
                 cell.as_mut().expect("checked cell").formula = true;
@@ -4006,7 +4256,10 @@ where
                 cell.as_mut().expect("checked cell").capture = Capture::None;
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "c" => {
-                let finished = cell.take().unwrap_or_default();
+                let mut finished = cell.take().unwrap_or_default();
+                if let Some((row, column)) = cell_coordinates(&finished.reference) {
+                    finished.formula |= formula_ranges.classify(row, column).is_some();
+                }
                 append_finished_cell_if_visible(
                     &mut row,
                     document_id,
@@ -4022,7 +4275,8 @@ where
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "row" => {
                 if let Some(finished) = row.take() {
-                    chunks.push(finish_worksheet_row(finished)?)?;
+                    let finished = finish_worksheet_row(finished)?;
+                    chunks.push(finished)?;
                 }
             }
             Event::Eof => {
@@ -4090,7 +4344,23 @@ fn append_finished_cell_if_visible(
     let is_merge_anchor = cell_coordinates(&finished.reference)
         .and_then(|(cell_row, cell_col)| merged_ranges.classify(cell_row, cell_col))
         .is_some_and(|position| matches!(position, MergePosition::Anchor(_)));
-    if !finished.reference.is_empty() && (has_content || is_merge_anchor) {
+    // A physically present empty cell has a stable source address and can use
+    // the same text splice and source-preserving export as other cells. Do not
+    // materialize virtual gaps, or cells covered by a merged range.
+    let stored_blank = !has_content
+        && finished.value_type != "s"
+        && cell_coordinates(&finished.reference).is_some_and(|(cell_row, cell_col)| {
+            !matches!(
+                merged_ranges.classify(cell_row, cell_col),
+                Some(MergePosition::Covered(_))
+            )
+        });
+    if !finished.reference.is_empty() && (has_content || is_merge_anchor || stored_blank) {
+        if stored_blank && !is_merge_anchor {
+            if let Some((_, column)) = cell_coordinates(&finished.reference) {
+                row.optional_blank_columns.insert(column);
+            }
+        }
         *cell_ordinal += 1;
         append_cell(
             row,
@@ -4210,7 +4480,7 @@ fn append_cell(
             paragraph_id: Some(cell.reference),
             text_id: None,
             node_kind: "cell".to_string(),
-            editable: !cell.formula,
+            editable: !cell.formula && !cell.sheet_protected,
         },
     });
     Ok(())
@@ -4321,6 +4591,14 @@ pub(crate) fn export_xlsx(
     let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut insertions: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let workbook = workbook_info(&mut archive)?;
+    let worksheet_parts: HashSet<&str> = workbook
+        .sheets
+        .iter()
+        .map(|sheet| sheet.part.as_str())
+        .collect();
     for node in nodes {
         if node.source.node_kind != "cell" {
             continue;
@@ -4328,25 +4606,86 @@ pub(crate) fn export_xlsx(
         let cell = node.source.paragraph_id.ok_or_else(|| {
             HcdError::InvalidBundle(format!("XLSX node {} has no cell locator", node.node_id))
         })?;
-        replacements
-            .entry(node.source.part)
+        let part = node.source.part;
+        if !worksheet_parts.contains(part.as_str())
+            || canonical_cell_reference(&cell).as_deref() != Some(cell.as_str())
+        {
+            return Err(HcdError::InvalidBundle(
+                "invalid XLSX cell source mapping".into(),
+            ));
+        }
+        let target = match node.source.text_id.as_deref() {
+            Some(VIRTUAL_CELL_SOURCE) => {
+                if node.node_id != stable_node_id(&[&manifest.document_id, &part, "cell", &cell]) {
+                    return Err(HcdError::InvalidBundle(
+                        "invalid XLSX virtual cell identity".into(),
+                    ));
+                }
+                &mut insertions
+            }
+            _ => &mut replacements,
+        };
+        if target
+            .entry(part)
             .or_default()
-            .insert(cell, node.text);
+            .insert(cell, node.text)
+            .is_some()
+        {
+            return Err(HcdError::InvalidBundle(
+                "duplicate XLSX cell source mapping".into(),
+            ));
+        }
     }
 
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
-    let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
-    for (part, values) in &replacements {
-        let path = scratch.path().join(safe_temp_name(part));
-        let output = File::create(&path)?;
-        archive
+    let parts: BTreeSet<_> = replacements
+        .keys()
+        .chain(insertions.keys())
+        .cloned()
+        .collect();
+    for (index, part) in parts.iter().enumerate() {
+        let values = replacements.get(part).cloned().unwrap_or_default();
+        let added = insertions.get(part).cloned().unwrap_or_default();
+        if added.keys().any(|key| values.contains_key(key)) {
+            return Err(HcdError::InvalidBundle(
+                "duplicate XLSX cell source mapping".into(),
+            ));
+        }
+        let mut scan = archive
             .with_part(part, |input| {
-                rewrite_worksheet(input, BufWriter::new(output), values)
+                scan_worksheet_metadata(input, part)
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
-        replacement_paths.insert(part.clone(), path);
+        if scan.protected {
+            return Err(HcdError::InvalidPatch("XLSX_SHEET_PROTECTED".into()));
+        }
+        let targets: BTreeSet<_> = values.keys().chain(added.keys()).cloned().collect();
+        reject_formula_range_targets(&mut scan.formula_ranges, targets.iter())?;
+        reject_merged_covered_targets(&mut scan.merged_ranges, targets.iter())?;
+        let path = scratch.path().join(format!("sheet-{index}.xml"));
+        let output = File::create(&path)?;
+        archive
+            .with_part(part, |input| {
+                let mut output = BufWriter::new(output);
+                rewrite_worksheet(input, &mut output, &values)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                output
+                    .flush()
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        if added.is_empty() {
+            replacement_paths.insert(part.clone(), path);
+        } else {
+            let inserted = scratch.path().join(format!("sheet-{index}-inserted.xml"));
+            let mut input = File::open(&path)?;
+            let mut output = BufWriter::new(File::create(&inserted)?);
+            insert_virtual_worksheet_cells(&mut input, &mut output, &added)?;
+            output.flush()?;
+            replacement_paths.insert(part.clone(), inserted);
+        }
     }
     let changed =
         StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "xl/workbook.xml")
@@ -4373,6 +4712,1123 @@ pub(crate) fn export_xlsx(
     Ok(report)
 }
 
+fn reject_formula_range_targets<'a>(
+    ranges: &mut MergeCursor,
+    targets: impl Iterator<Item = &'a String>,
+) -> Result<(), HcdError> {
+    let mut cells = targets
+        .map(|address| {
+            cell_coordinates(address)
+                .map(|(row, column)| (row, column, address))
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle(format!("invalid XLSX cell reference {address}"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    cells.sort_unstable();
+    let mut current_row = None;
+    for (row, column, address) in cells {
+        if current_row != Some(row) {
+            ranges.begin_row(row)?;
+            current_row = Some(row);
+        }
+        if ranges.classify(row, column).is_some() {
+            return Err(HcdError::InvalidPatch(format!(
+                "XLSX_FORMULA_READ_ONLY: {address}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The anchor is the sole editable cell in a merged range. In particular,
+/// old or forged source maps must not authorize changes to covered cells.
+fn reject_merged_covered_targets<'a>(
+    ranges: &mut MergeCursor,
+    targets: impl Iterator<Item = &'a String>,
+) -> Result<(), HcdError> {
+    let mut cells = targets
+        .map(|address| {
+            cell_coordinates(address)
+                .map(|(row, column)| (row, column, address))
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle(format!("invalid XLSX cell reference {address}"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    cells.sort_unstable();
+    let mut current_row = None;
+    for (row, column, address) in cells {
+        if current_row != Some(row) {
+            ranges.begin_row(row)?;
+            current_row = Some(row);
+        }
+        if matches!(
+            ranges.classify(row, column),
+            Some(MergePosition::Covered(_))
+        ) {
+            return Err(HcdError::InvalidPatch(format!(
+                "XLSX_MERGED_CELL_READ_ONLY: {address}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A read-only, revision-bound observation. It is not a reservation or
+/// permission to write: a future insertion transaction must recheck it under
+/// the document's normal lock and revision CAS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XlsxVirtualBlankInspection {
+    pub document_id: String,
+    pub revision: u64,
+    pub root_hash: String,
+    pub mapping_fingerprint: String,
+    pub source_sha256: String,
+    pub sheet_id: String,
+    /// Source part and workbook position are derived from the same verified
+    /// source snapshot as the safety checks, never from client input.
+    pub sheet_part: String,
+    pub sheet_name: String,
+    /// Zero-based workbook sheet index, as used by GridChunkAddress.
+    pub sheet_index: usize,
+    pub sheet_state: String,
+    pub address: String,
+    /// One-based Excel coordinates, as used by GridChunkAddress.
+    pub row: u32,
+    pub column: u32,
+    pub merged_anchor: bool,
+    pub node_id: String,
+}
+
+/// The original file is external to the bundle and can change without a
+/// revision event. Recheck it before returning an observation or publishing
+/// a candidate, then reread the manifest after the potentially slow hash.
+fn verify_virtual_blank_observation(
+    bundle: &Bundle,
+    source: &Path,
+    expected: &HcdManifest,
+    observed: &XlsxVirtualBlankInspection,
+) -> Result<(), HcdError> {
+    let (hash, size) = source_identity(source, "xlsx")?;
+    let latest = bundle.manifest()?;
+    if latest.revision != observed.revision
+        || latest.root_hash != observed.root_hash
+        || latest.source != expected.source
+        || latest.source.sha256 != observed.source_sha256
+        || hash != observed.source_sha256
+        || size != latest.source.size_bytes
+    {
+        return Err(HcdError::RevisionConflict(
+            "XLSX_CELL_INSPECTION_STALE".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn publish_virtual_candidate(
+    bundle: &Bundle,
+    source: &Path,
+    expected: &HcdManifest,
+    observed: &XlsxVirtualBlankInspection,
+    candidate: &Path,
+    target: &Path,
+) -> Result<(), HcdError> {
+    verify_virtual_blank_observation(bundle, source, expected, observed)?;
+    // The temporary candidate and destination share a directory; a no-clobber
+    // link avoids publishing a partial file or replacing an existing one.
+    std::fs::hard_link(candidate, target)?;
+    Ok(())
+}
+
+pub fn inspect_xlsx_virtual_blank(
+    bundle: &Bundle,
+    source: &Path,
+    sheet_id: &str,
+    address: &str,
+) -> Result<XlsxVirtualBlankInspection, HcdError> {
+    Ok(inspect_xlsx_virtual_blanks(bundle, source, &[(sheet_id, address)])?.remove(0))
+}
+
+/// Create an exact-base batch after rechecking the original workbook under the
+/// HCD write lock. The host is responsible for authenticating the actor.
+pub fn create_xlsx_virtual_cells(
+    bundle: &Bundle,
+    source: &Path,
+    request: &hcd_core::GridCreateRequest,
+) -> Result<hcd_core::ApplyResult, HcdError> {
+    hcd_core::apply_checked_grid_cells(bundle, request, |bundle, manifest, request| {
+        let addresses: Vec<String> = request
+            .cells
+            .iter()
+            .map(|cell| format!("{}{}", column_name(cell.column), cell.row))
+            .collect();
+        let targets: Vec<_> = request
+            .cells
+            .iter()
+            .zip(&addresses)
+            .map(|(cell, address)| (cell.sheet_id.as_str(), address.as_str()))
+            .collect();
+        let observed = inspect_xlsx_virtual_blanks(bundle, source, &targets)?;
+        if observed.iter().zip(&request.cells).any(|(item, cell)| {
+            item.document_id != request.document_id
+                || item.revision != manifest.revision
+                || item.root_hash != manifest.root_hash
+                || item.source_sha256 != request.source_sha256
+                || item.sheet_part != cell.sheet_part
+                || item.row != cell.row
+                || item.column != cell.column
+        }) {
+            return Err(HcdError::RevisionConflict(
+                "XLSX_CELL_INSPECTION_STALE".into(),
+            ));
+        }
+        if observed.iter().any(|item| item.merged_anchor) {
+            return Err(HcdError::Unsupported(
+                "XLSX_VIRTUAL_MERGE_ANCHOR_UNSUPPORTED".into(),
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// Batch inspection reads the source snapshot and each affected worksheet
+/// once. A single protected or existing target rejects the entire batch.
+pub fn inspect_xlsx_virtual_blanks(
+    bundle: &Bundle,
+    source: &Path,
+    targets: &[(&str, &str)],
+) -> Result<Vec<XlsxVirtualBlankInspection>, HcdError> {
+    if targets.is_empty() || targets.len() > 4000 {
+        return Err(HcdError::InvalidPatch("XLSX_INSERT_COUNT".into()));
+    }
+    let manifest = bundle.manifest()?;
+    if manifest.source.format != "xlsx" {
+        return Err(HcdError::InvalidBundle("expected an XLSX document".into()));
+    }
+    if !hcd_core::validate_bundle(bundle)?.valid {
+        return Err(HcdError::InvalidBundle("invalid XLSX bundle".into()));
+    }
+    let mapping_fingerprint = xlsx_formula_mapping_fingerprint(bundle)?;
+    let (_dir, snapshot, _, _) = snapshot_xlsx_source(
+        source,
+        Some((&manifest.source.sha256, manifest.source.size_bytes)),
+    )?;
+    let mut archive = StreamingOxmlArchive::open(&snapshot).map_err(package_error)?;
+    let workbook = workbook_info(&mut archive)?;
+    let mut sheets = HashMap::new();
+    for sheet in &workbook.sheets {
+        if sheets
+            .insert(sheet_grid_id(&manifest.document_id, &sheet.part), sheet)
+            .is_some()
+        {
+            return Err(HcdError::InvalidBundle(
+                "duplicate XLSX sheet identity".into(),
+            ));
+        }
+    }
+    let mut by_part = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut results = Vec::with_capacity(targets.len());
+    let mut ids = HashSet::new();
+    for &(sheet_id, address) in targets {
+        let address = canonical_cell_reference(address)
+            .ok_or_else(|| HcdError::InvalidPatch("invalid XLSX cell address".into()))?;
+        let sheet = sheets
+            .get(sheet_id)
+            .ok_or_else(|| HcdError::InvalidPatch("XLSX_SHEET_NOT_FOUND".into()))?;
+        let (row, column) = cell_coordinates(&address)
+            .ok_or_else(|| HcdError::InvalidPatch("invalid XLSX cell address".into()))?;
+        if !by_part
+            .entry(sheet.part.clone())
+            .or_default()
+            .insert(address.clone())
+        {
+            return Err(HcdError::InvalidPatch("XLSX_DUPLICATE_CELL".into()));
+        }
+        let node_id = stable_node_id(&[&manifest.document_id, &sheet.part, "cell", &address]);
+        if !ids.insert(node_id.clone()) {
+            return Err(HcdError::InvalidBundle(
+                "duplicate XLSX node identity".into(),
+            ));
+        }
+        results.push(XlsxVirtualBlankInspection {
+            document_id: manifest.document_id.clone(),
+            revision: manifest.revision,
+            root_hash: manifest.root_hash.clone(),
+            mapping_fingerprint: mapping_fingerprint.clone(),
+            source_sha256: manifest.source.sha256.clone(),
+            sheet_id: sheet_id.into(),
+            sheet_part: sheet.part.clone(),
+            sheet_name: sheet.name.clone(),
+            sheet_index: sheet.index,
+            sheet_state: sheet.state.to_string(),
+            address,
+            row,
+            column,
+            merged_anchor: false,
+            node_id,
+        });
+    }
+    for page in 0..manifest.index_page_count {
+        for chunk in bundle.read_index_page(&manifest, page)?.chunks {
+            for entry in bundle.read_map_verified(&chunk)?.entries {
+                if ids.contains(&entry.node_id)
+                    || entry.source.node_kind == "cell"
+                        && by_part.contains_key(&entry.source.part)
+                        && entry
+                            .source
+                            .paragraph_id
+                            .as_deref()
+                            .and_then(canonical_cell_reference)
+                            .as_deref()
+                            .is_some_and(|address| by_part[&entry.source.part].contains(address))
+                {
+                    return Err(HcdError::InvalidPatch("XLSX_CELL_ALREADY_MAPPED".into()));
+                }
+            }
+        }
+    }
+    for (part, addresses) in &by_part {
+        let mut scan = archive
+            .with_part(part, |input| {
+                scan_worksheet_metadata(input, part)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        if scan.protected {
+            return Err(HcdError::InvalidPatch("XLSX_SHEET_PROTECTED".into()));
+        }
+        reject_formula_range_targets(&mut scan.formula_ranges, addresses.iter())?;
+        let mut anchors = MergeCursor::new(scan.merged_ranges.ranges.clone());
+        reject_merged_covered_targets(&mut scan.merged_ranges, addresses.iter())?;
+        let mut ordered: Vec<_> = addresses
+            .iter()
+            .map(|address| {
+                let (row, column) = cell_coordinates(address).expect("canonical address");
+                (row, column, address)
+            })
+            .collect();
+        ordered.sort_unstable();
+        let mut current_row = None;
+        let mut anchor_addresses = HashSet::new();
+        for (row, column, address) in ordered {
+            if current_row != Some(row) {
+                anchors.begin_row(row)?;
+                current_row = Some(row);
+            }
+            if matches!(
+                anchors.classify(row, column),
+                Some(MergePosition::Anchor(_))
+            ) {
+                anchor_addresses.insert(address.as_str());
+            }
+        }
+        for item in &mut results {
+            if item.sheet_part == *part && anchor_addresses.contains(item.address.as_str()) {
+                item.merged_anchor = true;
+            }
+        }
+        let mut present = false;
+        archive
+            .with_part(part, |input| {
+                let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, input));
+                reader.config_mut().check_end_names = true;
+                let mut buffer = Vec::new();
+                let mut budget = XmlBudget::default();
+                loop {
+                    let event = reader
+                        .read_event_into(&mut buffer)
+                        .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                    budget
+                        .observe(&event, part)
+                        .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                    if let Event::Start(ref tag) | Event::Empty(ref tag) = event {
+                        if local_name(tag.name().as_ref()) == "c"
+                            && attribute(tag, "r")
+                                .and_then(|value| canonical_cell_reference(&value))
+                                .is_some_and(|address| addresses.contains(&address))
+                        {
+                            present = true;
+                        }
+                    }
+                    if matches!(event, Event::Eof) {
+                        budget
+                            .finish(part)
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                        break;
+                    }
+                    buffer.clear();
+                }
+                Ok(())
+            })
+            .map_err(package_error)?;
+        if present {
+            return Err(HcdError::InvalidPatch("XLSX_CELL_ALREADY_PRESENT".into()));
+        }
+    }
+    verify_virtual_blank_observation(bundle, source, &manifest, &results[0])?;
+    Ok(results)
+}
+
+/// Produce a review-only workbook candidate containing a new virtual cell.
+/// This never changes the HCD bundle or reserves the cell; callers must use a
+/// future transactional creation protocol to save the edit collaboratively.
+pub fn preview_xlsx_virtual_cell(
+    bundle: &Bundle,
+    source: &Path,
+    sheet_id: &str,
+    address: &str,
+    text: &str,
+    target: &Path,
+) -> Result<XlsxVirtualBlankInspection, HcdError> {
+    let request = XlsxVirtualCell {
+        sheet_id: sheet_id.into(),
+        address: address.into(),
+        text: text.into(),
+    };
+    Ok(preview_xlsx_virtual_cells(bundle, source, &[request], target)?.remove(0))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XlsxVirtualCell {
+    pub sheet_id: String,
+    pub address: String,
+    pub text: String,
+}
+
+/// Build an all-or-nothing, review-only candidate for multiple virtual cells.
+pub fn preview_xlsx_virtual_cells(
+    bundle: &Bundle,
+    source: &Path,
+    cells: &[XlsxVirtualCell],
+    target: &Path,
+) -> Result<Vec<XlsxVirtualBlankInspection>, HcdError> {
+    if target.exists() {
+        return Err(HcdError::InvalidBundle("target already exists".into()));
+    }
+    if cells.is_empty()
+        || cells.len() > 4000
+        || cells
+            .iter()
+            .try_fold(0usize, |total, cell| total.checked_add(cell.text.len()))
+            .is_none_or(|total| total > MAX_CHUNK_BYTES)
+    {
+        return Err(HcdError::InvalidPatch("XLSX_INSERT_COUNT_OR_SIZE".into()));
+    }
+    let targets: Vec<_> = cells
+        .iter()
+        .map(|cell| (cell.sheet_id.as_str(), cell.address.as_str()))
+        .collect();
+    let observations = inspect_xlsx_virtual_blanks(bundle, source, &targets)?;
+    let observed = &observations[0];
+    let manifest = bundle.manifest()?;
+    if manifest.revision != observed.revision || manifest.root_hash != observed.root_hash {
+        return Err(HcdError::RevisionConflict(
+            "XLSX_CELL_INSPECTION_STALE".into(),
+        ));
+    }
+    let (_source_dir, source_snapshot, _, _) = snapshot_xlsx_source(
+        source,
+        Some((&manifest.source.sha256, manifest.source.size_bytes)),
+    )?;
+    let parent = target
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let work = tempfile::tempdir_in(parent)?;
+    let current = work.path().join("current.xlsx");
+    export_xlsx(
+        bundle,
+        &source_snapshot,
+        &current,
+        &ExportOptions {
+            revision: Some(observed.revision),
+            fidelity_report: None,
+        },
+    )?;
+    let mut archive = StreamingOxmlArchive::open(&current).map_err(package_error)?;
+    let workbook = workbook_info(&mut archive)?;
+    let mut sheets = HashMap::new();
+    for sheet in &workbook.sheets {
+        if sheets
+            .insert(sheet_grid_id(&observed.document_id, &sheet.part), sheet)
+            .is_some()
+        {
+            return Err(HcdError::InvalidBundle(
+                "duplicate XLSX sheet identity".into(),
+            ));
+        }
+    }
+    let mut grouped = BTreeMap::<String, BTreeMap<String, String>>::new();
+    for (cell, observation) in cells.iter().zip(&observations) {
+        let sheet = sheets
+            .get(&observation.sheet_id)
+            .ok_or_else(|| HcdError::InvalidPatch("XLSX_SHEET_NOT_FOUND".into()))?;
+        if sheet.part != observation.sheet_part
+            || sheet.name != observation.sheet_name
+            || sheet.index != observation.sheet_index
+            || sheet.state != observation.sheet_state
+        {
+            return Err(HcdError::RevisionConflict(
+                "XLSX_CELL_INSPECTION_STALE".into(),
+            ));
+        }
+        grouped
+            .entry(sheet.part.clone())
+            .or_default()
+            .insert(observation.address.clone(), cell.text.clone());
+    }
+    let mut replacements = HashMap::new();
+    for (index, (part, insertions)) in grouped.iter().enumerate() {
+        let mut scan = archive
+            .with_part(part, |input| {
+                scan_worksheet_metadata(input, part)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        reject_formula_range_targets(&mut scan.formula_ranges, insertions.keys())?;
+        reject_merged_covered_targets(&mut scan.merged_ranges, insertions.keys())?;
+        let replacement = work.path().join(format!("worksheet-{index}.xml"));
+        archive
+            .with_part(part, |input| {
+                let file = File::create(&replacement)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                let mut output = BufWriter::new(file);
+                insert_virtual_worksheet_cells(input, &mut output, insertions)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                output
+                    .flush()
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        replacements.insert(part.clone(), replacement);
+    }
+    let candidate = work.path().join("candidate.xlsx");
+    StreamingOxmlRewriter::rewrite(&current, &candidate, &replacements, "xl/workbook.xml")
+        .map_err(package_error)?;
+    publish_virtual_candidate(bundle, source, &manifest, observed, &candidate, target)?;
+    Ok(observations)
+}
+
+/// Check a current XLSX text patch against the immutable source, including
+/// formula ranges absent from old HCD source maps. This does not mutate the
+/// bundle or source and should be followed by the normal revision CAS.
+pub fn validate_xlsx_source_text_edits(
+    bundle: &Bundle,
+    source: &Path,
+    operations: &[hcd_core::PatchOperation],
+) -> Result<(), HcdError> {
+    let manifest = bundle.manifest()?;
+    if manifest.source.format != "xlsx" {
+        return Err(HcdError::InvalidBundle("expected an XLSX document".into()));
+    }
+    let mut targets: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut virtual_targets: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let ids: Vec<String> = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            hcd_core::PatchOperation::TextSplice { node_id, .. }
+            | hcd_core::PatchOperation::TextRuns { node_id, .. } => Some(node_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let nodes = hcd_core::get_text_node_sources_in_manifest(bundle, &ids, &manifest)?;
+    for (node_id, node) in nodes {
+        if node.node_kind != "cell" {
+            return Err(HcdError::InvalidPatch(
+                "XLSX text target is not a cell".into(),
+            ));
+        }
+        let reference = node
+            .paragraph_id
+            .ok_or_else(|| HcdError::InvalidBundle("XLSX cell has no source reference".into()))?;
+        let destination = if node.text_id.as_deref() == Some(VIRTUAL_CELL_SOURCE) {
+            if canonical_cell_reference(&reference).as_deref() != Some(reference.as_str())
+                || node_id
+                    != stable_node_id(&[&manifest.document_id, &node.part, "cell", &reference])
+            {
+                return Err(HcdError::InvalidBundle(
+                    "invalid XLSX virtual cell identity".into(),
+                ));
+            }
+            &mut virtual_targets
+        } else {
+            &mut targets
+        };
+        destination
+            .entry(node.part)
+            .or_default()
+            .insert(reference, String::new());
+    }
+    if targets.is_empty() && virtual_targets.is_empty() {
+        return Ok(());
+    }
+    let (_snapshot_dir, snapshot, _, _) = snapshot_xlsx_source(
+        source,
+        Some((&manifest.source.sha256, manifest.source.size_bytes)),
+    )?;
+    check_xlsx_formula_targets(&snapshot, &targets)?;
+    check_xlsx_virtual_targets(&snapshot, &virtual_targets)
+}
+
+fn check_xlsx_virtual_targets(
+    snapshot: &Path,
+    targets: &HashMap<String, BTreeMap<String, String>>,
+) -> Result<(), HcdError> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let mut archive = StreamingOxmlArchive::open(snapshot).map_err(package_error)?;
+    let workbook = workbook_info(&mut archive)?;
+    let parts: HashSet<&str> = workbook
+        .sheets
+        .iter()
+        .map(|sheet| sheet.part.as_str())
+        .collect();
+    for (part, cells) in targets {
+        if !parts.contains(part.as_str()) {
+            return Err(HcdError::InvalidBundle(
+                "invalid XLSX cell source mapping".into(),
+            ));
+        }
+        let mut scan = archive
+            .with_part(part, |input| {
+                scan_worksheet_metadata(input, part)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        if scan.protected {
+            return Err(HcdError::InvalidPatch("XLSX_SHEET_PROTECTED".into()));
+        }
+        reject_formula_range_targets(&mut scan.formula_ranges, cells.keys())?;
+        let mut anchors = MergeCursor::new(scan.merged_ranges.ranges.clone());
+        reject_merged_covered_targets(&mut scan.merged_ranges, cells.keys())?;
+        let mut coordinates: Vec<_> = cells
+            .keys()
+            .map(|address| {
+                cell_coordinates(address).ok_or_else(|| {
+                    HcdError::InvalidBundle("invalid XLSX virtual cell reference".into())
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        coordinates.sort_unstable();
+        let mut current_row = None;
+        for (row, column) in coordinates {
+            if current_row != Some(row) {
+                anchors.begin_row(row)?;
+                current_row = Some(row);
+            }
+            if matches!(
+                anchors.classify(row, column),
+                Some(MergePosition::Anchor(_))
+            ) {
+                return Err(HcdError::Unsupported(
+                    "XLSX_VIRTUAL_MERGE_ANCHOR_UNSUPPORTED".into(),
+                ));
+            }
+        }
+        archive
+            .with_part(part, |input| {
+                insert_virtual_worksheet_cells(input, std::io::sink(), cells)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+    }
+    Ok(())
+}
+
+/// Apply an XLSX patch using the original workbook to guard text targets.
+/// Previously committed requests may replay without the source; an outdated
+/// request without a matching receipt is still rejected by the core CAS.
+/// Direct calls to `hcd_core::apply_patch` do not provide this XLSX guard.
+pub fn apply_xlsx_patch_with_source(
+    bundle: &Bundle,
+    patch: &hcd_core::PatchBatch,
+    expected_revision: u64,
+    source: Option<&Path>,
+) -> Result<hcd_core::ApplyResult, HcdError> {
+    let manifest = bundle.manifest()?;
+    if manifest.source.format != "xlsx" {
+        return Err(HcdError::InvalidBundle("expected an XLSX document".into()));
+    }
+    if expected_revision == manifest.revision
+        && patch.operations.iter().any(|operation| {
+            matches!(
+                operation,
+                hcd_core::PatchOperation::TextSplice { .. }
+                    | hcd_core::PatchOperation::TextRuns { .. }
+            )
+        })
+    {
+        let source = source.filter(|source| source.is_file()).ok_or_else(|| {
+            HcdError::InvalidPatch(
+                "XLSX_SOURCE_MISSING: provide the original workbook; no text edit was saved".into(),
+            )
+        })?;
+        validate_xlsx_source_text_edits(bundle, source, &patch.operations)?;
+    }
+    hcd_core::apply_patch(bundle, patch, expected_revision)
+}
+
+fn check_xlsx_formula_targets(
+    snapshot: &Path,
+    targets: &HashMap<String, BTreeMap<String, String>>,
+) -> Result<(), HcdError> {
+    let mut archive = StreamingOxmlArchive::open(snapshot).map_err(package_error)?;
+    for (part, cells) in targets {
+        let mut scan = archive
+            .with_part(part, |input| {
+                scan_worksheet_metadata(input, part)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+        if scan.protected {
+            return Err(HcdError::InvalidPatch("XLSX_SHEET_PROTECTED".into()));
+        }
+        reject_formula_range_targets(&mut scan.formula_ranges, cells.keys())?;
+        reject_merged_covered_targets(&mut scan.merged_ranges, cells.keys())?;
+        let mut rejected = None;
+        archive
+            .with_part(part, |input| {
+                match rewrite_worksheet(input, std::io::sink(), cells) {
+                    Err(HcdError::InvalidPatch(reason)) if reason == "XLSX_FORMULA_READ_ONLY" => {
+                        rejected = Some(reason);
+                        Ok(())
+                    }
+                    result => {
+                        result.map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    }
+                }
+            })
+            .map_err(package_error)?;
+        if let Some(reason) = rejected {
+            return Err(HcdError::InvalidPatch(reason));
+        }
+    }
+    Ok(())
+}
+
+/// Audit the current XLSX editable cell mappings against a verified source.
+/// This is read-only: a successful audit is not a signed proof and does not
+/// migrate an existing document or authorize later source-free writes.
+pub fn audit_xlsx_editable_formula_map(bundle: &Bundle, source: &Path) -> Result<usize, HcdError> {
+    const MAX_AUDIT_CELLS: usize = 1_000_000;
+    let manifest = bundle.manifest()?;
+    if manifest.source.format != "xlsx" {
+        return Err(HcdError::InvalidBundle("expected an XLSX document".into()));
+    }
+    let validation = hcd_core::validate_bundle(bundle)?;
+    if !validation.valid {
+        return Err(HcdError::InvalidBundle("invalid XLSX bundle".into()));
+    }
+    let mut targets: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut virtual_targets: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let mut identities = HashSet::new();
+    let mut count = 0usize;
+    for page in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(&manifest, page)?.chunks {
+            for entry in bundle.read_map_verified(&descriptor)?.entries {
+                if !entry.source.editable {
+                    continue;
+                }
+                if entry.source.node_kind != "cell" {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX editable target is not a cell".into(),
+                    ));
+                }
+                count += 1;
+                if count > MAX_AUDIT_CELLS {
+                    return Err(HcdError::ResourceLimit(
+                        "XLSX editable map audit cell limit".into(),
+                    ));
+                }
+                let reference = entry.source.paragraph_id.ok_or_else(|| {
+                    HcdError::InvalidBundle("XLSX cell has no source reference".into())
+                })?;
+                if !identities.insert((entry.source.part.clone(), reference.clone())) {
+                    return Err(HcdError::InvalidBundle(
+                        "duplicate XLSX editable cell reference".into(),
+                    ));
+                }
+                let destination = if entry.source.text_id.as_deref() == Some(VIRTUAL_CELL_SOURCE) {
+                    if canonical_cell_reference(&reference).as_deref() != Some(reference.as_str())
+                        || entry.node_id
+                            != stable_node_id(&[
+                                &manifest.document_id,
+                                &entry.source.part,
+                                "cell",
+                                &reference,
+                            ])
+                    {
+                        return Err(HcdError::InvalidBundle(
+                            "invalid XLSX virtual cell identity".into(),
+                        ));
+                    }
+                    &mut virtual_targets
+                } else {
+                    &mut targets
+                };
+                if destination
+                    .entry(entry.source.part)
+                    .or_default()
+                    .insert(reference, String::new())
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "duplicate XLSX editable cell reference".into(),
+                    ));
+                }
+            }
+        }
+    }
+    let (_snapshot_dir, snapshot, _, _) = snapshot_xlsx_source(
+        source,
+        Some((&manifest.source.sha256, manifest.source.size_bytes)),
+    )?;
+    check_xlsx_formula_targets(&snapshot, &targets)?;
+    check_xlsx_virtual_targets(&snapshot, &virtual_targets)?;
+    Ok(count)
+}
+
+/// Identity of a verified audit result. This is data for an attestation, not
+/// an attestation itself: authenticity must come from a trusted signer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XlsxFormulaMappingAudit {
+    pub document_id: String,
+    pub revision: u64,
+    pub source: hcd_core::SourceDescriptor,
+    pub mapping_fingerprint: String,
+    pub editable_cells_checked: usize,
+}
+
+// Mirrors the viewer's td[data-hcd-cell] and first descendant data-hcd-id
+// binding, while rejecting ambiguous HTML instead of guessing how a browser
+// will repair it. Canonical fragments are well-formed XML-compatible HTML.
+fn visible_xlsx_cell_bindings(html: &str) -> Result<Vec<(String, Option<String>)>, HcdError> {
+    fn attr(element: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, HcdError> {
+        let mut found = None;
+        for value in element.attributes() {
+            let value = value
+                .map_err(|_| HcdError::InvalidBundle("invalid XLSX HTML attributes".into()))?;
+            if value.key.as_ref() == name {
+                if found.is_some() {
+                    return Err(HcdError::InvalidBundle(
+                        "duplicate XLSX HTML attribute".into(),
+                    ));
+                }
+                found = Some(
+                    value
+                        .unescape_value()
+                        .map_err(|_| {
+                            HcdError::InvalidBundle("invalid XLSX HTML attribute value".into())
+                        })?
+                        .into_owned(),
+                );
+            }
+        }
+        Ok(found)
+    }
+    let mut reader = Reader::from_str(html);
+    reader.config_mut().check_end_names = true;
+    let mut buf = Vec::new();
+    let mut depth = 0usize;
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut roots = 0usize;
+    let mut active: Option<(usize, Option<String>, Option<String>)> = None;
+    let mut result = Vec::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buf)
+            .map_err(|_| HcdError::InvalidBundle("invalid XLSX grid HTML".into()))?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                let empty = matches!(event, Event::Empty(_));
+                if ![
+                    b"section".as_slice(),
+                    b"table",
+                    b"colgroup",
+                    b"col",
+                    b"tbody",
+                    b"tr",
+                    b"td",
+                    b"span",
+                ]
+                .contains(&element.name().as_ref())
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "unsupported XLSX grid HTML element".into(),
+                    ));
+                }
+                let tag = element.name().as_ref().to_vec();
+                let parent = stack.last().map(Vec::as_slice);
+                let valid_parent = match tag.as_slice() {
+                    b"section" => parent.is_none(),
+                    b"table" => parent == Some(b"section"),
+                    b"colgroup" | b"tbody" => parent == Some(b"table"),
+                    b"col" => parent == Some(b"colgroup"),
+                    b"tr" => parent == Some(b"tbody"),
+                    b"td" => parent == Some(b"tr"),
+                    b"span" => parent == Some(b"td"),
+                    _ => false,
+                };
+                if !valid_parent {
+                    return Err(HcdError::InvalidBundle(
+                        "invalid XLSX grid HTML structure".into(),
+                    ));
+                }
+                if parent.is_none() {
+                    roots += 1;
+                    if roots > 1 {
+                        return Err(HcdError::InvalidBundle("multiple XLSX grid roots".into()));
+                    }
+                }
+                // HTML names are case-insensitive; accepting XML-only spelling
+                // would make this check disagree with the browser's DOM.
+                for value in element.attributes() {
+                    let value = value.map_err(|_| {
+                        HcdError::InvalidBundle("invalid XLSX HTML attributes".into())
+                    })?;
+                    if value
+                        .key
+                        .as_ref()
+                        .iter()
+                        .any(|byte| byte.is_ascii_uppercase() || *byte == b':')
+                    {
+                        return Err(HcdError::InvalidBundle(
+                            "unsupported XLSX HTML attribute name".into(),
+                        ));
+                    }
+                }
+                if !empty {
+                    depth += 1;
+                    stack.push(tag);
+                }
+                if depth > 256 {
+                    return Err(HcdError::ResourceLimit("XLSX grid HTML depth".into()));
+                }
+                if element.name().as_ref() == b"td" {
+                    if active.is_some() {
+                        return Err(HcdError::InvalidBundle("nested XLSX cell".into()));
+                    }
+                    let position = attr(element, b"data-hcd-cell")?;
+                    let id = attr(element, b"data-hcd-id")?;
+                    if id.is_some() {
+                        return Err(HcdError::InvalidBundle(
+                            "XLSX cell ID must be a descendant".into(),
+                        ));
+                    }
+                    if empty {
+                        if let Some(position) = position {
+                            result.push((position, None));
+                        }
+                    } else {
+                        active = Some((depth, position, None));
+                    }
+                } else if let Some((_, _, id)) = active.as_mut() {
+                    if let Some(value) = attr(element, b"data-hcd-id")? {
+                        if id.replace(value).is_some() {
+                            return Err(HcdError::InvalidBundle("ambiguous XLSX cell node".into()));
+                        }
+                    }
+                }
+            }
+            Event::End(ref element) => {
+                if element.name().as_ref() == b"td" {
+                    let (start, position, id) = active
+                        .take()
+                        .ok_or_else(|| HcdError::InvalidBundle("unmatched XLSX cell".into()))?;
+                    if start != depth {
+                        return Err(HcdError::InvalidBundle("invalid XLSX cell nesting".into()));
+                    }
+                    if let Some(position) = position {
+                        result.push((position, id));
+                    } else if id.is_some() {
+                        return Err(HcdError::InvalidBundle(
+                            "XLSX node has no visible coordinate".into(),
+                        ));
+                    }
+                }
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| HcdError::InvalidBundle("invalid XLSX HTML depth".into()))?;
+                stack.pop();
+            }
+            Event::Text(ref value)
+                if stack.last().map(Vec::as_slice) != Some(b"span")
+                    && !value.as_ref().iter().all(u8::is_ascii_whitespace) =>
+            {
+                return Err(HcdError::InvalidBundle(
+                    "unexpected text in XLSX grid structure".into(),
+                ));
+            }
+            Event::CData(_) | Event::DocType(_) | Event::PI(_) => {
+                return Err(HcdError::InvalidBundle(
+                    "unsupported XLSX grid HTML content".into(),
+                ))
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    if active.is_some() || depth != 0 || roots != 1 {
+        return Err(HcdError::InvalidBundle("unclosed XLSX grid HTML".into()));
+    }
+    Ok(result)
+}
+
+fn check_visible_xlsx_cells(
+    html: &str,
+    entries: &[NodeMapEntry],
+    document_id: &str,
+    sheet_id: &str,
+    visible_positions: &mut BTreeSet<(String, String)>,
+) -> Result<(), HcdError> {
+    let entries_by_id: HashMap<_, _> = entries
+        .iter()
+        .map(|entry| (entry.node_id.as_str(), &entry.source))
+        .collect();
+    let mut visible_nodes = BTreeSet::new();
+    for (reference, id) in visible_xlsx_cell_bindings(html)? {
+        if visible_positions.len() >= 1_000_000 {
+            return Err(HcdError::ResourceLimit(
+                "XLSX visible cell audit limit".into(),
+            ));
+        }
+        if reference.bytes().any(|byte| !byte.is_ascii_alphanumeric()) {
+            return Err(HcdError::InvalidBundle(
+                "invalid visible XLSX cell reference".into(),
+            ));
+        }
+        let canonical = canonical_cell_reference(&reference)
+            .ok_or_else(|| HcdError::InvalidBundle("invalid visible XLSX cell reference".into()))?;
+        if !visible_positions.insert((sheet_id.to_owned(), canonical.clone())) {
+            return Err(HcdError::InvalidBundle(
+                "duplicate visible XLSX cell".into(),
+            ));
+        }
+        if let Some(id) = id {
+            let source = entries_by_id.get(id.as_str()).ok_or_else(|| {
+                HcdError::InvalidBundle("visible XLSX cell has no source mapping".into())
+            })?;
+            if source.node_kind != "cell"
+                || source.paragraph_id.as_deref() != Some(canonical.as_str())
+                || sheet_grid_id(document_id, &source.part) != sheet_id
+                || !visible_nodes.insert(id)
+            {
+                return Err(HcdError::InvalidBundle(
+                    "visible XLSX cell does not match its source mapping".into(),
+                ));
+            }
+        }
+    }
+    if entries
+        .iter()
+        .any(|entry| entry.source.node_kind == "cell" && !visible_nodes.contains(&entry.node_id))
+    {
+        return Err(HcdError::InvalidBundle(
+            "mapped XLSX cell is not uniquely visible".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Hash every node's source identity and its displayed grid window, including
+/// read-only nodes. Text hashes are deliberately excluded so ordinary text
+/// saves do not invalidate the mapping identity. Call on a pinned snapshot or
+/// under a lock; a bare fingerprint is not proof of a source audit.
+pub fn xlsx_formula_mapping_fingerprint(bundle: &Bundle) -> Result<String, HcdError> {
+    use sha2::{Digest, Sha256};
+    struct HashWriter(Sha256);
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    const MAX_MAPPED_NODES: usize = 1_000_000;
+    let manifest = bundle.manifest()?;
+    if manifest.source.format != "xlsx" {
+        return Err(HcdError::InvalidBundle("expected an XLSX document".into()));
+    }
+    let mut nodes = BTreeMap::new();
+    let mut visible_positions = BTreeSet::new();
+    for page in 0..manifest.index_page_count {
+        for chunk in bundle.read_index_page(&manifest, page)?.chunks {
+            let grid = chunk.grid.clone();
+            let entries = bundle.read_map_verified(&chunk)?.entries;
+            if let Some(address) = grid
+                .as_ref()
+                .filter(|grid| grid.kind == GridChunkKind::Cells)
+            {
+                let html = bundle.read_chunk_verified(&chunk)?;
+                check_visible_xlsx_cells(
+                    &html,
+                    &entries,
+                    &manifest.document_id,
+                    &address.sheet_id,
+                    &mut visible_positions,
+                )?;
+            } else if entries.iter().any(|entry| entry.source.node_kind == "cell") {
+                return Err(HcdError::InvalidBundle(
+                    "mapped XLSX cell has no grid window".into(),
+                ));
+            }
+            for entry in entries {
+                if nodes.len() >= MAX_MAPPED_NODES {
+                    return Err(HcdError::ResourceLimit(
+                        "XLSX mapping identity node limit".into(),
+                    ));
+                }
+                if nodes
+                    .insert(entry.node_id, (entry.source, grid.clone()))
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "duplicate XLSX mapping node ID".into(),
+                    ));
+                }
+            }
+        }
+    }
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(
+        &mut writer,
+        &(
+            "hcd-xlsx-formula-mapping/1",
+            &manifest.document_id,
+            &manifest.source,
+            &nodes,
+        ),
+    )?;
+    Ok(format!("{:x}", writer.0.finalize()))
+}
+
+/// Audit and fingerprint a single immutable HCD snapshot against an immutable
+/// copy of the matching XLSX source. No proof is signed or persisted here.
+pub fn audit_xlsx_formula_mapping_snapshot(
+    bundle: &Bundle,
+    source: &Path,
+    revision: Option<u64>,
+) -> Result<XlsxFormulaMappingAudit, HcdError> {
+    let snapshot = hcd_core::create_portable_snapshot(bundle, revision)?;
+    let frozen = Bundle::open(snapshot.directory.path())?;
+    let count = audit_xlsx_editable_formula_map(&frozen, source)?;
+    let fingerprint = xlsx_formula_mapping_fingerprint(&frozen)?;
+    Ok(XlsxFormulaMappingAudit {
+        document_id: snapshot.manifest.document_id,
+        revision: snapshot.manifest.revision,
+        source: snapshot.manifest.source,
+        mapping_fingerprint: fingerprint,
+        editable_cells_checked: count,
+    })
+}
+
 fn rewrite_worksheet(
     source: &mut dyn Read,
     output: impl Write,
@@ -4389,6 +5845,13 @@ fn rewrite_worksheet(
             .read_event_into(&mut buffer)
             .map_err(|error| HcdError::InvalidBundle(format!("worksheet export XML: {error}")))?;
         if skip_depth > 0 {
+            // Older bundles may have misclassified a shared-formula follower
+            // whose <f/> element is empty. Never replace any source formula,
+            // even if a stale source map incorrectly marks the cell editable.
+            if matches!(&event, Event::Start(start) | Event::Empty(start) if local_name(start.name().as_ref()) == "f")
+            {
+                return Err(HcdError::InvalidPatch("XLSX_FORMULA_READ_ONLY".to_string()));
+            }
             match event {
                 Event::Start(_) => skip_depth += 1,
                 Event::End(_) => skip_depth -= 1,
@@ -4436,6 +5899,329 @@ fn rewrite_worksheet(
         return Err(HcdError::InvalidBundle(format!(
             "worksheet is missing mapped cells {missing:?}"
         )));
+    }
+    Ok(())
+}
+
+/// Insert explicitly authorized, absent cells into sheetData. The caller must
+/// validate the immutable source and reject protected formula/merge targets
+/// before calling this function, and must write to a disposable candidate.
+/// This is not yet wired to HCD export or an edit endpoint.
+fn insert_virtual_worksheet_cells(
+    source: &mut dyn Read,
+    output: impl Write,
+    insertions: &BTreeMap<String, String>,
+) -> Result<(), HcdError> {
+    if insertions.is_empty() || insertions.len() > 4000 {
+        return Err(HcdError::InvalidPatch("XLSX_INSERT_COUNT".into()));
+    }
+    let mut pending = BTreeMap::<(u32, u32), (&str, &str)>::new();
+    for (address, value) in insertions {
+        let (row, col) = cell_coordinates(address)
+            .filter(|_| canonical_cell_reference(address).as_deref() == Some(address.as_str()))
+            .ok_or_else(|| HcdError::InvalidPatch("invalid XLSX cell address".into()))?;
+        if value.len() > MAX_CHUNK_BYTES
+            || value.chars().any(|c| !matches!(c as u32, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF))
+            || pending.insert((row, col), (address, value)).is_some()
+        {
+            return Err(HcdError::InvalidPatch("XLSX_INSERT_INVALID".into()));
+        }
+    }
+    let min_row = pending.keys().map(|(row, _)| *row).min().expect("nonempty");
+    let max_row = pending.keys().map(|(row, _)| *row).max().expect("nonempty");
+    let min_col = pending.keys().map(|(_, col)| *col).min().expect("nonempty");
+    let max_col = pending.keys().map(|(_, col)| *col).max().expect("nonempty");
+    let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(output);
+    let mut buffer = Vec::new();
+    let mut budget = XmlBudget::default();
+    let mut depth = 0usize;
+    let mut sheet_depth = None;
+    let mut current_row = None;
+    let mut last_row = 0u32;
+    let mut last_col = 0u32;
+    let mut row_tail_started = false;
+    let mut prefix = String::new();
+    let mut saw_sheet_data = false;
+
+    fn write_cell(
+        writer: &mut Writer<impl Write>,
+        prefix: &str,
+        address: &str,
+        value: &str,
+    ) -> Result<(), HcdError> {
+        let mut cell = BytesStart::new(format!("{prefix}c"));
+        cell.push_attribute(("r", address));
+        cell.push_attribute(("t", "inlineStr"));
+        writer.write_event(Event::Start(cell))?;
+        writer.write_event(Event::Start(BytesStart::new(format!("{prefix}is"))))?;
+        let mut text = BytesStart::new(format!("{prefix}t"));
+        if value.starts_with(char::is_whitespace) || value.ends_with(char::is_whitespace) {
+            text.push_attribute(("xml:space", "preserve"));
+        }
+        writer.write_event(Event::Start(text))?;
+        writer.write_event(Event::Text(quick_xml::events::BytesText::new(value)))?;
+        writer.write_event(Event::End(quick_xml::events::BytesEnd::new(format!(
+            "{prefix}t"
+        ))))?;
+        writer.write_event(Event::End(quick_xml::events::BytesEnd::new(format!(
+            "{prefix}is"
+        ))))?;
+        writer.write_event(Event::End(quick_xml::events::BytesEnd::new(format!(
+            "{prefix}c"
+        ))))?;
+        Ok(())
+    }
+    fn flush_cells(
+        writer: &mut Writer<impl Write>,
+        prefix: &str,
+        pending: &mut BTreeMap<(u32, u32), (&str, &str)>,
+        row: u32,
+        before: u32,
+    ) -> Result<(), HcdError> {
+        let keys: Vec<_> = pending
+            .range((row, 0)..(row, before))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            let (address, value) = pending.remove(&key).expect("collected key");
+            write_cell(writer, prefix, address, value)?;
+        }
+        Ok(())
+    }
+    fn flush_rows(
+        writer: &mut Writer<impl Write>,
+        prefix: &str,
+        pending: &mut BTreeMap<(u32, u32), (&str, &str)>,
+        before: u32,
+    ) -> Result<(), HcdError> {
+        while let Some((&(row, _), _)) = pending.first_key_value() {
+            if row >= before {
+                break;
+            }
+            let name = format!("{prefix}row");
+            let mut tag = BytesStart::new(name.clone());
+            let number = row.to_string();
+            tag.push_attribute(("r", number.as_str()));
+            writer.write_event(Event::Start(tag))?;
+            flush_cells(writer, prefix, pending, row, u32::MAX)?;
+            writer.write_event(Event::End(quick_xml::events::BytesEnd::new(name)))?;
+        }
+        Ok(())
+    }
+    fn row_without_spans(tag: &BytesStart<'_>) -> Result<BytesStart<'static>, HcdError> {
+        let mut result = BytesStart::new(String::from_utf8_lossy(tag.name().as_ref()).to_string());
+        for attr in tag.attributes() {
+            let attr = attr.map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+            if local_name(attr.key.as_ref()) == "spans" {
+                continue;
+            }
+            let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+            let value = attr
+                .unescape_value()
+                .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+                .into_owned();
+            result.push_attribute((key.as_str(), value.as_str()));
+        }
+        Ok(result)
+    }
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("worksheet insertion XML: {error}"))
+        })?;
+        budget.observe(&event, "worksheet")?;
+        let local = match &event {
+            Event::Start(tag) | Event::Empty(tag) => {
+                Some(local_name(tag.name().as_ref()).to_owned())
+            }
+            Event::End(tag) => Some(local_name(tag.name().as_ref()).to_owned()),
+            _ => None,
+        };
+        match &event {
+            Event::Start(tag) | Event::Empty(tag)
+                if depth == 1 && local.as_deref() == Some("dimension") =>
+            {
+                let reference = attribute(tag, "ref").ok_or_else(|| {
+                    HcdError::InvalidBundle("worksheet dimension has no reference".into())
+                })?;
+                let range = if let Some(range) = parse_merge_reference(&reference) {
+                    range
+                } else {
+                    let (row, col) = cell_coordinates(&reference).ok_or_else(|| {
+                        HcdError::InvalidBundle("invalid worksheet dimension".into())
+                    })?;
+                    MergeRange {
+                        start_row: row,
+                        end_row: row,
+                        start_col: col,
+                        end_col: col,
+                    }
+                };
+                let reference = format!(
+                    "{}{}:{}{}",
+                    column_name(range.start_col.min(min_col)),
+                    range.start_row.min(min_row),
+                    column_name(range.end_col.max(max_col)),
+                    range.end_row.max(max_row)
+                );
+                let name = String::from_utf8_lossy(tag.name().as_ref()).to_string();
+                let mut updated = BytesStart::new(name);
+                for attr in tag.attributes() {
+                    let attr = attr.map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+                    if local_name(attr.key.as_ref()) == "ref" {
+                        continue;
+                    }
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                    let value = attr
+                        .unescape_value()
+                        .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+                        .into_owned();
+                    updated.push_attribute((key.as_str(), value.as_str()));
+                }
+                updated.push_attribute(("ref", reference.as_str()));
+                writer.write_event(if matches!(event, Event::Empty(_)) {
+                    Event::Empty(updated)
+                } else {
+                    Event::Start(updated)
+                })?;
+            }
+            Event::Start(tag) if local.as_deref() == Some("sheetData") && sheet_depth.is_none() => {
+                if saw_sheet_data {
+                    return Err(HcdError::InvalidBundle("duplicate sheetData".into()));
+                }
+                saw_sheet_data = true;
+                sheet_depth = Some(depth + 1);
+                let name = String::from_utf8_lossy(tag.name().as_ref()).to_string();
+                prefix = name
+                    .rsplit_once(':')
+                    .map(|(part, _)| format!("{part}:"))
+                    .unwrap_or_default();
+                writer.write_event(event.clone().into_owned())?;
+            }
+            Event::Empty(tag) if local.as_deref() == Some("sheetData") && sheet_depth.is_none() => {
+                if saw_sheet_data {
+                    return Err(HcdError::InvalidBundle("duplicate sheetData".into()));
+                }
+                saw_sheet_data = true;
+                let name = String::from_utf8_lossy(tag.name().as_ref()).to_string();
+                prefix = name
+                    .rsplit_once(':')
+                    .map(|(part, _)| format!("{part}:"))
+                    .unwrap_or_default();
+                writer.write_event(Event::Start(tag.to_owned()))?;
+                flush_rows(&mut writer, &prefix, &mut pending, u32::MAX)?;
+                writer.write_event(Event::End(quick_xml::events::BytesEnd::new(name)))?;
+            }
+            Event::Start(tag) | Event::Empty(tag)
+                if sheet_depth == Some(depth) && local.as_deref() == Some("row") =>
+            {
+                let row = attribute(tag, "r")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|row| *row > last_row && *row <= 1_048_576)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("invalid or unordered worksheet row".into())
+                    })?;
+                flush_rows(&mut writer, &prefix, &mut pending, row)?;
+                last_row = row;
+                last_col = 0;
+                row_tail_started = false;
+                let touched = pending.range((row, 0)..=(row, u32::MAX)).next().is_some();
+                if matches!(event, Event::Empty(_)) && touched {
+                    let name = String::from_utf8_lossy(tag.name().as_ref()).to_string();
+                    writer.write_event(Event::Start(row_without_spans(tag)?))?;
+                    flush_cells(&mut writer, &prefix, &mut pending, row, u32::MAX)?;
+                    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(name)))?;
+                } else {
+                    if touched {
+                        writer.write_event(Event::Start(row_without_spans(tag)?))?
+                    } else {
+                        writer.write_event(event.clone().into_owned())?
+                    }
+                    if matches!(event, Event::Start(_)) {
+                        current_row = Some(row)
+                    }
+                }
+            }
+            Event::Start(tag) | Event::Empty(tag)
+                if current_row.is_some()
+                    && sheet_depth == Some(depth - 1)
+                    && local.as_deref() == Some("c") =>
+            {
+                if row_tail_started {
+                    return Err(HcdError::InvalidBundle("cell after row extension".into()));
+                }
+                let row = current_row.expect("checked row");
+                let (cell_row, col) = attribute(tag, "r")
+                    .and_then(|v| cell_coordinates(&v))
+                    .filter(|(r, c)| *r == row && *c > last_col)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("invalid or unordered worksheet cell".into())
+                    })?;
+                if pending.contains_key(&(cell_row, col)) {
+                    return Err(HcdError::InvalidPatch("XLSX_CELL_ALREADY_PRESENT".into()));
+                }
+                flush_cells(&mut writer, &prefix, &mut pending, row, col)?;
+                last_col = col;
+                writer.write_event(event.clone().into_owned())?;
+            }
+            Event::Start(_) | Event::Empty(_)
+                if current_row.is_some()
+                    && sheet_depth == Some(depth - 1)
+                    && local.as_deref() == Some("extLst") =>
+            {
+                row_tail_started = true;
+                flush_cells(
+                    &mut writer,
+                    &prefix,
+                    &mut pending,
+                    current_row.expect("checked row"),
+                    u32::MAX,
+                )?;
+                writer.write_event(event.clone().into_owned())?;
+            }
+            Event::End(_)
+                if current_row.is_some()
+                    && sheet_depth == Some(depth - 1)
+                    && local.as_deref() == Some("row") =>
+            {
+                flush_cells(
+                    &mut writer,
+                    &prefix,
+                    &mut pending,
+                    current_row.take().expect("checked row"),
+                    u32::MAX,
+                )?;
+                writer.write_event(event.clone().into_owned())?;
+            }
+            Event::End(_)
+                if sheet_depth == Some(depth) && local.as_deref() == Some("sheetData") =>
+            {
+                flush_rows(&mut writer, &prefix, &mut pending, u32::MAX)?;
+                sheet_depth = None;
+                writer.write_event(event.clone().into_owned())?;
+            }
+            Event::Eof => {
+                budget.finish("worksheet")?;
+                break;
+            }
+            _ => writer.write_event(event.clone().into_owned())?,
+        }
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| HcdError::InvalidBundle("invalid XML depth".into()))?
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    if !saw_sheet_data || !pending.is_empty() {
+        return Err(HcdError::InvalidBundle(
+            "worksheet has no writable sheetData".into(),
+        ));
     }
     Ok(())
 }
@@ -4533,18 +6319,6 @@ fn local_name(name: &[u8]) -> &str {
     std::str::from_utf8(local).unwrap_or("")
 }
 
-fn safe_temp_name(part: &str) -> String {
-    part.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 fn package_error(error: PackageError) -> HcdError {
     match error {
         PackageError::ResourceLimit(message) => HcdError::ResourceLimit(message),
@@ -4562,6 +6336,358 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn checked_virtual_cells_commit_replay_edit_and_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        create_shared_string_fixture(&source);
+        let path = temp.path().join("document.hcd");
+        import_xlsx(&source, &path, &ImportOptions::new("grid-create"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let initial = bundle.manifest().unwrap();
+        let part = "xl/worksheets/sheet1.xml";
+        let sheet_id = sheet_grid_id("grid-create", part);
+        let request = hcd_core::GridCreateRequest {
+            document_id: "grid-create".into(),
+            patch_id: "create-1".into(),
+            base_revision: 0,
+            source_sha256: initial.source.sha256.clone(),
+            actor: BTreeMap::new(),
+            cells: vec![hcd_core::GridCellCreate {
+                sheet_id: sheet_id.clone(),
+                sheet_part: part.into(),
+                row: 3,
+                column: 12,
+                text: "New 😀".into(),
+            }],
+        };
+        let mut checks = 0;
+        let rejected = hcd_core::apply_checked_grid_cells(&bundle, &request, |_, _, _| {
+            checks += 1;
+            if checks == 2 {
+                Err(HcdError::RevisionConflict("source changed".into()))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(rejected.is_err());
+        assert_eq!(checks, 2);
+        assert_eq!(bundle.manifest().unwrap().root_hash, initial.root_hash);
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let mut mixed = request.clone();
+        mixed.patch_id = "mixed".into();
+        mixed.cells.push(hcd_core::GridCellCreate {
+            sheet_id: sheet_id.clone(),
+            sheet_part: part.into(),
+            row: 1,
+            column: 1,
+            text: "overwrite".into(),
+        });
+        assert!(create_xlsx_virtual_cells(&bundle, &source, &mixed).is_err());
+        assert_eq!(bundle.manifest().unwrap().root_hash, initial.root_hash);
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let mut merge_anchor = request.clone();
+        merge_anchor.patch_id = "merged-anchor".into();
+        merge_anchor.cells[0].row = 4;
+        merge_anchor.cells[0].column = 4;
+        assert!(create_xlsx_virtual_cells(&bundle, &source, &merge_anchor)
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_VIRTUAL_MERGE_ANCHOR_UNSUPPORTED"));
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        let result = create_xlsx_virtual_cells(&bundle, &source, &request).unwrap();
+        assert_eq!(result.revision, 1);
+        let head = bundle.manifest().unwrap();
+        let created = bundle
+            .read_index_page(&head, head.index_page_count - 1)
+            .unwrap()
+            .chunks
+            .last()
+            .unwrap()
+            .clone();
+        assert!(!bundle
+            .read_chunk(&created)
+            .unwrap()
+            .contains("data-hcd-row=\""));
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let audit = audit_xlsx_formula_mapping_snapshot(&bundle, &source, Some(1)).unwrap();
+        assert_eq!(audit.revision, 1);
+        assert!(audit.editable_cells_checked > 0);
+        assert_eq!(
+            audit.mapping_fingerprint,
+            xlsx_formula_mapping_fingerprint(&bundle).unwrap()
+        );
+        let id = stable_node_id(&["grid-create", part, "cell", "L3"]);
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &id).unwrap().node.text,
+            "New 😀"
+        );
+        assert!(
+            create_xlsx_virtual_cells(&bundle, &source, &request)
+                .unwrap()
+                .idempotent_replay
+        );
+        let mut changed_request = request.clone();
+        changed_request.cells[0].text = "different".into();
+        assert!(create_xlsx_virtual_cells(&bundle, &source, &changed_request).is_err());
+        let mut conflicting = request.clone();
+        conflicting.patch_id = "other".into();
+        assert!(create_xlsx_virtual_cells(&bundle, &source, &conflicting).is_err());
+        conflicting.base_revision = 1;
+        assert!(create_xlsx_virtual_cells(&bundle, &source, &conflicting).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        let original_export = temp.path().join("r0.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &original_export,
+            &ExportOptions {
+                revision: Some(0),
+                fidelity_report: None,
+            },
+        )
+        .unwrap();
+        assert!(!read_zip_entry(&original_export, part).contains("New 😀"));
+        let export = temp.path().join("r1.xlsx");
+        export_xlsx(&bundle, &source, &export, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&export, part).contains("New 😀"));
+        let node = hcd_core::get_text_node(&bundle, &id).unwrap().node;
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "grid-create".into(),
+            patch_id: "edit-2".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: id,
+                start: 0,
+                delete_count: 0,
+                insert_text: "Edited ".into(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        apply_xlsx_patch_with_source(&bundle, &patch, 1, Some(&source)).unwrap();
+        let export2 = temp.path().join("r2.xlsx");
+        export_xlsx(&bundle, &source, &export2, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&export2, part).contains("Edited New 😀"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let mut second = request.clone();
+        second.patch_id = "create-3".into();
+        second.base_revision = 2;
+        second.cells[0].column = 13;
+        second.cells[0].text = "Second".into();
+        assert_eq!(
+            create_xlsx_virtual_cells(&bundle, &source, &second)
+                .unwrap()
+                .revision,
+            3
+        );
+        let export3 = temp.path().join("r3.xlsx");
+        export_xlsx(&bundle, &source, &export3, &ExportOptions::default()).unwrap();
+        let output = read_zip_entry(&export3, part);
+        assert!(output.contains("Edited New 😀") && output.contains("Second"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn checked_virtual_cell_competing_creations_do_not_both_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        create_shared_string_fixture(&source);
+        let path = temp.path().join("document.hcd");
+        import_xlsx(&source, &path, &ImportOptions::new("grid-race"), |_| Ok(())).unwrap();
+        let initial = Bundle::open(&path).unwrap().manifest().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut threads = Vec::new();
+        for user in ["alice", "bob"] {
+            let barrier = barrier.clone();
+            let source = source.clone();
+            let path = path.clone();
+            let source_hash = initial.source.sha256.clone();
+            threads.push(std::thread::spawn(move || {
+                let bundle = Bundle::open(path).unwrap();
+                let part = "xl/worksheets/sheet1.xml";
+                let request = hcd_core::GridCreateRequest {
+                    document_id: "grid-race".into(),
+                    patch_id: user.into(),
+                    base_revision: 0,
+                    source_sha256: source_hash,
+                    actor: BTreeMap::new(),
+                    cells: vec![hcd_core::GridCellCreate {
+                        sheet_id: sheet_grid_id("grid-race", part),
+                        sheet_part: part.into(),
+                        row: 3,
+                        column: 12,
+                        text: user.into(),
+                    }],
+                };
+                barrier.wait();
+                create_xlsx_virtual_cells(&bundle, &source, &request)
+            }));
+        }
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let bundle = Bundle::open(path).unwrap();
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn marked_virtual_cells_export_with_existing_edits_and_reject_existing_source_cells() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.xlsx");
+        let source = temp.path().join("book.xlsx");
+        create_shared_string_fixture(&original);
+        let mut input = zip::ZipArchive::new(File::open(&original).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        for index in 0..input.len() {
+            let mut entry = input.by_index(index).unwrap();
+            let name = entry.name().to_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                bytes = String::from_utf8(bytes).unwrap().replace(
+                    "</row><row r=\"4\"/>",
+                    "<c r=\"J3\"><f t=\"array\" ref=\"J3:K3\">1+2</f><v>3</v></c></row><row r=\"4\"/>",
+                ).into_bytes();
+            }
+            output
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output.finish().unwrap();
+        let imported = temp.path().join("imported.hcd");
+        import_xlsx(
+            &source,
+            &imported,
+            &ImportOptions::new("virtual-export"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let initial = Bundle::open(&imported).unwrap().manifest().unwrap();
+        let part = "xl/worksheets/sheet1.xml";
+
+        for (address, should_succeed) in [("L3", true), ("A1", false), ("K3", false)] {
+            let path = temp.path().join(format!("{address}.hcd"));
+            let mut writer = hcd_core::BundleWriter::create(&path).unwrap();
+            writer.write_styles("").unwrap();
+            let node_id = stable_node_id(&["virtual-export", part, "cell", address]);
+            let hash = hash_bytes(b"");
+            let existing_id = stable_node_id(&["virtual-export", part, "cell", "C3"]);
+            let existing_hash = hash_bytes(b"After merge");
+            let id = "c_11111111111111111111111111111111".to_string();
+            let html = format!("<section data-hcd-sheet=\"Shared\"><table><tr><td data-hcd-cell=\"C3\"><span data-hcd-id=\"{existing_id}\" data-hcd-node-hash=\"{existing_hash}\">After merge</span></td><td data-hcd-cell=\"{address}\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{hash}\"></span></td></tr></table></section>");
+            let map = ChunkSourceMap {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                chunk_id: id.clone(),
+                entries: vec![
+                    NodeMapEntry {
+                        node_id: existing_id.clone(),
+                        node_hash: existing_hash.clone(),
+                        source: SourceAnchor {
+                            part: part.into(),
+                            text_ordinal: 1,
+                            paragraph_id: Some("C3".into()),
+                            text_id: None,
+                            node_kind: "cell".into(),
+                            editable: true,
+                        },
+                    },
+                    NodeMapEntry {
+                        node_id: node_id.clone(),
+                        node_hash: hash.clone(),
+                        source: SourceAnchor {
+                            part: part.into(),
+                            text_ordinal: 0,
+                            paragraph_id: Some(address.into()),
+                            text_id: Some(VIRTUAL_CELL_SOURCE.into()),
+                            node_kind: "cell".into(),
+                            editable: true,
+                        },
+                    },
+                ],
+            };
+            writer
+                .write_chunk(id, "sheet".into(), html, map, 1, false)
+                .unwrap();
+            writer.finish(initial.clone()).unwrap();
+            let bundle = Bundle::open(&path).unwrap();
+            let patch = PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: "virtual-export".into(),
+                patch_id: "edit".into(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![
+                    PatchOperation::TextSplice {
+                        node_id,
+                        start: 0,
+                        delete_count: 0,
+                        insert_text: "New 😀".into(),
+                        precondition: NodePrecondition { node_hash: hash },
+                    },
+                    PatchOperation::TextSplice {
+                        node_id: existing_id,
+                        start: 0,
+                        delete_count: 0,
+                        insert_text: "Changed ".into(),
+                        precondition: NodePrecondition {
+                            node_hash: existing_hash,
+                        },
+                    },
+                ],
+            };
+            if should_succeed {
+                apply_xlsx_patch_with_source(&bundle, &patch, 0, Some(&source)).unwrap();
+            } else {
+                assert!(apply_xlsx_patch_with_source(&bundle, &patch, 0, Some(&source)).is_err());
+                assert_eq!(bundle.manifest().unwrap().revision, 0);
+                // Simulate an old or direct-core version to verify the export guard.
+                hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+            }
+            let target = temp.path().join(format!("{address}.xlsx"));
+            let result = export_xlsx(&bundle, &source, &target, &ExportOptions::default());
+            if should_succeed {
+                result.unwrap();
+                let xml = read_zip_entry(&target, part);
+                assert!(xml.contains("New 😀"));
+                assert!(xml.contains("Changed After merge"));
+                assert!(xml.contains("<f t=\"array\" ref=\"J3:K3\">1+2</f><v>3</v>"));
+                let reimport = temp.path().join("reimported.hcd");
+                import_xlsx(&target, &reimport, &ImportOptions::new("roundtrip"), |_| {
+                    Ok(())
+                })
+                .unwrap();
+                let reopened = Bundle::open(reimport).unwrap();
+                assert!(validate_bundle(&reopened).unwrap().valid);
+                let nodes = extract_text_page(&reopened, None, 100).unwrap().entries;
+                assert!(nodes
+                    .iter()
+                    .any(|entry| entry.source.paragraph_id.as_deref() == Some("L3")
+                        && entry.text == "New 😀"));
+                assert!(nodes
+                    .iter()
+                    .any(|entry| entry.source.paragraph_id.as_deref() == Some("C3")
+                        && entry.text == "Changed After merge"));
+            } else {
+                assert!(result.is_err());
+                assert!(!target.exists());
+            }
+        }
+    }
 
     #[test]
     fn shared_string_store_supports_disk_backed_random_reads() {
@@ -4697,6 +6823,99 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("exceeds 1024 bytes"));
+    }
+
+    #[test]
+    fn source_snapshot_keeps_verified_bytes_after_source_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        create_shared_string_fixture(&source);
+        let original = std::fs::read(&source).unwrap();
+        let expected_hash = hash_bytes(&original);
+        let (_dir, snapshot, hash, size) =
+            snapshot_xlsx_source(&source, Some((&expected_hash, original.len() as u64))).unwrap();
+        std::fs::write(&source, b"changed source").unwrap();
+        assert_eq!(hash, expected_hash);
+        assert_eq!(size, original.len() as u64);
+        assert_eq!(std::fs::read(snapshot).unwrap(), original);
+        assert!(matches!(
+            snapshot_xlsx_source(&source, Some((&expected_hash, size))),
+            Err(HcdError::InvalidPatch(reason)) if reason == "XLSX_SOURCE_CHANGED"
+        ));
+    }
+
+    #[test]
+    fn import_reads_snapshot_while_source_is_temporarily_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let bundle_path = temp.path().join("bundle");
+        create_shared_string_fixture(&source);
+        let original = std::fs::read(&source).unwrap();
+        let mut chunks = 0;
+        let mut options = ImportOptions::new("snapshot");
+        options.chunk_blocks = 1;
+        let manifest = import_xlsx(&source, &bundle_path, &options, |event| {
+            if matches!(event, ImportEvent::ChunkReady { .. }) {
+                chunks += 1;
+                if chunks == 1 {
+                    std::fs::write(&source, b"temporarily overwritten")?;
+                } else if chunks == 3 {
+                    std::fs::write(&source, &original)?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(chunks, 3);
+        assert_eq!(manifest.source.sha256, hash_bytes(&original));
+        let bundle = Bundle::open(bundle_path).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let text = extract_text_page(&bundle, None, 10).unwrap();
+        assert_eq!(text.entries[0].text, "Shared Value 😀");
+        assert_eq!(text.entries.len(), 6);
+    }
+
+    #[test]
+    fn import_does_not_publish_when_source_is_replaced_during_progress() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        let replacement = temp.path().join("replacement.xlsx");
+        let bundle_path = temp.path().join("bundle");
+        create_shared_string_fixture(&source);
+        std::fs::copy(&source, &replacement).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&replacement)
+            .unwrap()
+            .write_all(b"changed")
+            .unwrap();
+        let mut replaced = false;
+        let mut completed = false;
+        let mut failed = false;
+        let mut options = ImportOptions::new("source-change");
+        options.chunk_blocks = 1;
+        let result = import_xlsx(&source, &bundle_path, &options, |event| {
+            match event {
+                ImportEvent::ChunkReady { .. } if !replaced => {
+                    std::fs::rename(&replacement, &source)?;
+                    replaced = true;
+                }
+                ImportEvent::Completed { .. } => completed = true,
+                ImportEvent::Failed { .. } => failed = true,
+                _ => {}
+            }
+            Ok(())
+        });
+        assert!(replaced);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("source changed during import"));
+        assert!(failed);
+        assert!(!completed);
+        assert!(!bundle_path.join("manifest.json").exists());
     }
 
     #[test]
@@ -4845,6 +7064,1220 @@ mod tests {
     }
 
     #[test]
+    fn stored_blank_cells_can_be_edited_and_exported_without_materializing_gaps() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("blank.xlsx");
+        let path = temp.path().join("bundle");
+        let output = temp.path().join("output.xlsx");
+        let mut zip = zip::ZipWriter::new(File::create(&source).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"/><c r="B1" t="inlineStr"><is><t>existing</t></is></c><c r="D1"/></row></sheetData></worksheet>"#,
+            ),
+        ];
+        for (name, value) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(value.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        import_xlsx(&source, &path, &ImportOptions::new("blank"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let entries = extract_text_page(&bundle, None, 20).unwrap().entries;
+        let blank = entries
+            .iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        assert!(blank.source.editable);
+        assert_eq!(blank.text, "");
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source.paragraph_id.as_deref() == Some("D1")));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.source.paragraph_id.as_deref() == Some("C1")));
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: "blank".into(),
+            patch_id: "blank-edit".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: blank.node_id.clone(),
+                start: 0,
+                delete_count: 0,
+                insert_text: "空格 😀".into(),
+                precondition: NodePrecondition {
+                    node_hash: blank.node_hash.clone(),
+                },
+            }],
+        };
+        validate_xlsx_source_text_edits(&bundle, &source, &patch.operations).unwrap();
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        export_xlsx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&output, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("空格 😀"));
+        assert!(xml.contains("<c r=\"D1\"/>"));
+        assert!(!xml.contains("<c r=\"C1\""));
+        assert!(xml.contains("existing"));
+
+        // A legal, very wide row must not become unimportable solely because
+        // thousands of optional blank nodes were newly materialized.
+        let wide_source = temp.path().join("wide.xlsx");
+        let wide_bundle = temp.path().join("wide-bundle");
+        let mut wide = zip::ZipWriter::new(File::create(&wide_source).unwrap());
+        let extra: String = (5..=16_384)
+            .map(|column| format!("<c r=\"{}1\"/>", column_name(column)))
+            .collect();
+        for (name, value) in parts {
+            wide.start_file(name, options).unwrap();
+            let content = if name == "xl/worksheets/sheet1.xml" {
+                value.replace("<c r=\"D1\"/>", &format!("<c r=\"D1\"/>{extra}"))
+            } else {
+                value.to_string()
+            };
+            wide.write_all(content.as_bytes()).unwrap();
+        }
+        wide.finish().unwrap();
+        let manifest = import_xlsx(
+            &wide_source,
+            &wide_bundle,
+            &ImportOptions::new("wide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(manifest
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_STORED_BLANK_MAPPING_LIMIT"));
+        let wide = Bundle::open(wide_bundle).unwrap();
+        assert!(validate_bundle(&wide).unwrap().valid);
+        let wide_entries = extract_text_page(&wide, None, 20).unwrap().entries;
+        assert!(wide_entries
+            .iter()
+            .any(|entry| entry.source.paragraph_id.as_deref() == Some("B1")));
+        assert!(wide_entries
+            .iter()
+            .any(|entry| entry.source.paragraph_id.as_deref() == Some("D1")));
+        let retained = wide_entries
+            .iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("D1"))
+            .unwrap();
+        let wide_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: "wide".into(),
+            patch_id: "wide-blank-edit".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: retained.node_id.clone(),
+                start: 0,
+                delete_count: 0,
+                insert_text: "retained blank ".repeat(512),
+                precondition: NodePrecondition {
+                    node_hash: retained.node_hash.clone(),
+                },
+            }],
+        };
+        validate_xlsx_source_text_edits(&wide, &wide_source, &wide_patch.operations).unwrap();
+        hcd_core::apply_patch(&wide, &wide_patch, 0).unwrap();
+        let wide_output = temp.path().join("wide-output.xlsx");
+        export_xlsx(&wide, &wide_source, &wide_output, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&wide_output, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("retained blank"));
+        assert!(xml.contains("<c r=\"XFD1\"/>"));
+
+        let protected_source = temp.path().join("protected.xlsx");
+        let protected_bundle = temp.path().join("protected-bundle");
+        let mut protected = zip::ZipWriter::new(File::create(&protected_source).unwrap());
+        for (name, value) in parts {
+            protected.start_file(name, options).unwrap();
+            let content = if name == "xl/worksheets/sheet1.xml" {
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f t="array" ref="A1:B1">1</f><v>1</v></c><c r="B1"/><c r="C1"/><c r="D1"/></row></sheetData><mergeCells><mergeCell ref="C1:D1"/></mergeCells></worksheet>"#
+            } else {
+                value
+            };
+            protected.write_all(content.as_bytes()).unwrap();
+        }
+        protected.finish().unwrap();
+        import_xlsx(
+            &protected_source,
+            &protected_bundle,
+            &ImportOptions::new("protected"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let protected = Bundle::open(protected_bundle).unwrap();
+        let entries = extract_text_page(&protected, None, 20).unwrap().entries;
+        assert!(
+            !entries
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some("B1"))
+                .unwrap()
+                .source
+                .editable
+        );
+        assert!(
+            entries
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some("C1"))
+                .unwrap()
+                .source
+                .editable
+        );
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.source.paragraph_id.as_deref() == Some("D1")));
+
+        let group_source = temp.path().join("group.xlsx");
+        let group_bundle = temp.path().join("group-bundle");
+        let row1: String = (2..=8_000)
+            .map(|c| format!("<c r=\"{}1\"/>", column_name(c)))
+            .collect();
+        let row2: String = (2..=8_000)
+            .map(|c| format!("<c r=\"{}2\"/>", column_name(c)))
+            .collect();
+        let sheet = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>anchor</t></is></c>{row1}</row><row r="2">{row2}</row></sheetData><mergeCells><mergeCell ref="A1:A2"/></mergeCells></worksheet>"#
+        );
+        let mut group = zip::ZipWriter::new(File::create(&group_source).unwrap());
+        for (name, value) in parts {
+            group.start_file(name, options).unwrap();
+            group
+                .write_all(if name == "xl/worksheets/sheet1.xml" {
+                    sheet.as_bytes()
+                } else {
+                    value.as_bytes()
+                })
+                .unwrap();
+        }
+        group.finish().unwrap();
+        let result = import_xlsx(
+            &group_source,
+            &group_bundle,
+            &ImportOptions::new("group"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let warning = result
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "XLSX_STORED_BLANK_MAPPING_LIMIT")
+            .unwrap();
+        let skipped: usize = warning
+            .message
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(skipped > 0 && skipped < 15998);
+        let group = Bundle::open(group_bundle).unwrap();
+        assert!(validate_bundle(&group).unwrap().valid);
+        let entries = extract_text_page(&group, None, 20).unwrap().entries;
+        assert!(entries.len() > 1);
+        assert_eq!(entries[0].text, "anchor");
+
+        // Headroom is a preference for optional blank mappings, never a new
+        // limit on existing content that already fits in a valid fragment.
+        let large_source = temp.path().join("large-existing.xlsx");
+        let large_bundle = temp.path().join("large-existing-bundle");
+        let content = "z".repeat(2_000_000);
+        let sheet = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{content}</t></is></c><c r="B1"/></row></sheetData></worksheet>"#
+        );
+        let mut large = zip::ZipWriter::new(File::create(&large_source).unwrap());
+        for (name, value) in parts {
+            large.start_file(name, options).unwrap();
+            large
+                .write_all(if name == "xl/worksheets/sheet1.xml" {
+                    sheet.as_bytes()
+                } else {
+                    value.as_bytes()
+                })
+                .unwrap();
+        }
+        large.finish().unwrap();
+        let result = import_xlsx(
+            &large_source,
+            &large_bundle,
+            &ImportOptions::new("large"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_STORED_BLANK_MAPPING_LIMIT"));
+        let large = Bundle::open(large_bundle).unwrap();
+        let entries = extract_text_page(&large, None, 5).unwrap().entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text.len(), content.len());
+    }
+
+    #[test]
+    fn editable_map_audit_rejects_legacy_formula_result_and_wrong_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let ordinary = temp.path().join("ordinary.xlsx");
+        let source = temp.path().join("formula.xlsx");
+        let bundle_path = temp.path().join("bundle");
+        create_shared_string_fixture(&ordinary);
+        import_xlsx(
+            &ordinary,
+            &bundle_path,
+            &ImportOptions::new("legacy"),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        // Reproduce an old map whose C3 was marked editable even though the
+        // authoritative workbook contains an array-formula result there.
+        let mut input = zip::ZipArchive::new(File::open(&ordinary).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        for index in 0..input.len() {
+            let mut entry = input.by_index(index).unwrap();
+            let name = entry.name().to_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                let xml = String::from_utf8(bytes).unwrap();
+                bytes = xml.replace(
+                    "<c r=\"C3\" t=\"inlineStr\">",
+                    "<c r=\"B3\"><f t=\"array\" ref=\"B3:C3\">1</f><v>1</v></c><c r=\"C3\" t=\"inlineStr\">",
+                ).into_bytes();
+            }
+            output
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output.finish().unwrap();
+        let source_bytes = std::fs::read(&source).unwrap();
+        let path = bundle_path.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["source"]["sha256"] = serde_json::json!(hash_bytes(&source_bytes));
+        manifest["source"]["sizeBytes"] = serde_json::json!(source_bytes.len());
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        assert!(audit_xlsx_editable_formula_map(&bundle, &source)
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_FORMULA_READ_ONLY"));
+        assert!(audit_xlsx_editable_formula_map(&bundle, &ordinary)
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_SOURCE_CHANGED"));
+        assert!(audit_xlsx_formula_mapping_snapshot(&bundle, &source, None).is_err());
+    }
+
+    #[test]
+    fn audited_mapping_identity_is_revision_pinned_and_ignores_text_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("book.xlsx");
+        let path = temp.path().join("book.hcd");
+        create_shared_string_fixture(&source);
+        import_xlsx(&source, &path, &ImportOptions::new("mapping-proof"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let audited = audit_xlsx_formula_mapping_snapshot(&bundle, &source, Some(0)).unwrap();
+        assert_eq!(audited.revision, 0);
+        assert!(audited.editable_cells_checked > 0);
+        let node = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|node| node.source.editable)
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: "mapping-proof".into(),
+            patch_id: "mapping-proof-edit".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: node.node_id,
+                start: 0,
+                delete_count: 0,
+                insert_text: "changed ".into(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash,
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        let latest = audit_xlsx_formula_mapping_snapshot(&bundle, &source, None).unwrap();
+        let old = audit_xlsx_formula_mapping_snapshot(&bundle, &source, Some(0)).unwrap();
+        assert_eq!(latest.revision, 1);
+        assert_eq!(audited.mapping_fingerprint, old.mapping_fingerprint);
+        assert_eq!(audited.mapping_fingerprint, latest.mapping_fingerprint);
+        assert_eq!(
+            latest.mapping_fingerprint,
+            xlsx_formula_mapping_fingerprint(&bundle).unwrap()
+        );
+        // A fingerprint cannot be transplanted to another document identity.
+        let another_path = temp.path().join("another.hcd");
+        import_xlsx(
+            &source,
+            &another_path,
+            &ImportOptions::new("other-document"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let another = Bundle::open(another_path).unwrap();
+        assert_ne!(
+            audited.mapping_fingerprint,
+            xlsx_formula_mapping_fingerprint(&another).unwrap()
+        );
+        std::fs::write(&source, b"wrong source").unwrap();
+        assert!(audit_xlsx_formula_mapping_snapshot(&bundle, &source, None).is_err());
+    }
+
+    #[test]
+    fn insert_virtual_cells_preserves_order_values_and_existing_formula() {
+        let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C5"/><sheetData><row r="1" spans="1:3"><c r="A1" s="2"><v>1</v></c><c r="C1"><f>1+2</f><v>3</v></c></row><row r="3"/><row r="5"><c r="B5"><v>5</v></c></row></sheetData></worksheet>"#;
+        let insertions = BTreeMap::from([
+            ("B1".into(), "  中<& ".into()),
+            ("A3".into(), "row".into()),
+            ("C4".into(), "gap".into()),
+            ("A6".into(), "tail".into()),
+        ]);
+        let mut output = Vec::new();
+        insert_virtual_worksheet_cells(&mut &xml[..], &mut output, &insertions).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("ref=\"A1:C6\""));
+        assert!(text.contains("xml:space=\"preserve\""));
+        assert!(text.contains("中&lt;&amp;"));
+        assert!(text.contains("<f>1+2</f><v>3</v>"));
+        assert!(text.contains("r=\"A1\" s=\"2\""));
+        assert!(!text.contains("spans=\"1:3\""));
+        let mut reader = Reader::from_str(&text);
+        let mut rows = Vec::new();
+        let mut cells = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Start(tag) | Event::Empty(tag)
+                    if local_name(tag.name().as_ref()) == "row" =>
+                {
+                    rows.push(attribute(&tag, "r").unwrap())
+                }
+                Event::Start(tag) | Event::Empty(tag) if local_name(tag.name().as_ref()) == "c" => {
+                    cells.push(attribute(&tag, "r").unwrap())
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        assert_eq!(rows, ["1", "3", "4", "5", "6"]);
+        assert_eq!(cells, ["A1", "B1", "C1", "A3", "C4", "B5", "A6"]);
+        let mut rejected = Vec::new();
+        assert!(insert_virtual_worksheet_cells(
+            &mut &xml[..],
+            &mut rejected,
+            &BTreeMap::from([("C1".into(), "bad".into())])
+        )
+        .is_err());
+        assert!(insert_virtual_worksheet_cells(
+            &mut &xml[..],
+            &mut Vec::new(),
+            &BTreeMap::from([("A2".into(), "bad\u{0000}".into())])
+        )
+        .is_err());
+        for malformed in [
+            "<worksheet><sheetData><row r=\"3\"/><row r=\"1\"/></sheetData></worksheet>",
+            "<worksheet><sheetData><row r=\"1\"><c r=\"C1\"/><c r=\"A1\"/></row></sheetData></worksheet>",
+            "<worksheet><sheetData><row r=\"1\"><extLst/><c r=\"A1\"/></row></sheetData></worksheet>",
+        ] {
+            assert!(insert_virtual_worksheet_cells(
+                &mut malformed.as_bytes(),
+                &mut Vec::new(),
+                &BTreeMap::from([("Z8".into(), "new".into())]),
+            )
+            .is_err());
+        }
+        let prefix=br#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData/></x:worksheet>"#;
+        let mut bytes = Vec::new();
+        insert_virtual_worksheet_cells(
+            &mut &prefix[..],
+            &mut bytes,
+            &BTreeMap::from([("A2".into(), "text".into())]),
+        )
+        .unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        assert!(output.contains("<x:row r=\"2\"><x:c r=\"A2\" t=\"inlineStr\"><x:is><x:t>text</x:t></x:is></x:c></x:row>"));
+    }
+
+    #[test]
+    fn inserted_cells_reimport_from_an_actual_workbook() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.xlsx");
+        let candidate = temp.path().join("candidate.xlsx");
+        create_shared_string_fixture(&original);
+        let mut input = zip::ZipArchive::new(File::open(&original).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&candidate).unwrap());
+        let changes = BTreeMap::from([
+            ("B3".to_string(), " inserted 😀 ".to_string()),
+            ("C4".to_string(), "new row cell".to_string()),
+            ("H6".to_string(), "new row".to_string()),
+        ]);
+        for index in 0..input.len() {
+            let mut entry = input.by_index(index).unwrap();
+            let name = entry.name().to_owned();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                data = String::from_utf8(data)
+                    .unwrap()
+                    .replace(
+                        "</row><row r=\"4\"/>",
+                        "<c r=\"J3\"><f>1+2</f><v>3</v></c></row><row r=\"4\"/>",
+                    )
+                    .into_bytes();
+                let mut scan = scan_worksheet_metadata(&mut &data[..], &name).unwrap();
+                reject_formula_range_targets(&mut scan.formula_ranges, changes.keys()).unwrap();
+                reject_merged_covered_targets(&mut scan.merged_ranges, changes.keys()).unwrap();
+                let mut modified = Vec::new();
+                insert_virtual_worksheet_cells(&mut &data[..], &mut modified, &changes).unwrap();
+                data = modified;
+            }
+            output
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&data).unwrap();
+        }
+        output.finish().unwrap();
+        if let Some(path) = std::env::var_os("HCD_XLSX_INSERT_FIXTURE") {
+            std::fs::copy(&candidate, path).unwrap();
+        }
+        let bundle_path = temp.path().join("reimport");
+        import_xlsx(
+            &candidate,
+            &bundle_path,
+            &ImportOptions::new("candidate"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(bundle_path).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        for (address, value) in changes {
+            let node = entries
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some(address.as_str()))
+                .unwrap();
+            assert_eq!(node.text, value);
+            assert!(node.source.editable);
+        }
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source.paragraph_id.as_deref() == Some("A1")
+                && entry.text == "Shared Value 😀"));
+        let xml = read_zip_entry(&candidate, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("mergeCell ref=\"A1:B2\""));
+        assert!(xml.contains("mergeCell ref=\"D4:E5\""));
+        assert!(xml.contains("<f>1+2</f><v>3</v>"));
+    }
+
+    #[test]
+    fn virtual_blank_inspection_rejects_formula_merge_existing_and_changed_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.xlsx");
+        let source = temp.path().join("source.xlsx");
+        let path = temp.path().join("bundle");
+        create_shared_string_fixture(&original);
+        let mut input = zip::ZipArchive::new(File::open(&original).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        let options = SimpleFileOptions::default();
+        for index in 0..input.len() {
+            let mut entry = input.by_index(index).unwrap();
+            let name = entry.name().to_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                bytes = String::from_utf8(bytes).unwrap().replace(
+                    "</row><row r=\"4\"/>",
+                    "<c r=\"J3\"><f t=\"array\" ref=\"J3:K3\">1+2</f><v>3</v></c></row><row r=\"4\"/>",
+                ).replace("<row r=\"4\"/>", "<row r=\"4\"><c r=\"L4\" t=\"s\"/></row>").into_bytes();
+            }
+            output.start_file(name, options).unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output.finish().unwrap();
+        import_xlsx(&source, &path, &ImportOptions::new("blank-check"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let sheet = sheet_grid_id("blank-check", "xl/worksheets/sheet1.xml");
+        let before = bundle.manifest().unwrap();
+        let result = inspect_xlsx_virtual_blank(&bundle, &source, &sheet, "$l$3").unwrap();
+        assert_eq!(result.address, "L3");
+        assert_eq!((result.row, result.column), (3, 12));
+        assert_eq!(result.sheet_part, "xl/worksheets/sheet1.xml");
+        assert_eq!(result.sheet_index, 0);
+        assert_eq!(result.sheet_state, "visible");
+        assert_eq!(result.revision, before.revision);
+        assert_eq!(result.root_hash, before.root_hash);
+        assert_eq!(
+            result.node_id,
+            stable_node_id(&["blank-check", "xl/worksheets/sheet1.xml", "cell", "L3"])
+        );
+        assert!(inspect_xlsx_virtual_blank(&bundle, &source, &sheet, "K3")
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_FORMULA_READ_ONLY"));
+        assert!(inspect_xlsx_virtual_blank(&bundle, &source, &sheet, "E5")
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_MERGED_CELL_READ_ONLY"));
+        assert!(inspect_xlsx_virtual_blank(&bundle, &source, &sheet, "A1")
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_CELL_ALREADY_MAPPED"));
+        assert!(inspect_xlsx_virtual_blank(&bundle, &source, &sheet, "L4")
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_CELL_ALREADY_PRESENT"));
+        assert!(inspect_xlsx_virtual_blank(&bundle, &source, "other", "L3").is_err());
+        assert!(inspect_xlsx_virtual_blank(&bundle, &source, &sheet, "XFE1").is_err());
+        assert_eq!(bundle.manifest().unwrap().root_hash, before.root_hash);
+        let text_node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("C3"))
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "blank-check".into(),
+            patch_id: "saved-existing-cell".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: text_node.node_id,
+                start: 0,
+                delete_count: 0,
+                insert_text: "saved ".into(),
+                precondition: NodePrecondition {
+                    node_hash: text_node.node_hash,
+                },
+            }],
+        };
+        apply_xlsx_patch_with_source(&bundle, &patch, 0, Some(&source)).unwrap();
+        let saved = bundle.manifest().unwrap();
+        let candidate = temp.path().join("preview.xlsx");
+        let preview =
+            preview_xlsx_virtual_cell(&bundle, &source, &sheet, "L3", "new 😀", &candidate)
+                .unwrap();
+        if let Some(path) = std::env::var_os("HCD_XLSX_VIRTUAL_PREVIEW") {
+            std::fs::copy(&candidate, path).unwrap();
+        }
+        assert_eq!(preview.revision, 1);
+        let xml = read_zip_entry(&candidate, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("saved After merge"));
+        assert!(xml.contains("new 😀"));
+        assert!(xml.contains("<f t=\"array\" ref=\"J3:K3\">1+2</f>"));
+        assert_eq!(bundle.manifest().unwrap().root_hash, saved.root_hash);
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        let refused = temp.path().join("refused.xlsx");
+        assert!(
+            preview_xlsx_virtual_cell(&bundle, &source, &sheet, "K3", "unsafe", &refused).is_err()
+        );
+        assert!(!refused.exists());
+        assert!(
+            preview_xlsx_virtual_cell(&bundle, &source, &sheet, "L3", "overwrite", &candidate)
+                .is_err()
+        );
+        let cell = |address: &str, text: &str| XlsxVirtualCell {
+            sheet_id: sheet.clone(),
+            address: address.into(),
+            text: text.into(),
+        };
+        let batch = vec![
+            cell("L3", "batch one"),
+            cell("M3", "batch two"),
+            cell("A6", "batch row"),
+        ];
+        let batch_path = temp.path().join("batch.xlsx");
+        let reports = preview_xlsx_virtual_cells(&bundle, &source, &batch, &batch_path).unwrap();
+        assert_eq!(reports.len(), 3);
+        assert!(reports
+            .iter()
+            .all(|item| item.revision == 1 && item.root_hash == saved.root_hash));
+        let output = read_zip_entry(&batch_path, "xl/worksheets/sheet1.xml");
+        for text in [
+            "saved After merge",
+            "batch one",
+            "batch two",
+            "batch row",
+            "<f t=\"array\" ref=\"J3:K3\">1+2</f>",
+        ] {
+            assert!(output.contains(text))
+        }
+        let failed = temp.path().join("batch-failed.xlsx");
+        assert!(preview_xlsx_virtual_cells(
+            &bundle,
+            &source,
+            &[cell("L3", "ok"), cell("K3", "unsafe")],
+            &failed
+        )
+        .is_err());
+        assert!(!failed.exists());
+        assert!(preview_xlsx_virtual_cells(
+            &bundle,
+            &source,
+            &[cell("L3", "one"), cell("$l$3", "two")],
+            &failed
+        )
+        .is_err());
+        assert!(!failed.exists());
+        assert_eq!(bundle.manifest().unwrap().root_hash, saved.root_hash);
+        let ready_candidate = temp.path().join("ready-candidate.xlsx");
+        std::fs::write(&ready_candidate, b"candidate already built").unwrap();
+        let publish_target = temp.path().join("stale-candidate.xlsx");
+        let mut changed_source = std::fs::read(&source).unwrap();
+        changed_source[0] ^= 1;
+        std::fs::write(&source, changed_source).unwrap();
+        assert!(publish_virtual_candidate(
+            &bundle,
+            &source,
+            &saved,
+            &reports[0],
+            &ready_candidate,
+            &publish_target
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("XLSX_CELL_INSPECTION_STALE"));
+        assert!(!publish_target.exists());
+        assert!(inspect_xlsx_virtual_blank(&bundle, &source, &sheet, "L3").is_err());
+    }
+
+    #[test]
+    fn virtual_cell_rejects_protected_worksheets_without_publishing_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.xlsx");
+        create_shared_string_fixture(&original);
+        for (flag, expected_protected) in [(Some("1"), true), (None, true), (Some("0"), false)] {
+            let suffix = flag.unwrap_or("default");
+            let source = temp.path().join(format!("{suffix}.xlsx"));
+            let path = temp.path().join(format!("bundle-{suffix}"));
+            let target = temp.path().join(format!("candidate-{suffix}.xlsx"));
+            let mut input = zip::ZipArchive::new(File::open(&original).unwrap()).unwrap();
+            let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+            for index in 0..input.len() {
+                let mut entry = input.by_index(index).unwrap();
+                let name = entry.name().to_owned();
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).unwrap();
+                if name == "xl/worksheets/sheet1.xml" {
+                    let attr = flag
+                        .map(|value| format!(" sheet=\"{value}\""))
+                        .unwrap_or_default();
+                    data = String::from_utf8(data)
+                        .unwrap()
+                        .replace(
+                            "</sheetData>",
+                            &format!("</sheetData><sheetProtection{attr}/>"),
+                        )
+                        .into_bytes();
+                }
+                output
+                    .start_file(name, SimpleFileOptions::default())
+                    .unwrap();
+                output.write_all(&data).unwrap();
+            }
+            output.finish().unwrap();
+            let fresh_path = temp.path().join(format!("fresh-{suffix}"));
+            import_xlsx(
+                &source,
+                &fresh_path,
+                &ImportOptions::new("protected"),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let fresh = Bundle::open(&fresh_path).unwrap();
+            assert_eq!(
+                fresh
+                    .manifest()
+                    .unwrap()
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.code == "XLSX_PROTECTED_SHEET_READ_ONLY"),
+                expected_protected
+            );
+            let fresh_cells = extract_text_page(&fresh, None, 100).unwrap().entries;
+            let cell = fresh_cells
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some("C3"))
+                .unwrap();
+            assert_eq!(cell.source.editable, !expected_protected);
+            import_xlsx(&original, &path, &ImportOptions::new("protected"), |_| {
+                Ok(())
+            })
+            .unwrap();
+            let source_bytes = std::fs::read(&source).unwrap();
+            let manifest_path = path.join("manifest.json");
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+            manifest["source"]["sha256"] = serde_json::json!(hash_bytes(&source_bytes));
+            manifest["source"]["sizeBytes"] = serde_json::json!(source_bytes.len());
+            std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let bundle = Bundle::open(path).unwrap();
+            let before = bundle.manifest().unwrap();
+            let sheet = sheet_grid_id("protected", "xl/worksheets/sheet1.xml");
+            let result =
+                preview_xlsx_virtual_cell(&bundle, &source, &sheet, "B3", "candidate", &target);
+            if expected_protected {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("XLSX_SHEET_PROTECTED"));
+                assert!(!target.exists());
+            } else {
+                result.unwrap();
+                assert!(target.exists());
+            }
+            assert_eq!(bundle.manifest().unwrap().root_hash, before.root_hash);
+            let cell = extract_text_page(&bundle, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some("C3"))
+                .unwrap();
+            let patch = PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: "protected".into(),
+                patch_id: "protected-cell".into(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: cell.node_id,
+                    start: 0,
+                    delete_count: 0,
+                    insert_text: "changed ".into(),
+                    precondition: NodePrecondition {
+                        node_hash: cell.node_hash,
+                    },
+                }],
+            };
+            let audit = audit_xlsx_editable_formula_map(&bundle, &source);
+            let save = apply_xlsx_patch_with_source(&bundle, &patch, 0, Some(&source));
+            if expected_protected {
+                assert!(audit
+                    .unwrap_err()
+                    .to_string()
+                    .contains("XLSX_SHEET_PROTECTED"));
+                assert!(save
+                    .unwrap_err()
+                    .to_string()
+                    .contains("XLSX_SHEET_PROTECTED"));
+                assert_eq!(bundle.manifest().unwrap().root_hash, before.root_hash);
+                // A historical or direct-core edit must still be blocked at export.
+                hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+                let exported = temp.path().join(format!("protected-export-{suffix}.xlsx"));
+                assert!(
+                    export_xlsx(&bundle, &source, &exported, &ExportOptions::default())
+                        .unwrap_err()
+                        .to_string()
+                        .contains("XLSX_SHEET_PROTECTED")
+                );
+                assert!(!exported.exists());
+            } else {
+                audit.unwrap();
+                save.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn virtual_cell_batch_preview_handles_multiple_sheets_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.xlsx");
+        let source = temp.path().join("two.xlsx");
+        let path = temp.path().join("bundle");
+        create_shared_string_fixture(&original);
+        let mut input = zip::ZipArchive::new(File::open(&original).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        for i in 0..input.len() {
+            let mut entry = input.by_index(i).unwrap();
+            let name = entry.name().to_owned();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            if name == "xl/workbook.xml" {
+                data = String::from_utf8(data)
+                    .unwrap()
+                    .replace(
+                        "</sheets>",
+                        "<sheet name=\"Second\" sheetId=\"2\" r:id=\"rId4\"/></sheets>",
+                    )
+                    .into_bytes()
+            } else if name == "xl/_rels/workbook.xml.rels" {
+                data=String::from_utf8(data).unwrap().replace("</Relationships>","<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet2.xml\"/></Relationships>").into_bytes()
+            } else if name == "[Content_Types].xml" {
+                data=String::from_utf8(data).unwrap().replace("</Types>","<Override PartName=\"/xl/worksheets/sheet2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>").into_bytes()
+            }
+            output
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&data).unwrap();
+        }
+        output
+            .start_file("xl/worksheets/sheet2.xml", SimpleFileOptions::default())
+            .unwrap();
+        output.write_all(br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>2+3</f><v>5</v></c></row></sheetData></worksheet>"#).unwrap();
+        output.finish().unwrap();
+        import_xlsx(&source, &path, &ImportOptions::new("multi"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(path).unwrap();
+        let before = bundle.manifest().unwrap();
+        let first = sheet_grid_id("multi", "xl/worksheets/sheet1.xml");
+        let second = sheet_grid_id("multi", "xl/worksheets/sheet2.xml");
+        let cells = vec![
+            XlsxVirtualCell {
+                sheet_id: first,
+                address: "C4".into(),
+                text: "first sheet".into(),
+            },
+            XlsxVirtualCell {
+                sheet_id: second,
+                address: "B1".into(),
+                text: "second sheet".into(),
+            },
+        ];
+        let target = temp.path().join("preview.xlsx");
+        let results = preview_xlsx_virtual_cells(&bundle, &source, &cells, &target).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            (results[0].row, results[0].column, results[0].sheet_index),
+            (4, 3, 0)
+        );
+        assert_eq!(
+            (results[1].row, results[1].column, results[1].sheet_index),
+            (1, 2, 1)
+        );
+        assert_eq!(results[1].sheet_name, "Second");
+        assert_eq!(results[1].sheet_part, "xl/worksheets/sheet2.xml");
+        assert_eq!(results[1].sheet_state, "visible");
+        assert!(read_zip_entry(&target, "xl/worksheets/sheet1.xml").contains("first sheet"));
+        let sheet = read_zip_entry(&target, "xl/worksheets/sheet2.xml");
+        assert!(sheet.contains("second sheet") && sheet.contains("<f>2+3</f>"));
+        let bad = temp.path().join("bad.xlsx");
+        let mut unsafe_batch = cells.clone();
+        unsafe_batch[1].address = "A1".into();
+        assert!(preview_xlsx_virtual_cells(&bundle, &source, &unsafe_batch, &bad).is_err());
+        assert!(!bad.exists());
+        assert_eq!(bundle.manifest().unwrap().root_hash, before.root_hash);
+        let import = temp.path().join("reimport");
+        import_xlsx(&target, &import, &ImportOptions::new("candidate"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(import).unwrap())
+                .unwrap()
+                .valid
+        );
+        let request = hcd_core::GridCreateRequest {
+            document_id: "multi".into(),
+            patch_id: "create-multi".into(),
+            base_revision: 0,
+            source_sha256: before.source.sha256.clone(),
+            actor: BTreeMap::new(),
+            cells: results
+                .iter()
+                .zip(&cells)
+                .map(|(result, cell)| hcd_core::GridCellCreate {
+                    sheet_id: cell.sheet_id.clone(),
+                    sheet_part: result.sheet_part.clone(),
+                    row: result.row,
+                    column: result.column,
+                    text: cell.text.clone(),
+                })
+                .collect(),
+        };
+        create_xlsx_virtual_cells(&bundle, &source, &request).unwrap();
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let committed = temp.path().join("committed.xlsx");
+        export_xlsx(&bundle, &source, &committed, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&committed, "xl/worksheets/sheet1.xml").contains("first sheet"));
+        let committed_second = read_zip_entry(&committed, "xl/worksheets/sheet2.xml");
+        assert!(
+            committed_second.contains("second sheet") && committed_second.contains("<f>2+3</f>")
+        );
+    }
+
+    #[test]
+    fn visible_grid_binding_must_match_the_mapped_cell_and_sheet() {
+        let part = "xl/worksheets/sheet1.xml";
+        let document_id = "grid-test";
+        let sheet = sheet_grid_id(document_id, part);
+        let entry = NodeMapEntry {
+            node_id: "node1".into(),
+            node_hash: "hash".into(),
+            source: SourceAnchor {
+                part: part.into(),
+                text_ordinal: 1,
+                paragraph_id: Some("A1".into()),
+                text_id: None,
+                node_kind: "cell".into(),
+                editable: true,
+            },
+        };
+        let check = |html: &str, sheet_id: &str| {
+            check_visible_xlsx_cells(
+                html,
+                std::slice::from_ref(&entry),
+                document_id,
+                sheet_id,
+                &mut BTreeSet::new(),
+            )
+        };
+        let valid = r#"<section><table><tbody><tr><td data-hcd-cell="A1"><span data-hcd-id="node1">x</span></td></tr></tbody></table></section>"#;
+        assert!(check(valid, &sheet).is_ok());
+        assert!(check(&valid.replace("A1", "B1"), &sheet).is_err());
+        assert!(check(valid, "another-sheet").is_err());
+        assert!(check(&valid.replace("node1", "unknown"), &sheet).is_err());
+        assert!(check(
+            &valid.replace("</tr>", "<td data-hcd-cell=\"A1\"></td></tr>"),
+            &sheet
+        )
+        .is_err());
+        assert!(check(
+            &valid.replace("</td>", "<span data-hcd-id=\"other\"></span></td>"),
+            &sheet
+        )
+        .is_err());
+        assert!(check(&valid.replace("data-hcd-cell", "DATA-HCD-CELL"), &sheet).is_err());
+        assert!(check(
+            &valid
+                .replace("<span", "<script")
+                .replace("</span>", "</script>"),
+            &sheet
+        )
+        .is_err());
+        assert!(check(
+            &valid
+                .replace("<tbody><tr>", "")
+                .replace("</tr></tbody>", ""),
+            &sheet
+        )
+        .is_err());
+        let mut seen = BTreeSet::new();
+        check_visible_xlsx_cells(
+            valid,
+            std::slice::from_ref(&entry),
+            document_id,
+            &sheet,
+            &mut seen,
+        )
+        .unwrap();
+        assert!(check_visible_xlsx_cells(
+            valid,
+            std::slice::from_ref(&entry),
+            document_id,
+            &sheet,
+            &mut seen
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn self_closing_shared_formulas_are_read_only_and_survive_other_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.xlsx");
+        let source = temp.path().join("formula.xlsx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("exported.xlsx");
+        create_shared_string_fixture(&original);
+        let mut input = zip::ZipArchive::new(File::open(original).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..input.len() {
+            let mut entry = input.by_index(index).unwrap();
+            let name = entry.name().to_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                let xml = String::from_utf8(bytes).unwrap();
+                bytes = xml.replace(
+                    "</row><row r=\"4\"/>",
+                    "<c r=\"H3\"><f t=\"shared\" si=\"0\"/><v>17</v></c><c r=\"I3\"><f t=\"shared\" si=\"0\"/></c><c r=\"J3\"><f t=\"array\" ref=\"J3:K3\">1+2</f><v>3</v></c><c r=\"K3\"><v>4</v></c></row><row r=\"4\"/>",
+                ).into_bytes();
+            }
+            output.start_file(name, options).unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output.finish().unwrap();
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("formula-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        assert!(audit_xlsx_editable_formula_map(&bundle, &source).unwrap() > 0);
+        for address in ["H3", "I3", "J3", "K3"] {
+            let targets = HashMap::from([(
+                "xl/worksheets/sheet1.xml".to_string(),
+                BTreeMap::from([(address.to_string(), String::new())]),
+            )]);
+            assert!(check_xlsx_formula_targets(&source, &targets)
+                .unwrap_err()
+                .to_string()
+                .contains("XLSX_FORMULA_READ_ONLY"));
+            assert!(check_xlsx_virtual_targets(&source, &targets).is_err());
+        }
+        let targets = HashMap::from([(
+            "xl/worksheets/sheet1.xml".to_string(),
+            BTreeMap::from([("D4".to_string(), String::new())]),
+        )]);
+        assert!(check_xlsx_virtual_targets(&source, &targets)
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_VIRTUAL_MERGE_ANCHOR_UNSUPPORTED"));
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        let mut entries = Vec::new();
+        for chunk in &page.chunks {
+            entries.extend(bundle.read_map(chunk).unwrap().entries);
+        }
+        for address in ["H3", "I3", "J3", "K3"] {
+            let node = entries
+                .iter()
+                .find(|entry| entry.source.paragraph_id.as_deref() == Some(address))
+                .unwrap();
+            assert!(!node.source.editable, "{address} must remain a formula");
+            let patch = PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+                document_id: "formula-doc".to_string(),
+                patch_id: format!("edit-{address}"),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: node.node_id.clone(),
+                    start: 0,
+                    delete_count: 0,
+                    insert_text: "x".to_string(),
+                    precondition: NodePrecondition {
+                        node_hash: node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            };
+            assert!(apply_xlsx_patch_with_source(&bundle, &patch, 0, Some(&source)).is_err());
+            assert!(hcd_core::apply_patch(&bundle, &patch, 0).is_err());
+        }
+        let node = entries
+            .iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("C3"))
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: "formula-doc".to_string(),
+            patch_id: "edit-neighbor".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: node.node_id.clone(),
+                start: 0,
+                delete_count: 0,
+                insert_text: "Changed ".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            }],
+            metadata: BTreeMap::new(),
+        };
+        validate_xlsx_source_text_edits(&bundle, &source, &patch.operations).unwrap();
+        let changed_source = temp.path().join("changed.xlsx");
+        std::fs::copy(&source, &changed_source).unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&changed_source)
+            .unwrap()
+            .write_all(b"changed")
+            .unwrap();
+        assert!(
+            validate_xlsx_source_text_edits(&bundle, &changed_source, &patch.operations)
+                .unwrap_err()
+                .to_string()
+                .contains("XLSX_SOURCE_CHANGED")
+        );
+        assert!(apply_xlsx_patch_with_source(&bundle, &patch, 0, None)
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_SOURCE_MISSING"));
+        assert!(
+            apply_xlsx_patch_with_source(&bundle, &patch, 0, Some(&changed_source))
+                .unwrap_err()
+                .to_string()
+                .contains("XLSX_SOURCE_CHANGED")
+        );
+        assert!(
+            !apply_xlsx_patch_with_source(&bundle, &patch, 0, Some(&source))
+                .unwrap()
+                .idempotent_replay
+        );
+        assert!(
+            apply_xlsx_patch_with_source(&bundle, &patch, 0, None)
+                .unwrap()
+                .idempotent_replay
+        );
+        let mut stale = patch.clone();
+        stale.patch_id = "uncommitted-old".into();
+        assert!(apply_xlsx_patch_with_source(&bundle, &stale, 0, None).is_err());
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("Changed After merge"));
+        assert!(sheet.contains("<c r=\"H3\"><f t=\"shared\" si=\"0\"/><v>17</v></c>"));
+        assert!(sheet.contains("<c r=\"I3\"><f t=\"shared\" si=\"0\"/></c>"));
+        assert!(sheet.contains("<c r=\"K3\"><v>4</v></c>"));
+        let mut replacements = BTreeMap::new();
+        replacements.insert("H3".to_string(), "unsafe edit".to_string());
+        let mut old_source = sheet.as_bytes();
+        let error = rewrite_worksheet(&mut old_source, Vec::new(), &replacements).unwrap_err();
+        assert!(error.to_string().contains("XLSX_FORMULA_READ_ONLY"));
+        let mut scan_source = sheet.as_bytes();
+        let mut scan = scan_worksheet_metadata(&mut scan_source, "sheet").unwrap();
+        let mut array_target = BTreeMap::new();
+        array_target.insert("K3".to_string(), "unsafe edit".to_string());
+        assert!(
+            reject_formula_range_targets(&mut scan.formula_ranges, array_target.keys())
+                .unwrap_err()
+                .to_string()
+                .contains("XLSX_FORMULA_READ_ONLY: K3")
+        );
+    }
+
+    #[test]
     fn merged_range_parser_rejects_invalid_and_overlapping_ranges() {
         assert_eq!(
             parse_merge_reference("$A$1:XFD1048576"),
@@ -4866,6 +8299,71 @@ mod tests {
         cursor.begin_row(1).unwrap();
         let error = cursor.begin_row(2).unwrap_err();
         assert!(error.to_string().contains("overlapping XLSX merged ranges"));
+    }
+
+    #[test]
+    fn merged_covered_targets_are_rejected_but_anchors_remain_editable() {
+        let source = br#"<worksheet><sheetData/><mergeCells><mergeCell ref="B2:C3"/><mergeCell ref="E1:F1"/></mergeCells></worksheet>"#;
+        let mut input = &source[..];
+        let mut scan = scan_worksheet_metadata(&mut input, "sheet").unwrap();
+        let allowed = ["E1".to_string(), "B2".to_string(), "A3".to_string()];
+        reject_merged_covered_targets(&mut scan.merged_ranges, allowed.iter()).unwrap();
+
+        for address in ["C2", "B3", "C3", "F1"] {
+            let mut input = &source[..];
+            let mut scan = scan_worksheet_metadata(&mut input, "sheet").unwrap();
+            let target = [address.to_string()];
+            let error =
+                reject_merged_covered_targets(&mut scan.merged_ranges, target.iter()).unwrap_err();
+            assert!(error.to_string().contains("XLSX_MERGED_CELL_READ_ONLY"));
+        }
+    }
+
+    #[test]
+    fn source_target_check_enforces_merged_cell_boundary() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("merged.xlsx");
+        let mut zip = zip::ZipWriter::new(File::create(&source).unwrap());
+        zip.start_file(
+            "xl/worksheets/sheet1.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(br#"<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"/></row></sheetData><mergeCells><mergeCell ref="A1:B1"/></mergeCells></worksheet>"#).unwrap();
+        zip.finish().unwrap();
+        let part = "xl/worksheets/sheet1.xml".to_string();
+        let mut targets = HashMap::new();
+        targets.insert(
+            part.clone(),
+            BTreeMap::from([("A1".to_string(), String::new())]),
+        );
+        check_xlsx_formula_targets(&source, &targets).unwrap();
+        targets.insert(part, BTreeMap::from([("B1".to_string(), String::new())]));
+        assert!(check_xlsx_formula_targets(&source, &targets)
+            .unwrap_err()
+            .to_string()
+            .contains("XLSX_MERGED_CELL_READ_ONLY"));
+    }
+
+    #[test]
+    fn formula_range_scanning_rejects_invalid_ranges_and_protects_table_results() {
+        let xml = r#"<worksheet><sheetData><row r="1"><c r="B1"><f t="dataTable" ref="B1:C3"/><v>1</v></c></row></sheetData></worksheet>"#;
+        let mut source = xml.as_bytes();
+        let mut scan = scan_worksheet_metadata(&mut source, "sheet").unwrap();
+        let mut targets = BTreeMap::new();
+        targets.insert("A1".to_string(), String::new());
+        targets.insert("C3".to_string(), String::new());
+        assert!(
+            reject_formula_range_targets(&mut scan.formula_ranges, targets.keys())
+                .unwrap_err()
+                .to_string()
+                .contains("C3")
+        );
+        for formula in [r#"<f t="array"/>"#, r#"<f t="array" ref="A1:XFE2"/>"#] {
+            let xml = format!("<worksheet><sheetData><row r=\"1\"><c r=\"A1\">{formula}</c></row></sheetData></worksheet>");
+            assert!(scan_worksheet_metadata(&mut xml.as_bytes(), "sheet").is_err());
+        }
     }
 
     #[test]
@@ -4898,6 +8396,35 @@ mod tests {
             .map(Option::unwrap);
         assert!(columns.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(html.matches("class=\"hcd-cell hcd-empty\"").count(), 3);
+    }
+
+    #[test]
+    fn partial_blank_compaction_measures_sparse_gaps_and_merge_covers() {
+        let make = |column| RenderedCell {
+            column,
+            span: 1,
+            html: format!("<td data-hcd-column=\"{column}\">{}</td>", "x".repeat(80)),
+        };
+        let mut row = finish_worksheet_row(RenderedRow {
+            number: 1,
+            html: "<tr data-hcd-row=\"1\">".into(),
+            cells: vec![make(1), make(2), make(5), make(8), make(10)],
+            merge_covers: vec![MergeRange {
+                start_row: 0,
+                end_row: 1,
+                start_col: 3,
+                end_col: 4,
+            }],
+            optional_blank_columns: [2, 5, 8].into_iter().collect(),
+            ..Default::default()
+        })
+        .unwrap();
+        let old_len = row.html.len();
+        assert_eq!(compact_worksheet_row(&mut row, old_len - 1).unwrap(), 1);
+        assert!(row.html.len() < old_len);
+        assert_eq!(row.optional_blank_columns, [2, 5].into_iter().collect());
+        assert!(row.html.contains("data-hcd-column=\"10\""));
+        assert!(!row.html.contains("data-hcd-column=\"3\""));
     }
 
     #[test]

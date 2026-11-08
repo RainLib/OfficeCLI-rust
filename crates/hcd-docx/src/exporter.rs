@@ -8,6 +8,7 @@ use quick_xml::{Reader, Writer};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
@@ -58,23 +59,58 @@ pub fn export_docx(
             head.revision
         )));
     }
-    let source = source.as_ref();
+    let (_source_snapshot, source_copy) =
+        snapshot_docx_source(source.as_ref(), &head.source.sha256, head.source.size_bytes)?;
+    let source = source_copy.as_path();
     let target = target.as_ref();
-    let actual_source_hash = hash_file(source)?;
-    if actual_source_hash != head.source.sha256 {
-        return Err(HcdError::SourceMismatch(format!(
-            "expected source {}, actual {actual_source_hash}",
-            head.source.sha256
-        )));
-    }
 
     let revision_manifest = manifest_at_revision(&bundle, &head, revision)?;
-    let (dirty_parts, dirty_node_ids) = dirty_state_through(&bundle, revision)?;
-    reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
-    reject_presentation_style_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
+    // Even source-backed export must understand required layout metadata. A
+    // future model may change section relationships without dirty text nodes.
+    hcd_core::read_flow_document_layout(&bundle, &revision_manifest)?;
+    if (2..=4097).contains(&revision)
+        && revision_manifest.capabilities.word_layout_edits == Some(2)
+        && bundle
+            .revision(revision)?
+            .patch_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("word-story-link-"))
+    {
+        return export_verified_story_link(&bundle, source, target, revision, options);
+    }
+    let verified = if revision_manifest.capabilities.flow_layout.is_some()
+        && requires_semantic_rebuild(&bundle, revision)?
+    {
+        Some(crate::story_link_verification::verify_source_region_text(
+            &bundle, source, revision,
+        )?)
+    } else {
+        None
+    };
+    let frozen = verified
+        .as_ref()
+        .map(|(_, snapshot, _)| Bundle::open(snapshot.directory.path()))
+        .transpose()?;
+    let bundle = frozen.as_ref().unwrap_or(&bundle);
+    let source = verified
+        .as_ref()
+        .map(|(_, _, path)| path.as_path())
+        .unwrap_or(source);
+    let revision_manifest = manifest_at_revision(bundle, &bundle.manifest()?, revision)?;
+    let (dirty_parts, dirty_node_ids) =
+        dirty_state_from(bundle, revision, if verified.is_some() { 2 } else { 1 })?;
+    reject_image_source_export(bundle, &revision_manifest, &dirty_node_ids)?;
+    reject_presentation_style_source_export(bundle, &revision_manifest, &dirty_node_ids)?;
     let text_by_part =
-        collect_text_by_part(&bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
-    let sizes_by_part = collect_sizes_by_part(&bundle, &revision_manifest, &dirty_node_ids)?;
+        collect_text_by_part(bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
+    let sizes_by_part = collect_sizes_by_part(bundle, &revision_manifest, &dirty_node_ids)?;
+
+    // Historical semantic imports may have marked cached field results as
+    // editable. Re-derive the source policy before writing any such text
+    // back into the original package, regardless of the old map's claims.
+    if revision_manifest.capabilities.flow_layout.is_none() && !text_by_part.is_empty() {
+        verify_original_text_policy(source, &head.source.sha256, &text_by_part)?;
+    }
 
     let temp_dir = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
@@ -132,6 +168,208 @@ pub fn export_docx(
         std::fs::create_dir_all(parent)?;
         let file = std::fs::File::create(path)?;
         serde_json::to_writer_pretty(file, &report)?;
+    }
+    Ok(report)
+}
+
+fn verify_original_text_policy(
+    source: &Path,
+    expected_hash: &str,
+    replacements: &HashMap<String, BTreeMap<u64, String>>,
+) -> Result<(), HcdError> {
+    let size = std::fs::metadata(source)?.len();
+    let readonly = source_read_only_policy(source, expected_hash, size)?;
+    for (part, ordinal) in readonly.iter() {
+        if replacements
+            .get(part)
+            .is_some_and(|items| items.contains_key(ordinal))
+        {
+            return Err(HcdError::Unsupported(format!(
+                "DOCX_SOURCE_TEXT_READ_ONLY: {part} ordinal {ordinal}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Identify mapped text which an older semantic import incorrectly marked
+/// editable. The source is copied and authenticated before it is parsed, so
+/// a concurrent replacement of the source path cannot change the proof.
+pub fn legacy_read_only_nodes(bundle: &Bundle, source: &Path) -> Result<HashSet<String>, HcdError> {
+    let head = bundle.manifest()?;
+    if head.source.format != "docx" || head.capabilities.flow_layout.is_some() {
+        return Ok(HashSet::new());
+    }
+    let readonly = source_read_only_policy(source, &head.source.sha256, head.source.size_bytes)?;
+    let mut legacy = HashSet::new();
+    for page in 0..head.index_page_count {
+        for descriptor in bundle.read_index_page(&head, page)?.chunks {
+            for entry in bundle.read_map_verified(&descriptor)?.entries {
+                if entry.source.node_kind == "text"
+                    && entry.source.editable
+                    && readonly.contains(&(entry.source.part, entry.source.text_ordinal))
+                {
+                    legacy.insert(entry.node_id);
+                }
+            }
+        }
+    }
+    Ok(legacy)
+}
+
+type SourcePolicy = HashSet<(String, u64)>;
+type SourcePolicyCache = HashMap<String, (Arc<SourcePolicy>, usize)>;
+static SOURCE_POLICY_CACHE: OnceLock<Mutex<SourcePolicyCache>> = OnceLock::new();
+
+fn snapshot_docx_source(
+    source: &Path,
+    expected_hash: &str,
+    expected_size: u64,
+) -> Result<(tempfile::TempDir, PathBuf), HcdError> {
+    if expected_size > 256 * 1024 * 1024 {
+        return Err(HcdError::ResourceLimit(
+            "DOCX source exceeds the import limit".into(),
+        ));
+    }
+    let temporary = tempfile::tempdir()?;
+    let source_copy = temporary.path().join("source.docx");
+    let input = std::fs::File::open(source)?;
+    let mut output = std::fs::File::create(&source_copy)?;
+    let copied = std::io::copy(
+        &mut input.take(expected_size.saturating_add(1)),
+        &mut output,
+    )?;
+    drop(output);
+    if copied != expected_size || hash_file(&source_copy)? != expected_hash {
+        return Err(HcdError::SourceMismatch(
+            "DOCX source changed during policy check".into(),
+        ));
+    }
+    Ok((temporary, source_copy))
+}
+
+fn source_read_only_policy(
+    source: &Path,
+    expected_hash: &str,
+    expected_size: u64,
+) -> Result<Arc<SourcePolicy>, HcdError> {
+    if expected_size > 256 * 1024 * 1024 {
+        return Err(HcdError::ResourceLimit(
+            "DOCX source exceeds the import limit".into(),
+        ));
+    }
+    // The cached policy only describes authenticated source bytes. Every hit
+    // still verifies the source path; an old cache entry cannot authorize a
+    // changed or missing file.
+    if std::fs::metadata(source)?.len() != expected_size || hash_file(source)? != expected_hash {
+        return Err(HcdError::SourceMismatch(
+            "DOCX source changed during policy check".into(),
+        ));
+    }
+    let cache = SOURCE_POLICY_CACHE.get_or_init(Default::default);
+    if let Some(policy) = cache
+        .lock()
+        .map_err(|_| HcdError::InvalidBundle("DOCX policy cache unavailable".into()))?
+        .get(expected_hash)
+        .map(|entry| Arc::clone(&entry.0))
+    {
+        return Ok(policy);
+    }
+    let (temporary, source_copy) = snapshot_docx_source(source, expected_hash, expected_size)?;
+    let imported_path = temporary.path().join("source.hcd");
+    let imported = crate::import_docx(
+        &source_copy,
+        &imported_path,
+        &crate::ImportOptions::new("source-policy-check"),
+        |_| Ok(()),
+    )?;
+    let source_bundle = Bundle::open(imported_path)?;
+    let mut readonly = HashSet::new();
+    for page in 0..imported.index_page_count {
+        for descriptor in source_bundle.read_index_page(&imported, page)?.chunks {
+            for entry in source_bundle.read_map_verified(&descriptor)?.entries {
+                if entry.source.node_kind == "text" && !entry.source.editable {
+                    readonly.insert((entry.source.part, entry.source.text_ordinal));
+                }
+            }
+        }
+    }
+    let readonly = Arc::new(readonly);
+    // Bound both entry count and estimated allocations. Large policies remain
+    // valid but are recomputed instead of consuming unbounded process memory.
+    let weight = readonly.iter().fold(0usize, |sum, (part, _)| {
+        sum.saturating_add(part.len().saturating_add(96))
+    });
+    if weight <= 2 * 1024 * 1024 {
+        let mut guard = cache
+            .lock()
+            .map_err(|_| HcdError::InvalidBundle("DOCX policy cache unavailable".into()))?;
+        if guard.len() >= 8
+            || guard
+                .values()
+                .map(|entry| entry.1)
+                .sum::<usize>()
+                .saturating_add(weight)
+                > 8 * 1024 * 1024
+        {
+            guard.clear();
+        }
+        guard.insert(expected_hash.to_string(), (Arc::clone(&readonly), weight));
+    }
+    Ok(readonly)
+}
+
+fn export_verified_story_link(
+    bundle: &Bundle,
+    source: &Path,
+    target: &Path,
+    revision: u64,
+    options: &ExportOptions,
+) -> Result<FidelityReport, HcdError> {
+    let verified = crate::verify_source_story_link(bundle, source, revision)?;
+    let snapshot = Bundle::open(verified.bundle_snapshot.directory.path())?;
+    let head = snapshot.manifest()?;
+    let stage = tempfile::tempdir()?;
+    let replacement = stage.path().join("document.xml");
+    let mut archive = StreamingOxmlArchive::open(&verified.source_path).map_err(package_error)?;
+    archive
+        .with_part("word/document.xml", |reader| {
+            let mut output = BufWriter::new(std::fs::File::create(&replacement)?);
+            crate::rewrite_story_link_references(
+                reader,
+                &mut output,
+                verified.section_count,
+                &verified.removals,
+            )
+            .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+            output.flush()?;
+            Ok(())
+        })
+        .map_err(package_error)?;
+    let replacements = HashMap::from([("word/document.xml".to_string(), replacement)]);
+    StreamingOxmlRewriter::rewrite(
+        &verified.source_path,
+        target,
+        &replacements,
+        "word/document.xml",
+    )
+    .map_err(package_error)?;
+    let report = FidelityReport {
+        schema_version: HCD_SCHEMA_VERSION.to_string(),
+        level: FidelityLevel::High,
+        preserved: vec![
+            "unmodified OOXML entries copied as raw compressed payloads".into(),
+            "paragraph and run formatting, relationships, media, numbering and stories".into(),
+            "selected section story reference linked to the preceding section".into(),
+        ],
+        flattened: Vec::new(),
+        dropped: vec!["HCD recognition annotations are not exported to DOCX".into()],
+        warnings: head.warnings,
+    };
+    if let Some(path) = &options.fidelity_report {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        serde_json::to_writer_pretty(std::fs::File::create(path)?, &report)?;
     }
     Ok(report)
 }
@@ -197,34 +435,24 @@ fn manifest_at_revision(
     head: &HcdManifest,
     revision: u64,
 ) -> Result<HcdManifest, HcdError> {
-    if revision == head.revision {
-        return Ok(head.clone());
-    }
-    let record = bundle.revision(revision)?;
-    let mut manifest = head.clone();
-    manifest.revision = revision;
-    manifest.root_hash = record.root_hash;
-    manifest.annotation_root_hash = record.annotation_root_hash;
-    manifest.annotation_href =
-        (manifest.annotation_root_hash != hcd_core::hash_bytes(b"[]")).then(|| {
-            format!(
-                "annotations/sha256/{}.json{}",
-                manifest.annotation_root_hash,
-                manifest.storage_codec.suffix()
-            )
-        });
-    manifest.index_prefix = record.index_prefix;
-    manifest.index_root_href = record.index_root_href;
-    Ok(manifest)
+    hcd_core::manifest_at_revision(bundle, head, Some(revision)).map(|(manifest, _)| manifest)
 }
 
 fn dirty_state_through(
     bundle: &Bundle,
     revision: u64,
 ) -> Result<(HashSet<String>, HashSet<String>), HcdError> {
+    dirty_state_from(bundle, revision, 1)
+}
+
+fn dirty_state_from(
+    bundle: &Bundle,
+    revision: u64,
+    start: u64,
+) -> Result<(HashSet<String>, HashSet<String>), HcdError> {
     let mut dirty_parts = HashSet::new();
     let mut dirty_nodes = HashSet::new();
-    for current in 1..=revision {
+    for current in start..=revision {
         let record = bundle.revision(current)?;
         if record.structural_change {
             return Err(HcdError::Unsupported(
@@ -494,6 +722,96 @@ mod tests {
         hash_bytes, BundleWriter, ChunkSourceMap, HcdCapabilities, NodeMapEntry, SourceAnchor,
         SourceDescriptor,
     };
+
+    #[test]
+    fn original_source_policy_rejects_legacy_field_replacements() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Normal</w:t></w:r></w:p><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:body></w:document>"#,
+            ),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let source_hash = hash_file(&source).unwrap();
+        let part = "word/document.xml".to_string();
+        let safe = HashMap::from([(part.clone(), BTreeMap::from([(1, "Changed".into())]))]);
+        let field = HashMap::from([(part, BTreeMap::from([(2, "Changed".into())]))]);
+        verify_original_text_policy(&source, &source_hash, &safe).unwrap();
+        assert!(
+            matches!(verify_original_text_policy(&source, &source_hash, &field),
+            Err(HcdError::Unsupported(message)) if message.contains("DOCX_SOURCE_TEXT_READ_ONLY"))
+        );
+        assert!(matches!(
+            verify_original_text_policy(&source, &"0".repeat(64), &safe),
+            Err(HcdError::SourceMismatch(_))
+        ));
+        let path = temp.path().join("legacy.hcd");
+        let mut writer = BundleWriter::create(&path).unwrap();
+        writer.write_styles("").unwrap();
+        let normal = "n_00000000000000000000000000000001";
+        let cached = "n_00000000000000000000000000000002";
+        let map = ChunkSourceMap {
+            schema_version: HCD_SCHEMA_VERSION.into(),
+            chunk_id: "c_00000000000000000000000000000001".into(),
+            entries: vec![
+                NodeMapEntry {
+                    node_id: normal.into(),
+                    node_hash: hash_bytes(b"Normal"),
+                    source: test_anchor("word/document.xml", 1),
+                },
+                NodeMapEntry {
+                    node_id: cached.into(),
+                    node_hash: hash_bytes(b"1"),
+                    source: test_anchor("word/document.xml", 2),
+                },
+            ],
+        };
+        let normal_hash = hash_bytes(b"Normal");
+        let cached_hash = hash_bytes(b"1");
+        writer.write_chunk(map.chunk_id.clone(), "body".into(), format!("<p><span data-hcd-id=\"{normal}\" data-hcd-node-hash=\"{normal_hash}\">Normal</span><span data-hcd-id=\"{cached}\" data-hcd-node-hash=\"{cached_hash}\">1</span></p>"), map, 1, false).unwrap();
+        let mut manifest = test_manifest();
+        manifest.source.sha256 = source_hash.clone();
+        manifest.source.size_bytes = std::fs::metadata(&source).unwrap().len();
+        writer.finish(manifest).unwrap();
+        let bundle = Bundle::open(path).unwrap();
+        let size = std::fs::metadata(&source).unwrap().len();
+        let first_policy = source_read_only_policy(&source, &source_hash, size).unwrap();
+        let second_policy = source_read_only_policy(&source, &source_hash, size).unwrap();
+        assert_eq!(first_policy, second_policy);
+        assert_eq!(
+            legacy_read_only_nodes(&bundle, &source).unwrap(),
+            HashSet::from([cached.to_string()])
+        );
+        let (_snapshot_dir, snapshot) = snapshot_docx_source(&source, &source_hash, size).unwrap();
+        let mut changed = std::fs::read(&source).unwrap();
+        changed[0] ^= 1;
+        std::fs::write(&source, changed).unwrap();
+        assert_eq!(hash_file(&snapshot).unwrap(), source_hash);
+        assert!(matches!(
+            source_read_only_policy(&source, &source_hash, size),
+            Err(HcdError::SourceMismatch(_))
+        ));
+        assert!(matches!(
+            legacy_read_only_nodes(&bundle, &source),
+            Err(HcdError::SourceMismatch(_))
+        ));
+    }
 
     #[test]
     fn text_rewriter_uses_unicode_text_and_preserves_spaces() {

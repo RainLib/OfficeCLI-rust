@@ -55,6 +55,105 @@ fn build_segment_tokens(
     tokens
 }
 
+/// Mark each original logical text block in a disposable source copy. PDF
+/// objects are decoded/re-encoded as bytes, rather than lossy UTF-8 strings.
+pub fn mark_source_text_groups(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+) -> Result<(), HandlerError> {
+    use lopdf::content::{Content, Operation};
+    let page = *doc
+        .get_pages()
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+    let bytes = crate::reader::page_content_bounded(doc, page, 16 * 1024 * 1024)?;
+    let parsed = crate::content_stream::parse_page_content_stream_text_only_bounded(
+        &bytes,
+        page,
+        doc,
+        8 * 1024 * 1024,
+    )?;
+    let groups: std::collections::HashMap<_, _> = parsed
+        .text_blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .show_operators
+                .iter()
+                .map(move |show| (show.ordinal, block.index))
+        })
+        .collect();
+    let content = Content::decode(&bytes).map_err(|error| {
+        HandlerError::OperationFailed(format!("cannot mark PDF source text: {error}"))
+    })?;
+    if content
+        .operations
+        .iter()
+        .any(|operation| matches!(operation.operator.as_str(), "BI" | "ID" | "EI"))
+    {
+        return Err(HandlerError::OperationFailed(
+            "source text tracking does not support inline-image streams".into(),
+        ));
+    }
+    let mut output = Vec::with_capacity(content.operations.len());
+    let mut in_text = false;
+    let mut ordinal = 0;
+    fn hex_strings(value: &mut lopdf::Object, depth: usize) -> Result<(), HandlerError> {
+        if depth > 256 {
+            return Err(HandlerError::InvalidArgument(
+                "PDF operand nesting exceeds 256".into(),
+            ));
+        }
+        match value {
+            lopdf::Object::String(_, format) => *format = lopdf::StringFormat::Hexadecimal,
+            lopdf::Object::Array(values) => {
+                for value in values {
+                    hex_strings(value, depth + 1)?;
+                }
+            }
+            lopdf::Object::Dictionary(values) => {
+                for (_, value) in values.iter_mut() {
+                    hex_strings(value, depth + 1)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    for mut operation in content.operations {
+        for value in &mut operation.operands {
+            hex_strings(value, 0)?;
+        }
+        match operation.operator.as_str() {
+            "BT" => in_text = true,
+            "ET" => in_text = false,
+            _ => {}
+        }
+        let group = if in_text && matches!(operation.operator.as_str(), "Tj" | "TJ") {
+            ordinal += 1;
+            groups.get(&ordinal).copied()
+        } else {
+            None
+        };
+        if let Some(group) = group {
+            output.push(Operation::new(
+                "BMC",
+                vec![lopdf::Object::Name(
+                    format!("OfficeCLITextGroup{group}").into_bytes(),
+                )],
+            ));
+            output.push(operation);
+            output.push(Operation::new("EMC", vec![]));
+        } else {
+            output.push(operation);
+        }
+    }
+    let bytes = Content { operations: output }.encode().map_err(|error| {
+        HandlerError::OperationFailed(format!("cannot serialize PDF source groups: {error}"))
+    })?;
+    write_content_to_page(doc, page, &bytes)
+}
+
 fn format_size(size: f32) -> String {
     if size.fract().abs() < 1e-3 {
         format!("{}", size as i32)
@@ -122,28 +221,29 @@ pub fn replace_text_at_path(
         )));
     }
 
-    let mut modified_lines = parsed.lines.clone();
-    let line = &modified_lines[target_block.text_line_index];
-    let mut line_tokens = crate::content_stream::tokenize_pdf_line(line);
-
     let new_tokens = build_segment_tokens(&segments, orig_font, orig_size);
-
-    if target_block.line_token_index < line_tokens.len() {
-        // Replace the operand + operator (Tj/TJ) with our token sequence
-        let op_idx = target_block.line_token_index;
-        let consume_extra = matches!(
-            line_tokens.get(op_idx + 1).map(|s| s.as_str()),
-            Some("Tj") | Some("TJ")
+    let mut modified_lines = parsed.lines.clone();
+    // A logical source block may consist of several adjacent show operators.
+    // Replace its first show and remove the remaining shows, from right to left.
+    for (index, show) in target_block.show_operators.iter().enumerate().rev() {
+        let mut tokens = crate::content_stream::tokenize_pdf_line(&modified_lines[show.line]);
+        if !matches!(
+            tokens.get(show.token + 1).map(String::as_str),
+            Some("Tj" | "TJ")
+        ) {
+            return Err(HandlerError::OperationFailed(
+                "PDF text operator moved".into(),
+            ));
+        }
+        tokens.splice(
+            show.token..show.token + 2,
+            if index == 0 {
+                new_tokens.clone()
+            } else {
+                vec![]
+            },
         );
-        let end = if consume_extra {
-            op_idx + 2
-        } else {
-            op_idx + 1
-        };
-        line_tokens.splice(op_idx..end, new_tokens);
-        modified_lines[target_block.text_line_index] = line_tokens.join(" ");
-    } else {
-        modified_lines[target_block.text_line_index] = new_tokens.join(" ");
+        modified_lines[show.line] = tokens.join(" ");
     }
 
     let modified_content = modified_lines.join("\n");

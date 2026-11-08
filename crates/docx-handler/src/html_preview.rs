@@ -912,6 +912,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
     let mut current_num_id: Option<String> = None;
     let mut current_list_level: usize = 0;
     let mut abs_num_level_counters: HashMap<String, HashMap<usize, usize>> = HashMap::new();
+    let mut num_instance_counters = HashMap::new();
 
     let mut w_para_count = 0;
     let mut w_table_count = 0;
@@ -989,7 +990,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 &styles,
                 &doc_defaults,
                 &num_maps,
-                &mut HashMap::new(),
+                &mut num_instance_counters,
                 &doc_rels,
                 package,
                 &mut list_stack,
@@ -2987,7 +2988,7 @@ fn render_paragraph(
     styles: &HashMap<String, DocxStyle>,
     doc_defaults: &DocDefaults,
     num_maps: &HashMap<String, HashMap<String, NumLevel>>,
-    _num_counters: &mut HashMap<String, usize>,
+    num_counters: &mut HashMap<String, usize>,
     rels: &oxml::rels::Relationships,
     package: &OxmlPackage,
     list_stack: &mut Vec<String>,
@@ -3126,6 +3127,18 @@ fn render_paragraph(
                           num_maps: &HashMap<String, HashMap<String, NumLevel>>,
                           num_id: &str|
          -> usize {
+            // A nested list with another numId may close/reopen the HTML
+            // container. Resume this instance before reapplying its start
+            // override; overrides seed an instance, not every container switch.
+            if let Some(&previous) = num_counters.get(&format!("list:{num_id}:{ilvl_ooxml}")) {
+                return previous;
+            }
+            if let Some(&start) = num_start_overrides
+                .get(num_id)
+                .and_then(|levels| levels.get(&ilvl_ooxml))
+            {
+                return start.saturating_sub(1);
+            }
             if let Some(&prev) = ol_count_per_level.get(&for_ilvl) {
                 if prev > 0 {
                     return prev;
@@ -3159,9 +3172,12 @@ fn render_paragraph(
                 &num_id,
             );
 
-            let count = ol_count_per_level.entry(ilvl).or_insert(seed);
-            *count += 1;
-            let current_count = *count;
+            let current_count = seed.saturating_add(1);
+            ol_count_per_level.insert(ilvl, current_count);
+            num_counters.insert(format!("list:{num_id}:{ilvl_ooxml}"), current_count);
+            for level in ilvl_ooxml + 1..=8 {
+                num_counters.remove(&format!("list:{num_id}:{level}"));
+            }
             multi_level_counters.insert(ilvl, current_count);
 
             for lk in ilvl + 1..=8 {

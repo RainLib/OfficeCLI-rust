@@ -276,7 +276,8 @@ impl ttf_parser::OutlineBuilder for OutlineRecorder {
     }
 }
 
-fn font_bytes_missing_chars(
+/// Return characters absent from a parsed font's Unicode character map.
+pub fn font_bytes_missing_chars(
     font_bytes: &[u8],
     chars_needed: &HashSet<char>,
 ) -> Result<HashSet<char>, String> {
@@ -305,19 +306,118 @@ pub fn ensure_cjk_font_for_chars(
     user_font_file: Option<&str>,
     force_embed: bool,
 ) -> Result<Option<String>, HandlerError> {
-    let pages = doc.get_pages();
-    let page_id = *pages
+    let page_id = *doc
+        .get_pages()
         .get(&(page_num as u32))
         .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
+    ensure_font_for_chars(
+        doc,
+        page_id,
+        chars_needed,
+        preferred_name,
+        user_font_file,
+        force_embed,
+        FontUsage::Visible,
+    )
+}
 
+/// Embed a font for a rendering-mode-3 text layer over an existing page image.
+/// Unsupported visible glyphs use .notdef outlines, but retain distinct Unicode
+/// CIDs. This font must never be selected for visible text rendering.
+pub fn ensure_invisible_text_font(
+    doc: &mut LopdfDocument,
+    page_id: ObjectId,
+    chars_needed: &HashSet<char>,
+) -> Result<Option<String>, HandlerError> {
+    ensure_font_for_chars(
+        doc,
+        page_id,
+        chars_needed,
+        Some("HCDText"),
+        None,
+        true,
+        FontUsage::Invisible,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum FontUsage {
+    Visible,
+    Emoji,
+    Invisible,
+}
+
+/// Fill only gaps in the existing page fonts. Coverage is checked before
+/// mutating resources, so an unsupported scalar cannot produce a partial edit.
+pub fn ensure_text_fallback_fonts(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    text: &str,
+) -> Result<(), HandlerError> {
+    let page_id = *doc
+        .get_pages()
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+    let mut missing = Vec::new();
+    crate::content_stream::pick_fonts_for_text(doc, page_id, None, text, &mut missing)?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let sans = Face::parse(BUNDLED_NOTO, 0).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid bundled font: {error:?}"))
+    })?;
+    let emoji = Face::parse(BUNDLED_NOTO_EMOJI, 0).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid bundled emoji font: {error:?}"))
+    })?;
+    let mut sans_chars = HashSet::new();
+    let mut emoji_chars = HashSet::new();
+    for character in missing {
+        if sans.glyph_index(character).is_some() {
+            sans_chars.insert(character);
+        } else if emoji.glyph_index(character).is_some() {
+            emoji_chars.insert(character);
+        } else {
+            return Err(HandlerError::OperationFailed(format!(
+                "no bundled PDF fallback glyph for U+{:04X}",
+                character as u32
+            )));
+        }
+    }
+    for (characters, usage) in [
+        (&sans_chars, FontUsage::Visible),
+        (&emoji_chars, FontUsage::Emoji),
+    ] {
+        if !characters.is_empty() {
+            ensure_font_for_chars(doc, page_id, characters, None, None, true, usage)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_font_for_chars(
+    doc: &mut LopdfDocument,
+    page_id: ObjectId,
+    chars_needed: &HashSet<char>,
+    preferred_name: Option<&str>,
+    user_font_file: Option<&str>,
+    force_embed: bool,
+    usage: FontUsage,
+) -> Result<Option<String>, HandlerError> {
+    let invisible = matches!(usage, FontUsage::Invisible);
     let custom_bytes = user_font_file
         .map(|path| read_font_file(Path::new(path)))
         .transpose()?;
-    let font_bytes = custom_bytes.as_deref().unwrap_or(BUNDLED_NOTO);
+    let font_bytes = custom_bytes
+        .as_deref()
+        .unwrap_or(if matches!(usage, FontUsage::Emoji) {
+            BUNDLED_NOTO_EMOJI
+        } else {
+            BUNDLED_NOTO
+        });
     let identity = if custom_bytes.is_some() {
         crate::fonts::font_identity(font_bytes, 0)?
     } else {
-        crate::fonts::bundled_font_catalog()[0].clone()
+        crate::fonts::bundled_font_catalog()[usize::from(matches!(usage, FontUsage::Emoji))].clone()
     };
     // A semantic export supplies the same complete character set for the first
     // text block on every page. Reuse an already embedded Type0 font object
@@ -328,8 +428,9 @@ pub fn ensure_cjk_font_for_chars(
             chars_needed,
             &identity.sha256,
             identity.face_index,
+            invisible,
         ) {
-            let page_font_name = choose_pdf_font_name(doc, page_id, preferred_name);
+            let page_font_name = choose_pdf_font_name(doc, page_id, preferred_name)?;
             register_font_on_page(doc, page_id, &page_font_name, font_id)?;
             return Ok(Some(page_font_name));
         }
@@ -359,6 +460,8 @@ pub fn ensure_cjk_font_for_chars(
     for &ch in &chars_to_embed {
         if let Some(GlyphId(gid)) = face.glyph_index(ch) {
             char_to_gid.push((ch, gid));
+        } else if invisible {
+            char_to_gid.push((ch, 0));
         } else {
             missing_in_font.push(ch);
         }
@@ -424,7 +527,7 @@ pub fn ensure_cjk_font_for_chars(
         .unwrap_or(ascender);
     let italic_angle: f32 = face.italic_angle().unwrap_or(0.0);
 
-    let pdf_font_name = choose_pdf_font_name(doc, page_id, preferred_name);
+    let pdf_font_name = choose_pdf_font_name(doc, page_id, preferred_name)?;
     if face.tables().glyf.is_none() {
         return Err(HandlerError::OperationFailed(
             "font embedding requires TrueType glyf outlines".into(),
@@ -510,6 +613,7 @@ pub fn ensure_cjk_font_for_chars(
         "OfficeCLISourceFontSHA256" => Object::string_literal(identity.sha256),
         "OfficeCLISourceFontFaceIndex" => Object::Integer(i64::from(identity.face_index)),
         "OfficeCLICidMappingVersion" => Object::Integer(1),
+        "OfficeCLIInvisibleTextFont" => Object::Boolean(invisible),
         "Encoding" => Object::Name(b"Identity-H".to_vec()),
         "DescendantFonts" => Object::Array(vec![Object::Reference(cidfont_id)]),
         "ToUnicode" => Object::Reference(tu_id),
@@ -525,9 +629,13 @@ fn find_embedded_font_covering_chars(
     chars_needed: &HashSet<char>,
     source_hash: &str,
     face_index: u32,
+    invisible: bool,
 ) -> Option<ObjectId> {
     doc.objects.iter().find_map(|(object_id, object)| {
         let dictionary = object.as_dict().ok()?;
+        if is_invisible_text_font(dictionary) != invisible {
+            return None;
+        }
         if dictionary
             .get(b"OfficeCLICidMappingVersion")
             .ok()?
@@ -578,6 +686,13 @@ fn find_embedded_font_covering_chars(
     })
 }
 
+pub(crate) fn is_invisible_text_font(font: &Dictionary) -> bool {
+    font.get(b"OfficeCLIInvisibleTextFont")
+        .ok()
+        .and_then(|value| value.as_bool().ok())
+        .unwrap_or(false)
+}
+
 /// Inspect each page font and collect which of `chars_needed` it can already render.
 fn collect_supported_chars(
     doc: &LopdfDocument,
@@ -607,6 +722,9 @@ fn collect_supported_chars(
     }
 
     for (name, font) in fonts {
+        if is_invisible_text_font(font) {
+            continue;
+        }
         let font_name = String::from_utf8_lossy(&name).to_string();
         let is_subsetted = font
             .get(b"BaseFont")
@@ -700,32 +818,88 @@ fn char_renders_via_encoding(encoding: &lopdf::Encoding, ch: char) -> bool {
         .unwrap_or(false)
 }
 
-/// Pick a unique PDF font name on the page (e.g. CJK1, CJK2).
-/// Honors `preferred` if it isn't taken.
-fn choose_pdf_font_name(doc: &LopdfDocument, page_id: ObjectId, preferred: Option<&str>) -> String {
-    let existing: HashSet<String> = doc
-        .get_page_fonts(page_id)
-        .map(|fonts| {
-            fonts
-                .into_keys()
-                .map(|n| String::from_utf8_lossy(&n).to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+/// Copy the nearest inherited resource dictionary without mutating its owner.
+fn page_resources_copy(doc: &LopdfDocument, page_id: ObjectId) -> Result<Dictionary, HandlerError> {
+    let mut current = page_id;
+    let mut seen = HashSet::new();
+    while seen.insert(current) {
+        let page = doc.get_dictionary(current).map_err(|error| {
+            HandlerError::OperationFailed(format!("invalid PDF page resources: {error}"))
+        })?;
+        if let Ok(value) = page.get(b"Resources") {
+            let (_, value) = doc.dereference(value).map_err(|error| {
+                HandlerError::OperationFailed(format!("invalid PDF resource reference: {error}"))
+            })?;
+            if !matches!(value, Object::Null) {
+                return value.as_dict().cloned().map_err(|error| {
+                    HandlerError::OperationFailed(format!("invalid PDF resources: {error}"))
+                });
+            }
+        }
+        match page.get(b"Parent") {
+            Ok(parent) => {
+                current = parent.as_reference().map_err(|error| {
+                    HandlerError::OperationFailed(format!("invalid PDF resource parent: {error}"))
+                })?
+            }
+            Err(_) => return Ok(Dictionary::new()),
+        }
+    }
+    Err(HandlerError::OperationFailed(
+        "cyclic PDF resource inheritance".into(),
+    ))
+}
+
+fn font_resources_copy(
+    doc: &LopdfDocument,
+    resources: &Dictionary,
+) -> Result<Dictionary, HandlerError> {
+    let Ok(value) = resources.get(b"Font") else {
+        return Ok(Dictionary::new());
+    };
+    let (_, value) = doc.dereference(value).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid PDF Font resource reference: {error}"))
+    })?;
+    if matches!(value, Object::Null) {
+        return Ok(Dictionary::new());
+    }
+    value.as_dict().cloned().map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid PDF Font resources: {error}"))
+    })
+}
+
+/// Pick a page-local resource name, including names in indirect font maps.
+fn choose_pdf_font_name(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    preferred: Option<&str>,
+) -> Result<String, HandlerError> {
+    let resources = page_resources_copy(doc, page_id)?;
+    let existing: HashSet<String> = font_resources_copy(doc, &resources)?
+        .iter()
+        .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    if existing.len() > 4096 {
+        return Err(HandlerError::OperationFailed(
+            "PDF page exceeds 4096 font resources".into(),
+        ));
+    }
 
     if let Some(name) = preferred {
         if !existing.contains(name) {
-            return name.to_string();
+            return Ok(name.to_string());
         }
     }
 
-    for i in 1..1000 {
+    for i in 1..=existing.len().saturating_add(1) {
         let candidate = format!("CJK{}", i);
         if !existing.contains(&candidate) {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    "CJK_FALLBACK".to_string()
+    Err(HandlerError::OperationFailed(
+        "no free PDF font resource name".into(),
+    ))
 }
 
 /// PDF Subset Prefix — 6 uppercase ASCII letters preceding `+`.
@@ -794,48 +968,16 @@ fn register_font_on_page(
     font_name: &str,
     font_obj_id: ObjectId,
 ) -> Result<(), HandlerError> {
-    let resources = doc.get_or_create_resources(page_id).map_err(|e| {
-        HandlerError::OperationFailed(format!("failed to get/create page resources: {:?}", e))
-    })?;
-
-    // `resources` may be a direct dict or a reference to a shared resources object.
-    // We resolve to the actual mutable Dictionary.
-    let resources_id_opt: Option<ObjectId> = match resources {
-        Object::Reference(id) => Some(*id),
-        _ => None,
-    };
-
-    if let Some(res_id) = resources_id_opt {
-        let res_obj = doc.get_object_mut(res_id).map_err(|e| {
-            HandlerError::OperationFailed(format!("resources obj missing: {:?}", e))
-        })?;
-        ensure_font_in_resources(res_obj, font_name, font_obj_id)?;
-    } else {
-        ensure_font_in_resources(resources, font_name, font_obj_id)?;
-    }
-
-    Ok(())
-}
-
-fn ensure_font_in_resources(
-    resources: &mut Object,
-    font_name: &str,
-    font_obj_id: ObjectId,
-) -> Result<(), HandlerError> {
-    let dict = resources
-        .as_dict_mut()
-        .map_err(|e| HandlerError::OperationFailed(format!("resources not a dict: {:?}", e)))?;
-    if !dict.has(b"Font") {
-        dict.set("Font", Dictionary::new());
-    }
-    let font_dict = dict
-        .get_mut(b"Font")
-        .and_then(Object::as_dict_mut)
-        .map_err(|e| HandlerError::OperationFailed(format!("/Font not a dict: {:?}", e)))?;
-    font_dict.set(
-        font_name.as_bytes().to_vec(),
-        Object::Reference(font_obj_id),
-    );
+    // Copy both levels: Resources and Font can independently be inherited or
+    // shared indirect dictionaries. A font added to one page must not mutate
+    // the dictionaries used by another page.
+    let mut resources = page_resources_copy(doc, page_id)?;
+    let mut fonts = font_resources_copy(doc, &resources)?;
+    fonts.set(font_name.as_bytes(), font_obj_id);
+    resources.set("Font", fonts);
+    doc.get_dictionary_mut(page_id)
+        .map_err(|error| HandlerError::OperationFailed(format!("missing PDF page: {error}")))?
+        .set("Resources", resources);
     Ok(())
 }
 
@@ -900,6 +1042,122 @@ mod tests {
     }
 
     #[test]
+    fn fallback_registration_copies_indirect_and_inherited_resources_without_changing_peers() {
+        for inherited in [false, true] {
+            for indirect in [false, true] {
+                let mut doc = empty_two_page_document();
+                let first = doc.get_pages()[&1];
+                let second = doc.get_pages()[&2];
+                let parent = doc
+                    .get_dictionary(first)
+                    .unwrap()
+                    .get(b"Parent")
+                    .unwrap()
+                    .as_reference()
+                    .unwrap();
+                let original = doc.add_object(dictionary! {"Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>"Helvetica", "Encoding"=>"WinAnsiEncoding"});
+                let fonts = doc.add_object(dictionary! {"CJK1"=>original});
+                let resources = dictionary! {"Font"=>fonts, "ProcSet"=>vec![Object::Name(b"PDF".to_vec()),Object::Name(b"Text".to_vec())]};
+                let shared = doc.add_object(resources.clone());
+                let value = if indirect {
+                    Object::Reference(shared)
+                } else {
+                    Object::Dictionary(resources)
+                };
+                if inherited {
+                    doc.get_dictionary_mut(parent)
+                        .unwrap()
+                        .set("Resources", value);
+                    doc.get_dictionary_mut(first).unwrap().remove(b"Resources");
+                    doc.get_dictionary_mut(second).unwrap().remove(b"Resources");
+                } else {
+                    doc.get_dictionary_mut(first)
+                        .unwrap()
+                        .set("Resources", value.clone());
+                    doc.get_dictionary_mut(second)
+                        .unwrap()
+                        .set("Resources", value);
+                }
+                let before = format!(
+                    "{:?}{:?}{:?}{:?}",
+                    doc.get_object(fonts),
+                    doc.get_object(shared),
+                    doc.get_dictionary(second),
+                    doc.get_dictionary(parent)
+                );
+                ensure_text_fallback_fonts(&mut doc, 1, "AB保存😀").unwrap();
+                let after = format!(
+                    "{:?}{:?}{:?}{:?}",
+                    doc.get_object(fonts),
+                    doc.get_object(shared),
+                    doc.get_dictionary(second),
+                    doc.get_dictionary(parent)
+                );
+                assert_eq!(before, after, "shared resources or another page changed");
+                let resources = doc
+                    .get_dictionary(first)
+                    .unwrap()
+                    .get(b"Resources")
+                    .unwrap()
+                    .as_dict()
+                    .unwrap();
+                assert!(resources.has(b"ProcSet"));
+                let registered = resources.get(b"Font").unwrap().as_dict().unwrap();
+                assert_eq!(
+                    registered.get(b"CJK1").unwrap().as_reference().unwrap(),
+                    original
+                );
+                assert!(registered.len() >= 3);
+                let mut missing = Vec::new();
+                crate::content_stream::pick_fonts_for_text(
+                    &doc,
+                    first,
+                    Some("CJK1"),
+                    "AB保存😀",
+                    &mut missing,
+                )
+                .unwrap();
+                assert!(missing.is_empty());
+                let count = doc.objects.len();
+                ensure_text_fallback_fonts(&mut doc, 1, "AB保存😀").unwrap();
+                assert_eq!(
+                    doc.objects.len(),
+                    count,
+                    "a covered edit should reuse its fonts"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_fallback_glyph_does_not_partially_change_the_document() {
+        let mut doc = empty_two_page_document();
+        let before = format!("{:?}", doc.objects);
+        assert!(ensure_text_fallback_fonts(&mut doc, 1, "保存\u{10ffff}")
+            .unwrap_err()
+            .to_string()
+            .contains("U+10FFFF"));
+        assert_eq!(format!("{:?}", doc.objects), before);
+    }
+
+    #[test]
+    fn fallback_accepts_null_font_maps_but_rejects_invalid_resource_inheritance() {
+        let mut doc = empty_two_page_document();
+        let page = doc.get_pages()[&1];
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Resources", dictionary! {"Font"=>Object::Null});
+        ensure_text_fallback_fonts(&mut doc, 1, "中").unwrap();
+        assert!(!doc.get_page_fonts(page).unwrap().is_empty());
+        doc.get_dictionary_mut(page).unwrap().remove(b"Resources");
+        doc.get_dictionary_mut(page).unwrap().set("Parent", page);
+        assert!(page_resources_copy(&doc, page)
+            .unwrap_err()
+            .to_string()
+            .contains("cyclic"));
+    }
+
+    #[test]
     fn embedded_font_reuse_requires_the_requested_file_identity_and_character_coverage() {
         let mut doc = empty_two_page_document();
         let sans = Face::parse(BUNDLED_NOTO, 0).unwrap();
@@ -915,6 +1173,7 @@ mod tests {
             &chars,
             &crate::fonts::bundled_font_catalog()[0].sha256,
             0,
+            false,
         )
         .unwrap();
         let before = doc.objects.len();
@@ -934,6 +1193,7 @@ mod tests {
             &chars,
             &crate::fonts::bundled_font_catalog()[1].sha256,
             0,
+            false,
         )
         .unwrap();
         assert_ne!(
@@ -982,6 +1242,64 @@ mod tests {
     }
 
     #[test]
+    fn invisible_fonts_preserve_unsupported_unicode_without_becoming_visible_fallbacks() {
+        let mut doc = empty_two_page_document();
+        let page = doc.get_pages()[&1];
+        let text = "离线 A 😀\u{10ffff}";
+        let chars = text.chars().collect();
+        let name = ensure_invisible_text_font(&mut doc, page, &chars)
+            .unwrap()
+            .unwrap();
+        let operand =
+            crate::content_stream::encode_chunk_with_font(&doc, page, &name, text).unwrap();
+        attach_text(&mut doc, page, &name, &operand);
+        let parsed = crate::content_stream::parse_page_content_stream(
+            &doc.get_page_content(page).unwrap(),
+            page,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<String>(),
+            text
+        );
+        let mut missing = Vec::new();
+        crate::content_stream::pick_fonts_for_text(&doc, page, Some(&name), "A", &mut missing)
+            .unwrap();
+        assert_eq!(
+            missing,
+            vec!['A'],
+            "search-layer fonts must not be picked as visible fallbacks"
+        );
+        let hidden = find_embedded_font_covering_chars(
+            &doc,
+            &chars,
+            &crate::fonts::bundled_font_catalog()[0].sha256,
+            0,
+            true,
+        )
+        .unwrap();
+        let visible_chars = HashSet::from(['A']);
+        ensure_cjk_font_for_chars(&mut doc, 2, &visible_chars, None, None, true).unwrap();
+        let visible = find_embedded_font_covering_chars(
+            &doc,
+            &visible_chars,
+            &crate::fonts::bundled_font_catalog()[0].sha256,
+            0,
+            false,
+        )
+        .unwrap();
+        assert_ne!(
+            hidden, visible,
+            "invisible .notdef mappings must not be reused for visible text"
+        );
+    }
+
+    #[test]
     fn unicode_aliases_of_one_glyph_have_distinct_cids_and_roundtrip_exactly() {
         let face = Face::parse(BUNDLED_NOTO, 0).unwrap();
         let mut seen = HashMap::new();
@@ -1008,6 +1326,7 @@ mod tests {
             &chars,
             &crate::fonts::bundled_font_catalog()[0].sha256,
             0,
+            false,
         )
         .unwrap();
         let font = doc.get_dictionary(font_id).unwrap();
@@ -1088,6 +1407,7 @@ mod tests {
             &chars,
             &crate::fonts::bundled_font_catalog()[0].sha256,
             0,
+            false,
         )
         .unwrap();
         let font = doc.get_dictionary(font_id).unwrap();

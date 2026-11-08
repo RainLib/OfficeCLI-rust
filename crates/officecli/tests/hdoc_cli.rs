@@ -26,6 +26,63 @@ fn bundle_node_ids(bundle: &Path) -> Vec<String> {
 }
 
 #[test]
+fn xlsx_formula_audit_checks_fixed_head_and_rejects_wrong_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.xlsx");
+    let wrong = temp.path().join("wrong.xlsx");
+    let bundle = temp.path().join("bundle");
+    officecli()
+        .args(["create", source.to_str().unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "hdoc",
+            "import",
+            source.to_str().unwrap(),
+            "--output",
+            bundle.to_str().unwrap(),
+            "--document-id",
+            "audit",
+        ])
+        .assert()
+        .success();
+    let before = std::fs::read(bundle.join("manifest.json")).unwrap();
+    let output = officecli()
+        .args([
+            "hdoc",
+            "audit-xlsx-formulas",
+            bundle.to_str().unwrap(),
+            "--source",
+            source.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["data"]["revision"], 0);
+    assert_eq!(result["data"]["documentId"], "audit");
+    assert_eq!(result["data"]["sourceFreeEditsAuthorized"], false);
+    assert_eq!(std::fs::read(bundle.join("manifest.json")).unwrap(), before);
+    std::fs::write(&wrong, b"not the original").unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "audit-xlsx-formulas",
+            bundle.to_str().unwrap(),
+            "--source",
+            wrong.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("XLSX_SOURCE_CHANGED"));
+}
+
+#[test]
 fn hdoc_cli_import_patch_validate_export_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.docx");

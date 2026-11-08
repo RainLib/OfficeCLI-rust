@@ -96,19 +96,47 @@ impl WordHandler {
     /// Append typed text blocks in one DOM pass, including native hyperlinks.
     /// Validation/building happens before mutating the package.
     pub fn append_rich_blocks(&self, blocks: &[crate::RichBlock]) -> Result<(), HandlerError> {
+        self.append_rich_blocks_to("/body", blocks)
+    }
+
+    /// Append rich blocks to a body, header or footer root. Hyperlinks belong to
+    /// the receiving OPC part, so identical IDs in other stories stay independent.
+    pub fn append_rich_blocks_to(
+        &self,
+        parent: &str,
+        blocks: &[crate::RichBlock],
+    ) -> Result<(), HandlerError> {
         if !self.editable {
             return Err(HandlerError::OperationFailed(
                 "document opened in read-only mode".into(),
             ));
         }
+        let (part_path, original) = if parent == "/body" {
+            (DOCUMENT_PART.to_string(), None)
+        } else if let Some((kind, index)) = semantic_header_footer_path(parent) {
+            let package = self.package.borrow();
+            let part = resolve_docx_raw_part_path(&package, &format!("/{kind}[{index}]"))?;
+            let xml = package
+                .read_part_xml(&part)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            (part, Some(parse_document_xml(&xml)?))
+        } else {
+            return Err(HandlerError::InvalidArgument(
+                "rich blocks require /body, /header[N], or /footer[N]".into(),
+            ));
+        };
         if blocks.is_empty() {
             return Ok(());
         }
-        let mut dom = self.parse_dom()?;
+        let mut dom = if let Some(original) = &original {
+            header_footer_as_body_dom(original)
+        } else {
+            self.parse_dom()?
+        };
         let existing = self
             .package
             .borrow()
-            .part_rels(DOCUMENT_PART)
+            .part_rels(&part_path)
             .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
         let mut used: HashSet<String> = existing.all().keys().cloned().collect();
         let mut targets = HashMap::new();
@@ -149,10 +177,15 @@ impl WordHandler {
         if !additions.is_empty() {
             // Preserve all existing relationship nodes, attributes and namespace prefixes.
             let mut package = self.package.borrow_mut();
-            let part = "word/_rels/document.xml.rels";
-            let source = if package.has_part(part) {
+            let (directory, name) = part_path.rsplit_once('/').unwrap_or(("", &part_path));
+            let part = if directory.is_empty() {
+                format!("_rels/{name}.rels")
+            } else {
+                format!("{directory}/_rels/{name}.rels")
+            };
+            let source = if package.has_part(&part) {
                 package
-                    .read_part_xml(part)
+                    .read_part_xml(&part)
                     .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
             } else {
                 "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>".into()
@@ -194,10 +227,14 @@ impl WordHandler {
             let xml = String::from_utf8(writer.into_inner())
                 .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
             package
-                .write_part_xml(part, &xml)
+                .write_part_xml(&part, &xml)
                 .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
         }
-        self.write_dom(&dom)
+        if let Some(original) = &original {
+            write_header_footer_body_dom(&mut self.package.borrow_mut(), &part_path, original, &dom)
+        } else {
+            self.write_dom(&dom)
+        }
     }
 
     pub fn add_batch(

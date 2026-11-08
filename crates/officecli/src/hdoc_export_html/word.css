@@ -1,0 +1,10 @@
+body.hcd-word-export{box-sizing:border-box!important;width:auto!important;max-width:none!important;min-width:0!important;margin:24px!important;padding:0!important;background:transparent!important;box-shadow:none!important}
+.hcd-word-export>.hcd-word-sources{display:none!important}
+.hcd-word-pages{display:flex;flex-direction:column;align-items:center;gap:20px}
+.hcd-word-page{position:relative;flex:none;box-sizing:border-box;background:white;box-shadow:0 3px 18px #0002;overflow:visible}
+.hcd-word-page-header,.hcd-word-page-footer{position:absolute;display:flow-root;min-height:0}
+.hcd-word-page-body{position:absolute;display:flow-root;overflow:visible}
+.hcd-word-page .hcd-chunk,.hcd-word-export-measure .hcd-chunk{content-visibility:visible!important;contain:none!important;contain-intrinsic-size:none!important}
+.hcd-word-export-measure{position:absolute;visibility:hidden;left:-100000px;top:0;display:flow-root;content-visibility:visible;contain:none}
+.hcd-word-export-ready .hcd-word-page{content-visibility:auto;contain-intrinsic-size:auto 1122px}
+@media print{html{background:white!important}body.hcd-word-export{margin:0!important}.hcd-word-pages{display:block}.hcd-word-page{margin:0;box-shadow:none;break-after:page;content-visibility:visible!important}.hcd-word-page:last-child{break-after:auto}}

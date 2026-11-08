@@ -4,6 +4,7 @@ use hcd_core::{
     NodeMapEntry, SourceAnchor, SourceDescriptor, DEFAULT_CHUNK_BLOCKS, DEFAULT_CHUNK_SOFT_BYTES,
     HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES,
 };
+use oxml::semantic_lists::{ListParagraph as ListOwnership, ParagraphRole};
 use oxml::{PackageError, StreamingOxmlArchive};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -27,6 +28,8 @@ pub struct ImportOptions {
     pub chunk_soft_bytes: usize,
     pub chunk_blocks: usize,
     pub storage_codec: hcd_core::StorageCodec,
+    /// Internal opt-in until region-aware editing/save/export negotiate this model.
+    pub flow_layout: bool,
 }
 
 impl ImportOptions {
@@ -36,6 +39,7 @@ impl ImportOptions {
             chunk_soft_bytes: DEFAULT_CHUNK_SOFT_BYTES,
             chunk_blocks: DEFAULT_CHUNK_BLOCKS,
             storage_codec: hcd_core::StorageCodec::Gzip,
+            flow_layout: false,
         }
     }
 }
@@ -55,6 +59,18 @@ struct RenderedBlock {
     entries: Vec<NodeMapEntry>,
     visual_placement: Option<VisualPlacement>,
     requires_overflow_visible: bool,
+    list: Option<ListParagraph>,
+    semantic_read_only: bool,
+    ownership: Option<ListOwnership>,
+}
+
+struct ListParagraph {
+    id: String,
+    number_id: String,
+    depth: u8,
+    ordered: bool,
+    ordinal: u32,
+    owner: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -67,7 +83,10 @@ struct VisualPlacement {
 
 #[derive(Default)]
 struct ParagraphBuilder {
+    flow_metadata: bool,
+    flow_body_paragraph: bool,
     paragraph_id: Option<String>,
+    ownership: Option<ListOwnership>,
     format: ParagraphFormat,
     html: String,
     entries: Vec<NodeMapEntry>,
@@ -81,6 +100,7 @@ struct ParagraphBuilder {
 #[derive(Default, Clone)]
 struct ParagraphFormat {
     style_id: Option<String>,
+    outline_level: Option<u8>,
     alignment: Option<String>,
     bidi: bool,
     keep_next: bool,
@@ -137,6 +157,7 @@ struct RunFormat {
 
 #[derive(Default)]
 struct WordStyleDefinition {
+    name: Option<String>,
     kind: Option<String>,
     is_default: bool,
     based_on: Option<String>,
@@ -252,7 +273,13 @@ const CONDITIONAL_STYLE_FLAGS: [ConditionalStyleFlag; 12] = [
 struct RenderedWordStyles {
     css: String,
     table_bands: TableBandCatalog,
-    paragraph_numbering: BTreeMap<String, (String, Option<String>)>,
+    paragraph_styles: ParagraphStyles,
+}
+
+#[derive(Debug, Default)]
+struct ParagraphStyles {
+    numbering: BTreeMap<String, (String, Option<String>)>,
+    outlines: BTreeMap<String, u8>,
 }
 
 struct StylePropertyScope<'a> {
@@ -339,6 +366,7 @@ struct PendingText {
 
 #[derive(Default)]
 struct FieldFrame {
+    id: String,
     instruction: String,
     wrapper_is_anchor: Option<bool>,
     simple: bool,
@@ -464,6 +492,8 @@ struct NumberingState {
 struct RenderedNumberMarker {
     html: String,
     definition: NumberLevel,
+    depth: u8,
+    ordinal: i64,
 }
 
 fn load_word_theme(archive: &mut StreamingOxmlArchive) -> Result<WordTheme, HcdError> {
@@ -737,7 +767,7 @@ fn load_word_styles(
         return Ok(RenderedWordStyles {
             css: format!("{FONT_METADATA_CSS_MARKER}{}", default_styles()),
             table_bands: BTreeMap::new(),
-            paragraph_numbering: BTreeMap::new(),
+            paragraph_styles: ParagraphStyles::default(),
         });
     }
     let xml = archive
@@ -924,11 +954,14 @@ fn load_word_styles(
     append_table_style_css(&mut css, &styles);
     hcd_core::validate_css_text(&css)?;
     let table_bands = resolve_table_band_catalog(&styles);
-    let paragraph_numbering = resolve_paragraph_style_numbering(&styles);
+    let paragraph_styles = ParagraphStyles {
+        numbering: resolve_paragraph_style_numbering(&styles),
+        outlines: resolve_paragraph_style_outlines(&styles),
+    };
     Ok(RenderedWordStyles {
         css,
         table_bands,
-        paragraph_numbering,
+        paragraph_styles,
     })
 }
 
@@ -963,6 +996,45 @@ fn resolve_paragraph_style_numbering(
             let (number_id, level) = resolve(style_id, styles, &mut HashSet::new());
             number_id.map(|number_id| (style_id.clone(), (number_id, level)))
         })
+        .collect()
+}
+
+fn builtin_heading_outline(name: &str) -> Option<u8> {
+    let name = name.to_ascii_lowercase().replace(' ', "");
+    let level = name.strip_prefix("heading")?.parse::<u8>().ok()?;
+    (1..=9).contains(&level).then(|| level - 1)
+}
+
+fn resolve_paragraph_style_outlines(
+    styles: &BTreeMap<String, WordStyleDefinition>,
+) -> BTreeMap<String, u8> {
+    fn resolve(
+        id: &str,
+        styles: &BTreeMap<String, WordStyleDefinition>,
+        seen: &mut HashSet<String>,
+    ) -> Option<u8> {
+        if seen.len() >= MAX_XML_DEPTH || !seen.insert(id.into()) {
+            return None;
+        }
+        let style = styles.get(id)?;
+        if style.kind.as_deref() != Some("paragraph") {
+            return None;
+        }
+        style
+            .paragraph
+            .outline_level
+            .or_else(|| builtin_heading_outline(id))
+            .or_else(|| style.name.as_deref().and_then(builtin_heading_outline))
+            .or_else(|| {
+                style
+                    .based_on
+                    .as_deref()
+                    .and_then(|parent| resolve(parent, styles, seen))
+            })
+    }
+    styles
+        .keys()
+        .filter_map(|id| resolve(id, styles, &mut HashSet::new()).map(|level| (id.clone(), level)))
         .collect()
 }
 
@@ -2060,6 +2132,8 @@ impl NumberingState {
         Some(RenderedNumberMarker {
             html: format!("<span{attributes}>{}</span>", escape_text(&marker)),
             definition,
+            depth: level,
+            ordinal: counters.values[usize::from(level)],
         })
     }
 }
@@ -2147,6 +2221,12 @@ fn capture_style_property(
 ) {
     let qualified_name = element.name();
     let name = local_name(qualified_name.as_ref());
+    if name == "name" {
+        if let Some((_, definition)) = current {
+            definition.name = attribute_by_local_name(element, "val");
+        }
+        return;
+    }
     if name == "basedOn" {
         if let Some((_, definition)) = current {
             definition.based_on = attribute_by_local_name(element, "val");
@@ -2336,11 +2416,12 @@ struct PartRelationships {
 }
 
 struct TextPartContext<'a> {
+    preserve_fields: bool,
     document_id: &'a str,
     part: &'a str,
     relationships: &'a PartRelationships,
     numbering: &'a NumberingCatalog,
-    paragraph_numbering: &'a BTreeMap<String, (String, Option<String>)>,
+    paragraph_styles: &'a ParagraphStyles,
     theme: &'a WordTheme,
     table_bands: &'a TableBandCatalog,
 }
@@ -2859,6 +2940,141 @@ fn table_band_index(zero_based_position: u64, band_size: u32) -> u8 {
     ((zero_based_position / band_size) % 2 + 1) as u8
 }
 
+struct ListFrame {
+    depth: u8,
+    number_id: String,
+    ordered: bool,
+    next: Option<u32>,
+    owner: Option<u32>,
+}
+
+/// Buffer one root item, not the entire list. A root and its descendants must
+/// share a canonical block so edits retain every original source anchor.
+#[derive(Default)]
+struct PendingList {
+    block: RenderedBlock,
+    frames: Vec<ListFrame>,
+}
+
+impl PendingList {
+    fn append_continuation(
+        &mut self,
+        block: &mut RenderedBlock,
+        owner: ListOwnership,
+    ) -> Result<bool, HcdError> {
+        if !self
+            .frames
+            .iter()
+            .any(|frame| frame.depth == owner.depth() && frame.owner == Some(owner.item()))
+        {
+            return Ok(false);
+        }
+        self.reserve_block(block)?;
+        while self
+            .frames
+            .last()
+            .is_some_and(|frame| frame.depth > owner.depth())
+        {
+            self.close_level();
+        }
+        self.block.html.push_str(&block.html);
+        self.block.entries.append(&mut block.entries);
+        self.block.requires_overflow_visible |= block.requires_overflow_visible;
+        Ok(true)
+    }
+
+    fn reserve_block(&self, block: &RenderedBlock) -> Result<(), HcdError> {
+        if self.block.html.len().saturating_add(block.html.len())
+            > MAX_CHUNK_BYTES.saturating_sub(2048)
+        {
+            return Err(HcdError::ResourceLimit(
+                "NODE_TOO_LARGE: DOCX root list item exceeds canonical chunk limit".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn root_depth(&self) -> u8 {
+        self.frames[0].depth
+    }
+
+    fn close_level(&mut self) {
+        let frame = self.frames.pop().expect("open list frame");
+        self.block.html.push_str(if frame.ordered {
+            "</li></ol>"
+        } else {
+            "</li></ul>"
+        });
+    }
+
+    fn append(&mut self, mut block: RenderedBlock) -> Result<(), HcdError> {
+        // Reserve wrappers/closing tags before extending the buffer. Huge
+        // subtrees fail explicitly rather than silently losing nesting.
+        self.reserve_block(&block)?;
+        let item = block.list.take().expect("numbered paragraph");
+        while self
+            .frames
+            .last()
+            .is_some_and(|frame| frame.depth > item.depth)
+        {
+            self.close_level();
+        }
+        if self
+            .frames
+            .last()
+            .is_some_and(|frame| frame.depth == item.depth)
+        {
+            let frame = self.frames.last().expect("open list");
+            let compatible = frame.ordered == item.ordered
+                && frame.number_id == item.number_id
+                && (!item.ordered || frame.next == Some(item.ordinal));
+            if compatible {
+                self.block.html.push_str("</li>");
+            } else {
+                self.close_level();
+            }
+        }
+        if self
+            .frames
+            .last()
+            .is_none_or(|frame| frame.depth < item.depth)
+        {
+            let series = escape_attribute(&item.number_id);
+            self.block.html.push_str(&if item.ordered {
+                format!(
+                    "<ol class=\"hcd-word-list\" data-hcd-word-list-id=\"{series}\" start=\"{}\">",
+                    item.ordinal
+                )
+            } else {
+                format!("<ul class=\"hcd-word-list\" data-hcd-word-list-id=\"{series}\">")
+            });
+            self.frames.push(ListFrame {
+                depth: item.depth,
+                number_id: item.number_id,
+                ordered: item.ordered,
+                next: None,
+                owner: None,
+            });
+        }
+        self.frames.last_mut().expect("open list").next = item.ordinal.checked_add(1);
+        self.frames.last_mut().expect("open list").owner = item.owner;
+        self.block.html.push_str(&format!(
+            "<li data-hcd-id=\"{}\">",
+            escape_attribute(&item.id)
+        ));
+        self.block.html.push_str(&block.html);
+        self.block.entries.extend(block.entries);
+        self.block.requires_overflow_visible |= block.requires_overflow_visible;
+        Ok(())
+    }
+
+    fn finish(mut self) -> RenderedBlock {
+        while !self.frames.is_empty() {
+            self.close_level();
+        }
+        self.block
+    }
+}
+
 struct ChunkAccumulator<'a, F>
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
@@ -2866,6 +3082,7 @@ where
     document_id: &'a str,
     part: &'a str,
     region: &'a str,
+    flow_metadata: bool,
     soft_bytes: usize,
     max_blocks: usize,
     chunk_ordinal: usize,
@@ -2874,6 +3091,9 @@ where
     block_count: usize,
     continuation: bool,
     requires_overflow_visible: bool,
+    pending_list: Option<PendingList>,
+    ownership_items: HashSet<u32>,
+    ignored_ownership: bool,
     writer: &'a mut BundleWriter,
     emit: &'a mut F,
 }
@@ -2894,6 +3114,7 @@ where
             document_id,
             part,
             region,
+            flow_metadata: options.flow_layout,
             soft_bytes: options.chunk_soft_bytes.min(MAX_CHUNK_BYTES),
             max_blocks: options.chunk_blocks.clamp(1, DEFAULT_CHUNK_BLOCKS),
             chunk_ordinal: 0,
@@ -2902,12 +3123,74 @@ where
             block_count: 0,
             continuation: false,
             requires_overflow_visible: false,
+            pending_list: None,
+            ownership_items: HashSet::new(),
+            ignored_ownership: false,
             writer,
             emit,
         }
     }
 
-    fn push_block(&mut self, block: RenderedBlock, continuation: bool) -> Result<(), HcdError> {
+    fn push_block(&mut self, mut block: RenderedBlock, continuation: bool) -> Result<(), HcdError> {
+        if let Some(owner) = block.ownership.take() {
+            match owner.role() {
+                ParagraphRole::Start => {
+                    if let Some(item) = block
+                        .list
+                        .as_mut()
+                        .filter(|item| item.depth == owner.depth())
+                    {
+                        if self.ownership_items.insert(owner.item()) {
+                            item.owner = Some(owner.item());
+                        } else {
+                            self.ignored_ownership = true;
+                        }
+                    } else {
+                        self.ignored_ownership = true;
+                    }
+                }
+                ParagraphRole::Continuation => {
+                    if block.list.is_none()
+                        && !block.semantic_read_only
+                        && block.html.starts_with("<p ")
+                    {
+                        if let Some(list) = &mut self.pending_list {
+                            if list.append_continuation(&mut block, owner)? {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    self.ignored_ownership = true;
+                }
+            }
+        }
+        let depth = block.list.as_ref().map(|item| item.depth);
+        if self
+            .pending_list
+            .as_ref()
+            .is_some_and(|list| depth.is_none_or(|depth| depth <= list.root_depth()))
+        {
+            self.finish_list()?;
+        }
+        if depth.is_some() {
+            self.pending_list.get_or_insert_default().append(block)?;
+            return Ok(());
+        }
+        self.push_ready_block(block, continuation)
+    }
+
+    fn finish_list(&mut self) -> Result<(), HcdError> {
+        if let Some(list) = self.pending_list.take() {
+            self.push_ready_block(list.finish(), false)?;
+        }
+        Ok(())
+    }
+
+    fn push_ready_block(
+        &mut self,
+        block: RenderedBlock,
+        continuation: bool,
+    ) -> Result<(), HcdError> {
         if block.html.len() > MAX_CHUNK_BYTES {
             return Err(HcdError::ResourceLimit(format!(
                 "NODE_TOO_LARGE: block in {} is {} bytes",
@@ -2919,7 +3202,7 @@ where
             && (self.html.len() + block.html.len() > self.soft_bytes
                 || self.block_count >= self.max_blocks)
         {
-            self.flush()?;
+            self.flush_ready()?;
         }
         self.html.push_str(&block.html);
         self.entries.extend(block.entries);
@@ -2930,6 +3213,11 @@ where
     }
 
     fn flush(&mut self) -> Result<(), HcdError> {
+        self.finish_list()?;
+        self.flush_ready()
+    }
+
+    fn flush_ready(&mut self) -> Result<(), HcdError> {
         if self.block_count == 0 {
             return Ok(());
         }
@@ -2942,9 +3230,10 @@ where
             ""
         };
         let html = format!(
-            "<section class=\"hcd-chunk{overflow_class}\" data-hcd-chunk-id=\"{}\" data-hcd-region=\"{}\">{}</section>",
+            "<section class=\"hcd-chunk{overflow_class}\" data-hcd-chunk-id=\"{}\" data-hcd-region=\"{}\"{}>{}</section>",
             escape_attribute(&chunk_id),
             escape_attribute(self.region),
+            if self.flow_metadata {format!(" data-hcd-source-part=\"{}\"",escape_attribute(self.part))}else{String::new()},
             self.html
         );
         let source_map = ChunkSourceMap {
@@ -3041,10 +3330,31 @@ where
         .push_str(&page_layout.presentation_css());
     hcd_core::validate_css_text(&rendered_styles.css)?;
     let numbering = load_word_numbering(&mut archive)?;
+    let flow_layout = options
+        .flow_layout
+        .then(|| crate::flow_layout::load_flow_layout(&mut archive, &options.document_id))
+        .transpose()?;
     let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(&rendered_styles.css)?;
 
-    let text_parts = ordered_text_parts(&archive);
+    let mut text_parts = ordered_text_parts(&archive);
+    if let Some(layout) = &flow_layout {
+        for story in &layout.stories {
+            if !text_parts
+                .iter()
+                .any(|(part, _)| part == &story.source_part)
+            {
+                text_parts.push((
+                    story.source_part.clone(),
+                    match story.kind {
+                        hcd_core::FlowStoryKind::Header => "header",
+                        hcd_core::FlowStoryKind::Footer => "footer",
+                    }
+                    .into(),
+                ));
+            }
+        }
+    }
     let referenced_media = referenced_media_parts(&mut archive, &text_parts)?;
     let (referenced_parts, deferred_parts): (Vec<_>, Vec<_>) = archive
         .entries()
@@ -3073,11 +3383,12 @@ where
         archive
             .with_part(&part, |reader| {
                 let context = TextPartContext {
+                    preserve_fields: options.flow_layout,
                     document_id: &options.document_id,
                     part: &part,
                     relationships: &relationships,
                     numbering: &numbering,
-                    paragraph_numbering: &rendered_styles.paragraph_numbering,
+                    paragraph_styles: &rendered_styles.paragraph_styles,
                     theme: &theme,
                     table_bands: &rendered_styles.table_bands,
                 };
@@ -3088,6 +3399,17 @@ where
         accumulator.flush()?;
     }
     assets.extend(import_assets(&mut archive, &writer, emit, deferred_parts)?);
+    if let Some(layout) = &flow_layout {
+        let bytes = serde_json::to_vec(layout)?;
+        let (href, hash, byte_length) =
+            writer.write_asset_from_reader("json", &mut bytes.as_slice())?;
+        assets.push(AssetRecord {
+            source_part: hcd_core::FLOW_LAYOUT_SOURCE_PART.into(),
+            hash,
+            href,
+            byte_length,
+        });
+    }
     write_asset_index(writer.root(), &assets)?;
 
     let manifest = HcdManifest {
@@ -3109,7 +3431,7 @@ where
         index_page_count: 0,
         chunk_count: 0,
         styles_href: "styles.css".to_string(),
-        capabilities: HcdCapabilities::default(),
+        capabilities: HcdCapabilities { flow_layout: flow_layout.as_ref().map(|_| 1), ..HcdCapabilities::default() },
         fidelity: Some(FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             level: FidelityLevel::High,
@@ -3288,7 +3610,7 @@ where
     let numbering = context.numbering;
     let theme = context.theme;
     let table_bands = context.table_bands;
-    let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
+    let mut reader = quick_xml::NsReader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut paragraphs: Vec<ParagraphBuilder> = Vec::new();
@@ -3301,6 +3623,7 @@ where
     let mut skipped_fallback_depth = None;
     let mut hyperlink_tags: Vec<bool> = Vec::new();
     let mut fields: Vec<FieldFrame> = Vec::new();
+    let mut field_ordinal = 0u64;
     let mut current_text: Option<PendingText> = None;
     let mut revisions: Vec<RevisionFrame> = Vec::new();
     let mut property_change_depth = None;
@@ -3327,6 +3650,7 @@ where
     let mut element_count = 0usize;
     let mut xml_depth = 0usize;
     let mut numbering_state = NumberingState::default();
+    let mut semantic_read_only = false;
 
     loop {
         let event = reader
@@ -3482,7 +3806,14 @@ where
                             ensure_current_cell_open(table.as_mut(), cells.last_mut());
                             paragraph_ordinal += 1;
                             paragraphs.push(ParagraphBuilder {
+                                flow_metadata: context.preserve_fields,
+                                flow_body_paragraph: part == "word/document.xml" && xml_depth == 3,
                                 paragraph_id: attribute_by_local_name(start, "paraId"),
+                                ownership: read_list_ownership(
+                                    start,
+                                    &reader,
+                                    &mut chunks.ignored_ownership,
+                                ),
                                 ordinal: paragraph_ordinal,
                                 ..Default::default()
                             });
@@ -3508,12 +3839,33 @@ where
                                 append_hyperlink_start(start, relationships, paragraphs.last_mut());
                             hyperlink_tags.push(is_anchor);
                         }
+                        "fldChar" => handle_complex_field_marker(
+                            start,
+                            &mut fields,
+                            paragraphs.last_mut(),
+                            part,
+                            document_id,
+                            &mut field_ordinal,
+                            context.preserve_fields,
+                        )?,
                         "fldSimple" => {
                             let instruction =
                                 attribute_by_local_name(start, "instr").unwrap_or_default();
+                            field_ordinal += 1;
+                            let id = stable_node_id(&[
+                                document_id,
+                                part,
+                                "field",
+                                &field_ordinal.to_string(),
+                            ]);
+                            if context.preserve_fields {
+                                append_field_start(paragraphs.last_mut(), &id);
+                            }
+
                             let wrapper_is_anchor =
                                 append_field_hyperlink_start(&instruction, paragraphs.last_mut());
                             fields.push(FieldFrame {
+                                id,
                                 instruction,
                                 wrapper_is_anchor,
                                 simple: true,
@@ -3647,6 +3999,12 @@ where
                                 kind: TextNodeKind::FieldInstruction,
                             });
                         }
+                        "br" | "cr" => {
+                            ensure_run_open(paragraphs.last_mut(), runs.last_mut());
+                            if let Some(paragraph) = paragraphs.last_mut() {
+                                paragraph.html.push_str("<br/>");
+                            }
+                        }
                         "blip" => {
                             ensure_run_open(paragraphs.last_mut(), runs.last_mut());
                             image_ordinal += 1;
@@ -3760,7 +4118,14 @@ where
                         ensure_current_cell_open(table.as_mut(), cells.last_mut());
                         paragraph_ordinal += 1;
                         let paragraph = ParagraphBuilder {
+                            flow_metadata: context.preserve_fields,
+                            flow_body_paragraph: part == "word/document.xml" && xml_depth == 2,
                             paragraph_id: attribute_by_local_name(empty, "paraId"),
+                            ownership: read_list_ownership(
+                                empty,
+                                &reader,
+                                &mut chunks.ignored_ownership,
+                            ),
                             ordinal: paragraph_ordinal,
                             ..Default::default()
                         };
@@ -3769,9 +4134,10 @@ where
                             part,
                             paragraph,
                             numbering,
-                            context.paragraph_numbering,
+                            context.paragraph_styles,
                             &mut numbering_state,
                         );
+                        semantic_read_only |= block.semantic_read_only;
                         if let Some(table) = &mut table {
                             table.html.push_str(&block.html);
                             table.entries.extend(block.entries);
@@ -3787,11 +4153,35 @@ where
                             chunks.push_block(block, false)?;
                         }
                     }
+                    "fldSimple" if context.preserve_fields => {
+                        field_ordinal += 1;
+                        let id = stable_node_id(&[
+                            document_id,
+                            part,
+                            "field",
+                            &field_ordinal.to_string(),
+                        ]);
+                        append_field_start(paragraphs.last_mut(), &id);
+                        append_field_definition(
+                            paragraphs.last_mut(),
+                            part,
+                            &FieldFrame {
+                                id,
+                                instruction: attribute_by_local_name(empty, "instr")
+                                    .unwrap_or_default(),
+                                simple: true,
+                                wrapper_is_anchor: None,
+                            },
+                        )?;
+                    }
                     "fldChar" => handle_complex_field_marker(
                         empty,
                         &mut fields,
                         paragraphs.last_mut(),
                         part,
+                        document_id,
+                        &mut field_ordinal,
+                        context.preserve_fields,
                     )?,
                     "tblPrEx" if table_depth == 1 => {
                         if let Some(table) = &mut table {
@@ -3814,7 +4204,11 @@ where
                             matches!(revision.kind, RevisionKind::Delete | RevisionKind::MoveFrom)
                         });
                         if name == "t" && !deleted_revision {
-                            let editable = !cells.iter().any(|cell| cell.read_only);
+                            let policy = text_node_policy(
+                                !cells.iter().any(|cell| cell.read_only),
+                                &fields,
+                                context.preserve_fields,
+                            );
                             append_text_node(
                                 &mut paragraphs,
                                 document_id,
@@ -3822,7 +4216,7 @@ where
                                 text_ordinal,
                                 text_id,
                                 String::new(),
-                                editable,
+                                policy,
                             );
                         }
                     }
@@ -4006,7 +4400,11 @@ where
                                         field.instruction.push_str(&pending.value);
                                     }
                                 } else if pending.kind == TextNodeKind::Editable && name == "t" {
-                                    let editable = !cells.iter().any(|cell| cell.read_only);
+                                    let policy = text_node_policy(
+                                        !cells.iter().any(|cell| cell.read_only),
+                                        &fields,
+                                        context.preserve_fields,
+                                    );
                                     append_text_node(
                                         &mut paragraphs,
                                         document_id,
@@ -4014,7 +4412,7 @@ where
                                         text_ordinal,
                                         pending.text_id,
                                         pending.value,
-                                        editable,
+                                        policy,
                                     );
                                 } else {
                                     append_read_only_text(paragraphs.last_mut(), &pending.value);
@@ -4059,6 +4457,9 @@ where
                                 field.wrapper_is_anchor,
                                 paragraphs.last_mut(),
                             );
+                            if context.preserve_fields {
+                                append_field_definition(paragraphs.last_mut(), part, &field)?;
+                            }
                         }
                         "drawing" => {
                             if let Some(drawing) = drawings.pop() {
@@ -4091,9 +4492,10 @@ where
                                 part,
                                 paragraph,
                                 numbering,
-                                context.paragraph_numbering,
+                                context.paragraph_styles,
                                 &mut numbering_state,
                             );
+                            semantic_read_only |= block.semantic_read_only;
                             if let Some(table) = &mut table {
                                 table.html.push_str(&block.html);
                                 table.entries.extend(block.entries);
@@ -4259,6 +4661,20 @@ where
             "unbalanced text structure in {part}"
         )));
     }
+    if semantic_read_only {
+        warnings.push(FidelityWarning {
+            code: "WORD_SEMANTIC_EDITING_LIMIT".into(),
+            message: "Advanced numbering, decimal values outside 1–1000000, numbered headings, headings 7–9 and numbered visual groups retain their source rendering as read-only blocks; the editor supports decimal/bullet lists and headings 1–6".into(),
+            node_id: None, source_part: Some(part.into()),
+        });
+    }
+    if chunks.ignored_ownership {
+        warnings.push(FidelityWarning {
+            code: "WORD_LIST_OWNERSHIP_IGNORED".into(),
+            message: "Invalid, duplicate or stale list ownership was ignored; native paragraphs/numbering remain readable without guessing continuation ownership".into(),
+            node_id: None, source_part: Some(part.into()),
+        });
+    }
     if part == "word/document.xml" {
         warnings.push(FidelityWarning {
             code: "OPAQUE_OFFICE_OBJECTS_PRESERVED".to_string(),
@@ -4268,7 +4684,7 @@ where
         });
         warnings.push(FidelityWarning {
             code: "STYLE_AND_STRUCTURE_PATCH_UNSUPPORTED".to_string(),
-            message: "Formatting and structure are rendered from OOXML but remain read-only in HCD v1; only text and annotations are patchable".to_string(),
+            message: "Source-backed edits preserve OOXML structure; semantic heading/list edits require rebuilding the selected revision and may change layout".to_string(),
             node_id: None,
             source_part: Some(part.to_string()),
         });
@@ -4283,7 +4699,7 @@ fn append_text_node(
     text_ordinal: u64,
     text_id: Option<String>,
     text: String,
-    editable: bool,
+    policy: TextNodePolicy,
 ) {
     let Some(paragraph) = paragraphs.last_mut() else {
         return;
@@ -4321,9 +4737,23 @@ fn append_text_node(
     let node_hash = hash_bytes(canonical_text.as_bytes());
     paragraph.has_visible_text |= !canonical_text.is_empty();
     paragraph.html.push_str(&format!(
-        "<span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span>",
+        "<span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\"{}>{}</span>",
         escape_attribute(&node_id),
         node_hash,
+        if policy.fields.is_empty() {
+            if policy.computed {
+                " data-hcd-computed-field=\"1\"".to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            format!(
+                " data-hcd-word-field-path=\"{}\"",
+                escape_attribute(
+                    &serde_json::to_string(&policy.fields).expect("field IDs are strings")
+                )
+            )
+        },
         rendered_text
     ));
     paragraph.entries.push(NodeMapEntry {
@@ -4335,7 +4765,7 @@ fn append_text_node(
             paragraph_id: paragraph.paragraph_id.clone(),
             text_id,
             node_kind: "text".to_string(),
-            editable,
+            editable: policy.editable,
         },
     });
 }
@@ -4637,6 +5067,7 @@ fn capture_paragraph_format_property(element: &BytesStart<'_>, format: &mut Para
     let value = attribute_by_local_name(element, "val");
     match name {
         "pStyle" => format.style_id = value,
+        "outlineLvl" => format.outline_level = value.and_then(|v| v.parse().ok()),
         "cnfStyle" => capture_conditional_style(element, &mut format.conditional_style),
         "jc" => format.alignment = value,
         "bidi" => format.bidi = on_off_value(value.as_deref()),
@@ -4665,6 +5096,11 @@ fn capture_paragraph_format_property(element: &BytesStart<'_>, format: &mut Para
 
 fn paragraph_html_attributes(format: &ParagraphFormat) -> String {
     let mut attributes = String::new();
+    push_data_number(
+        &mut attributes,
+        "data-hcd-outline-level",
+        format.outline_level,
+    );
     push_data_attribute(
         &mut attributes,
         "data-hcd-word-style",
@@ -5356,9 +5792,22 @@ fn handle_complex_field_marker(
     fields: &mut Vec<FieldFrame>,
     paragraph: Option<&mut ParagraphBuilder>,
     part: &str,
+    document_id: &str,
+    ordinal: &mut u64,
+    preserve: bool,
 ) -> Result<(), HcdError> {
     match attribute_by_local_name(element, "fldCharType").as_deref() {
-        Some("begin") => fields.push(FieldFrame::default()),
+        Some("begin") => {
+            *ordinal += 1;
+            let id = stable_node_id(&[document_id, part, "field", &ordinal.to_string()]);
+            if preserve {
+                append_field_start(paragraph, &id);
+            }
+            fields.push(FieldFrame {
+                id,
+                ..Default::default()
+            });
+        }
         Some("separate") => {
             let field = fields.last_mut().ok_or_else(|| {
                 HcdError::InvalidBundle(format!("field separator without begin in {part}"))
@@ -5374,9 +5823,67 @@ fn handle_complex_field_marker(
                     "complex field end closed a simple field in {part}"
                 )));
             }
-            append_field_hyperlink_end(field.wrapper_is_anchor, paragraph);
+            let mut paragraph = paragraph;
+            append_field_hyperlink_end(field.wrapper_is_anchor, paragraph.as_deref_mut());
+            if preserve {
+                append_field_definition(paragraph, part, &field)?;
+            }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+struct TextNodePolicy {
+    editable: bool,
+    computed: bool,
+    fields: Vec<String>,
+}
+fn text_node_policy(editable: bool, fields: &[FieldFrame], preserve: bool) -> TextNodePolicy {
+    let computed = fields.iter().any(|field| {
+        !field
+            .instruction
+            .split_whitespace()
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("HYPERLINK"))
+    });
+    TextNodePolicy {
+        editable: editable && !computed,
+        computed,
+        fields: if computed && preserve {
+            fields.iter().map(|field| field.id.clone()).collect()
+        } else {
+            Vec::new()
+        },
+    }
+}
+fn append_field_start(paragraph: Option<&mut ParagraphBuilder>, id: &str) {
+    if let Some(paragraph) = paragraph {
+        paragraph.html.push_str(&format!(
+            "<span data-hcd-word-field-start=\"{}\"></span>",
+            escape_attribute(id)
+        ));
+    }
+}
+fn append_field_definition(
+    paragraph: Option<&mut ParagraphBuilder>,
+    part: &str,
+    field: &FieldFrame,
+) -> Result<(), HcdError> {
+    let definition = hcd_core::FlowWordFieldDefinition {
+        schema_version: hcd_core::FLOW_WORD_FIELD_SCHEMA.into(),
+        field_id: field.id.clone(),
+        source_part: part.into(),
+        instruction: field.instruction.clone(),
+        simple: field.simple,
+    };
+    definition.validate()?;
+    if let Some(paragraph) = paragraph {
+        paragraph.html.push_str(&format!(
+            "<span data-hcd-word-field-end=\"{}\" data-hcd-word-field-definition=\"{}\"></span>",
+            escape_attribute(&field.id),
+            escape_attribute(&serde_json::to_string(&definition)?)
+        ));
     }
     Ok(())
 }
@@ -5805,7 +6312,7 @@ fn finish_paragraph(
     part: &str,
     mut paragraph: ParagraphBuilder,
     numbering: &NumberingCatalog,
-    paragraph_numbering: &BTreeMap<String, (String, Option<String>)>,
+    paragraph_styles: &ParagraphStyles,
     numbering_state: &mut NumberingState,
 ) -> RenderedBlock {
     let identity = paragraph
@@ -5814,10 +6321,19 @@ fn finish_paragraph(
         .unwrap_or_else(|| paragraph.ordinal.to_string());
     let block_id = stable_node_id(&[document_id, part, "paragraph", &identity]);
     let mut effective_format = paragraph.format.clone();
+    effective_format.outline_level = effective_format.outline_level.or_else(|| {
+        effective_format.style_id.as_deref().and_then(|id| {
+            paragraph_styles
+                .outlines
+                .get(id)
+                .copied()
+                .or_else(|| builtin_heading_outline(id))
+        })
+    });
     if let Some((number_id, level)) = effective_format
         .style_id
         .as_deref()
-        .and_then(|style_id| paragraph_numbering.get(style_id))
+        .and_then(|style_id| paragraph_styles.numbering.get(style_id))
     {
         if effective_format.numbering_id.is_none() {
             effective_format.numbering_id = Some(number_id.clone());
@@ -5845,15 +6361,74 @@ fn finish_paragraph(
             effective_format.hanging_twips = marker.definition.hanging_twips;
         }
     }
-    let format_attributes = paragraph_html_attributes(&effective_format);
+    let list = marker
+        .as_ref()
+        .filter(|marker| {
+            paragraph.nested.is_empty()
+                && effective_format
+                    .outline_level
+                    .is_none_or(|level| level == 9)
+                && (marker.definition.number_format == "bullet"
+                    || marker.definition.number_format == "decimal"
+                        && (1..=1_000_000).contains(&marker.ordinal)
+                        && marker.definition.level_text == format!("%{}.", marker.depth + 1))
+        })
+        .and_then(|marker| {
+            Some(ListParagraph {
+                id: block_id.clone(),
+                number_id: effective_format.numbering_id.clone()?,
+                depth: marker.depth,
+                ordered: marker.definition.number_format != "bullet",
+                ordinal: u32::try_from(marker.ordinal).ok()?,
+                owner: None,
+            })
+        });
+    let semantic_read_only = marker.is_some() && list.is_none()
+        || effective_format
+            .outline_level
+            .is_some_and(|level| (6..=8).contains(&level));
+    let mut format_attributes = paragraph_html_attributes(&effective_format);
+    let flow_attribute = if paragraph.flow_metadata {
+        format!(" data-hcd-word-paragraph-ordinal=\"{}\"", paragraph.ordinal)
+    } else {
+        String::new()
+    };
+    let flow_attribute = if paragraph.flow_metadata && paragraph.flow_body_paragraph {
+        format!(
+            "{flow_attribute} data-hcd-word-body-paragraph=\"{}\"",
+            paragraph.ordinal
+        )
+    } else {
+        flow_attribute
+    };
+    format_attributes.push_str(&flow_attribute);
     let is_empty = !paragraph.has_visible_text && marker.is_none() && paragraph.nested.is_empty();
     let empty_class = if is_empty { " hcd-empty-paragraph" } else { "" };
-    let marker = marker.map(|marker| marker.html).unwrap_or_default();
+    let marker = marker
+        .map(|marker| {
+            if list.is_some() {
+                marker
+                    .html
+                    .replacen("<span", "<span data-hcd-decoration=\"list-marker\"", 1)
+            } else {
+                marker.html
+            }
+        })
+        .unwrap_or_default();
+    let tag = effective_format
+        .outline_level
+        .filter(|level| *level < 6)
+        .map(|level| format!("h{}", level + 1))
+        .unwrap_or_else(|| "p".into());
     let mut requires_overflow_visible = false;
-    let html = if paragraph.nested.is_empty() {
+    let html = if paragraph.nested.is_empty() && !semantic_read_only {
+        let identity = if list.is_some() {
+            String::new()
+        } else {
+            format!(" data-hcd-id=\"{}\"", escape_attribute(&block_id))
+        };
         format!(
-            "<p class=\"hcd-paragraph{style_class}{empty_class}\" data-hcd-id=\"{}\"{}>{marker}{}</p>",
-            escape_attribute(&block_id),
+            "<{tag} class=\"hcd-paragraph{style_class}{empty_class}\"{identity} data-hcd-word-tree=\"1\"{}>{marker}{}</{tag}>",
             format_attributes,
             paragraph.html
         )
@@ -5883,7 +6458,7 @@ fn finish_paragraph(
             )
         };
         format!(
-            "<div class=\"hcd-paragraph-group\" data-hcd-id=\"{}\"><p class=\"hcd-paragraph{style_class}{empty_class}\"{}>{marker}{}</p>{canvas}{flow_html}</div>",
+            "<div class=\"hcd-paragraph-group\" data-hcd-id=\"{}\"{flow_attribute}><p class=\"hcd-paragraph{style_class}{empty_class}\"{}>{marker}{}</p>{canvas}{flow_html}</div>",
             escape_attribute(&block_id),
             format_attributes,
             paragraph.html
@@ -5894,6 +6469,9 @@ fn finish_paragraph(
         entries: paragraph.entries,
         visual_placement: None,
         requires_overflow_visible,
+        list,
+        semantic_read_only,
+        ownership: paragraph.ownership,
     }
 }
 
@@ -5904,6 +6482,7 @@ fn take_table_fragment(table: &mut TableBuilder) -> RenderedBlock {
         entries: std::mem::take(&mut table.entries),
         visual_placement: None,
         requires_overflow_visible: false,
+        ..Default::default()
     }
 }
 
@@ -6104,6 +6683,7 @@ fn render_textbox(document_id: &str, part: &str, mut drawing: DrawingBuilder) ->
             height_px,
         }),
         requires_overflow_visible: true,
+        ..Default::default()
     }
 }
 
@@ -6518,7 +7098,10 @@ fn relationship_part_path(source_part: &str) -> String {
     }
 }
 
-fn resolve_relationship_target(source_part: &str, target: &str) -> Result<String, HcdError> {
+pub(crate) fn resolve_relationship_target(
+    source_part: &str,
+    target: &str,
+) -> Result<String, HcdError> {
     let source_parent = Path::new(source_part)
         .parent()
         .unwrap_or_else(|| Path::new(""));
@@ -6555,6 +7138,39 @@ fn write_asset_index(root: &Path, assets: &[AssetRecord]) -> Result<(), HcdError
     let file = std::fs::File::create(directory.join("index.json"))?;
     serde_json::to_writer(file, assets)?;
     Ok(())
+}
+
+fn read_list_ownership<R>(
+    element: &BytesStart<'_>,
+    reader: &quick_xml::NsReader<R>,
+    ignored: &mut bool,
+) -> Option<ListOwnership> {
+    let mut parsed = None;
+    let mut seen = false;
+    for attribute in element.attributes() {
+        let Ok(attribute) = attribute else {
+            *ignored = true;
+            return None;
+        };
+        let (namespace, local) = reader.resolve_attribute(attribute.key);
+        if matches!(namespace, quick_xml::name::ResolveResult::Bound(uri) if uri.as_ref() == oxml::semantic_lists::NAMESPACE.as_bytes())
+            && local.as_ref() == oxml::semantic_lists::ATTRIBUTE.as_bytes()
+        {
+            if seen {
+                *ignored = true;
+                return None;
+            }
+            seen = true;
+            parsed = attribute
+                .unescape_value()
+                .ok()
+                .and_then(|value| value.parse().ok());
+            if parsed.is_none() {
+                *ignored = true;
+            }
+        }
+    }
+    parsed
 }
 
 fn attribute_by_local_name(element: &BytesStart<'_>, name: &str) -> Option<String> {
@@ -6600,7 +7216,7 @@ fn escape_attribute(text: &str) -> String {
 }
 
 fn default_styles() -> &'static str {
-    r#"article,.hcd-chunk{display:block}.hcd-chunk-overflow{content-visibility:visible;contain:none;overflow:visible}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em;white-space:nowrap}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{padding:.25em .4em;vertical-align:top}.hcd-paragraph-group{min-width:0}.hcd-textbox-canvas{position:relative;max-width:100%}.hcd-textbox{box-sizing:border-box;margin:0}.hcd-textbox-content>.hcd-table{margin:0;max-width:100%}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:not([data-hcd-node-kind=\"image\"]):hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
+    r#"article,.hcd-chunk{display:block}.hcd-chunk-overflow{content-visibility:visible;contain:none;overflow:visible}.hcd-paragraph{font-size:inherit;font-weight:inherit;white-space:pre-wrap;min-height:1em;margin:0}.hcd-word-list{list-style:none;padding:0;margin:0}.hcd-list-marker{display:inline-block;min-width:2em;white-space:nowrap}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{padding:.25em .4em;vertical-align:top}.hcd-paragraph-group{min-width:0}.hcd-textbox-canvas{position:relative;max-width:100%}.hcd-textbox{box-sizing:border-box;margin:0}.hcd-textbox-content>.hcd-table{margin:0;max-width:100%}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:not([data-hcd-node-kind=\"image\"]):hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
 }
 
 #[cfg(test)]
@@ -7067,11 +7683,12 @@ mod tests {
             parse_text_part(
                 &mut Cursor::new(xml.as_bytes()),
                 &TextPartContext {
+                    preserve_fields: false,
                     document_id: "format-test",
                     part: "word/document.xml",
                     relationships: &relationships,
                     numbering: &numbering,
-                    paragraph_numbering: &BTreeMap::new(),
+                    paragraph_styles: &ParagraphStyles::default(),
                     theme: &WordTheme::default(),
                     table_bands: &BTreeMap::new(),
                 },
@@ -7173,6 +7790,30 @@ mod tests {
         assert!(!html.contains("fallback duplicate"));
         assert!(html.contains("background-color:transparent"));
         assert_eq!(map.entries.len(), 3);
+    }
+
+    #[test]
+    fn ordinary_import_keeps_computed_field_results_read_only() {
+        let xml = r#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:r><w:t>ordinary</w:t></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>12</w:t></w:r></w:fldSimple><w:fldSimple w:instr="HYPERLINK &quot;https://example.org&quot;"><w:r><w:t>link</w:t></w:r></w:fldSimple></w:p>
+          <w:p><w:r><w:fldChar w:fldCharType="begin"></w:fldChar></w:r><w:r><w:instrText> TOC \\o &quot;1-3&quot; </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>contents</w:t></w:r></w:p>
+          <w:p><w:fldSimple w:instr="HYPERLINK &quot;https://example.org&quot;"><w:r><w:t>nested result</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"></w:fldChar></w:r><w:r><w:t>after</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+        let (html, map) = render_test_part(xml, &WordTheme::default(), None);
+        let text = hcd_core::extract_html_text_nodes(&html).unwrap();
+        let flags: BTreeMap<_, _> = map
+            .entries
+            .iter()
+            .map(|entry| (text[&entry.node_id].as_str(), entry.source.editable))
+            .collect();
+        assert_eq!(flags["ordinary"], true);
+        assert_eq!(flags["12"], false);
+        assert_eq!(flags["link"], true);
+        assert_eq!(flags["contents"], false);
+        assert_eq!(flags["nested result"], false);
+        assert_eq!(flags["after"], true);
+        assert!(!html.contains("data-hcd-word-field-path"));
+        assert_eq!(html.matches("data-hcd-computed-field=\"1\"").count(), 3);
     }
 
     #[test]
@@ -7521,11 +8162,12 @@ mod tests {
         let result = parse_text_part(
             &mut source,
             &TextPartContext {
+                preserve_fields: false,
                 document_id: "progressive-test",
                 part: "word/document.xml",
                 relationships: &PartRelationships::default(),
                 numbering: &NumberingCatalog::default(),
-                paragraph_numbering: &BTreeMap::new(),
+                paragraph_styles: &ParagraphStyles::default(),
                 theme: &WordTheme::default(),
                 table_bands: &BTreeMap::new(),
             },
@@ -7686,11 +8328,12 @@ mod tests {
             parse_text_part(
                 &mut Cursor::new(xml.as_bytes()),
                 &TextPartContext {
+                    preserve_fields: false,
                     document_id: "render-test",
                     part: "word/document.xml",
                     relationships: &relationships,
                     numbering: &numbering,
-                    paragraph_numbering: &BTreeMap::new(),
+                    paragraph_styles: &ParagraphStyles::default(),
                     theme,
                     table_bands,
                 },
@@ -7729,11 +8372,12 @@ mod tests {
         parse_text_part(
             &mut Cursor::new(xml.into_bytes()),
             &TextPartContext {
+                preserve_fields: false,
                 document_id: "resource-test",
                 part: "word/document.xml",
                 relationships: &PartRelationships::default(),
                 numbering: &NumberingCatalog::default(),
-                paragraph_numbering: &BTreeMap::new(),
+                paragraph_styles: &ParagraphStyles::default(),
                 theme: &WordTheme::default(),
                 table_bands: &BTreeMap::new(),
             },

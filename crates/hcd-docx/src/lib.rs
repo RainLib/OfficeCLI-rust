@@ -1,13 +1,47 @@
 //! Streaming DOCX adapters for the HTML Canonical Document format.
 
 mod exporter;
+mod flow_layout;
 mod importer;
 mod source_runs;
+mod story_link_verification;
+mod story_link_xml;
 
-pub use exporter::{export_docx, requires_semantic_rebuild, ExportOptions};
+pub use story_link_verification::{
+    prepare_source_story_unlink, replay_source_story_unlink, verify_source_story_link,
+    verify_source_story_unlink_destination, PreparedSourceStoryUnlink, StoryCopyReplay,
+    VerifiedSourceStoryLink,
+};
+pub use story_link_xml::{
+    plan_source_story_link_reference, rewrite_story_link_references, SourceStoryReferenceRemoval,
+};
+
+#[cfg(test)]
+mod semantic_import_tests;
+
+pub use exporter::{export_docx, legacy_read_only_nodes, requires_semantic_rebuild, ExportOptions};
 pub use importer::{
     import_docx, source_typography_styles, ImportOptions, FONT_METADATA_CSS_MARKER,
 };
+
+/// Read-only preflight for the restricted source-preserving region text path.
+pub fn verify_source_region_text_export(
+    bundle: &hcd_core::Bundle,
+    source: &std::path::Path,
+    revision: u64,
+) -> Result<(), hcd_core::HcdError> {
+    let directory = tempfile::tempdir()?;
+    export_docx(
+        bundle.root(),
+        source,
+        directory.path().join("preflight.docx"),
+        &ExportOptions {
+            revision: Some(revision),
+            fidelity_report: None,
+        },
+    )?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -18,6 +52,169 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn source_region_text_export_replays_disjoint_stale_collaborator_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let path = temp.path().join("region.hcd");
+        create_fixture(&source);
+        let mut options = ImportOptions::new("stale-text");
+        options.flow_layout = true;
+        import_docx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let nodes: Vec<_> = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                entry.source.editable
+                    && entry.source.node_kind == "text"
+                    && entry.source.part == "word/document.xml"
+            })
+            .take(2)
+            .collect();
+        assert_eq!(nodes.len(), 2);
+        let batch = |index: usize, id: &str, text: &str| PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "stale-text".into(),
+            patch_id: id.into(),
+            base_revision: 1,
+            actor: BTreeMap::from([("userId".into(), id.into())]),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: nodes[index].node_id.clone(),
+                start: 0,
+                delete_count: nodes[index].text.chars().count(),
+                insert_text: text.into(),
+                precondition: NodePrecondition {
+                    node_hash: nodes[index].node_hash.clone(),
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &batch(0, "alice", "Alice text"), 1).unwrap();
+        hcd_core::apply_patch(&bundle, &batch(1, "bob", "Bob text"), 2).unwrap();
+        assert_eq!(bundle.revision(3).unwrap().patch_base_revision, Some(1));
+        assert!(
+            hcd_core::apply_patch(&bundle, &batch(0, "stale-conflict", "overwrite"), 3).is_err()
+        );
+        let exported = temp.path().join("merged.docx");
+        export_docx(&path, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "word/document.xml");
+        assert!(xml.contains("Alice text") && xml.contains("Bob text"));
+        assert_eq!(
+            read_zip_entry(&source, "word/header1.xml"),
+            read_zip_entry(&exported, "word/header1.xml")
+        );
+    }
+
+    #[test]
+    fn source_region_text_proof_replays_exact_text_only_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let path = temp.path().join("region.hcd");
+        create_fixture(&source);
+        let mut options = ImportOptions::new("region-proof");
+        options.flow_layout = true;
+        import_docx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        crate::story_link_verification::verify_source_region_text(&bundle, &source, 1).unwrap();
+        let initial_export = temp.path().join("initial.docx");
+        let report =
+            export_docx(&path, &source, &initial_export, &ExportOptions::default()).unwrap();
+        assert!(matches!(report.level, hcd_core::FidelityLevel::Exact));
+        let mut original = zip::ZipArchive::new(std::fs::File::open(&source).unwrap()).unwrap();
+        let mut projected =
+            zip::ZipArchive::new(std::fs::File::open(&initial_export).unwrap()).unwrap();
+        assert_eq!(original.len(), projected.len());
+        for index in 0..original.len() {
+            let mut item = original.by_index(index).unwrap();
+            let name = item.name().to_string();
+            let mut before = Vec::new();
+            item.read_to_end(&mut before).unwrap();
+            let mut after = Vec::new();
+            projected
+                .by_name(&name)
+                .unwrap()
+                .read_to_end(&mut after)
+                .unwrap();
+            assert_eq!(before, after, "source part changed: {name}");
+        }
+        let entry = hcd_core::extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.editable && entry.source.node_kind == "text")
+            .unwrap();
+        let batch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "region-proof".into(),
+            patch_id: "edit".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: entry.node_id.clone(),
+                start: 0,
+                delete_count: entry.text.chars().count(),
+                insert_text: "edited 😀".into(),
+                precondition: NodePrecondition {
+                    node_hash: entry.node_hash,
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &batch, 1).unwrap();
+        crate::story_link_verification::verify_source_region_text(&bundle, &source, 2).unwrap();
+        let exported = temp.path().join("edited.docx");
+        export_docx(&path, &source, &exported, &ExportOptions::default()).unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&exported).unwrap()).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(xml.contains("edited 😀"));
+        let current = hcd_core::get_text_node(&bundle, &entry.node_id)
+            .unwrap()
+            .node;
+        let styled = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_3.into(),
+            document_id: "region-proof".into(),
+            patch_id: "style".into(),
+            base_revision: 2,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::NodeStyle {
+                node_id: entry.node_id,
+                style: hcd_core::NodeStylePatch {
+                    text_color: Some("#ff0000".into()),
+                    background_color: None,
+                    border: None,
+                },
+                precondition: NodePrecondition {
+                    node_hash: current.node_hash,
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &styled, 2).unwrap();
+        assert!(
+            crate::story_link_verification::verify_source_region_text(&bundle, &source, 3).is_err()
+        );
+        assert!(export_docx(
+            &path,
+            &source,
+            temp.path().join("styled.docx"),
+            &ExportOptions::default()
+        )
+        .is_err());
+        std::fs::write(&source, b"changed").unwrap();
+        assert!(
+            crate::story_link_verification::verify_source_region_text(&bundle, &source, 2).is_err()
+        );
+    }
 
     #[test]
     fn source_size_partitions_survive_text_edits_annotations_history_and_native_export() {

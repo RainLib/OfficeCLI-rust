@@ -26,6 +26,15 @@ pub enum HdocSubcommand {
     Import(HdocImportCommand),
     /// Validate an HCD bundle and all content hashes
     Validate(HdocValidateCommand),
+    /// Check XLSX editable cells against the matching original workbook
+    #[command(
+        after_help = "Example: officecli hdoc audit-xlsx-formulas workbook.hcd --source workbook.xlsx --json\nThe audit does not migrate the document or authorize source-free editing."
+    )]
+    AuditXlsxFormulas(HdocAuditXlsxFormulasCommand),
+    /// Pack a saved revision and its history/resources into one offline .hcdz archive
+    Pack(HdocPackCommand),
+    /// Verify and unpack an offline .hcdz archive into a new HCD directory
+    Unpack(HdocUnpackCommand),
     /// Measure HCD storage, compression, revision growth and unreferenced objects
     Stats(HdocStatsCommand),
     /// List or delete unreferenced immutable objects after checking all revisions
@@ -52,7 +61,7 @@ pub enum HdocSubcommand {
     PutAsset(HdocPutAssetCommand),
     /// Materialize the current chunk sequence as a standalone inspection HTML file
     RenderHtml(HdocRenderHtmlCommand),
-    /// Apply a text/annotation patch and append a revision
+    /// Apply a hash-guarded text, style, annotation, image or structure patch
     Apply(HdocApplyCommand),
     /// Create a revision that enables semantic block editing while preserving the original view
     ProjectEditor(HdocProjectEditorCommand),
@@ -82,6 +91,9 @@ pub struct HdocUpgradePdfLayoutCommand {
 
 #[derive(Args)]
 pub struct HdocImportCommand {
+    /// Preserve Word sections/stories for preview region editing (DOCX only)
+    #[arg(long)]
+    pub word_regions: bool,
     /// Immutable source DOCX, XLSX, PPTX, PDF, HTML, UTF-8 Markdown, or UTF-8 TXT
     pub source: String,
     /// New HCD directory; must not already exist
@@ -126,6 +138,35 @@ pub enum HdocPdfRasterMode {
 #[derive(Args)]
 pub struct HdocValidateCommand {
     pub bundle: String,
+}
+
+/// Check the current saved XLSX mapping without changing the document.
+///
+/// This does not migrate the document or authorize source-free edits.
+/// Example: officecli hdoc audit-xlsx-formulas workbook.hcd --source workbook.xlsx --json
+#[derive(Args)]
+pub struct HdocAuditXlsxFormulasCommand {
+    /// Saved HCD directory to check
+    pub bundle: PathBuf,
+    /// Original XLSX; its SHA-256 and size must match the HCD source
+    #[arg(long)]
+    pub source: PathBuf,
+}
+
+#[derive(Args)]
+pub struct HdocPackCommand {
+    pub bundle: PathBuf,
+    #[arg(short, long)]
+    pub output: PathBuf,
+    /// Include this saved head and all its ancestors; defaults to the current head
+    #[arg(long)]
+    pub revision: Option<u64>,
+}
+#[derive(Args)]
+pub struct HdocUnpackCommand {
+    pub archive: PathBuf,
+    #[arg(short, long)]
+    pub output: PathBuf,
 }
 
 #[derive(Args)]
@@ -282,10 +323,16 @@ pub struct HdocApplyCommand {
     pub patch: String,
     #[arg(long)]
     pub expected_revision: u64,
+    /// Original XLSX used to protect formula cells during text edits
+    #[arg(long)]
+    pub source: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct HdocProjectEditorCommand {
+    /// Upgrade an opted-in Word layout to canonical regions (preview; browser editing unavailable)
+    #[arg(long)]
+    pub word_regions: bool,
     pub bundle: String,
     #[arg(long)]
     pub expected_revision: u64,
@@ -348,6 +395,8 @@ pub struct HdocRestoreCommand {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum HdocTokenScope {
+    /// Policy management only; does not grant document read/write access.
+    Manage,
     Read,
     Write,
     Upload,
@@ -380,6 +429,24 @@ pub fn handle_hdoc(
     match command.command {
         HdocSubcommand::Import(command) => import(command, format),
         HdocSubcommand::Validate(command) => validate(command, format),
+        HdocSubcommand::AuditXlsxFormulas(command) => audit_xlsx_formulas(command, format),
+        HdocSubcommand::Pack(command) => {
+            let bundle = Bundle::open(command.bundle).map_err(handler_error)?;
+            let result = super::hdoc_archive::pack(&bundle, &command.output, command.revision)?;
+            render(
+                &result,
+                format,
+                format!("Packed offline document at r{}", result.revision),
+            )
+        }
+        HdocSubcommand::Unpack(command) => {
+            let result = super::hdoc_archive::unpack(&command.archive, &command.output)?;
+            render(
+                &result,
+                format,
+                format!("Unpacked verified offline document at r{}", result.revision),
+            )
+        }
         HdocSubcommand::Stats(command) => stats(command, format),
         HdocSubcommand::Gc(command) => gc(command, format),
         HdocSubcommand::GetIndexPage(command) => get_index_page(command, format),
@@ -470,6 +537,7 @@ fn import(
         None => deterministic_document_id(&command.source)?,
     };
     let mut options = ImportOptions::new(document_id);
+    options.word_regions = command.word_regions;
     options.chunk_soft_bytes = command.chunk_bytes;
     options.chunk_blocks = command.chunk_blocks;
     options.storage_codec = match command.storage_codec {
@@ -502,6 +570,30 @@ fn import(
             ),
         )
     }
+}
+
+fn audit_xlsx_formulas(
+    command: HdocAuditXlsxFormulasCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(command.bundle).map_err(handler_error)?;
+    // Snapshot under the bundle lock so the audit sees one saved head even
+    // while another process continues editing the live document.
+    let snapshot = hcd_core::create_portable_snapshot(&bundle, None).map_err(handler_error)?;
+    let frozen = Bundle::open(snapshot.directory.path()).map_err(handler_error)?;
+    let count = hcd_formats::audit_xlsx_editable_formula_map(&frozen, &command.source)
+        .map_err(handler_error)?;
+    let data = serde_json::json!({
+        "documentId": snapshot.manifest.document_id,
+        "revision": snapshot.manifest.revision,
+        "editableCellsChecked": count,
+        "sourceFreeEditsAuthorized": false,
+    });
+    render(
+        &data,
+        format,
+        format!("Checked {count} editable cells at r{}; no migration or source-free authorization was performed", snapshot.manifest.revision),
+    )
 }
 
 fn validate(
@@ -1142,24 +1234,42 @@ fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, boo
     let patch_json = read_patch_json(&command.patch)?;
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
     let header: serde_json::Value = serde_json::from_str(&patch_json)?;
-    let result = if header["schemaVersion"] == hcd_core::HCD_PATCH_SCHEMA_VERSION_4 {
+    let result = if header["schemaVersion"] == hcd_core::HCD_PATCH_SCHEMA_VERSION_6 {
+        let patch: hcd_core::FlowStructurePatchBatch = serde_json::from_str(&patch_json)?;
+        hcd_core::apply_flow_structure_patch(&bundle, &patch, command.expected_revision)
+    } else if header["schemaVersion"] == hcd_core::HCD_PATCH_SCHEMA_VERSION_4 {
         let patch: hcd_core::StructurePatchBatch = serde_json::from_str(&patch_json)?;
         hcd_core::apply_structure_patch(&bundle, &patch, command.expected_revision)
     } else {
         let patch: PatchBatch = serde_json::from_str(&patch_json)?;
         let manifest = bundle.manifest().map_err(handler_error)?;
-        let source = std::path::Path::new(&command.bundle)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("sources")
-            .join(format!("{}.pdf", manifest.document_id));
-        let plan = if manifest.source.format == "pdf" {
-            hcd_formats::plan_pdf_page_rasters(&bundle, &source, &patch.operations)
-                .map_err(handler_error)?
+        if manifest.source.format == "xlsx" {
+            let default_source = std::path::Path::new(&command.bundle)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("sources")
+                .join(format!("{}.xlsx", manifest.document_id));
+            let source = command.source.as_deref().unwrap_or(&default_source);
+            hcd_formats::apply_xlsx_patch_with_source(
+                &bundle,
+                &patch,
+                command.expected_revision,
+                Some(source),
+            )
         } else {
-            hcd_core::PdfRasterPlan::default()
-        };
-        hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, command.expected_revision, plan)
+            let source = std::path::Path::new(&command.bundle)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("sources")
+                .join(format!("{}.pdf", manifest.document_id));
+            let plan = if manifest.source.format == "pdf" {
+                hcd_formats::plan_pdf_page_rasters(&bundle, &source, &patch.operations)
+                    .map_err(handler_error)?
+            } else {
+                hcd_core::PdfRasterPlan::default()
+            };
+            hcd_core::apply_patch_with_pdf_rasters(&bundle, &patch, command.expected_revision, plan)
+        }
     }
     .map_err(handler_error)?;
     render(
@@ -1179,8 +1289,12 @@ fn project_editor(
     format: OutputFormat,
 ) -> Result<(String, bool), HandlerError> {
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
-    let result =
-        hcd_core::project_editor(&bundle, command.expected_revision).map_err(handler_error)?;
+    let result = if command.word_regions {
+        hcd_core::project_flow_regions(&bundle, command.expected_revision)
+    } else {
+        hcd_core::project_editor(&bundle, command.expected_revision)
+    }
+    .map_err(handler_error)?;
     render(
         &result,
         format,
@@ -1315,9 +1429,12 @@ fn semantic_export(
     fidelity_report: Option<&Path>,
     typography_source: Option<&str>,
 ) -> Result<FidelityReport, HandlerError> {
-    if !matches!(target, "docx" | "xlsx" | "pptx" | "pdf" | "md" | "txt") {
+    if !matches!(
+        target,
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+    ) {
         return Err(HandlerError::UnsupportedMode(format!(
-            "source-free semantic export supports .docx, .xlsx, .pptx, .pdf, .md, or .txt; .{target} requires its immutable source"
+            "source-free semantic export supports .docx, .xlsx, .pptx, .pdf, .html, .md, or .txt; .{target} requires its immutable source"
         )));
     }
     let validation = hcd_core::validate_bundle(bundle).map_err(handler_error)?;
@@ -1329,27 +1446,122 @@ fn semantic_export(
     }
     let (manifest, revision) =
         manifest_at_revision(bundle, head, requested_revision).map_err(handler_error)?;
+    if manifest.source.format == "pdf"
+        && hcd_formats::pdf_has_unpainted_text(bundle, revision).map_err(handler_error)?
+    {
+        return Err(HandlerError::UnsupportedMode("PDF_UNPAINTED_TEXT: source-free export cannot safely hide original text behind an approximate overlay. Restore the original PDF for source-backed export or retain the HCD archive.".into()));
+    }
+    if let Some(layout) =
+        hcd_core::read_flow_document_layout(bundle, &manifest).map_err(handler_error)?
+    {
+        if target == "docx" {
+            return word_region_export(
+                bundle,
+                &manifest,
+                &layout,
+                output,
+                fidelity_report,
+                typography_source,
+            );
+        }
+        if target == "txt" && layout.schema_version == hcd_core::FLOW_REGION_LAYOUT_SCHEMA {
+            if typography_source.is_some() {
+                return Err(HandlerError::InvalidArgument(
+                    "--typography-source requires DOCX semantic export from a DOCX bundle".into(),
+                ));
+            }
+            let summary = super::html_convert::word_regions::export_text(
+                bundle,
+                &manifest,
+                &layout,
+                Path::new(output),
+            )?;
+            let mut warnings = vec![FidelityWarning {
+                code: "HCD_WORD_TEXT_STATIC".into(),
+                message: "Section bodies and distinct header/footer stories are listed as static text. Page variants, paper layout, field calculations, images and attachments require the original Word file or HCDZ".into(),
+                node_id: None,
+                source_part: None,
+            }];
+            warnings.extend(summary.warnings.into_iter().map(|message| FidelityWarning {
+                code: "RUST_HTML_SEMANTIC_WARNING".into(),
+                message,
+                node_id: None,
+                source_part: None,
+            }));
+            let report = FidelityReport {
+                schema_version: HCD_SCHEMA_VERSION.into(),
+                level: FidelityLevel::Semantic,
+                preserved: vec![format!("saved revision {revision} body sections and distinct header/footer stories as labeled text")],
+                flattened: vec!["formatting, page layout, fields and relationships become static readable text".into()],
+                dropped: vec!["image bytes, attachments and native history require HCDZ".into()],
+                warnings,
+            };
+            if let Some(path) = fidelity_report {
+                write_semantic_fidelity_report(path, &report)?;
+            }
+            return Ok(report);
+        }
+        if target != "html" || layout.schema_version != hcd_core::FLOW_REGION_LAYOUT_SCHEMA {
+            let recovery = if hcd_docx::requires_semantic_rebuild(bundle, revision)
+                .map_err(handler_error)?
+            {
+                "Use hdoc pack for an offline HCD archive; edited Word regions require section-aware rebuilding"
+            } else {
+                "Export DOCX with --source pointing to the original DOCX, or use hdoc pack for an offline HCD archive"
+            };
+            return Err(HandlerError::UnsupportedMode(format!("Semantic export cannot preserve this Word document's headers, footers and section settings yet. {recovery}")));
+        }
+    }
     let output_path = Path::new(output);
     let parent = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
+    if target == "html" {
+        if typography_source.is_some() {
+            return Err(HandlerError::InvalidArgument(
+                "--typography-source requires DOCX semantic export from a DOCX bundle".into(),
+            ));
+        }
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        let exported = crate::hdoc_export_html::render(bundle, revision, temporary.as_file_mut())
+            .map_err(handler_error)?;
+        temporary.as_file_mut().flush()?;
+        temporary
+            .persist(output_path)
+            .map_err(|error| HandlerError::IoError(error.error))?;
+        let mut report = FidelityReport {
+            schema_version: HCD_SCHEMA_VERSION.into(), level: FidelityLevel::Semantic,
+            preserved: vec![format!("canonical HCD revision {revision} across {} chunks, with stylesheet and portable HTML node presentations", exported.presentation.chunk_count),format!("{} verified content-addressed resources embedded as data URIs", exported.embedded_assets),"inert node/reference metadata where present in the canonical HTML".into()],
+            flattened: vec!["source-format opaque objects and exact physical pagination are not reconstructed; online collaboration and relationship services require HCD".into()],
+            dropped: Vec::new(), warnings: vec![FidelityWarning { code:"HCD_HTML_STANDALONE_EXPORT".into(),message:"Self-contained derived HTML uses the selected saved revision; original Office package parts, unaccepted suggestions and live service state are not added".into(),node_id:None,source_part:None }],
+        };
+        if exported.word_regions {
+            report.preserved.push("section and story identities, explicit paper dimensions/margins, header/footer variant bindings and cached field results".into());
+            report.flattened.push("browser block pagination is approximate; continuous sections start separate pages, oversized blocks expand rather than crop, and Word field caches are not recalculated".into());
+            report.warnings.push(FidelityWarning{code:"HCD_WORD_HTML_BROWSER_PAGINATION".into(),message:"The standalone Word view uses source section geometry and story bindings. Exact Word line/table pagination, continuous-section positioning and computed page fields still require a Word layout engine; use HCDZ for complete native history and attachments".into(),node_id:None,source_part:None});
+        }
+        if let Some(path) = fidelity_report {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return Ok(report);
+    }
     if target == "pdf"
         && manifest.profile == "fixed-layout"
         && manifest.source.format == "pdf"
         && super::hdoc_raster_pdf::can_export(bundle, &manifest)?
     {
-        let pages = super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path)?;
+        let exported = super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path)?;
         let report = FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             level: FidelityLevel::Visual,
-            preserved: vec![format!("{pages} HCD page rasters and physical page dimensions")],
+            preserved: vec![format!("{} HCD page rasters and physical page dimensions", exported.pages), format!("{} positioned canonical text nodes in an invisible Unicode search/copy layer", exported.text_nodes)],
             flattened: vec!["PDF page text and vector structure are represented by page images".to_string()],
-            dropped: vec!["selectable PDF text layer and original PDF object metadata".to_string()],
+            dropped: vec!["original PDF object metadata and original font structure".to_string()],
             warnings: vec![FidelityWarning {
-                code: "HCD_PDF_RASTER_ONLY_EXPORT".to_string(),
-                message: "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for selectable text and exact PDF structure".to_string(),
+                code: "HCD_PDF_RASTER_TEXT_EXPORT".to_string(),
+                message: "source-free PDF export embeds final HCD page images plus existing canonical text for search/copy; it does not run OCR or preserve the original PDF vector/font/tag structure".to_string(),
                 node_id: None, source_part: None,
             }],
         };
@@ -1397,6 +1609,8 @@ fn semantic_export(
         },
         materialized.as_file_mut(),
         |html| {
+            let adapted = hcd_core::adapt_extension_exports(html, target)?;
+            let html = adapted.as_str();
             if target == "pdf" {
                 hcd_formats::enhance_presentation_fragment(html)
             } else if let Some(resolver) = &typography {
@@ -1435,6 +1649,21 @@ fn semantic_export(
         node_id: None,
         source_part: None,
     }));
+    if manifest.profile == "semantic-flow" {
+        for extension in hcd_core::projection_extensions(
+            &hcd_core::editor_projection(bundle, Some(revision)).map_err(handler_error)?,
+        )
+        .map_err(handler_error)?
+        {
+            let adapted = extension.exports.contains_key(target);
+            warnings.push(FidelityWarning{code:if adapted {"HCD_EXTENSION_ADAPTED"} else {"HCD_EXTENSION_FLATTENED"}.into(),message:format!("{} ({} v{}): {} retained in .{target}; business data and opaque resources require the native HCD bundle",extension.instance_id,extension.node_type,extension.version,if adapted {"portable presentation"} else {"readable content"}),node_id:None,source_part:None});
+        }
+        for occurrence in
+            hcd_core::document_references(bundle, Some(revision)).map_err(handler_error)?
+        {
+            warnings.push(FidelityWarning{code:"HCD_REFERENCE_FLATTENED".into(),message:format!("{}: readable display text is retained in .{target}; dynamic person/business relationships require the native HCD bundle",occurrence.reference.mention_id),node_id:Some(occurrence.block_id),source_part:None});
+        }
+    }
     let mut preserved = vec![
         format!("canonical HCD revision {revision} text in chunk sequence order"),
         format!(
@@ -1455,7 +1684,7 @@ fn semantic_export(
     }
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
-        level: if conversion_engine == "rust-html-css-pdf" {
+        level: if conversion_engine == "rust-html-css-pdf" && manifest.profile != "fixed-layout" {
             FidelityLevel::High
         } else {
             FidelityLevel::Semantic
@@ -1480,6 +1709,108 @@ fn semantic_export(
         },
         dropped: Vec::new(),
         warnings,
+    };
+    if let Some(path) = fidelity_report {
+        write_semantic_fidelity_report(path, &report)?;
+    }
+    Ok(report)
+}
+
+fn word_region_export(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    layout: &hcd_core::FlowDocumentLayout,
+    output: &str,
+    fidelity_report: Option<&Path>,
+    typography_source: Option<&str>,
+) -> Result<FidelityReport, HandlerError> {
+    if layout.schema_version == hcd_core::FLOW_LAYOUT_SCHEMA {
+        // Project an owned immutable snapshot. Export must never upgrade the
+        // caller's head or overwrite its concurrent edits, including history.
+        let snapshot = hcd_core::create_portable_snapshot(bundle, Some(manifest.revision))
+            .map_err(handler_error)?;
+        let projected = Bundle::open(snapshot.directory.path()).map_err(handler_error)?;
+        hcd_core::project_flow_regions(&projected, manifest.revision).map_err(handler_error)?;
+        let selected = projected.manifest().map_err(handler_error)?;
+        let layout = hcd_core::read_flow_document_layout(&projected, &selected)
+            .map_err(handler_error)?
+            .ok_or_else(|| HandlerError::ValidationError("missing projected Word layout".into()))?;
+        let mut report = word_region_export(
+            &projected,
+            &selected,
+            &layout,
+            output,
+            None,
+            typography_source,
+        )?;
+        if let Some(first) = report.preserved.first_mut() {
+            *first = format!(
+                "canonical revision {} rebuilt through an owned temporary region projection",
+                manifest.revision
+            );
+        }
+        report.warnings.push(FidelityWarning { code:"HCD_TEMPORARY_REGION_PROJECTION".into(), message: "Word region projection was applied only to the export snapshot; the saved document and its history were unchanged".into(),node_id:None,source_part:None });
+        if let Some(path) = fidelity_report {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return Ok(report);
+    }
+    let mut stylesheet = String::new();
+    std::fs::File::open(
+        bundle
+            .resolve_href(&manifest.styles_href)
+            .map_err(handler_error)?,
+    )?
+    .take(hcd_core::MAX_CONTROL_PART_BYTES + 1)
+    .read_to_string(&mut stylesheet)?;
+    if stylesheet.len() as u64 > hcd_core::MAX_CONTROL_PART_BYTES {
+        return Err(HandlerError::ValidationError(
+            "Word export stylesheet exceeds limit".into(),
+        ));
+    }
+    if let Some(source) = typography_source {
+        stylesheet.push_str(
+            &hcd_docx::source_typography_styles(source, &manifest.source.sha256)
+                .map_err(handler_error)?,
+        );
+    }
+    let typography = hcd_core::TypographyResolver::new(&stylesheet).map_err(handler_error)?;
+    let assets = semantic_assets(bundle, manifest.revision).map_err(handler_error)?;
+    let references =
+        hcd_core::document_references(bundle, Some(manifest.revision)).map_err(handler_error)?;
+    let extensions = hcd_core::projection_extensions(
+        &hcd_core::editor_projection(bundle, Some(manifest.revision)).map_err(handler_error)?,
+    )
+    .map_err(handler_error)?;
+    let summary = super::html_convert::word_regions::export(
+        bundle,
+        manifest,
+        layout,
+        Path::new(output),
+        assets,
+        &typography,
+    )?;
+    let mut warnings: Vec<_> = summary
+        .warnings
+        .into_iter()
+        .map(|message| FidelityWarning {
+            code: "HCD_WORD_REGION_SEMANTIC_EXPORT".into(),
+            message,
+            node_id: None,
+            source_part: None,
+        })
+        .collect();
+    for occurrence in references {
+        warnings.push(FidelityWarning { code:"HCD_REFERENCE_FLATTENED".into(),message:"Readable mention text is retained; dynamic relationships remain in the native HCD archive".into(),node_id:Some(occurrence.block_id),source_part:None });
+    }
+    for extension in extensions {
+        warnings.push(FidelityWarning { code:if extension.exports.contains_key("docx") { "HCD_EXTENSION_ADAPTED" } else { "HCD_EXTENSION_FLATTENED" }.into(),message:format!("{}: readable portable presentation is retained; opaque business data and resources remain in the native HCD archive",extension.instance_id),node_id:None,source_part:None });
+    }
+    let report = FidelityReport {
+        schema_version: HCD_SCHEMA_VERSION.into(), level: FidelityLevel::Semantic,
+        preserved: vec![format!("canonical revision {} across {} body sections and {} independent header/footer stories", manifest.revision,layout.sections.len(),layout.stories.len()), "section page settings, first/even/default bindings, inheritance and shared story identity".into(),format!("{} semantic blocks and {} of {} trusted image assets",summary.block_count, summary.embedded_image_count,summary.image_count),"native rich text, links and numbering with part-local relationships".into()],
+        flattened: vec!["source pagination, unsupported CSS, computed field results and floating image placement use static semantic representations".into()],
+        dropped: vec!["source-only opaque parts and section property revision history".into()], warnings,
     };
     if let Some(path) = fidelity_report {
         write_semantic_fidelity_report(path, &report)?;
@@ -1525,6 +1856,9 @@ fn semantic_assets(
             )));
         }
         let format = semantic_asset_format(&path)?;
+        if format.is_empty() {
+            continue;
+        } // Opaque extension attachments remain in the native bundle.
         assets.insert(
             format!("asset://sha256/{}", record.hash),
             super::html_convert::SemanticAsset { path, format },
@@ -1615,6 +1949,275 @@ fn handler_error(error: HcdError) -> HandlerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regional_word_text_export_labels_all_regions_without_modifying_bundle() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/assets/hcd-flow-regions-2026-10-26/image-source.docx");
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("regional.hcd");
+        let mut options = hcd_docx::ImportOptions::new("text-export-test");
+        options.flow_layout = true;
+        hcd_docx::import_docx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let before = bundle.manifest().unwrap();
+        let output = temp.path().join("document.txt");
+        let report = semantic_export(
+            &bundle,
+            &before,
+            output.to_str().unwrap(),
+            "txt",
+            Some(1),
+            None,
+            None,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(output).unwrap();
+        assert!(text.contains("Section 1") && text.contains("Section 2"));
+        assert!(text.contains("Body one") && text.contains("Body two"));
+        assert!(text.contains("Header") && text.contains("Footer"), "{text}");
+        assert!(!text.contains("asset://"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "HCD_WORD_TEXT_STATIC"));
+        assert_eq!(bundle.manifest().unwrap().root_hash, before.root_hash);
+        assert_eq!(bundle.manifest().unwrap().revision, before.revision);
+    }
+
+    #[test]
+    fn independent_word_header_semantic_export_preserves_sections_and_reimports() {
+        use std::io::Read;
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/assets/hcd-flow-regions-2026-10-26/image-source.docx");
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("independent.hcd");
+        let mut options = hcd_docx::ImportOptions::new("unlink-export-test");
+        options.flow_layout = true;
+        hcd_docx::import_docx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let projection = hcd_core::editor_projection(&bundle, Some(1)).unwrap();
+        let layout = projection.flow_layout.as_ref().unwrap();
+        let request = hcd_core::FlowStoryUnlinkRequest {
+            base_layout_hash: projection.flow_layout_hash.clone().unwrap(),
+            section_id: layout.sections[1].id.clone(),
+            kind: hcd_core::FlowStoryKind::Header,
+            variant: hcd_core::FlowStoryVariant::First,
+            expected_inherited_story_id: layout.sections[0].headers.first.clone(),
+        };
+        let story = hcd_core::FlowStory {
+            id: format!("n_{:032x}", 999996),
+            kind: hcd_core::FlowStoryKind::Header,
+            source_part: "word/independent-export.xml".into(),
+        };
+        let candidate = hcd_docx::prepare_source_story_unlink(
+            &bundle,
+            &source,
+            1,
+            &request,
+            &story,
+            |_| unreachable!(),
+            |_| unreachable!(),
+        )
+        .unwrap();
+        candidate.verify_current(&bundle).unwrap();
+        hcd_core::apply_prepared_story_unlink(
+            &bundle,
+            &candidate.prepared,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &Default::default(),
+        )
+        .unwrap();
+        let independent = hcd_core::editor_projection(&bundle, Some(2)).unwrap();
+        let block = independent
+            .blocks
+            .iter()
+            .find(|block| block.flow_region_id.as_deref() == Some(story.id.as_str()))
+            .unwrap();
+        let mut content = block.content.clone();
+        content.inlines[0].text = "Changed independently".into();
+        let patch = hcd_core::FlowStructurePatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_6.into(),
+            document_id: independent.document_id.clone(),
+            patch_id: "independent-header-edit".into(),
+            base_revision: 2,
+            layout_hash: independent.flow_layout_hash.unwrap(),
+            actor: Default::default(),
+            regions: vec![hcd_core::FlowRegionEdits {
+                region_id: story.id.clone(),
+                operations: vec![hcd_core::StructureOperation::Replace {
+                    block_id: block.block_id.clone(),
+                    block: content,
+                    precondition: hcd_core::BlockPrecondition {
+                        block_hash: block.block_hash.clone(),
+                    },
+                }],
+            }],
+        };
+        hcd_core::apply_flow_structure_patch(&bundle, &patch, 2).unwrap();
+        let output = temp.path().join("independent.docx");
+        semantic_export(
+            &bundle,
+            &bundle.manifest().unwrap(),
+            output.to_str().unwrap(),
+            "docx",
+            Some(3),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(xml.contains("Body one") && xml.contains("Body two"));
+        let document = roxmltree::Document::parse(&xml).unwrap();
+        let references: Vec<_> = document
+            .descendants()
+            .filter(|node| node.is_element() && node.tag_name().name() == "sectPr")
+            .map(|section| {
+                section
+                    .children()
+                    .find(|node| {
+                        node.is_element()
+                            && node.tag_name().name() == "headerReference"
+                            && node
+                                .attributes()
+                                .iter()
+                                .any(|attr| attr.name() == "type" && attr.value() == "first")
+                    })
+                    .and_then(|node| {
+                        node.attributes()
+                            .iter()
+                            .find(|attr| attr.name() == "id")
+                            .map(|attr| attr.value().to_owned())
+                    })
+            })
+            .collect();
+        assert_eq!(references.len(), 2);
+        assert!(references.iter().all(Option::is_some));
+        assert_ne!(references[0], references[1]);
+        let imported = temp.path().join("roundtrip.hcd");
+        let mut roundtrip_options = hcd_docx::ImportOptions::new("unlink-roundtrip");
+        roundtrip_options.flow_layout = true;
+        hcd_docx::import_docx(&output, &imported, &roundtrip_options, |_| Ok(())).unwrap();
+        let imported = Bundle::open(imported).unwrap();
+        let imported_layout =
+            hcd_core::read_flow_document_layout(&imported, &imported.manifest().unwrap())
+                .unwrap()
+                .unwrap();
+        assert_eq!(imported_layout.sections.len(), 2);
+        assert_ne!(
+            imported_layout.sections[0].headers.first,
+            imported_layout.sections[1].headers.first
+        );
+        let mut original_headers = 0;
+        let mut independent_headers = 0;
+        for index in 0..archive.len() {
+            let mut part = archive.by_index(index).unwrap();
+            if part.name().starts_with("word/header") && part.name().ends_with(".xml") {
+                let mut text = String::new();
+                part.read_to_string(&mut text).unwrap();
+                if text.contains("First header") {
+                    original_headers += 1;
+                }
+                if text.contains("Changed independently") {
+                    independent_headers += 1;
+                }
+            }
+        }
+        assert_eq!(original_headers, 1);
+        assert_eq!(independent_headers, 1);
+    }
+
+    #[test]
+    fn semantic_docx_export_embeds_png_stored_as_bin() {
+        use base64::Engine;
+        use std::io::Read;
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+        let (temp, bundle, _) =
+            crate::hdoc_export_html::tests::fixture_with_extension(&png, "bin", |hash| {
+                format!("<p>Shared image</p><img src=\"asset://sha256/{hash}\"/>")
+            });
+        let output = temp.path().join("shared.docx");
+        let head = bundle.manifest().unwrap();
+        let validation = hcd_core::validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        semantic_export(
+            &bundle,
+            &head,
+            output.to_str().unwrap(),
+            "docx",
+            Some(0),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(output).unwrap()).unwrap();
+        let mut found = false;
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            if file.name().starts_with("word/media/") && !file.is_dir() {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).unwrap();
+                if bytes == png {
+                    assert!(file.name().ends_with(".png"));
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "the original PNG must be embedded as an image");
+    }
+
+    #[test]
+    fn semantic_docx_export_embeds_shared_node_image_stored_as_bin() {
+        use base64::Engine;
+        use std::io::Read;
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+        let (temp, bundle, _) = crate::hdoc_export_html::tests::fixture_with_extension(
+            &png,
+            "bin",
+            |hash| {
+                let node = serde_json::json!({"schemaVersion":"hcd.extension/2","instanceId":format!("x_{:032x}",1),"type":"example.shared","version":1,"display":"block","data":{},"fallback":{"text":"Files"},"resources":[{"key":"photo","name":"picture.png","mediaType":"image/png","byteLength":png.len(),"hash":hash},{"key":"file","name":"attachment.bin","mediaType":"application/octet-stream","byteLength":png.len(),"hash":hash}],"exports":{"docx":{"support":"semantic","blocks":[{"kind":"paragraph","runs":[{"text":"Shared image"},{"resource":"photo","alt":"Photo","widthPt":32,"heightPt":24}]}]}}});
+                format!(
+                    "<div data-hcd-extension=\"{}\">Files</div>",
+                    quick_xml::escape::escape(node.to_string())
+                )
+            },
+        );
+        let validation = hcd_core::validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let output = temp.path().join("shared-node.docx");
+        semantic_export(
+            &bundle,
+            &bundle.manifest().unwrap(),
+            output.to_str().unwrap(),
+            "docx",
+            Some(0),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(output).unwrap()).unwrap();
+        let mut found = false;
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            if file.name().starts_with("word/media/") && !file.is_dir() {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).unwrap();
+                if bytes == png {
+                    assert!(file.name().ends_with(".png"));
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "the shared node PNG must be embedded as an image");
+    }
 
     #[test]
     fn patch_reader_stops_at_the_json_byte_limit() {
