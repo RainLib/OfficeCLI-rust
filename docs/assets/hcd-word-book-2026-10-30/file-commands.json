@@ -1,0 +1,213 @@
+[
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "export",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "6",
+      "--output",
+      "/Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/docs/assets/hcd-word-book-2026-10-30/book-r6.docx"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "import",
+      "/Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/docs/assets/hcd-word-book-2026-10-30/book-r6.docx",
+      "--word-regions",
+      "--output",
+      "<owned-root>/book-returned.hcd"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "validate",
+      "<owned-root>/book-returned.hcd"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-returned.hcd"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "pack",
+      "<owned-root>/region-test.hcd",
+      "--output",
+      "/Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/docs/assets/hcd-word-book-2026-10-30/book-r6.hcdz"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "unpack",
+      "/Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/docs/assets/hcd-word-book-2026-10-30/book-r6.hcdz",
+      "--output",
+      "<owned-root>/book-offline.hcd"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "validate",
+      "<owned-root>/book-offline.hcd"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "0"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "0"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "1"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "1"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "2"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "2"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "3"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "3"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "4"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "4"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "5"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "5"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "6"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "editor-state",
+      "<owned-root>/region-test.hcd",
+      "--revision",
+      "6"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "export",
+      "<owned-root>/book-offline.hcd",
+      "--revision",
+      "6",
+      "--output",
+      "/Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/docs/assets/hcd-word-book-2026-10-30/book-offline-r6.docx"
+    ],
+    "exitCode": 0
+  },
+  {
+    "args": [
+      "list-revisions",
+      "<owned-root>/region-test.hcd"
+    ],
+    "exitCode": 0
+  }
+]

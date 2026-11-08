@@ -1,0 +1,11 @@
+{
+  "finalHead": 6,
+  "mainParentSignalled": true,
+  "mainPorts": [
+    62665,
+    62664,
+    62663
+  ],
+  "qaPeerExitedZero": true,
+  "browserBulkCloseTimedOut": "No explicit close confirmation; normal ephemeral cleanup remains"
+}

@@ -1,0 +1,87 @@
+{
+  "scope": "Recorded from actual CUA observations in this turn before the browser kernel reset; no second-browser assertion for the final controlled-peer wheel check",
+  "peerInitialRevision": 5,
+  "peerInitialBodyLengths": [
+    5329,
+    6669
+  ],
+  "peerInitialUniqueLiveRegions": 7,
+  "normalPaste": {
+    "marker": "Bob 跨节同伴",
+    "count": 1,
+    "position": "beginning of second body; native field focus did not retain End position"
+  },
+  "ownUndo": {
+    "bodyLengths": [
+      5329,
+      6669
+    ],
+    "markerCount": 0,
+    "sharedHeader": "跨节共享页眉 Header image text"
+  },
+  "ownRedo": {
+    "bodyLengths": [
+      5329,
+      6678
+    ],
+    "markerCount": 1,
+    "sharedHeader": "跨节共享页眉 Header image text"
+  },
+  "savedRevision": 6,
+  "quarterScale": {
+    "scale": 0.25,
+    "sectionPages": [
+      3,
+      4
+    ],
+    "sectionStarts": [
+      1,
+      4
+    ],
+    "paperWidths": [
+      203.9930725097656,
+      280.625
+    ]
+  },
+  "rangeGeometry": [
+    {
+      "bodyHeight": 813.493,
+      "scale": 0.25,
+      "lineRects": 264,
+      "gapIntersections": 0
+    },
+    {
+      "bodyHeight": 551.226,
+      "scale": 0.24999247126612156,
+      "lineRects": 222,
+      "gapIntersections": 0
+    }
+  ],
+  "ordinaryTwoBrowserCrossZoomFollowBeforeFinalIntentGuard": {
+    "writerScale": 0.25,
+    "readerScale": 1,
+    "writerSectionIndex": 1,
+    "readerSectionIndex": 1,
+    "writerPaperIndex": 0,
+    "readerPaperIndex": 0,
+    "readerFollowing": true,
+    "readerPaperTop": 176.6319580078125,
+    "readerViewportTop": 176.53646850585938,
+    "readerBodiesEditable": [
+      false,
+      false
+    ],
+    "revision": 6
+  },
+  "firstHighLevelScrollAttempt": {
+    "followingRemainedTrue": true,
+    "scrollTop": 3263.888916015625,
+    "notCountedAsManualStopPass": true
+  },
+  "cuaFailures": [
+    "Sequential input stopped after partial text; exact values checked before continuing",
+    "Playwright focus timeout on Bob; native AX paste and shortcuts then succeeded",
+    "Old page observations and a new-tab creation timed out during final follow-guard HMR; inventory found the new tab and it was recovered without restarting services"
+  ],
+  "finalControlledPeerVerification": "follow-final-browser.json"
+}

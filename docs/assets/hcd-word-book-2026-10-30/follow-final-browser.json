@@ -1,0 +1,29 @@
+{
+  "scope": "Ordinary final-code read-only Chrome UI with controlled read-only WebSocket presence; not a second browser",
+  "follow": {
+    "following": true,
+    "scrollTop": 4240.5556640625,
+    "section": "节导航第 2 节屏幕分页 4 页A4 · 横向首页不同默认页面奇偶页不",
+    "title": "已保存 · r6"
+  },
+  "nativeWheel": {
+    "editable": [
+      "false",
+      "false"
+    ],
+    "following": false,
+    "scrollTop": 4551.6669921875,
+    "title": "已保存 · r6"
+  },
+  "locate": {
+    "following": false,
+    "scrollTop": 4240.5556640625,
+    "title": "已保存 · r6"
+  },
+  "keyboard": {
+    "following": false,
+    "title": "已保存 · r6"
+  },
+  "documentRevisionUnchanged": 6,
+  "uiOnlyCdpCommand": "Input.dispatchMouseEvent mouseWheel; no page content or browser settings changed"
+}

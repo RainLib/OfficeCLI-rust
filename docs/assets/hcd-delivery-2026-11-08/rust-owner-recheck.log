@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.73s
+     Running unittests src/main.rs (target/debug/deps/officecli-3cd1a567fa1e24b0)
+
+running 1 test
+test hdoc_server::word_checkpoints::tests::story_transaction_requires_owner_and_replays_exact_candidate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 251 filtered out; finished in 2.49s
+

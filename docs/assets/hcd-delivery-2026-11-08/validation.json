@@ -1,0 +1,101 @@
+{
+  "date": "2026-11-08",
+  "branch": "feature/hcd-editor-delivery",
+  "scope": "Local source/test/build delivery only; not full product, external application, browser, device or production acceptance",
+  "checks": [
+    {
+      "name": "frontend-tests",
+      "exitCode": 0,
+      "log": "frontend-tests.log",
+      "sha256": "385263cbcde7e74f0a802511c1a54a9ea7e7589c175f5e5eb5a5360a1da36ba8"
+    },
+    {
+      "name": "frontend-typecheck",
+      "exitCode": 0,
+      "log": "frontend-typecheck.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "frontend-build",
+      "exitCode": 0,
+      "log": "frontend-build.log",
+      "sha256": "834dfafe631ae1cc12e8eeb40b75dbc269bdad8407de7038d0a548e854182647"
+    },
+    {
+      "name": "rust-format",
+      "exitCode": 0,
+      "log": "rust-format.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "rust-tests-initial",
+      "exitCode": 101,
+      "log": "rust-tests-initial.log",
+      "sha256": "26be90a70878694f9c25f5176d0fca217f38253797e0a83b2b1fe6c933ae66f1"
+    },
+    {
+      "name": "rust-owner-recheck",
+      "exitCode": 0,
+      "log": "rust-owner-recheck.log",
+      "sha256": "7c037a0b92a7a20c66c49197691c1a331d333aaab08fb6dba2f8bd61518273d4"
+    },
+    {
+      "name": "rust-tests-bounded",
+      "exitCode": 0,
+      "log": "rust-tests-bounded.log",
+      "sha256": "20dbc27ef1b1a138bbc96e3581c950c4c8781951d97332da243c1e05bf742903"
+    }
+  ],
+  "frontendTests": {
+    "tests": 2080,
+    "passed": 2080,
+    "failed": 0
+  },
+  "sourceHashes": {
+    "examples/hdoc/editor/src/fontSize.ts": "ba737ded0ecb3453b095df56adb503555c57cf165e699bccd545484dd429b6b2",
+    "examples/hdoc/editor/src/FontSizeControl.tsx": "c2bc24830ba8ffb46bc5aedee41e8747d65c7cc438e31e3836ddbd6cab91031d",
+    "examples/hdoc/editor/src/RegionalWordEditor.tsx": "0570c302d7b4cc1c932e1e755b2f4f1b681e0addb3942a14f56dfd569a9cbfbd",
+    "examples/hdoc/editor/src/wordRegionalBinding.test.ts": "7d385ab97c13231702324e56f49c08483f7b4117bf2f87f1dd8c675647ecb868"
+  },
+  "retainedLocalFilesVerified": 3719,
+  "excluded": [
+    "build outputs",
+    "runtime credentials",
+    "Python caches",
+    "most historical validation artifacts"
+  ],
+  "rustTests": {
+    "passed": 915,
+    "failed": 0,
+    "ignored": 1,
+    "exitCode": 0,
+    "testThreads": 2,
+    "ignoredReason": "real_picture_source_geometry_export_fixture requires an explicit real-PPTX source and output path"
+  },
+  "whitespaceCheck": {
+    "exitCode": 0,
+    "exceptions": [
+      "vendor/ironpress/assets/LICENSE-LiberationFonts",
+      "vendor/ironpress/tests/parity/fonts/LICENSE-ParitySans.txt",
+      "docs/assets/**/*.log"
+    ],
+    "reason": "Upstream license text and raw command logs are retained byte-for-byte"
+  },
+  "initialRustFailure": {
+    "test": "hdoc_server::word_checkpoints::tests::story_transaction_requires_owner_and_replays_exact_candidate",
+    "error": "409 word-owner-lost on replay",
+    "singleTestRecheck": "passed in 2.49 seconds",
+    "productionLeaseMs": 15000,
+    "inference": "Consistent with wall-clock lease expiry under full parallel test load; causality not independently established",
+    "productionGuardsChanged": false,
+    "boundedFullRecheck": "passed; all 252 officecli unit tests passed, including the initially failed test"
+  },
+  "sourceHead": "82708861f5f412c933e1e942147cbb27715edccd",
+  "baseHead": "2e9d4ec",
+  "buildBoundary": "Builds used installed dependencies; npm ci is a reproduction step, not a check rerun in this delivery",
+  "securityPatternScan": {
+    "stagedFilesBeforeFinalEvidence": 1790,
+    "jwtPrivateKeyProviderKeyMatches": 0,
+    "staticTestAndExampleCredentialsReviewed": true
+  }
+}

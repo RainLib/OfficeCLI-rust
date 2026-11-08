@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict'
+import {readFile,writeFile} from 'node:fs/promises'
+import {getSchema} from '../examples/hdoc/editor/node_modules/@tiptap/core/dist/index.js'
+import {HocuspocusProvider} from '../examples/hdoc/editor/node_modules/@hocuspocus/provider/dist/hocuspocus-provider.esm.js'
+import * as Y from '../examples/hdoc/editor/node_modules/yjs/dist/yjs.mjs'
+import {EditorState} from '../examples/hdoc/editor/node_modules/@tiptap/pm/state/index.ts'
+import {schemaExtensions,jsonToSnapshot,sourceIdentityPlugin} from '../examples/hdoc/editor/src/schema.ts'
+import {SemanticStructureIdentity} from '../examples/hdoc/editor/src/semanticStructureIdentity.ts'
+import {SemanticBlockStore} from '../examples/hdoc/editor/src/semanticBlockStore.ts'
+import {NodeExtensionRegistry} from '../examples/hdoc/editor/src/extensionRegistry.ts'
+import {extensionNodes,extensionPreservationPlugin} from '../examples/hdoc/editor/src/extensionNode.ts'
+import {nodeEditCollaborationUrl} from '../examples/hdoc/editor/src/collaborationProtocol.ts'
+import {checkpointDigest} from '../examples/hdoc/editor/src/checkpointSnapshot.ts'
+import {imageDraftDigest} from '../examples/hdoc/editor/src/collaborativeImages.ts'
+import {requestCoordinatedSave} from '../examples/hdoc/editor/src/semanticSaveClient.ts'
+import {nodePortableFixture} from '../examples/hdoc/editor/fixtures/nodePortable.ts'
+import {deletionReviews} from '../examples/hdoc/editor/src/deletionReview.ts'
+const c=JSON.parse(await readFile(process.argv[2],'utf8')),response=await fetch(`http://127.0.0.1:${c.ports[1]}/v1/documents/mentions-docx/collaboration/negotiate`,{method:'POST',headers:{Authorization:'Bearer '+c.alice}});assert.equal(response.status,200);const auth=await response.json();assert.equal(auth.nodeEditVersion,5)
+const doc=new Y.Doc(),url=`ws://127.0.0.1:${c.ports[1]}?hcdNodeEdits=4`;let rejected=false;const provider=new HocuspocusProvider({url,name:`mentions-docx:${auth.collaborationEpoch}:structure3:save4`,document:doc,token:c.alice,WebSocketPolyfill:WebSocket,onAuthenticationFailed:()=>{rejected=true}})
+try{const end=Date.now()+10000;while(!rejected&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,25));assert.equal(rejected,true);assert.equal(provider.isSynced,false);assert.equal(doc.getMap('hcd-semantic-blocks/3/meta').get('version'),undefined);await writeFile('docs/assets/hcd-deletion-review-2026-10-25/socket-model-fence.json',JSON.stringify({scope:'Actual local sidecar WebSocket authentication; old wire4 client rejected before synchronization',requiredModel:5,clientModel:4,rejected:true,noSharedDocumentReceived:true},null,2)+'\n');console.log('PASS old wire4 socket rejected before document sync')}finally{provider.disconnect();provider.destroy();await provider.configuration.websocketProvider.destroy();doc.destroy()}

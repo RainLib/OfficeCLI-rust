@@ -1,0 +1,194 @@
+{
+  "scope": "Ordinary same-machine Chrome UI stages; intermediate pre-width-fix counts are identified explicitly",
+  "originalMixedSource": {
+    "bookZoom": "1",
+    "liveRegions": [
+      {
+        "id": "n_9fac304fd94c74c30239cb910d18daed",
+        "kind": "body"
+      },
+      {
+        "id": "n_c623df2475687d6b4c4752452a12f5ba",
+        "kind": "body"
+      },
+      {
+        "id": "n_b85a74bccab6e38e1cabf93c1cee3ef3",
+        "kind": "footer"
+      },
+      {
+        "id": "n_a668bc341fb61bc32f2300d30f8f616c",
+        "kind": "footer"
+      },
+      {
+        "id": "n_96f9c955c325b3911a80dffa81c179a9",
+        "kind": "header"
+      },
+      {
+        "id": "n_e9446e1680af68c64dcc7b8eade24520",
+        "kind": "header"
+      },
+      {
+        "id": "n_f1875ec1098fbb31c41f8b7f1c23a17b",
+        "kind": "header"
+      }
+    ],
+    "sections": [
+      {
+        "height": 1055.998291015625,
+        "id": "n_9fac304fd94c74c30239cb910d18daed",
+        "pages": "1",
+        "start": "1",
+        "top": 200.5295257568359,
+        "width": 815.998291015625
+      },
+      {
+        "height": 793.732666015625,
+        "id": "n_c623df2475687d6b4c4752452a12f5ba",
+        "pages": "1",
+        "start": "4",
+        "top": 1280.5208740234375,
+        "width": 1122.526123046875
+      }
+    ]
+  },
+  "plainSourceStart": {
+    "liveIds": [
+      "n_9fac304fd94c74c30239cb910d18daed",
+      "n_c623df2475687d6b4c4752452a12f5ba",
+      "n_b85a74bccab6e38e1cabf93c1cee3ef3",
+      "n_a668bc341fb61bc32f2300d30f8f616c",
+      "n_96f9c955c325b3911a80dffa81c179a9",
+      "n_e9446e1680af68c64dcc7b8eade24520",
+      "n_f1875ec1098fbb31c41f8b7f1c23a17b"
+    ],
+    "sections": [
+      {
+        "id": "n_9fac304fd94c74c30239cb910d18daed",
+        "pages": "1",
+        "start": "1"
+      },
+      {
+        "id": "n_c623df2475687d6b4c4752452a12f5ba",
+        "pages": "1",
+        "start": "2"
+      }
+    ],
+    "title": "已保存 · r1"
+  },
+  "firstSectionGrowth": {
+    "active": "文档内容",
+    "section": "节导航第 1 节屏幕分页 3 页Letter · 纵向首页不",
+    "sections": [
+      {
+        "pages": "3",
+        "start": "1",
+        "top": -1445.026123046875
+      },
+      {
+        "pages": "1",
+        "start": "4",
+        "top": 1794.96533203125
+      }
+    ],
+    "status": "屏幕分页 3 页"
+  },
+  "secondSectionGrowthBeforeWidthFix": {
+    "sections": [
+      {
+        "height": 3215.99853515625,
+        "pages": "3",
+        "start": "1",
+        "width": 815.998291015625
+      },
+      {
+        "height": 4064.66162109375,
+        "pages": "5",
+        "start": "4",
+        "width": 1122.526123046875
+      }
+    ],
+    "status": "节导航第 2 节屏幕分页 5 页A4 · 横向首页不同默认页面奇偶页不同下载草稿备份查看设"
+  },
+  "secondUndoBeforeWidthFix": {
+    "sections": [
+      {
+        "bodyLength": 5329,
+        "pages": "3",
+        "start": "1"
+      },
+      {
+        "bodyLength": 8,
+        "pages": "1",
+        "start": "4"
+      }
+    ]
+  },
+  "secondRedoBeforeWidthFix": {
+    "sections": [
+      {
+        "bodyLength": 5329,
+        "pages": "3",
+        "start": "1"
+      },
+      {
+        "bodyLength": 6669,
+        "pages": "5",
+        "start": "4"
+      }
+    ]
+  },
+  "afterWidthFix": {
+    "sections": [
+      {
+        "bodyLength": 5329,
+        "bodyWidth": 624.0017700195312,
+        "pages": "3",
+        "paperWidth": 815.998291015625,
+        "start": "1"
+      },
+      {
+        "bodyLength": 6669,
+        "bodyWidth": 930.529541015625,
+        "pages": "4",
+        "paperWidth": 1122.526123046875,
+        "start": "4"
+      }
+    ],
+    "title": "已保存 · r2"
+  },
+  "inheritedHeaderActivation": {
+    "active": "编辑页眉",
+    "context": "页眉 · 第 2 节 · 默认页面 · 链接前一节 · 共享内容：修改会影响所有关联位置关闭页眉和页脚",
+    "live": [
+      {
+        "id": "n_b85a74bccab6e38e1cabf93c1cee3ef3",
+        "kind": "footer",
+        "text": "Default footer",
+        "top": 1232.03125
+      },
+      {
+        "id": "n_96f9c955c325b3911a80dffa81c179a9",
+        "kind": "header",
+        "text": "Header image text+⠿",
+        "top": 571.8142700195312
+      }
+    ],
+    "targetTop": 572.3524780273438
+  },
+  "sharedHeaderCopies": {
+    "first": "跨节共享页眉 Header image text",
+    "liveIds": [
+      "n_9fac304fd94c74c30239cb910d18daed",
+      "n_c623df2475687d6b4c4752452a12f5ba",
+      "n_b85a74bccab6e38e1cabf93c1cee3ef3",
+      "n_a668bc341fb61bc32f2300d30f8f616c",
+      "n_96f9c955c325b3911a80dffa81c179a9",
+      "n_e9446e1680af68c64dcc7b8eade24520",
+      "n_f1875ec1098fbb31c41f8b7f1c23a17b"
+    ],
+    "second": "跨节共享页眉 Header image text",
+    "title": "已保存 · r5"
+  },
+  "typingTimeouts": "Sequential input stopped after two characters twice. Exact partial values were checked before continuing; final text inserted through normal paste.",
+  "postHmrOldAliceTab": "Observation timeout; no zoom action or peer undo counted from that handle."
+}

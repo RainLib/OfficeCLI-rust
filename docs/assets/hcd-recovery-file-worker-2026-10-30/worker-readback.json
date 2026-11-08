@@ -1,0 +1,24 @@
+{
+  "scope": "Real Node worker thread executing bundled production codec, real local canonical verifier, actual synthetic file bytes; not browser UI/performance",
+  "revisionUnchanged": 8,
+  "packetBytes": 16828344,
+  "packetHash": "38cb0385c56444dc212759a7477dba45924e4e7c34a5af131fc9cd3785e87279",
+  "workerThreads": 2,
+  "workerTerminated": 2,
+  "mainWholeFileReadsDuringParsing": 0,
+  "independentResourceHashes": true,
+  "damagedResourceRejected": true,
+  "files": [
+    {
+      "name": "large-1.bin",
+      "bytes": 6291456,
+      "hash": "856a7d62e6bf8b1e8cd815bd086af8cd63158e81eeaacf2228e7179fe5f9dc7c"
+    },
+    {
+      "name": "large-2.bin",
+      "bytes": 6291456,
+      "hash": "e954205f79a3f32051cabbb7b369156ae745fab6b8cf459110173d6a64c0e826"
+    }
+  ],
+  "codecSourceHash": "d00c84286e798919935e046ac5018189c060a7ba853c8fc12a153ef6e63b99b5"
+}

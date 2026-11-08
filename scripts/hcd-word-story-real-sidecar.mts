@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict'
+import {createHash,createHmac} from 'node:crypto'
+import {spawn} from 'node:child_process'
+import {readFile} from 'node:fs/promises'
+import {setTimeout as delay} from 'node:timers/promises'
+import {HocuspocusProvider} from '../examples/hdoc/editor/node_modules/@hocuspocus/provider/dist/hocuspocus-provider.esm.js'
+import * as Y from '../examples/hdoc/editor/node_modules/yjs/dist/yjs.mjs'
+import {WordCheckpointJournal,wordSaveCapsule} from '../examples/hdoc/editor/src/wordCheckpointJournal.ts'
+import {WordRegionStore,wordRegionSchema} from '../examples/hdoc/editor/src/wordRegionStore.ts'
+const [root,fixtureFile,api,port,token]=process.argv.slice(2),secret=process.env.HCD_TOKEN_SECRET!
+const fixture=JSON.parse(await readFile(fixtureFile,'utf8')),lineage=createHmac('sha256',secret).update(`word-room/1:${api}:doc:0`).digest('hex').slice(0,32),journal=new WordCheckpointJournal(root,api,'doc',0,lineage,secret,true,true),schema=wordRegionSchema(),doc=new Y.Doc(),previous=fixture.previous,model=new WordRegionStore(doc,schema,'doc',previous.flowLayout,previous.flowLayoutHash)
+model.initialize(previous);const base={revision:previous.revision,rootHash:fixture.baseRoot,layoutHash:previous.flowLayoutHash,digest:createHash('sha256').update(model.contents()).digest('hex')},initial=wordSaveCapsule(journal.scope,model,base,[fixture.pending.actor]),tip=await journal.save(initial,'none'),prepared=await journal.prepareStory(fixture.pending,tip,()=>{})
+const region=previous.flowLayout.sections[0].id,before=model.region(region),target=before.find((item:any)=>item.node.type.name==='paragraph'&&item.node.firstChild?.isText);assert.ok(target)
+const replacement=target.node.type.createChecked(target.node.attrs,schema.text('Real sidecar unsaved draft 😀',target.node.firstChild.marks)),edited=before.map((item:any)=>item.key===target.key?{key:item.key,node:replacement}:item);model.reconcile(region,before,edited)
+const late=structuredClone(prepared.capsule);late.document=Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64');const lateTip=await journal.save(late,prepared.tip)
+const child=spawn(process.execPath,['--import','tsx','sidecar.ts'],{cwd:process.cwd(),env:{...process.env,HCD_API_URL:api,HCD_COLLAB_PORT:port,HCD_SIDECAR_STATE_DIR:root,HCD_WORD_ROOMS:'1'},stdio:['ignore','pipe','pipe']});let logs='';child.stdout.on('data',v=>logs+=v);child.stderr.on('data',v=>logs+=v)
+const wait=async(check:()=>boolean|Promise<boolean>)=>{for(let i=0;i<400;i++){if(child.exitCode!==null)throw Error('sidecar exited '+logs);if(await check())return;await delay(50)}throw Error('timeout '+logs)}
+const client=new Y.Doc();let provider:HocuspocusProvider|undefined
+try{
+ await wait(async()=>{try{return(await fetch(`http://127.0.0.1:${port}`,{signal:AbortSignal.timeout(200)})).ok}catch{return false}})
+ provider=new HocuspocusProvider({url:`ws://127.0.0.1:${port}?hcdNodeEdits=7&hcdWordRegions=1`,name:'doc:0:wordregions1:save5',document:client,token})
+ let saved:any;await wait(async()=>{saved=await new WordCheckpointJournal(root,api,'doc',0,lineage,secret,true,true).load();return !!saved?.capsule.storyAcknowledgement})
+ assert.notEqual(saved.hash,lateTip);assert.equal(provider.isSynced,false);const receipt=saved.capsule.storyAcknowledgement.receipt,projection=JSON.parse(JSON.stringify(previous));projection.revision=fixture.revision;projection.flowLayoutHash=receipt.layoutHash;projection.flowLayout.stories.push(fixture.pending.story);projection.flowLayout.sections[1].headers.first=fixture.pending.story.id
+ const restored=new Y.Doc();try{Y.applyUpdate(restored,Buffer.from(saved.capsule.document,'base64'));const recovered=new WordRegionStore(restored,schema,'doc',projection.flowLayout,projection.flowLayoutHash);assert.match(recovered.project(region).textContent,/Real sidecar unsaved draft/);assert.ok(recovered.project(fixture.pending.story.id).textContent);const expected=fixture.next.blocks.find((block:any)=>block.flowRegionId===fixture.pending.story.id);const actual=recovered.capture().regions.find((item:any)=>item.regionId===fixture.pending.story.id)!.blocks[0];assert.equal(actual.content.inlines[0].nodeId,expected.content.inlines[0].nodeId);assert.ok(expected.content.inlines[0].nodeId);if(fixture.multi){const inherited=previous.blocks.find((block:any)=>block.flowRegionId===fixture.pending.intent.expectedInheritedStoryId);assert.equal(inherited.content.inlines[0].nodeId,inherited.content.inlines[1].nodeId);assert.deepEqual(expected.content.inlines.map((inline:any)=>inline.typography?.sizePt),[12,18]);assert.deepEqual(actual.content.inlines.map((inline:any)=>inline.typography?.sizePt),[12,18]);assert.deepEqual(actual.content.inlines.map((inline:any)=>inline.nodeId),expected.content.inlines.map((inline:any)=>inline.nodeId));assert.notEqual(actual.content.inlines[0].nodeId,actual.content.inlines[1].nodeId)}}finally{restored.destroy()}
+ console.log(JSON.stringify({revision:saved.capsule.base.revision,actualNativeReceipt:true,actualSidecar:true,oldClientSynced:false,lateDraftPreserved:true,multiSizeVerified:!!fixture.multi,previousTip:lateTip,recoveredTip:saved.hash}))
+}finally{provider?.destroy();client.destroy();doc.destroy();child.kill('SIGTERM');if(child.exitCode===null)await new Promise<void>(resolve=>child.once('exit',()=>resolve()))}

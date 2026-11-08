@@ -1,0 +1,18 @@
+{
+  "scope": "Owned synthetic canonical archive with two private 6 MiB files; no browser state writes or document commits",
+  "revision": 8,
+  "packetBytes": 16828344,
+  "packetHash": "38cb0385c56444dc212759a7477dba45924e4e7c34a5af131fc9cd3785e87279",
+  "files": [
+    {
+      "name": "large-1.bin",
+      "hash": "856a7d62e6bf8b1e8cd815bd086af8cd63158e81eeaacf2228e7179fe5f9dc7c",
+      "byteLength": 6291456
+    },
+    {
+      "name": "large-2.bin",
+      "hash": "e954205f79a3f32051cabbb7b369156ae745fab6b8cf459110173d6a64c0e826",
+      "byteLength": 6291456
+    }
+  ]
+}

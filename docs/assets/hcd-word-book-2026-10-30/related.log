@@ -1,0 +1,47 @@
+✔ awareness sends a bounded position and renders peer range/caret without changing document state (66.273549ms)
+✔ a remote caret follows the same permanent text through a quote conversion (32.722963ms)
+✔ malformed or out-of-document awareness positions are ignored without touching content (11.532748ms)
+✔ unfocused regional views cannot clear the active story caret or destroy its ownership (4.741128ms)
+✔ book screen numbering continues measured sections and honors zero/restart without changing canonical layout (6.156653ms)
+✔ dirty/unsupported predecessors never lend a stale count; a later explicit restart can establish numbering again (1.602264ms)
+✔ non-page section breaks do not invent physical sharing, blank pages or subsequent inherited numbers (0.984166ms)
+✔ invalid counts and overflowing page numbers cannot become a following section baseline (0.649702ms)
+✔ story uses keep inherited disabled bindings for later sections and deduplicate shared identities at each width (2.489625ms)
+✔ ephemeral paper positions are bounded and do not create missing pages (0.732976ms)
+✔ page estimates distinguish unpaginated content from physical page stride (3.204601ms)
+✔ geometry rejects invalid scales, impossible body space and unbounded values (0.758186ms)
+✔ layout metadata neither changes document content nor enters personal history (37.26099ms)
+✔ layout commands reject forged counts without editing state (7.335596ms)
+✔ page layout leaves real regional Yjs bytes, checkpoint and personal undo intact (129.794646ms)
+✔ shared header awareness belongs to its actual section and physical page (3.027237ms)
+✔ commands target only the currently visible body or active header/footer story (0.618744ms)
+✔ preview choice reports the actual story variant when first/even settings are disabled (0.529178ms)
+✔ shared stories are detected for both original and inherited bindings, including alternate variants (1.142268ms)
+✔ paper stories resolve first/even/default independently with source inheritance (0.8379ms)
+✔ continuous section page parity is never guessed when the previous page count is unknown (0.52568ms)
+✔ unknown parity allows only regions whose odd and even bindings resolve identically (2.169897ms)
+✔ independent screen pagination never silently blanks ambiguous inherited margins (0.714283ms)
+✔ paper dimensions use the section orientation and margins without converting native chunks to pages (0.9895ms)
+✔ paper labels distinguish Letter and landscape A4 using actual dimensions (0.928409ms)
+✔ history and follow map a shared story back to the preferred body instead of selecting the first section (5.113274ms)
+✔ story location uses the updated index after asynchronous loading and preserves the preferred section (0.698373ms)
+✔ story location loads further index pages only until a matching body is found (0.900495ms)
+✔ story location skips verified unrelated body groups but verifies the selected region (2.3986ms)
+✔ legacy story location refuses a body identity carried by a different source part (0.724223ms)
+✔ regional presence retains the containing section for inherited stories and rejects foreign locations (0.923086ms)
+✔ story loading is bounded and a stale section stops requesting more pages (23.236602ms)
+✔ pagination measures only enabled first and even stories, including inherited ones (5.103763ms)
+✔ region-indexed story loading selects effective variants and falls back for old indexes (4.384184ms)
+✔ verified story identity must match the loaded page before it can be displayed (3.213244ms)
+✔ actual PM split and source identity plugins produce admissible regional packets and preserve the peer header (205.415505ms)
+✔ regional AI accepts one header action without changing peer body and own undo preserves the peer (68.49709ms)
+✔ regional AI rejects a changed target and cannot reuse a body target in a different story (22.774432ms)
+✔ regional receipt equivalence only fills false flags on block atom fallbacks, never business payload or true formatting (2.041347ms)
+ℹ tests 39
+ℹ suites 0
+ℹ pass 39
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3919.935697

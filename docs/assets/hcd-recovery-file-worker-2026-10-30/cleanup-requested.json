@@ -1,0 +1,11 @@
+{
+  "finalHead": 8,
+  "controllerSignalled": true,
+  "ports": [
+    49882,
+    49883,
+    49884
+  ],
+  "browserFinalTabClosed": true,
+  "browserOldTabCloseRequestedNotConfirmed": true
+}

@@ -1,0 +1,296 @@
+{
+  "blocks": [
+    {
+      "blockHash": "73bd61b53fa5d81864ea4bcc297821d438ff462307fb15705ecda66581596ac0",
+      "blockId": "n_4b9387a96ad62b35871e33f450c50028",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_09b51ccceeb966a2a8da7ee45722cb43",
+            "strike": false,
+            "text": "Body one",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_9fac304fd94c74c30239cb910d18daed",
+      "readOnly": false,
+      "region": "body"
+    },
+    {
+      "blockHash": "53332c60e13b0e14ecd8e554264fd3a1721a57dc48e5fb763c977396a54efe89",
+      "blockId": "n_62768e0aacd751a20302e9e7b10bf868",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_2adb67a5f8fde53275d0173552b82f58",
+            "strike": false,
+            "text": "Body two",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_c623df2475687d6b4c4752452a12f5ba",
+      "readOnly": false,
+      "region": "body"
+    },
+    {
+      "blockHash": "4f211c66ac391bec3773f5cd7747b4ad14018900bea3e3cb0f7b81d836c9e0a2",
+      "blockId": "n_2ba1440e00fc9f192d44968c199a40b7",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_54893abccc73c228ffe07982be53f7f2",
+            "strike": false,
+            "text": "Default footer",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_b85a74bccab6e38e1cabf93c1cee3ef3",
+      "readOnly": false,
+      "region": "footer"
+    },
+    {
+      "blockHash": "9045221a74e015af2a55a4a50058b77f167292791c2f5fc488e97409c8e869dc",
+      "blockId": "n_ebc1c360a820f9ffa378a2af4a2aae0e",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_c058ef1630c13ca732f2acd9d3867e86",
+            "strike": false,
+            "text": "",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_a668bc341fb61bc32f2300d30f8f616c",
+      "readOnly": false,
+      "region": "footer"
+    },
+    {
+      "blockHash": "bf77e9e91ae7471ee74e2488fa3b2924540f66fcff26d04e7c62fa1da67539b7",
+      "blockId": "n_0009a2f62b375ce33e61b2b20b751668",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_6a43c142e05c5072a0fe06f136766860",
+            "strike": false,
+            "text": "Header image text",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_96f9c955c325b3911a80dffa81c179a9",
+      "readOnly": false,
+      "region": "header"
+    },
+    {
+      "blockHash": "7db0c83a2011f0d4451391a68ab71d0ff0990ea62a00960794410b4f81fe6dbd",
+      "blockId": "n_36c64535ad2b58ee6a5332135bd2f603",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_9c5e7ba9cf06781c86e8b4cc598a1b01",
+            "strike": false,
+            "text": "",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_96f9c955c325b3911a80dffa81c179a9",
+      "readOnly": true,
+      "readOnlyHtml": "<p class=\"hcd-paragraph hcd-empty-paragraph\" data-hcd-id=\"n_36c64535ad2b58ee6a5332135bd2f603\" data-hcd-word-tree=\"1\" data-hcd-word-paragraph-ordinal=\"2\"><span class=\"hcd-run\" data-hcd-run-index=\"1\"><img class=\"hcd-drawing hcd-drawing-inline\" data-hcd-id=\"n_9c5e7ba9cf06781c86e8b4cc598a1b01\" data-hcd-node-hash=\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\" data-hcd-visual-hash=\"8061902398279b13316503555e8edafed80ecfeb64f0bc89771c2c2dd113436f\" data-hcd-asset-hash=\"775ad9a128a9043b7232ba9b0ad73bbc6a3e6457b010d45346eb88e50d6ec845\" data-hcd-node-kind=\"image\" data-hcd-editable=\"true\" data-hcd-source-part=\"word/header1.xml\" data-hcd-source-path=\"/drawing[1]\" src=\"asset://sha256/775ad9a128a9043b7232ba9b0ad73bbc6a3e6457b010d45346eb88e50d6ec845\" data-hcd-asset-href=\"assets/sha256/775ad9a128a9043b7232ba9b0ad73bbc6a3e6457b010d45346eb88e50d6ec845.png\" data-hcd-x=\"0\" data-hcd-y=\"0\" data-hcd-width=\"914400\" data-hcd-height=\"457200\" data-hcd-geometry-unit=\"emu\" alt=\"Header logo\" data-hcd-drawing-layout=\"inline\" data-hcd-drawing-id=\"42\" data-hcd-width-emu=\"914400\" data-hcd-height-emu=\"457200\" style=\"width:96.00px;height:48.00px\"/></span></p>",
+      "region": "header"
+    },
+    {
+      "blockHash": "db119094966561810dfe911959298c382829291756552b5ecfb7f2baa4c76a9c",
+      "blockId": "n_7a9524230ec6b0097741954f3193f353",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_bfce7ca13c46b23c1847df044bb6c6c5",
+            "strike": false,
+            "text": "Even header",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_e9446e1680af68c64dcc7b8eade24520",
+      "readOnly": false,
+      "region": "header"
+    },
+    {
+      "blockHash": "0403134a6532ce64227f223ec619b34d4155db82b8d70f82c7de3954bb8c809b",
+      "blockId": "n_7a8a7436d489c7df7bedb007fe73a2eb",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_98fed72325005444657c2fba011486bf",
+            "strike": false,
+            "text": "Unused header",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_62e123419d93cef7467458b4aea43e41",
+      "readOnly": false,
+      "region": "header"
+    },
+    {
+      "blockHash": "13623c832a50f462381e5e0ada3219f56776b7200ffc19df7641bdfc50eb5f48",
+      "blockId": "n_870b0c06af5556e7ed966a4017521b2d",
+      "content": {
+        "inlines": [
+          {
+            "bold": false,
+            "code": false,
+            "hardBreak": false,
+            "italic": false,
+            "nodeId": "n_6aed9af4514beff183e1846c2940c116",
+            "strike": false,
+            "text": "First header",
+            "underline": false
+          }
+        ],
+        "kind": "paragraph"
+      },
+      "flowRegionId": "n_f1875ec1098fbb31c41f8b7f1c23a17b",
+      "readOnly": false,
+      "region": "header"
+    }
+  ],
+  "documentId": "region-test",
+  "flowLayout": {
+    "evenAndOddHeaders": true,
+    "schemaVersion": "hcd-flow-layout/2",
+    "sections": [
+      {
+        "canonicalEndBlockId": "n_4b9387a96ad62b35871e33f450c50028",
+        "differentFirstPage": true,
+        "footers": {
+          "default": "n_b85a74bccab6e38e1cabf93c1cee3ef3"
+        },
+        "headers": {
+          "default": "n_96f9c955c325b3911a80dffa81c179a9",
+          "first": "n_f1875ec1098fbb31c41f8b7f1c23a17b"
+        },
+        "id": "n_9fac304fd94c74c30239cb910d18daed",
+        "page": {
+          "heightTwips": 15840,
+          "marginsTwips": {
+            "bottom": 1440,
+            "footer": 720,
+            "gutter": 0,
+            "header": 720,
+            "left": 1440,
+            "right": 1440,
+            "top": 1440
+          },
+          "widthTwips": 12240
+        },
+        "source": {
+          "originalPropertiesXml": "<w:sectPr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:headerReference w:type=\"default\" r:id=\"hd\"/><w:headerReference w:type=\"first\" r:id=\"hf\"/><w:footerReference w:type=\"default\" r:id=\"fd\"/><w:titlePg/><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>",
+          "paragraphId": "P1",
+          "paragraphOrdinal": 1,
+          "part": "word/document.xml"
+        }
+      },
+      {
+        "breakType": "nextPage",
+        "differentFirstPage": true,
+        "footers": {
+          "first": "n_a668bc341fb61bc32f2300d30f8f616c"
+        },
+        "headers": {
+          "even": "n_e9446e1680af68c64dcc7b8eade24520"
+        },
+        "id": "n_c623df2475687d6b4c4752452a12f5ba",
+        "page": {
+          "heightTwips": 11906,
+          "numberFormat": "decimal",
+          "orientation": "landscape",
+          "widthTwips": 16838
+        },
+        "source": {
+          "originalPropertiesXml": "<w:sectPr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:headerReference w:type=\"even\" r:id=\"he\"/><w:footerReference w:type=\"first\" r:id=\"ff\"/><w:titlePg w:val=\"1\"/><w:type w:val=\"nextPage\"/><w:pgSz w:w=\"16838\" w:h=\"11906\" w:orient=\"landscape\"/><w:pgNumType w:fmt=\"decimal\"/></w:sectPr>",
+          "part": "word/document.xml"
+        }
+      }
+    ],
+    "stories": [
+      {
+        "id": "n_b85a74bccab6e38e1cabf93c1cee3ef3",
+        "kind": "footer",
+        "sourcePart": "word/footer1.xml"
+      },
+      {
+        "id": "n_a668bc341fb61bc32f2300d30f8f616c",
+        "kind": "footer",
+        "sourcePart": "word/footer2.xml"
+      },
+      {
+        "id": "n_96f9c955c325b3911a80dffa81c179a9",
+        "kind": "header",
+        "sourcePart": "word/header1.xml"
+      },
+      {
+        "id": "n_e9446e1680af68c64dcc7b8eade24520",
+        "kind": "header",
+        "sourcePart": "word/header2.xml"
+      },
+      {
+        "id": "n_62e123419d93cef7467458b4aea43e41",
+        "kind": "header",
+        "sourcePart": "word/header3.xml"
+      },
+      {
+        "id": "n_f1875ec1098fbb31c41f8b7f1c23a17b",
+        "kind": "header",
+        "sourcePart": "word/parts/custom.xml"
+      }
+    ]
+  },
+  "flowLayoutHash": "4eafe7e608854f65d98d2cb5141d8122f783ca11a5038c41af86eff021642300",
+  "revision": 1
+}

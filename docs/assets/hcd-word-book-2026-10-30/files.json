@@ -1,0 +1,34 @@
+{
+  "scope": "Actual native CLI files from ordinary browser saves, not external Word/WPS layout or app offline startup",
+  "head": 6,
+  "docx": {
+    "file": "book-r6.docx",
+    "bodyTextAndBothMembers": true,
+    "sharedHeaderWrittenOnce": true,
+    "derivedPageStartNotWritten": true,
+    "sections": 2,
+    "mediaEntries": 1
+  },
+  "offlineDocx": {
+    "file": "book-offline-r6.docx",
+    "bodyTextAndBothMembers": true,
+    "sharedHeaderWrittenOnce": true,
+    "derivedPageStartNotWritten": true,
+    "sections": 2,
+    "mediaEntries": 1
+  },
+  "canonicalLayoutAndStoryBindingsUnchanged": true,
+  "oneParagraphPerBodyRetained": true,
+  "reimportTextAndSharedHeader": true,
+  "offlineCanonicalFilesIdentical": 70,
+  "offlineExactRevisions": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "nativeBinaryUnchanged": true
+}

@@ -1,0 +1,252 @@
+
+> @officecli/hcd-reference-editor@0.1.0 build
+> tsc --noEmit && vite build && vite build --config vite.embed.config.ts
+
+vite v7.1.11 building for production...
+transforming...
+node_modules/@tiptap/react/dist/menus/index.js (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@tiptap/react/dist/menus/index.js" was ignored.
+node_modules/@tiptap/react/dist/index.js (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@tiptap/react/dist/index.js" was ignored.
+node_modules/@radix-ui/react-direction/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-direction/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-dialog/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-dialog/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-popover/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-popover/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-dropdown-menu/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-dropdown-menu/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-hover-card/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-hover-card/dist/index.mjs" was ignored.
+node_modules/sonner/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/sonner/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-portal/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-portal/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-dismissable-layer/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-dismissable-layer/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-focus-scope/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-focus-scope/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-focus-guards/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-focus-guards/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-presence/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-presence/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-popper/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-popper/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-menu/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-menu/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-roving-focus/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-roving-focus/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-collection/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-collection/dist/index.mjs" was ignored.
+✓ 4120 modules transformed.
+rendering chunks...
+[plugin vite:reporter] 
+(!) /Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/examples/hdoc/xlsx-univer-viewer/src/hcd-parser.ts is dynamically imported by /Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/examples/hdoc/xlsx-univer-viewer/src/adapter.ts but also statically imported by /Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/examples/hdoc/editor/src/WorkbookEditor.tsx, dynamic import will not move module into another chunk.
+
+computing gzip size...
+dist/index.html                                          0.38 kB │ gzip:     0.27 kB
+dist/assets/semanticRecoveryParseWorker-NGJ0eVvz.js      1.76 kB
+dist/assets/UniverViewer-Dyw6R-VU.css                   84.30 kB │ gzip:    13.01 kB
+dist/assets/index-CPSeonjl.css                         136.83 kB │ gzip:    23.75 kB
+dist/assets/pa-C54UG8eN-EW_8hrTF.js                      0.53 kB │ gzip:     0.23 kB
+dist/assets/or-50rxpoq4-B_XNinj_.js                      0.57 kB │ gzip:     0.24 kB
+dist/assets/gu-Bjl0l-cf-Bb_OSiMJ.js                      0.58 kB │ gzip:     0.24 kB
+dist/assets/hi-DsAaTPCC-lc1bUHMk.js                      0.61 kB │ gzip:     0.25 kB
+dist/assets/mr-CjWJPVmH-BKMRnoAc.js                      0.61 kB │ gzip:     0.25 kB
+dist/assets/as-BPtSu6VN-CYxxmKqh.js                      0.63 kB │ gzip:     0.26 kB
+dist/assets/bn-NCLZcWHi-CsgykzQM.js                      0.63 kB │ gzip:     0.26 kB
+dist/assets/te-B5Spl2Jk-DYnT8Dmf.js                      0.63 kB │ gzip:     0.25 kB
+dist/assets/kn-C6Lov-DP-D7dHjlY1.js                      0.63 kB │ gzip:     0.25 kB
+dist/assets/ta-BcghgTbD-D3SGVeDl.js                      0.71 kB │ gzip:     0.25 kB
+dist/assets/ml-2xLVYkVY-CBhOFsDv.js                      0.81 kB │ gzip:     0.30 kB
+dist/assets/pi-B9cgjyG1-v-IB86gp.js                      0.86 kB │ gzip:     0.35 kB
+dist/assets/recoveryAttachmentFile-Ynsb-xso.js           0.94 kB │ gzip:     0.46 kB
+dist/assets/zh-latn-pinyin-BdYb-Ey_-BpSBSv6m.js          1.28 kB │ gzip:     0.22 kB
+dist/assets/eu-Ctv_kq9Z-DMhU9kwg.js                      1.52 kB │ gzip:     0.21 kB
+dist/assets/pt-Cum2_NUC-D8aZaPM_.js                      2.29 kB │ gzip:     0.31 kB
+dist/assets/id-DifDyWg9-1QUBE4o0.js                      2.52 kB │ gzip:     0.63 kB
+dist/assets/oc-P_i3-xLA-Cg0Gj-PC.js                      2.56 kB │ gzip:     0.67 kB
+dist/assets/kmr-Cfwhwuff-DNWs8Gbk.js                     2.73 kB │ gzip:     0.80 kB
+dist/assets/zh-CN-f-QozKx0.js                            2.80 kB │ gzip:     1.53 kB
+dist/assets/zh-TW-CpIp6l27.js                            2.80 kB │ gzip:     1.53 kB
+dist/assets/zh-HK-BbHVQ5gQ.js                            2.80 kB │ gzip:     1.53 kB
+dist/assets/en-US-C3S3r6vs.js                            2.81 kB │ gzip:     1.30 kB
+dist/assets/fi-RW5VB8Yp-C_52fTOR.js                      3.19 kB │ gzip:     0.78 kB
+dist/assets/la-DuvHjUWw-BcBNkSEh.js                      3.19 kB │ gzip:     0.63 kB
+dist/assets/pms-BRGfm5gS-DtZRgBhp.js                     3.38 kB │ gzip:     0.91 kB
+dist/assets/it-Bt_Meacx-BwawXXgW.js                      3.63 kB │ gzip:     0.87 kB
+dist/assets/rm-C0MIK9N4-DeBfDBrx.js                      3.67 kB │ gzip:     0.94 kB
+dist/assets/mul-ethi-D_CMSMEq-2TGBnG-Z.js                3.69 kB │ gzip:     0.92 kB
+dist/assets/fur-AC12wySk-Ulg0Fy5V.js                     3.90 kB │ gzip:     1.01 kB
+dist/assets/tr-CIHIuzqc-ZkOY1dVp.js                      3.97 kB │ gzip:     0.34 kB
+dist/assets/mn-cyrl-x-lmc-3aetruI8-mEBV16An.js           4.83 kB │ gzip:     1.20 kB
+dist/assets/el-monoton-D3aKqTz2-DpMW17GV.js              4.87 kB │ gzip:     0.88 kB
+dist/assets/ia-Cr4TJH0c-BcFKNbxH.js                      6.49 kB │ gzip:     1.82 kB
+dist/assets/cop-C3sk0IUo-Cj8cOj0I.js                     6.89 kB │ gzip:     0.70 kB
+dist/assets/ro-0fmdH0HA-1lLksn9e.js                      7.27 kB │ gzip:     2.14 kB
+dist/assets/ca-SUf6Y2Om-Dp4lcbPL.js                      7.86 kB │ gzip:     1.13 kB
+dist/assets/la-x-classic-yTyAOQEt-DuDJBVty.js            8.93 kB │ gzip:     2.31 kB
+dist/assets/sa-CKY9c_Vq-DzgpFnfw.js                      9.71 kB │ gzip:     1.65 kB
+dist/assets/hr-DT1SBBes-CkK3TemH.js                     11.36 kB │ gzip:     0.96 kB
+dist/assets/hy-e995ysyO-Cf-NYmW5.js                     11.93 kB │ gzip:     0.30 kB
+dist/assets/mn-cyrl-lHM4n0oC-QhYuXAWB.js                12.15 kB │ gzip:     2.14 kB
+dist/assets/sl-DpiklF-D-_46w5B9b.js                     12.60 kB │ gzip:     3.43 kB
+dist/assets/da-CCDXfXtG-C3O8h2wc.js                     12.72 kB │ gzip:     3.47 kB
+dist/assets/hsb-DC_ITc1e-C4pa9vvS.js                    14.01 kB │ gzip:     1.93 kB
+dist/assets/lt-BBe8DlDF-CObMPDIF.js                     14.77 kB │ gzip:     3.60 kB
+dist/assets/tk-BMbKB10q-cqtw6prh.js                     16.96 kB │ gzip:     0.99 kB
+dist/assets/el-polyton-ogVWcTzh-BOWLBXgh.js             17.63 kB │ gzip:     2.87 kB
+dist/assets/la-x-liturgic-CXeQb4FY-DNU_Uk5t.js          22.82 kB │ gzip:     5.72 kB
+dist/assets/fr-BC2onEz9-BGmqATrI.js                     24.14 kB │ gzip:     4.31 kB
+dist/assets/ka-jyoLzyDE-CZftRBZr.js                     26.19 kB │ gzip:     4.56 kB
+dist/assets/be-CrQ0smca-B2EeXxUh.js                     27.83 kB │ gzip:     2.26 kB
+dist/assets/sh-latn-sRy4Tuaj-DcyoDtEt.js                29.78 kB │ gzip:     5.31 kB
+dist/assets/sr-cyrl-Dpzrbd0W-DKfS_grW.js                31.60 kB │ gzip:     5.60 kB
+dist/assets/sk-_iOeDNrQ-BXQc18Za.js                     31.69 kB │ gzip:     6.83 kB
+dist/assets/sh-cyrl-BpCRFOmq-Cv4-R-p6.js                32.50 kB │ gzip:     5.46 kB
+dist/assets/gl-DZGc-K_G-DLl5jmsP.js                     33.64 kB │ gzip:     4.31 kB
+dist/assets/cs-CmAteokq-TjIVgNl6.js                     39.76 kB │ gzip:    10.15 kB
+dist/assets/es-DcaaHPU_-sYKznHcq.js                     44.13 kB │ gzip:     6.32 kB
+dist/assets/pl-9fg-ESVt-DpPW5ISU.js                     46.09 kB │ gzip:     7.77 kB
+dist/assets/et-B_spaleu-BaO20FM2.js                     47.21 kB │ gzip:    11.66 kB
+dist/assets/is-BT8UVRze-BXloJ18M.js                     48.41 kB │ gzip:    13.03 kB
+dist/assets/RecoveryArchivePanel-v9vbsUnq.js            56.21 kB │ gzip:    15.61 kB
+dist/assets/sv-CFm5y56M-I8ncZ9Nb.js                     56.81 kB │ gzip:    14.78 kB
+dist/assets/bg-CrQqGwni-Pt9yPLke.js                     56.93 kB │ gzip:     4.89 kB
+dist/assets/uk-Dir3oxLs-BVEQM3Jf.js                     63.99 kB │ gzip:     8.69 kB
+dist/assets/th-DWX5iPSo-BI_G36o8.js                     68.62 kB │ gzip:    13.44 kB
+dist/assets/grc-DOlGgO8T-C7K_Bcib.js                    71.61 kB │ gzip:     8.91 kB
+dist/assets/cy-BBPa6z2x-BONU7bVJ.js                     80.20 kB │ gzip:    19.64 kB
+dist/assets/ga-Cn6LkudM-WsF4_z3Y.js                     82.15 kB │ gzip:    20.54 kB
+dist/assets/ru-v4l-ayaq-BZkHNr9F.js                     85.31 kB │ gzip:    17.10 kB
+dist/assets/en-gb-B7Al27b_-BFFr9zKP.js                 105.38 kB │ gzip:    26.85 kB
+dist/assets/lv-Q2BBHnzp-DRPSUjhQ.js                    112.68 kB │ gzip:    16.40 kB
+dist/assets/nl-BHQJ6Gvn-BMWl-SdQ.js                    138.51 kB │ gzip:    37.20 kB
+dist/assets/cu-CBUlrW6Y-BrxB2kb-.js                    168.80 kB │ gzip:    26.86 kB
+dist/assets/af-DK_CjRn6-C81U6qP1.js                    179.89 kB │ gzip:    40.15 kB
+dist/assets/RegionalWordEditor-B_zbnPgR.js             182.71 kB │ gzip:    50.80 kB
+dist/assets/de-ch-1901-hVThVHVb-CC5Yf8hX.js            264.34 kB │ gzip:    72.65 kB
+dist/assets/de-1996-BL6awyxG-BSuIomZy.js               266.94 kB │ gzip:    73.24 kB
+dist/assets/de-1901-CWoAOigE-yOXirf_M.js               270.04 kB │ gzip:    74.07 kB
+dist/assets/zh-TW-F50A0Y-h.js                          292.05 kB │ gzip:    63.67 kB
+dist/assets/zh-CN-DDLaZyVf.js                          294.05 kB │ gzip:    62.45 kB
+dist/assets/zh-HK-DeMpLuvl.js                          321.58 kB │ gzip:    61.23 kB
+dist/assets/en-US-Cxh0xBrJ.js                          322.92 kB │ gzip:    59.70 kB
+dist/assets/no-B8ItS0F3-BlrHaK3Z.js                    341.90 kB │ gzip:    90.72 kB
+dist/assets/nb-DI8u59ch-S2a9vUN_.js                    341.92 kB │ gzip:    90.73 kB
+dist/assets/nn-ntZvarUK-cMBifkqM.js                    341.92 kB │ gzip:    90.73 kB
+dist/assets/hu-DVk7Y_ka-CCTZJfqn.js                    765.41 kB │ gzip:   179.02 kB
+dist/assets/index-u_iPE4j9.js                        2,064.89 kB │ gzip:   613.07 kB
+dist/assets/UniverViewer-CkE--vfR.js                 6,051.13 kB │ gzip: 1,725.34 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 1m 24s
+vite v7.1.11 building for production...
+transforming...
+node_modules/@tiptap/react/dist/index.js (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@tiptap/react/dist/index.js" was ignored.
+node_modules/@tiptap/react/dist/menus/index.js (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@tiptap/react/dist/menus/index.js" was ignored.
+node_modules/@radix-ui/react-direction/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-direction/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-dialog/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-dialog/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-popover/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-popover/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-hover-card/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-hover-card/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-dropdown-menu/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-dropdown-menu/dist/index.mjs" was ignored.
+node_modules/sonner/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/sonner/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-portal/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-portal/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-dismissable-layer/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-dismissable-layer/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-presence/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-presence/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-focus-scope/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-focus-scope/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-focus-guards/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-focus-guards/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-popper/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-popper/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-menu/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-menu/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-roving-focus/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-roving-focus/dist/index.mjs" was ignored.
+node_modules/@radix-ui/react-collection/dist/index.mjs (1:0): Module level directives cause errors when bundled, "use client" in "node_modules/@radix-ui/react-collection/dist/index.mjs" was ignored.
+✓ 4105 modules transformed.
+rendering chunks...
+[plugin vite:reporter] 
+(!) /Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/examples/hdoc/xlsx-univer-viewer/src/hcd-parser.ts is dynamically imported by /Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/examples/hdoc/xlsx-univer-viewer/src/adapter.ts but also statically imported by /Users/houshuai/project/backend/java/smart-desnsitization/OfficeCli-rust/examples/hdoc/editor/src/WorkbookEditor.tsx, dynamic import will not move module into another chunk.
+
+computing gzip size...
+dist-embed/assets/semanticRecoveryParseWorker-NGJ0eVvz.js      1.76 kB
+dist-embed/hcd-editor.css                                    221.13 kB │ gzip:    36.48 kB
+dist-embed/ai.js                                               0.29 kB │ gzip:     0.20 kB
+dist-embed/hcd-editor.js                                       0.31 kB │ gzip:     0.22 kB
+dist-embed/inline-containers.js                                0.38 kB │ gzip:     0.21 kB
+dist-embed/pa-C54UG8eN-CIQ5Y3X6.js                             0.55 kB │ gzip:     0.24 kB
+dist-embed/or-50rxpoq4-BXsM2pbv.js                             0.59 kB │ gzip:     0.25 kB
+dist-embed/gu-Bjl0l-cf-OnDkDFRR.js                             0.60 kB │ gzip:     0.26 kB
+dist-embed/hi-DsAaTPCC-wZq2N712.js                             0.63 kB │ gzip:     0.26 kB
+dist-embed/mr-CjWJPVmH-Bn6x2K8t.js                             0.63 kB │ gzip:     0.26 kB
+dist-embed/as-BPtSu6VN-Q56YT8ds.js                             0.64 kB │ gzip:     0.27 kB
+dist-embed/bn-NCLZcWHi-BOqBYJXb.js                             0.64 kB │ gzip:     0.27 kB
+dist-embed/te-B5Spl2Jk-BXwc4QG8.js                             0.64 kB │ gzip:     0.26 kB
+dist-embed/kn-C6Lov-DP-DAOQBMT3.js                             0.65 kB │ gzip:     0.27 kB
+dist-embed/ta-BcghgTbD-CFDeBwfd.js                             0.73 kB │ gzip:     0.26 kB
+dist-embed/ml-2xLVYkVY-DCtpf5tH.js                             0.83 kB │ gzip:     0.31 kB
+dist-embed/pi-B9cgjyG1-D_nNqT17.js                             0.87 kB │ gzip:     0.36 kB
+dist-embed/recoveryAttachmentFile-h-BGLJby.js                  1.15 kB │ gzip:     0.54 kB
+dist-embed/zh-latn-pinyin-BdYb-Ey_-C29el_eo.js                 1.30 kB │ gzip:     0.23 kB
+dist-embed/eu-Ctv_kq9Z-BGsqKnTM.js                             1.53 kB │ gzip:     0.23 kB
+dist-embed/pt-Cum2_NUC-DkX8-WA3.js                             2.31 kB │ gzip:     0.32 kB
+dist-embed/oc-P_i3-xLA-CEAeI_Pn.js                             2.58 kB │ gzip:     0.68 kB
+dist-embed/kmr-Cfwhwuff-dNPUHbsW.js                            2.75 kB │ gzip:     0.81 kB
+dist-embed/id-DifDyWg9-CDLqpvHD.js                             2.77 kB │ gzip:     0.66 kB
+dist-embed/fi-RW5VB8Yp-BPikEZql.js                             3.21 kB │ gzip:     0.79 kB
+dist-embed/la-DuvHjUWw-B2sD59yr.js                             3.21 kB │ gzip:     0.64 kB
+dist-embed/pms-BRGfm5gS-C-FumxE9.js                            3.40 kB │ gzip:     0.92 kB
+dist-embed/zh-CN-DpECeJrb.js                                   3.54 kB │ gzip:     1.59 kB
+dist-embed/zh-TW-CDiGziFg.js                                   3.54 kB │ gzip:     1.59 kB
+dist-embed/zh-HK-D95Q21Nm.js                                   3.54 kB │ gzip:     1.59 kB
+dist-embed/en-US-9zWpvmDL.js                                   3.55 kB │ gzip:     1.37 kB
+dist-embed/it-Bt_Meacx-C8yMXhVu.js                             3.65 kB │ gzip:     0.89 kB
+dist-embed/rm-C0MIK9N4-Djs6hoP6.js                             3.69 kB │ gzip:     0.96 kB
+dist-embed/mul-ethi-D_CMSMEq-BzcfASck.js                       3.71 kB │ gzip:     0.94 kB
+dist-embed/fur-AC12wySk-BfxkaO05.js                            3.92 kB │ gzip:     1.03 kB
+dist-embed/tr-CIHIuzqc-BR64TmVY.js                             3.99 kB │ gzip:     0.35 kB
+dist-embed/mn-cyrl-x-lmc-3aetruI8-BVlv2lTY.js                  4.84 kB │ gzip:     1.22 kB
+dist-embed/el-monoton-D3aKqTz2-BCxophpw.js                     4.89 kB │ gzip:     0.90 kB
+dist-embed/ia-Cr4TJH0c-BPpzCpVU.js                             6.56 kB │ gzip:     1.85 kB
+dist-embed/cop-C3sk0IUo-Cg_9EzGl.js                            6.91 kB │ gzip:     0.72 kB
+dist-embed/ro-0fmdH0HA-BlUZ9Cqj.js                             7.29 kB │ gzip:     2.15 kB
+dist-embed/ca-SUf6Y2Om-DNCw15Om.js                             8.01 kB │ gzip:     1.15 kB
+dist-embed/la-x-classic-yTyAOQEt-CaVCyU_Q.js                   8.95 kB │ gzip:     2.32 kB
+dist-embed/sa-CKY9c_Vq-DwT18fhY.js                             9.73 kB │ gzip:     1.67 kB
+dist-embed/hr-DT1SBBes-BydruLWx.js                            11.38 kB │ gzip:     0.97 kB
+dist-embed/hy-e995ysyO-CwMqVcRs.js                            11.95 kB │ gzip:     0.32 kB
+dist-embed/mn-cyrl-lHM4n0oC-BBsXVZW8.js                       12.17 kB │ gzip:     2.16 kB
+dist-embed/index-Bvq9rDvS.js                                  12.37 kB │ gzip:     4.01 kB
+dist-embed/sl-DpiklF-D-PkRf1aEq.js                            12.62 kB │ gzip:     3.45 kB
+dist-embed/da-CCDXfXtG-CDalw6_k.js                            12.74 kB │ gzip:     3.48 kB
+dist-embed/hsb-DC_ITc1e-BG80pl_e.js                           14.21 kB │ gzip:     1.96 kB
+dist-embed/lt-BBe8DlDF-CbfOJm1r.js                            14.79 kB │ gzip:     3.62 kB
+dist-embed/tk-BMbKB10q-CUXETJVM.js                            16.98 kB │ gzip:     1.01 kB
+dist-embed/el-polyton-ogVWcTzh-cc2dKcNi.js                    17.64 kB │ gzip:     2.89 kB
+dist-embed/la-x-liturgic-CXeQb4FY-BUjsEOKb.js                 22.84 kB │ gzip:     5.74 kB
+dist-embed/fr-BC2onEz9-CVOiY7Hk.js                            24.15 kB │ gzip:     4.33 kB
+dist-embed/ka-jyoLzyDE-BdcqGePe.js                            26.21 kB │ gzip:     4.58 kB
+dist-embed/be-CrQ0smca-D01Emmav.js                            27.85 kB │ gzip:     2.27 kB
+dist-embed/sh-latn-sRy4Tuaj-CjbXS8sT.js                       30.39 kB │ gzip:     5.34 kB
+dist-embed/sk-_iOeDNrQ-DMqawKJR.js                            31.74 kB │ gzip:     6.86 kB
+dist-embed/sr-cyrl-Dpzrbd0W-cX7hxNkp.js                       32.27 kB │ gzip:     5.64 kB
+dist-embed/sh-cyrl-BpCRFOmq-vs7LrXMi.js                       33.10 kB │ gzip:     5.50 kB
+dist-embed/gl-DZGc-K_G-C-k_Tfyb.js                            33.66 kB │ gzip:     4.32 kB
+dist-embed/cs-CmAteokq-CO3omPBc.js                            39.80 kB │ gzip:    10.17 kB
+dist-embed/es-DcaaHPU_-CM1w66HG.js                            44.15 kB │ gzip:     6.34 kB
+dist-embed/pl-9fg-ESVt-DRrtuwd1.js                            46.21 kB │ gzip:     7.79 kB
+dist-embed/et-B_spaleu-1vv3Izyw.js                            47.23 kB │ gzip:    11.68 kB
+dist-embed/is-BT8UVRze-CIYOndu4.js                            48.43 kB │ gzip:    13.05 kB
+dist-embed/sv-CFm5y56M-B5qT7wUY.js                            56.83 kB │ gzip:    14.80 kB
+dist-embed/bg-CrQqGwni-BROkuUw0.js                            56.94 kB │ gzip:     4.91 kB
+dist-embed/uk-Dir3oxLs-CIt18LjH.js                            64.01 kB │ gzip:     8.71 kB
+dist-embed/th-DWX5iPSo-BFfX9uLb.js                            68.64 kB │ gzip:    13.46 kB
+dist-embed/RecoveryArchivePanel-CxUakJq8.js                   71.08 kB │ gzip:    17.30 kB
+dist-embed/grc-DOlGgO8T-DVfTDU-B.js                           71.63 kB │ gzip:     8.93 kB
+dist-embed/cy-BBPa6z2x-DdcmQdRU.js                            80.22 kB │ gzip:    19.66 kB
+dist-embed/ga-Cn6LkudM-RgFbe6O4.js                            82.40 kB │ gzip:    20.58 kB
+dist-embed/ru-v4l-ayaq-CT3O6fnD.js                            86.25 kB │ gzip:    17.16 kB
+dist-embed/en-gb-B7Al27b_-CH5n2vc2.js                        105.45 kB │ gzip:    26.88 kB
+dist-embed/lv-Q2BBHnzp-7jJet9iv.js                           112.70 kB │ gzip:    16.42 kB
+dist-embed/nl-BHQJ6Gvn-DJ0c5Nwz.js                           138.73 kB │ gzip:    37.23 kB
+dist-embed/cu-CBUlrW6Y-BVXCZrRb.js                           168.92 kB │ gzip:    26.89 kB
+dist-embed/af-DK_CjRn6-7QQ0fr8U.js                           180.84 kB │ gzip:    40.17 kB
+dist-embed/RegionalWordEditor-DDiC6s0a.js                    231.49 kB │ gzip:    56.32 kB
+dist-embed/de-ch-1901-hVThVHVb-DXmVppkP.js                   264.36 kB │ gzip:    72.67 kB
+dist-embed/de-1996-BL6awyxG-D04zKy3t.js                      266.96 kB │ gzip:    73.27 kB
+dist-embed/de-1901-CWoAOigE-Bio6PX1D.js                      270.06 kB │ gzip:    74.09 kB
+dist-embed/no-B8ItS0F3-rNan2JXr.js                           342.46 kB │ gzip:    90.75 kB
+dist-embed/nb-DI8u59ch-B9uP_hJB.js                           342.49 kB │ gzip:    90.76 kB
+dist-embed/nn-ntZvarUK-BSKjhM96.js                           342.49 kB │ gzip:    90.76 kB
+dist-embed/zh-TW-C_gPytUt.js                                 370.57 kB │ gzip:    66.56 kB
+dist-embed/zh-CN-BoOGGZoj.js                                 372.57 kB │ gzip:    65.30 kB
+dist-embed/zh-HK-D7XwXe5N.js                                 400.10 kB │ gzip:    63.92 kB
+dist-embed/en-US-DxgtyehM.js                                 401.44 kB │ gzip:    62.38 kB
+dist-embed/inlineContainerRegistry-DIaXqoUS.js               687.25 kB │ gzip:   192.25 kB
+dist-embed/hu-DVk7Y_ka-BDn_208e.js                           765.42 kB │ gzip:   179.05 kB
+dist-embed/embed-B6WgA0_J.js                               1,486.49 kB │ gzip:   364.20 kB
+dist-embed/UniverViewer-CiQnEElZ.js                        9,488.79 kB │ gzip: 2,261.44 kB
+✓ built in 2m 35s

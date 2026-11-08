@@ -1,0 +1,15 @@
+{
+  "controllerExitCode": 130,
+  "intentionalSigint": true,
+  "ownedPortsClosed": [
+    49882,
+    49883,
+    49884
+  ],
+  "ownedRuntimeRemoved": true,
+  "browserTabsClosedConfirmed": [
+    "435267284",
+    "435267287"
+  ],
+  "otherTabsUntouched": true
+}

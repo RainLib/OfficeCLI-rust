@@ -1,0 +1,54 @@
+{
+  "scope": "Local synthetic ordinary-browser, controlled presence, and actual CLI file evidence; not production, external Word/WPS, or complete offline app acceptance",
+  "fullFrontend": {
+    "tests": 2069,
+    "pass": 2069,
+    "fail": 0,
+    "log": "full-final.log",
+    "boundary": "Before the final section-progress/backward-compatibility change; not a final-source full-suite run"
+  },
+  "finalTargetedFrontend": {
+    "tests": 47,
+    "pass": 47,
+    "fail": 0,
+    "log": "related-compatibility.log",
+    "boundary": "After the final progress compatibility change"
+  },
+  "finalBuild": {
+    "exitCode": 0,
+    "typescript": true,
+    "standalone": true,
+    "embedded": true,
+    "log": "build-compatibility.log",
+    "observation": "Terminal exit 0 reobserved in the overall audit turn"
+  },
+  "browser": {
+    "ordinaryTwoMemberEditingAndOwnUndo": "peer-browser.json",
+    "ordinaryCrossZoomFollow": "peer-browser.json",
+    "finalWheelLocatePageDown": "follow-final-browser.json",
+    "finalWheelBoundary": "Ordinary read-only UI with a controlled read-only WebSocket position peer, not two-browser final-wheel acceptance",
+    "stages": "browser-stages.json",
+    "timeoutsAndIncompleteAttemptsRetained": true
+  },
+  "files": {
+    "result": "files.json",
+    "authors": "authors.json",
+    "head": 6,
+    "hcdzCanonicalFiles": 70,
+    "revisions": [0, 1, 2, 3, 4, 5, 6],
+    "boundary": "CLI output/reimport and unpacked archive readback; not browser download or external application layout"
+  },
+  "remaining": [
+    "same-page continuous sections, columns, odd/even blank pages and exact Word pagination",
+    "complex table, floating object and business-block pagination",
+    "field recalculation and dynamic table of contents",
+    "actual body data segmentation and long-document performance",
+    "new book view topology handoff, fault recovery, real IME and cross-device/browser acceptance",
+    "full offline application and multi-instance production",
+    "all other document-format, font, internationalization and real AI goals"
+  ],
+  "cleanup": {
+    "request": "cleanup-requested.json",
+    "boundary": "Cleanup was requested; this record does not assert runtime directory removal or confirmed browser-tab closure"
+  }
+}

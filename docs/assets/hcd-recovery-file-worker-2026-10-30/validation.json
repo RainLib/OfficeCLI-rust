@@ -1,0 +1,64 @@
+{
+  "scope": "File-input recovery optimization, not full editor-goal completion",
+  "previousGoalTurn": "progress: capability audit and prior build terminal verified",
+  "targetedTests": {
+    "tests": 104,
+    "pass": 104,
+    "fail": 0,
+    "log": "related-final.log"
+  },
+  "build": {
+    "exitCode": 0,
+    "typescript": true,
+    "standalone": true,
+    "embedded": true,
+    "log": "build.log"
+  },
+  "fullFrontendSuite": "not rerun this batch",
+  "initialTypecheck": "failed on package digest union type; corrected before final tests/build; failure log retained",
+  "actualWorkerAndFiles": "worker-readback.json",
+  "browser": {
+    "panelOpened": true,
+    "fileSelection": "not completed: extension local-file permission rejected setFiles; native capture failed",
+    "comparisonImportDownloadReopen": "not accepted",
+    "performance": "not accepted; no completed browser file input",
+    "screenshot": "browser-panel.png",
+    "noBrowserPermissionChanges": true,
+    "noBrowserStorageOrCandidateInjection": true
+  },
+  "sourceHashes": {
+    "examples/hdoc/editor/src/RecoveryArchivePanel.tsx": "12ab70bcdbfa37fbf93cb7b4a04c5e8063e0dfe6ddc3bba1e6983bb7fe0de6b5",
+    "examples/hdoc/editor/src/semanticRecoveryArchive.ts": "ad6bf2b9f2fb74eba7709d578b5e89711fa517b0af56d6e949458b5d342e298b",
+    "examples/hdoc/editor/src/semanticRecoveryParseWorker.ts": "d00c84286e798919935e046ac5018189c060a7ba853c8fc12a153ef6e63b99b5",
+    "examples/hdoc/editor/src/semanticRecoveryTransfer.ts": "65929a22de3fe589c20cb850f181dc53b62646d0746245e90236639270e370ec",
+    "examples/hdoc/editor/src/semanticRecoveryFileWorker.test.ts": "6c6dde6aac9cc3b5a79bcd9cd288314d29be7cfdf87b022b0739753a7927c53e",
+    "examples/hdoc/editor/src/semanticRecoveryParseWorker.test.ts": "735e892e32e58799149bf07058dc38cbdc22962df6832c8da363c8a0cae7f5b9",
+    "examples/hdoc/editor/src/semanticRecoveryWorkerCodec.test.ts": "fc050bbcb40aa48255ce43e2631828c94308b452b41470873b2896de726ca6e9",
+    "examples/hdoc/editor/src/semanticRecoveryTransfer.test.ts": "da309c682fee4e4c8dd0a71df9c1671dcdc9f6bddb5dd85436af5900274b65a4"
+  },
+  "deliveryArtifacts": {
+    "dist": [
+      {
+        "file": "examples/hdoc/editor/dist/assets/RecoveryArchivePanel-BFRotNIO.js",
+        "sha256": "8be8ddd33ea009b91b94ebe5374a22fbc61e9db36ba92bdbdbd407c79639df50"
+      }
+    ],
+    "dist-embed": [
+      {
+        "file": "examples/hdoc/editor/dist-embed/RecoveryArchivePanel-zcnQZIUv.js",
+        "sha256": "ff59d4a90250862a5b10056f169f900b113e93bcaea08cf1db8287027656d611"
+      }
+    ]
+  },
+  "open": [
+    "normal browser file-input, full recovery/download/reopen and performance",
+    "Yjs/model/serialization long tasks and no-worker fallback",
+    "cross-window/device/identity and regional device-store coverage",
+    "all document creation, compatibility, pagination, lazy-body, fonts/i18n, AI and multi-instance goals"
+  ],
+  "deferred": [
+    "management platform",
+    "actual reminder delivery"
+  ],
+  "cleanup": "cleanup.json"
+}

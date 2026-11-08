@@ -1,0 +1,9 @@
+import assert from 'node:assert/strict'
+import {readFile,writeFile} from 'node:fs/promises'
+import {compareRecoveryImageBaselines} from '../examples/hdoc/editor/src/recoveryImageBaselines.ts'
+const root=process.argv[2];if(!root.includes('/hcd-preview-runtime/hcd-mention-preview-'))throw Error('isolated fixture required')
+const cfg=JSON.parse(await readFile(root+'/private.json','utf8')),session={documentId:'mentions-docx',token:cfg.alice,scope:'write' as const,format:'docx',apiUrl:cfg.origin+'/v1/documents'},base=session.apiUrl+'/'+session.documentId
+async function json(route:string){const response=await fetch(base+route,{headers:{Authorization:`Bearer ${session.token}`},signal:AbortSignal.timeout(30000)});assert.equal(response.status,200);return response.json()}
+const manifest=await json(''),list=await json('/images'),id=list.entries[0].nodeId,original=(await json(`/images/${id}?revision=1`)).image;assert.ok(original);assert.ok(manifest.revision>1)
+const intent={intentId:crypto.randomUUID(),clientId:42,ancestors:[],touched:['width' as const],base:original,geometry:{...original.geometry,width:original.geometry.width+1},revision:1},report=await compareRecoveryImageBaselines(session,[intent],AbortSignal.timeout(30000));assert.equal(report.headRevision,manifest.revision);assert.equal(report.items[0].baseline,'verified');assert.equal(report.items[0].current,'changed');assert.equal((await json('')).revision,manifest.revision)
+const evidence={scope:'Local native HTTP immutable revisions with synthetic image replacement; no browser upload or production validation.',baselineRevision:1,headRevision:report.headRevision,baselineVerified:true,savedImageChanged:true,headUnchanged:true};await writeFile(root+'/image-baseline-evidence.json',JSON.stringify(evidence,null,2)+'\n');console.log(JSON.stringify(evidence))
