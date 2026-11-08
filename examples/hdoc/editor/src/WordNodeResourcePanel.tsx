@@ -1,0 +1,16 @@
+import {useState,useSyncExternalStore} from 'react'
+import {useI18n} from './i18n.tsx'
+import {downloadNodeFile} from './downloadNodeFile.ts'
+import type {ExtensionNodePayload} from './extensionTypes.ts'
+import type {ResourceNodePayload} from './nodeResourceModel.ts'
+import type {NodeResourceClient,WordNodeResourceDraft} from './wordNodeResources.ts'
+export function WordNodeResourcePanel<P extends ResourceNodePayload=ExtensionNodePayload>({client,selected,disabled,onLocate,onApply}:{client:NodeResourceClient<P>;selected:P|null;disabled:boolean;onLocate:(id:string)=>boolean;onApply:(draft:WordNodeResourceDraft<P>,expected:P)=>Promise<void>}){
+ const {t}=useI18n();useSyncExternalStore(client.subscribe,client.snapshot);const state=client.state(),[error,setError]=useState(''),[missing,setMissing]=useState<string|null>(null)
+ const download=async(id:string)=>{setError('');try{const {name,blob}=await client.readPendingFile(id);downloadNodeFile(name,blob)}catch{setError('download')}}
+ const act=(work:()=>Promise<unknown>)=>{setError('');void work().catch(cause=>setError(cause instanceof Error?cause.message:'word-node-resource-interrupted'))}
+ if(!state.loading&&!state.jobs.length&&!state.problem)return null
+ return <section className="word-upload-panel" aria-label={t('wordNodeResourceTasks')}><div className="panel-head"><strong>{t('wordNodeResourceTasks')}</strong><button disabled={state.busy} onClick={()=>act(()=>client.refresh())}>{t('wordUploadRefresh')}</button></div><p>{t('wordNodeResourceHint')}</p>{state.loading&&<p role="status">{t('wordUploadLoading')}</p>}{state.jobs.map(job=>{
+  const current=selected?.schemaVersion===job.draft?.expected.schemaVersion&&selected?.instanceId===job.draft?.expected.instanceId&&selected?.type===job.draft?.expected.type?selected:null
+  return <div className="word-upload-job" key={job.id}><strong>{job.name}</strong><span role="status">{t(job.phase==='preparing'||job.phase==='uploading'||job.phase==='linking'?'wordUploadSending':job.phase==='archived'?'wordNodeResourceReady':'wordNodeResourceWaiting')}</span>{job.draft&&<><span>{t('wordNodeResourceOriginal')}: {job.draft.expected.fallback.text}</span>{current&&<span>{t('wordNodeResourceCurrent')}: {current.fallback.text}</span>}</>}{job.problem&&<p>{t('wordNodeResourceInterrupted')}</p>}<div className="word-upload-actions"><button disabled={state.busy||!job.draft} onClick={()=>void download(job.id)}>{t('wordNodeResourceDownload')}</button><button disabled={disabled||state.busy||!job.draft} onClick={()=>{if(job.draft)setMissing(onLocate(job.draft.expected.instanceId)?null:job.id)}}>{t('nodeReviewProperties')}</button><button disabled={disabled||state.busy||!job.draft} onClick={()=>act(()=>client.resume(job.id))}>{t('wordUploadResume')}</button><button disabled={disabled||state.busy||!current||!job.draft} onClick={()=>act(()=>onApply(job.draft!,current!))}>{t('wordNodeResourceAttach')}</button><button disabled={state.loading||job.phase==='linking'} onClick={()=>act(()=>client.cancel(job.id))}>{t('wordNodeResourceCancel')}</button></div>{missing===job.id&&<p role="alert">{t('wordNodeResourceTargetMissing')}</p>}</div>
+ })}{(state.problem||error)&&<p role="alert">{t(state.problem?'wordNodeResourceStorage':error==='download'?'nodeResourceReadFailed':'wordNodeResourceInterrupted')}</p>}</section>
+}

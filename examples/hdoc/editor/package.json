@@ -5,7 +5,17 @@
   "type": "module",
   "files": [
     "dist-embed",
-    "src/public.d.ts"
+    "src/public.d.ts",
+    "src/commands/types.ts",
+    "src/extensionTypes.ts",
+    "src/customMarkTypes.ts",
+    "src/extensionPortable.ts",
+    "src/ai/index.ts",
+    "src/ai/types.ts",
+    "src/ai/core.ts",
+    "src/ai/http.ts",
+    "src/ai/autocomplete.ts",
+    "src/inline-containers.d.ts"
   ],
   "sideEffects": [
     "**/*.css"
@@ -15,7 +25,15 @@
       "types": "./src/public.d.ts",
       "import": "./dist-embed/hcd-editor.js"
     },
-    "./style.css": "./dist-embed/hcd-editor.css"
+    "./ai": {
+      "types": "./src/ai/index.ts",
+      "import": "./dist-embed/ai.js"
+    },
+    "./style.css": "./dist-embed/hcd-editor.css",
+    "./inline-containers": {
+      "types": "./src/inline-containers.d.ts",
+      "import": "./dist-embed/inline-containers.js"
+    }
   },
   "scripts": {
     "test": "node --import tsx --test src/*.test.ts",
@@ -38,6 +56,7 @@
     "@univerjs/preset-sheets-core": "^0.25.1",
     "@univerjs/preset-sheets-drawing": "^0.25.1",
     "@univerjs/presets": "^0.25.1",
+    "lib0": "0.2.117",
     "yjs": "13.6.27"
   },
   "peerDependencies": {

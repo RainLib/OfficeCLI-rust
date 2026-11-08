@@ -10,7 +10,7 @@ import zhCN from '@univerjs/preset-sheets-core/locales/zh-CN';
 import { UniverSheetsDrawingPreset } from '@univerjs/preset-sheets-drawing';
 import { HcdUniverAdapter } from './adapter.ts';
 import type { HcdViewerMode } from './adapter.ts';
-import { HcdBundleClient } from './hcd.ts';
+import { HcdBundleClient, hasStoredBlankMappingLimit } from './hcd.ts';
 import { parseStyleCatalog } from './hcd-parser.ts';
 import './app.css';
 
@@ -25,6 +25,13 @@ modeSelect.value = mode;
 document.body.dataset.hcdMode = mode;
 
 function setStatus(message: string): void {
+  if (message === 'workbookVisibleLoadFailed') message = '当前工作表区域加载失败，请滚动或重新打开以重试。';
+  if (message === 'workbookVisibleLoaded') message = '当前工作表区域已加载。';
+  if (message === 'workbookCellUnmapped') message = '此单元格尚不支持编辑，或数据还未加载。';
+  if (message === 'workbookCellProtected') message = '此单元格受保护或包含公式，当前无法编辑。';
+  if (message === 'workbookCellPending') message = '此单元格的修改正在等待确认，请稍后重试。';
+  if (message === 'workbookUnsupportedFormula') message = '暂不支持保存公式，本次修改未应用。';
+  if (message === 'workbookUnsupportedPaste') message = '选区中有无法编辑的单元格，本次修改未应用。';
   status.textContent = `${mode === 'editable' ? '可编辑' : '只读'} · ${message}`;
 }
 
@@ -41,6 +48,12 @@ modeSelect.addEventListener('change', reloadWithSelection);
 async function boot(): Promise<void> {
   const client = new HcdBundleClient(bundleInput.value);
   await client.open();
+  if (hasStoredBlankMappingLimit(client.manifest)) {
+    const warning = document.createElement('p');
+    warning.setAttribute('role', 'status');
+    warning.textContent = '工作表过大，部分原有空单元格暂不能编辑；此处理不会修改原文件。';
+    status.parentElement?.append(warning);
+  }
   const styleCatalog = parseStyleCatalog(await client.readStyles());
   const sheets = client.sheets();
   if (!sheets.length) throw new Error('HCD bundle 不包含工作表');

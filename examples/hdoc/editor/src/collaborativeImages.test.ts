@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as Y from 'yjs'
-import { acknowledgeImages, captureImages, CollaborativeImageDraftStore, imageDraftContents, imageDraftDigest, imageDraftMap, reconcileImageBaseline } from './collaborativeImages.ts'
+import { applyImageReplacement, acknowledgeImages, captureImages, CollaborativeImageDraftStore, imageDraftContents, imageDraftDigest, imageDraftMap, reconcileImageBaseline } from './collaborativeImages.ts'
 import type { PositionedImage } from './imageDrafts.ts'
 const image: PositionedImage={nodeId:`n_${'1'.repeat(32)}`,visualHash:'a'.repeat(64),assetHash:'b'.repeat(64),geometry:{x:1,y:2,width:30,height:40,unit:'pt'},preview:'data:image/png;base64,never-share-this'}
 const saved=(x:number,width=30):PositionedImage=>({...image,visualHash:'c'.repeat(64),geometry:{...image.geometry,x,width}})
@@ -205,4 +205,12 @@ test('sequential prepared replacement supersedes the seen resource while retaini
     assert.ok(sa.get(image.nodeId)!.alternatives!.some(value=>value.assetHash==='1'.repeat(64)))
     assert.ok(sa.get(image.nodeId)!.alternatives!.some(value=>value.assetHash==='2'.repeat(64)))
   }finally{a.destroy();b.destroy()}
+})
+test('server-acknowledged replacement from an older window can be undone before save without claiming peer geometry',()=>{
+ const doc=new Y.Doc(),store=new CollaborativeImageDraftStore(doc),original={nodeId:'n_'+'a'.repeat(32),visualHash:'b'.repeat(64),assetHash:'c'.repeat(64),geometry:{unit:'pt' as const,x:0,y:0,width:72,height:36}},own=crypto.randomUUID(),peer=crypto.randomUUID(),asset='d'.repeat(64)
+ try{applyImageReplacement(doc,{base:original,revision:1,clientId:123,seen:[]},asset,undefined,own);doc.getMap(imageDraftMap).set(peer,{intentId:peer,clientId:456,ancestors:[],base:original,revision:1,geometry:{...original.geometry,width:90},touched:['width']});store.acceptServerReplacement(own,original.nodeId,asset,123);store.applyHistory(original,1,original,undefined,['assetHash']);assert.equal(doc.getMap(imageDraftMap).has(own),false);assert.equal(doc.getMap(imageDraftMap).has(peer),true)}finally{doc.destroy()}
+})
+test('an unclaimed peer reversion to the canonical value is a conflict, not a successful no-op undo',()=>{
+ const doc=new Y.Doc(),store=new CollaborativeImageDraftStore(doc),original={nodeId:'n_'+'a'.repeat(32),visualHash:'b'.repeat(64),assetHash:'c'.repeat(64),geometry:{unit:'pt' as const,x:0,y:0,width:72,height:36}},peer=crypto.randomUUID()
+ try{applyImageReplacement(doc,{base:original,revision:1,clientId:123,seen:[]},'d'.repeat(64),undefined,peer);assert.throws(()=>store.applyHistory(original,1,original,undefined,['assetHash']),/historyConflict/);assert.equal(doc.getMap(imageDraftMap).has(peer),true)}finally{doc.destroy()}
 })

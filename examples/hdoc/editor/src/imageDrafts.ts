@@ -25,7 +25,7 @@ function staged(base:PositionedImage,revision:number,desired:PositionedImage,aut
  * Confirmations cover the sent values only; the owner may journal full snapshots. */
 export type DraftCollection = { readonly size: number; get(key:string): ImageDraft|undefined; set(key:string,value:ImageDraft): unknown; delete(key:string): boolean; entries(): IterableIterator<[string,ImageDraft]> }
 export class ImageDraftStore {
-  readonly actions=new DraftActions<PositionedImage>()
+  readonly actions=new DraftActions<PositionedImage,ImageDraft>()
   protected drafts: DraftCollection
   constructor(drafts?: DraftCollection) { this.drafts = drafts ?? new Map<string, ImageDraft>() }
   private inFlight = new Map<string, ImageDraft>()
@@ -161,9 +161,28 @@ export class ImageDraftStore {
     const merged=this.merge(draft,current,revision),next=wanted(merged)
     if(!keepLocal)for(const field of merged.conflictingFields??[])assign(next,current,field)
     if(next.geometry.unit!==current.geometry.unit){if(keepLocal)return;next.geometry.unit=current.geometry.unit}
-    this.actions.emit({before:current,after:current,revision,kind:'reset'})
+    const before=structuredClone(merged),choiceFields=[...(merged.conflictingFields??[])]
     this.observe(current,revision)
     this.drafts.set(nodeId,staged(current,revision,next,different(current,next),draft.page));this.settle(nodeId);this.changed()
+    this.actions.emit({before:wanted(before),after:next,revision,page:draft.page,kind:'choose',choice:{before,after:this.drafts.get(nodeId)??null,canonical:copy(current),fields:choiceFields}})
+  }
+  /** Restore a decision as draft state, not an old canonical revision. */
+  applyChoiceHistory(current:PositionedImage,revision:number,expected:ImageDraft|null,desired:ImageDraft|null,guard?:{canonical:PositionedImage;fields:string[]},requireResolvedExpected=false){
+    if(this.isSaving(current.nodeId))throw new Error('historyBusy')
+    if(guard&&guard.fields.some(field=>fields.includes(field as ImageField)&&!Object.is(fieldValue(current,field as ImageField),fieldValue(guard.canonical,field as ImageField))))throw new Error('historyConflict')
+    const rebase=(snapshot:ImageDraft|null)=>{
+      if(!snapshot)return null
+      const merged=this.merge(structuredClone(snapshot),current,revision)
+      return !merged.remote&&!merged.deleted&&matchesImageDraft(current,merged)?null:merged
+    }
+    const signature=(draft:ImageDraft|null)=>draft?JSON.stringify({geometry:draft.geometry,asset:desiredAsset(draft)??null,touched:[...touched(draft)].sort(),conflicts:[...(draft.conflictingFields??[])].sort(),deleted:!!draft.deleted}):'none'
+    const actual=rebase(this.drafts.get(current.nodeId)??null),wantedExpected=rebase(expected),next=rebase(desired)
+    if(requireResolvedExpected&&wantedExpected?.remote)throw new Error('historyConflict')
+    if(signature(actual)!==signature(wantedExpected))throw new Error('historyConflict')
+    if(!this.observe(current,revision))throw new Error('historyChanged')
+    if(next)this.drafts.set(current.nodeId,next);else this.drafts.delete(current.nodeId)
+    this.changed()
+    return {before:structuredClone(actual),after:structuredClone(next)}
   }
   resolveVariant(_nodeId: string, _intentId: string) { /* Shared stores provide explicit concurrent-intent choices. */ }
   discard(nodeId: string) { const draft=this.drafts.get(nodeId);if (!this.isSaving(nodeId) && draft && this.drafts.delete(nodeId)){this.changed();this.actions.emit({before:draft.base,after:draft.base,revision:draft.revision,kind:'reset'})} }

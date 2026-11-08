@@ -8,8 +8,20 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
-    "types": ["vite/client", "node"],
-    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+    "types": [
+      "vite/client",
+      "node"
+    ],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ]
   },
-  "include": ["src", "sidecar.ts", "vite.config.ts"]
+  "include": [
+    "src",
+    "sidecar.ts",
+    "vite.config.ts",
+    "fixtures"
+  ]
 }

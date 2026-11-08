@@ -1,11 +1,15 @@
+import {editableFlowElement,wordRegionForElement,type WordRegion} from './wordRegions.ts'
 import { api, type Session } from './api.ts'
 import { translate, type EditorLocale } from './i18n.tsx'
 import type { ImageNode } from './ImagePanel.tsx'
 import type { TextRun } from './textDrafts.ts'
+import {pdfLayoutFont} from './pdfTextLayout.ts'
+import {readFixedPreviewAsset} from './fixedPreviewAsset.ts'
+import {boundedAsyncPool} from './boundedAsyncPool.ts'
 
 export type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
-export type Descriptor = { sequence: number; region: string; continuation: boolean }
-export type PageGroup = { firstSequence: number; region: string; sequences: number[] }
+export type Descriptor = { sequence: number; region: string; continuation: boolean; wordRegionId?:string; wordRegionsVerified?:boolean }
+export type PageGroup = { firstSequence: number; region: string; sequences: number[]; wordRegionId?:string; wordRegionsVerified?:boolean }
 export type PageSize = { width: number; height: number }
 
 export function groupPages(descriptors: Descriptor[]): PageGroup[] {
@@ -54,7 +58,7 @@ export function textRuns(root: HTMLElement): TextRun[] {
     if (!(element instanceof HTMLElement)) continue
     const kind = element.getAttribute('data-hcd-node-kind') || ''
     if (kind === 'image' || kind === 'chart' || kind === 'picture' || kind.startsWith('pdf-image')) continue
-    if (element.getAttribute('data-hcd-editable') === 'false') continue
+    if (!editableFlowElement(element)) continue
     if (element.querySelector('[data-hcd-node-hash]')) continue
     const nodeId = element.getAttribute('data-hcd-id')
     const nodeHash = element.getAttribute('data-hcd-node-hash')
@@ -66,7 +70,7 @@ export function textRuns(root: HTMLElement): TextRun[] {
       return ''
     }
     const weight = inherited('font-weight')
-    runs.push({ nodeId, nodeHash, text: element.textContent ?? '', font: {
+    runs.push({ nodeId, nodeHash, text: element.textContent ?? '', font: pdfLayoutFont(element.closest('[data-hcd-pdf-text-layout]')?.getAttribute('data-hcd-pdf-text-layout')??null,nodeHash,element.textContent??'')??{
       family: inherited('font-family').split(',')[0].replaceAll(/["']/g, '').trim(), sizePt: cssPixels(inherited('font-size')) * 3 / 4,
       bold: weight === 'bold' || Number(weight) >= 600, italic: inherited('font-style') === 'italic',
     } })
@@ -75,7 +79,7 @@ export function textRuns(root: HTMLElement): TextRun[] {
 }
 
 export type SlideObject = { kind: 'text' | 'image'; nodeIds: string[]; label: string; x: number; y: number; width: number; height: number; transform: string }
-export type RenderedPage = { html: string; size: PageSize; runs: TextRun[]; nodeIds: string[]; images: ImageNode[]; objects: SlideObject[]; revision: number; approximateText: boolean }
+export type RenderedPage = { wordRegion?:WordRegion; html: string; size: PageSize; runs: TextRun[]; nodeIds: string[]; images: ImageNode[]; objects: SlideObject[]; revision: number; approximateText: boolean }
 
 export function fitSlide(size: PageSize, viewport: PageSize, padding = 48): number {
   return Math.max(0.05, Math.min((viewport.width - padding) / size.width, (viewport.height - padding) / size.height, 2))
@@ -83,15 +87,14 @@ export function fitSlide(size: PageSize, viewport: PageSize, padding = 48): numb
 
 /** Shared by the active canvas and visible thumbnails. Caches are bounded and
  * owned by one workspace; document credentials and assets never enter storage. */
-export function createPageLoader(session: Session, locale: EditorLocale) {
+export function createPageLoader(session: Session, locale: EditorLocale, signal?:AbortSignal) {
   const pages = new Map<string, Promise<RenderedPage>>()
   const assets = new Map<string, Promise<string>>()
-  const asset = (hash: string): Promise<string> => {
-    const cached = assets.get(hash)
+  const asset = (hash: string, revision:number): Promise<string> => {
+    const key=`${revision}:${hash}`,cached = assets.get(key)
     if (cached) return cached
-    const request = api(session, `/assets/${hash}`).then(async response => {
-      const blob = await response.blob()
-      if (blob.size > 64 * 1024 * 1024) throw new Error(translate(locale, 'assetTooLarge'))
+    const request = api(session, `/assets/${hash}?revision=${revision}`, {signal}).then(async response => {
+      const blob = await readFixedPreviewAsset(response,hash,signal??new AbortController().signal,locale)
       return new Promise<string>((resolve, reject) => {
         const reader = new FileReader()
         reader.onload = () => resolve(String(reader.result))
@@ -99,9 +102,9 @@ export function createPageLoader(session: Session, locale: EditorLocale) {
         reader.readAsDataURL(blob)
       })
     })
-    assets.set(hash, request)
+    assets.set(key, request)
     if (assets.size > 32) assets.delete(assets.keys().next().value!)
-    void request.catch(() => { if (assets.get(hash) === request) assets.delete(hash) })
+    void request.catch(() => { if (assets.get(key) === request) assets.delete(key) })
     return request
   }
   return (page: PageGroup, revision: number): Promise<RenderedPage> => {
@@ -109,8 +112,19 @@ export function createPageLoader(session: Session, locale: EditorLocale) {
     const cached = pages.get(key)
     if (cached) return cached
     const request = (async () => {
-      const chunks = await Promise.all(page.sequences.map(async sequence =>
-        (await (await api(session, `/chunks/${sequence}?revision=${revision}`)).json() as { html: string }).html))
+      const readChunk=async(sequence:number,requestSignal?:AbortSignal)=>(await (await api(session, `/chunks/${sequence}?revision=${revision}`, {signal:requestSignal})).json() as { html: string }).html
+      const chunks = session.flowLayoutVersion===2
+        ? await boundedAsyncPool(page.sequences.map(sequence=>taskSignal=>readChunk(sequence,taskSignal)),signal??new AbortController().signal)
+        : await Promise.all(page.sequences.map(sequence=>readChunk(sequence,signal)))
+      if(page.wordRegionsVerified&&page.wordRegionId){
+        let sourcePart:string|undefined
+        for(const chunk of chunks){
+          const root=new DOMParser().parseFromString(chunk,'text/html').body.firstElementChild
+          const region=wordRegionForElement(root)
+          if(!region||region.id!==page.wordRegionId||region.kind!==page.region||sourcePart!==undefined&&sourcePart!==region.sourcePart)throw new Error('word-region-index-mismatch')
+          sourcePart=region.sourcePart
+        }
+      }
       const composed = ['pdf', 'pptx'].includes(session.format) ? composePage(chunks, locale) : { html: `<div class="hcd-flow-chunk">${chunks.join('')}</div>`, size: { width: 794, height: 1123 } }
       const root = new DOMParser().parseFromString(composed.html, 'text/html').body.firstElementChild as HTMLElement
       const runs = textRuns(root)
@@ -124,14 +138,17 @@ export function createPageLoader(session: Session, locale: EditorLocale) {
       }
       for (const text of root.querySelectorAll<HTMLElement>('.hcd-pdf-text')) {
         const nodeId = text.getAttribute('data-hcd-text-node')
-        if (!nodeId || !runs.some(run => run.nodeId === nodeId && run.text.trim())) continue
+        if (!nodeId || !runs.some(run => run.nodeId === nodeId)) continue
+        const width=Number(text.getAttribute('data-hcd-width') || 0)*4/3,height=Number(text.getAttribute('data-hcd-height') || 0)*4/3
+        // Old saved empty nodes may have lost their original coordinates. Keep
+        // them in the object list but do not invent a clickable location.
+        if(!Number.isFinite(width)||!Number.isFinite(height)||width<=0||height<=0)continue
         objects.push({ kind: 'text', nodeIds: [nodeId], label: text.textContent?.trim() || '',
           x: cssPixels(text.style.left), y: cssPixels(text.style.top),
-          width: Number(text.getAttribute('data-hcd-width') || 0) * 4 / 3,
-          height: Number(text.getAttribute('data-hcd-height') || 0) * 4 / 3, transform: text.style.transform })
+          width, height, transform: text.style.transform })
       }
       const hashes = [...new Set(Array.from(composed.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1]))]
-      const resolved = new Map(await Promise.all(hashes.map(async hash => [hash, await asset(hash)] as const)))
+      const resolved = new Map(await Promise.all(hashes.map(async hash => [hash, await asset(hash, revision)] as const)))
       const images: ImageNode[] = Array.from(root.querySelectorAll<HTMLElement>('[data-hcd-visual-hash][data-hcd-editable="true"]'))
         .filter(node => node.hasAttribute('data-hcd-id') && node.hasAttribute('data-hcd-visual-hash'))
         .map(node => ({ nodeId: node.getAttribute('data-hcd-id')!, visualHash: node.getAttribute('data-hcd-visual-hash')!,
@@ -151,7 +168,8 @@ export function createPageLoader(session: Session, locale: EditorLocale) {
       }
       return { html: composed.html.replace(/asset:\/\/sha256\/([0-9a-f]{64})/g, (_, hash: string) => resolved.get(hash) || ''),
         size: composed.size, runs, objects, images, revision,
-        approximateText: session.format === 'pdf' && !!root.querySelector('[data-hcd-patched="true"]'),
+        wordRegion:session.flowLayoutVersion?wordRegionForElement(root.querySelector('[data-hcd-region]')):undefined,
+        approximateText: session.format === 'pdf' && !!root.querySelector('[data-hcd-patched="true"],[data-hcd-pdf-layout-approximate="true"]'),
         nodeIds: Array.from(root.querySelectorAll('[data-hcd-id]'), node => node.getAttribute('data-hcd-id')!),
       }
     })()
@@ -170,7 +188,16 @@ export function pageDocument(page: RenderedPage, stylesheet: string, locale: Edi
     const root = new DOMParser().parseFromString(html, 'text/html').body
     for (const element of root.querySelectorAll('[data-hcd-node-hash]')) {
       const id = element.getAttribute('data-hcd-id')
-      if (id && edits.has(id) && !element.querySelector('[data-hcd-node-hash]')) element.textContent = edits.get(id)!
+      if (id && edits.has(id) && !element.querySelector('[data-hcd-node-hash]')) {
+        const value=edits.get(id)!
+        if(value!==element.textContent){
+          element.textContent=value
+          // A source-raster PDF deliberately renders its original text layer
+          // transparent. Draft text must opt into the existing approximate
+          // patched styling or the old raster remains the only visible text.
+          if(element.closest('.hcd-pdf-text'))element.setAttribute('data-hcd-patched','true')
+        }
+      }
     }
     html = root.innerHTML
   }

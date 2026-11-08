@@ -1,0 +1,59 @@
+import {openSemanticRecoveryArchive} from '../src/semanticRecoveryArchive.ts'
+import {nativeRecoveryVerifier} from './semanticRecoveryFileVerifier.ts'
+/** Owned internal body deletion + real signed coordinator recovery, not a room upgrade. */
+import assert from 'node:assert/strict'
+import {readFile,writeFile,access} from 'node:fs/promises'
+import {join} from 'node:path'
+import {createHash} from 'node:crypto'
+import * as Y from 'yjs'
+import {getSchema} from '@tiptap/core'
+import {EditorState} from '@tiptap/pm/state'
+import {schemaExtensions,projectionToJson,jsonToSnapshot,type Projection} from '../src/schema.ts'
+import {SemanticInlineContainerNode} from '../src/semanticInlineNode.ts'
+import {SemanticStructureIdentity} from '../src/semanticStructureIdentity.ts'
+import {SemanticBlockStore} from '../src/semanticBlockStore.ts'
+import {SemanticSaveCoordinator} from '../src/semanticSaveCoordinator.ts'
+import {structureTextEdits} from '../src/semanticStructureBinding.ts'
+import {deletionReviews} from '../src/deletionReview.ts'
+import {inlineDeletionField} from '../src/inlineDeletionReview.ts'
+import {readInlineContainerPayload} from '../src/inlineContainerPayload.ts'
+
+const config=JSON.parse(await readFile(process.argv[2],'utf8')),phase=process.argv[3],models={inlineContainers:true} as const,schema=getSchema([...schemaExtensions,SemanticInlineContainerNode,SemanticStructureIdentity])
+const headers:Record<string,string>={Authorization:`Bearer ${config.service}`,'X-HCD-Collaboration-Epoch':'0','X-HCD-Node-Edits-Version':'7','X-HCD-Inline-Containers-Version':'1','X-HCD-Extension-Version':'3','X-HCD-Custom-Marks-Version':'1'}
+const hash=(value:Uint8Array)=>createHash('sha256').update(value).digest('hex'),pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms))
+let drop=phase==='prepare'
+async function request(route:string,init:RequestInit={}){const body=route==='/checkpoints'?JSON.parse(String(init.body)):undefined;if(body)await writeFile(join(config.root,`request-r${body.expectedRevision+1}.json`),JSON.stringify(body,null,2)+'\n');const target=route==='/checkpoints'&&drop?(drop=false,config.dropUrl):config.apiUrl+route;const response=await fetch(target,{...init,headers:{...headers,...init.headers},signal:init.signal??AbortSignal.timeout(60_000)});if(!response.ok)await writeFile(join(config.root,'http-error.json'),JSON.stringify({route,status:response.status,body:await response.clone().text()},null,2));return response}
+async function json(route:string,token?:string){const response=await request(route,token?{headers:{Authorization:`Bearer ${token}`}}:{});assert.ok(response.ok,`${route}: ${response.status}`);return response.json()}
+async function signal(name:string){const end=Date.now()+40_000;while(Date.now()<end){try{await access(join(config.root,name));return}catch{await pause(25)}}throw Error('commit signal missing')}
+const document=new Y.Doc({gc:false}),store=new SemanticBlockStore(document,schema,undefined,models),states:unknown[]=[]
+const projection:Projection=await json('/editor');let stateHash='none'
+if(phase==='prepare'){store.initialize(schema.nodeFromJSON(projectionToJson(projection,models)));document.getMap('hcdSchema').set('typography',2);document.getMap('hcdSchema').set('sourceIdentity',1)}else{const response=await request('/collaboration/state');assert.equal(response.status,200);const bytes=new Uint8Array(await response.arrayBuffer());stateHash=hash(bytes);if(config.recoveryArchive){const candidate=await openSemanticRecoveryArchive(new Uint8Array(await readFile(join(config.root,'pending-collaboration.hcd-recovery'))),{scope:config.recoveryScope,schema,verifyCanonical:nativeRecoveryVerifier(config)});try{Y.applyUpdate(document,Y.encodeStateAsUpdate(candidate.document));assert.equal(candidate.pendingFiles.length,1);assert.equal(candidate.resources.size,3)}finally{candidate.dispose()}}else Y.applyUpdate(document,bytes)}
+const owner=new SemanticSaveCoordinator({documentId:'inline-native',epoch:0,document,structure:store,inlineContainers:1,secret:config.secret,stateHash,request,broadcast:state=>states.push(state),autoSave:false})
+const save=(name:string,value:unknown)=>writeFile(join(config.root,name),JSON.stringify(value,null,2)+'\n')
+function located(target:SemanticBlockStore,id:string){const doc=target.project();let pos=-1;doc.descendants((node,at)=>{if(node.type.name==='hcdExtensionInlineContainer'&&node.attrs.extension.instanceId===id)pos=at});assert.ok(pos>=0);return{doc,pos,node:doc.nodeAt(pos)!}}
+async function actor(id:'alice'|'bob'){const auth=await json('/auth',config[id]);assert.equal(auth.userId,id);assert.equal(auth.scope,'write');return{userId:id,displayName:auth.displayName}}
+try{
+ await owner.initialize(projection);assert.equal(owner.state().conflict,undefined)
+ if(phase==='prepare'){
+  assert.equal(projection.revision,8);let chosen:string|undefined;store.project().descendants(node=>{if(!chosen&&node.type.name==='hcdExtensionInlineContainer')chosen=node.attrs.extension.instanceId});assert.ok(chosen)
+  const alice=await actor('alice'),bob=await actor('bob'),peer=new Y.Doc({gc:false});Y.applyUpdate(peer,Y.encodeStateAsUpdate(document));const other=new SemanticBlockStore(peer,schema,undefined,models)
+  try{
+   const before=located(store,chosen),deletion=EditorState.create({schema,doc:before.doc}).tr.delete(before.pos,before.pos+before.node.nodeSize);store.reconcile(store.blocks(),deletion.doc.content.content.map(node=>({key:node.attrs.hcdStructureKey,node})));owner.changed(alice);assert.equal(deletionReviews(store).length,0)
+   const tombstone=document.getMap(inlineDeletionField).get(`inline:node:${chosen}`) as any;assert.equal(tombstone.version,2);assert.equal(tombstone.node.content,undefined)
+   const live=located(other,chosen),base=readInlineContainerPayload(live.node.attrs.extension),exports=structuredClone(base.exports)!
+   for(const portable of Object.values(exports))for(const block of portable.blocks??[])if('runs' in block)for(const run of block.runs)if('text' in run&&run.text.includes('[项目]'))run.text='[恢复属性] '
+   let resources=base.resources
+   if(config.recoveryArchive){const bytes=new TextEncoder().encode('已上传未提交 attachment bytes 😀'),response=await request('/resources?extension=bin',{method:'POST',headers:{Authorization:`Bearer ${config.bob}`,'Content-Type':'application/octet-stream'},body:bytes});assert.equal(response.status,200);const descriptor=await response.json(),extra={key:'uncommitted',hash:descriptor.hash,byteLength:descriptor.byteLength,name:'未提交附件.txt',mediaType:'text/plain'};assert.equal(extra.hash,hash(bytes));resources=[...(base.resources??[]),extra];await save('uncommitted-resource.json',extra)}
+   const extension=readInlineContainerPayload({...base,data:{...base.data,recovered:true},fallback:{text:'恢复属性'},exports,...(resources?{resources}:{})}),tr=EditorState.create({schema,doc:live.doc}).tr.setNodeMarkup(live.pos,undefined,{...live.node.attrs,extension}).insertText('迟到删除正文😀 ',live.pos+1);other.reconcile(other.blocks(),tr.doc.content.content.map(node=>({key:node.attrs.hcdStructureKey,node})),{textEdits:structureTextEdits([tr],true)})
+   const outcome=owner.save().then(value=>({value}),error=>({error:String(error)}));await signal('committed-response.json');Y.applyUpdate(document,Y.encodeStateAsUpdate(peer));owner.changed(bob);assert.equal(deletionReviews(store).length,1);assert.equal(owner.state().problem,'deletion-drafts-conflict');await owner.persist();await writeFile(join(config.root,'release-drop'),'release');const lost=await outcome;assert.ok('error' in lost);assert.equal((await json('/revisions?limit=1')).headRevision,9);await owner.persist();await writeFile(join(config.root,'lost-state.yjs'),Y.encodeStateAsUpdate(document));await save('prepare-evidence.json',{pid:process.pid,chosen,committedRevision:9,realTcpResponseLost:true,removedBodyNotCopiedIntoTombstone:true,lateHiddenBodyAndPropertyPersisted:true,reviewBlockedSave:true,error:lost.error})
+  }finally{peer.destroy()}
+ }else{
+  const preparation=JSON.parse(await readFile(join(config.root,'prepare-evidence.json'),'utf8'));assert.notEqual(preparation.pid,process.pid);assert.equal(owner.state().revision,9);assert.equal(owner.state().problem,'deletion-drafts-conflict');const groups=deletionReviews(store);assert.equal(groups.length,1);const review=groups[0];assert.equal(review.key,`inline:node:${preparation.chosen}`);assert.match(review.node.textContent,/迟到删除正文😀 /);assert.equal(store.flow.containers!.readBody(preparation.chosen).attrs.extension.data.recovered,true)
+  const bob=await actor('bob');await Promise.all([owner.restoreInline(review,bob),owner.restoreInline(review,bob)]);assert.equal(deletionReviews(store).length,0);assert.equal(owner.state().problem,undefined);assert.equal(owner.state().pending,true);const current=located(store,preparation.chosen);assert.match(current.node.textContent,/^迟到删除正文😀 /);assert.equal(current.node.attrs.extension.data.recovered,true);await save('recovered-before-save.json',jsonToSnapshot(store.project().toJSON(),models))
+  const saved=await owner.save();assert.equal(saved.status,'saved');assert.equal(saved.revision,10);const canonical:Projection=await json('/editor?revision=10');assert.deepEqual(jsonToSnapshot(store.project().toJSON(),models),jsonToSnapshot(projectionToJson(canonical,models),models));assert.equal(deletionReviews(store).length,0)
+  const r9=await json('/references?revision=9',config.alice),r10=await json('/references?revision=10',config.bob);assert.equal(r9.items.length,2);assert.equal(r10.items.length,4);assert.equal(r9.transition.events.length,2);assert.equal(r10.transition.events.length,2);assert.ok(r9.transition.events.every((event:any)=>event.kind==='reference.removed'&&event.context.actorId==='alice'));assert.ok(r10.transition.events.every((event:any)=>event.kind==='reference.created'&&event.context.actorId==='bob'));assert.equal(r10.reminders.enabled,false);await save('references-r9.json',r9);await save('references-r10.json',r10)
+  const original=JSON.parse(await readFile(join(config.root,'request-r9.json'),'utf8')),replay=await request('/checkpoints',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(original)});assert.equal(replay.status,200);const receipt=await replay.json();assert.equal(receipt.revision,9);assert.equal(receipt.idempotentReplay,true);const legacyHeaders={...headers};delete legacyHeaders['X-HCD-Inline-Containers-Version'];const legacy=await fetch(config.apiUrl+'/checkpoints',{method:'POST',headers:{...legacyHeaders,'Content-Type':'application/json'},body:JSON.stringify(original)});assert.equal(legacy.status,426);const denied=await request('/checkpoints',{method:'POST',headers:{Authorization:`Bearer ${config.reader}`,'Content-Type':'application/json'},body:JSON.stringify(original)});assert.equal(denied.status,403);assert.equal((await json('/revisions?limit=1')).headRevision,10)
+  await owner.persist();await writeFile(join(config.root,'saved-state.yjs'),Y.encodeStateAsUpdate(document));await save('postreceipt.json',jsonToSnapshot(store.project().toJSON(),models));await save('resume-evidence.json',{scope:'Internal body-aware coordinator + real authenticated native HTTP; public SDK/active room remains closed',preparePid:preparation.pid,resumePid:process.pid,unknownCommitRecoveredRevision:9,restoredRevision:10,hiddenBodyAndPropertyRecovered:true,restoredFromPortableArchive:!!config.recoveryArchive,concurrentRestoreSerializedAndIdempotent:true,recursiveSourcesExactlyMatchNative:true,referenceRemovals:{count:2,actor:'alice'},referenceRestorations:{count:2,actor:'bob'},remindersEnabled:false,originalRequestReplayRevision:9,replayDidNotAdvanceHead:true,oldModelStatus:legacy.status,readOnlyStatus:denied.status,states})
+ }
+ console.log(`PASS ${phase}: inline deletion, hidden peer edits, signed source recovery and serialized restoration`)
+}finally{owner.dispose();document.destroy()}

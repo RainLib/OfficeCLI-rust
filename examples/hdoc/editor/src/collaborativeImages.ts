@@ -13,6 +13,7 @@ const sameImage = (a:DesiredImage,b:DesiredImage) => sameGeometry(a.geometry,b.g
 export type SharedImageDraft = ImageDraft & { intentId: string; clientId: number; touched: Field[]; ancestors: string[] }
 export type SnapshotImage = { nodeId: string; geometry: ImageGeometry; assetHash?: string; precondition: { visualHash: string } }
 export type CapturedImage = { intentId: string; intentIds: string[]; base?: PositionedImage; clientId?: number; change: SnapshotImage }
+export type ImageReplacementCapture={base:PositionedImage;revision:number;clientId:number;seen:SharedImageDraft[];page?:number}
 const nodeId = /^n_[a-f0-9]{32}$/
 const hash = /^[a-f0-9]{64}$/
 const intent = /^[a-f0-9-]{36}$/
@@ -27,6 +28,7 @@ function image(value: unknown): value is PositionedImage {
 }
 /** Previews and asset bytes never enter the shared intent log. */
 const cleanImage = (value: PositionedImage): PositionedImage => ({ nodeId:value.nodeId, visualHash:value.visualHash, ...(value.assetHash ? {assetHash:value.assetHash} : {}), geometry:{...value.geometry} })
+const visibleImage = (draft: ImageDraft): PositionedImage => cleanImage({ nodeId:draft.base.nodeId, visualHash:draft.base.visualHash, geometry:{...draft.geometry}, ...(draft.assetHash ? {assetHash:draft.assetHash} : draft.base.assetHash ? {assetHash:draft.base.assetHash} : {}) })
 function sharedDraft(key: string, value: unknown): SharedImageDraft | null {
   if (!intent.test(key) || !record(value) || value.intentId!==key || !image(value.base) || !revision(value.clientId) || value.clientId>0xffffffff
     || !revision(value.revision) || !geometry(value.geometry) || value.geometry.unit!==value.base.geometry.unit
@@ -81,6 +83,40 @@ export function captureImages(document: Y.Doc): CapturedImage[] {
     if(!validGeometry(draft.geometry)) throw new Error('image-drafts-not-ready')
     return {intentId:draft.intentId,intentIds:intents.map(entry=>entry.intentId),base:cleanImage(draft.base),clientId:draft.clientId,change:{nodeId:id,geometry:{...draft.geometry},...(draft.touched.includes('assetHash')?{assetHash:draft.assetHash}:{}),precondition:{visualHash:draft.base.visualHash}}}
   })
+}
+/** Private recovery records must preserve exactly which intents a receipt may
+ * remove. Validate without consulting the current (possibly newer) draft. */
+export function validateCapturedImages(value:unknown):asserts value is CapturedImage[]{
+  if(!Array.isArray(value)||value.length>1000)throw new Error('Invalid captured images')
+  const nodes=new Set<string>(),ids=new Set<string>()
+  for(const entry of value){
+    if(!record(entry)||!intent.test(entry.intentId)||!Array.isArray(entry.intentIds)||!entry.intentIds.length||entry.intentIds.length>4000||!entry.intentIds.includes(entry.intentId)||!image(entry.base)||!revision(entry.clientId)||entry.clientId>0xffffffff||!record(entry.change)||!nodeId.test(entry.change.nodeId)||nodes.has(entry.change.nodeId)||entry.base.nodeId!==entry.change.nodeId||!hash.test(entry.change.precondition?.visualHash)||entry.change.precondition.visualHash!==entry.base.visualHash||!geometry(entry.change.geometry)||!validGeometry(entry.change.geometry)||entry.change.geometry.unit!==entry.base.geometry.unit||entry.change.assetHash!==undefined&&!hash.test(entry.change.assetHash))throw new Error('Invalid captured images')
+    nodes.add(entry.change.nodeId)
+    for(const id of entry.intentIds){if(typeof id!=='string'||!intent.test(id)||ids.has(id)||ids.size>=4000)throw new Error('Invalid captured images');ids.add(id)}
+  }
+}
+export function validateImageReplacementCapture(value:unknown):asserts value is ImageReplacementCapture{
+  if(!record(value)||!image(value.base)||!revision(value.revision)||!revision(value.clientId)||value.clientId>0xffffffff||!Array.isArray(value.seen)||value.seen.length>4000||value.page!==undefined&&!revision(value.page))throw new Error('Invalid image replacement capture')
+  const ids=new Set<string>()
+  for(const entry of value.seen){const draft=sharedDraft(entry?.intentId,entry);if(!draft||draft.base.nodeId!==value.base.nodeId||ids.has(draft.intentId))throw new Error('Invalid image replacement capture');ids.add(draft.intentId)}
+}
+/** Only intents observed when choosing the file may be superseded. A resumed
+ * server upload uses the same capture; it must not re-select today's intents. */
+export function applyImageReplacement(document:Y.Doc,capture:ImageReplacementCapture,assetHash:string,origin:unknown='hcd-image-edit',intentId:string=crypto.randomUUID()):string{
+  validateImageReplacementCapture(capture)
+  if(!hash.test(assetHash)||!intent.test(intentId))throw new Error('Invalid replacement upload')
+  const map=document.getMap(imageDraftMap)
+  if(map.has(intentId))throw new Error('Image replacement already applied')
+  document.transact(()=>{
+    for(const prior of capture.seen.filter(entry=>entry.touched.includes('assetHash'))){
+      const actual=sharedDraft(prior.intentId,map.get(prior.intentId))
+      if(!actual||JSON.stringify(actual)!==JSON.stringify(prior))continue
+      map.delete(prior.intentId);const touched=prior.touched.filter(field=>field!=='assetHash')
+      if(touched.length){const nextId=crypto.randomUUID();map.set(nextId,{...prior,intentId:nextId,touched,assetHash:undefined,ancestors:[prior.intentId,...prior.ancestors].slice(0,64)})}
+    }
+    map.set(intentId,{intentId,clientId:capture.clientId,ancestors:[...new Set(capture.seen.flatMap(entry=>[entry.intentId,...entry.ancestors]))].slice(0,64),base:cleanImage(capture.base),revision:capture.revision,geometry:{...capture.base.geometry},assetHash,touched:['assetHash'],...(capture.page!==undefined?{page:capture.page}:{})})
+  },origin)
+  return intentId
 }
 /** Acknowledgement deletes only captured intent IDs. Unseen concurrent changes
  * are rebased field by field, preserving explicit reversions to the old value. */
@@ -149,7 +185,12 @@ export function reconcileImageBaseline(document:Y.Doc,current:PositionedImage,at
  * values; disjoint fields merge, overlapping values need an explicit choice. */
 export class CollaborativeImageDraftStore extends ImageDraftStore {
   private document: Y.Doc
+  ownsDocument(document:Y.Doc){return this.document===document}
   private uploads=0
+  private serverAuthored=new Map<string,{nodeId:string;assetHash:string;clientId:number}>()
+  /** Window-local history ownership after an authenticated server upload reply.
+   * This never changes shared authors, receipts or client IDs. */
+  acceptServerReplacement(intentId:string,nodeId:string,assetHash:string,clientId:number){if(!intent.test(intentId)||!hash.test(assetHash)||!revision(clientId)||clientId>0xffffffff)throw new Error('historyInvalid');this.serverAuthored.set(intentId,{nodeId,assetHash,clientId})}
   get uploading() { return this.uploads>0 }
   private notify=()=>this.changed()
   constructor(document: Y.Doc) {
@@ -186,34 +227,48 @@ export class CollaborativeImageDraftStore extends ImageDraftStore {
     const desired=changedField?{...before,[changedField]:next[changedField]}:next
     const touched=fields.filter(field=>(previous as SharedImageDraft|undefined)?.touched.includes(field)||(field!=='assetHash' && !Object.is(before[field],desired[field])))
     if(!touched.length && !previous) return
+    const beforeImage=previous?visibleImage(previous):cleanImage(current)
     this.drafts.set(value.nodeId,{base:previous?.base??cleanImage(current),revision:previous?.revision??Math.max(atRevision,Number((this.document.getMap(imageReceiptMap).get(value.nodeId) as any)?.revision)||0),geometry:{...desired},...(previous?.assetHash?{assetHash:previous.assetHash}:{}),intentId:crypto.randomUUID(),clientId:this.document.clientID,touched,...(page!==undefined?{page}:previous?.page!==undefined?{page:previous.page}:{})} as SharedImageDraft)
     this.changed()
+    this.note(beforeImage,{...beforeImage,geometry:{...desired}},atRevision,page,'edit')
+  }
+  /** Commit an already revalidated recovery as a new, locally owned intent.
+   * Never remove or reuse the old packet's intent or another member's draft. */
+  applyRecovery(value:PositionedImage,atRevision:number,next:ImageGeometry,assetHash?:string,page?:number):boolean {
+    if(this.saving||!image(value)||!revision(atRevision)||!geometry(next)||!validGeometry(next)||next.unit!==value.geometry.unit||assetHash!==undefined&&!hash.test(assetHash))throw new Error('recovery-image-plan-invalid')
+    if(imageIntents(this.document).some(entry=>entry.base.nodeId===value.nodeId))throw new Error('recovery-image-room-draft')
+    const before=cleanImage(value),after=cleanImage({...before,geometry:{...next},...(assetHash!==undefined?{assetHash}:{})})
+    const touched=fields.filter(field=>!Object.is(fieldValue(before,field),fieldValue(after,field)))
+    if(!touched.length)return false
+    this.drafts.set(value.nodeId,{intentId:crypto.randomUUID(),clientId:this.document.clientID,ancestors:[],base:before,revision:atRevision,geometry:{...after.geometry},touched,...(touched.includes('assetHash')?{assetHash:after.assetHash}:{}),...(page!==undefined?{page}:{})} as SharedImageDraft)
+    this.changed();this.note(before,after,atRevision,page,'choose');return true
   }
   /** Bind the user's choice before asynchronous upload. Only resource intents
    * seen at that moment may be superseded; later edits remain separate. */
-  prepareReplacement(value:PositionedImage,atRevision:number,page?:number) {
+  captureReplacement(value:PositionedImage,atRevision:number,page?:number):ImageReplacementCapture {
     const current=this.currentImage(value,atRevision),previous=this.drafts.get(value.nodeId)
     if(previous?.collaborationConflict) throw new Error('Resolve the collaborative image conflict first')
-    const baseline=cleanImage(previous?.base??current)
-    const at=previous?.revision??Math.max(atRevision,Number((this.document.getMap(imageReceiptMap).get(value.nodeId) as any)?.revision)||0)
+    const base=cleanImage(previous?.base??current)
+    const revision=previous?.revision??Math.max(atRevision,Number((this.document.getMap(imageReceiptMap).get(value.nodeId) as any)?.revision)||0)
     const seen=imageIntents(this.document).filter(entry=>entry.base.nodeId===value.nodeId)
+    return {base,revision,clientId:this.document.clientID,seen,...(page!==undefined?{page}:{})}
+  }
+  applyCapturedReplacement(capture:ImageReplacementCapture,assetHash:string,intentId:string) {
+    const previous=this.drafts.get(capture.base.nodeId)
+    applyImageReplacement(this.document,capture,assetHash,'hcd-image-edit',intentId)
+    this.changed()
+    if(capture.clientId===this.document.clientID)this.note({...capture.base,assetHash:previous?.assetHash??capture.base.assetHash},{...capture.base,assetHash},capture.revision,capture.page,'replace')
+  }
+  prepareReplacement(value:PositionedImage,atRevision:number,page?:number) {
+    const previous=this.drafts.get(value.nodeId),capture=this.captureReplacement(value,atRevision,page),baseline=capture.base,at=capture.revision
     this.uploads++;this.changed()
     let ended=false,committed=false
     return {
       commit:(assetHash:string)=> {
         if(ended || committed || !hash.test(assetHash)) throw new Error('Invalid replacement upload')
-        const map=this.document.getMap(imageDraftMap),id=crypto.randomUUID()
-        this.document.transact(()=> {
-          for(const prior of seen.filter(entry=>entry.touched.includes('assetHash'))) {
-            const actual=sharedDraft(prior.intentId,map.get(prior.intentId))
-            if(!actual || JSON.stringify(actual)!==JSON.stringify(prior)) continue
-            map.delete(prior.intentId)
-            const touched=prior.touched.filter(field=>field!=='assetHash')
-            if(touched.length){const nextId=crypto.randomUUID();map.set(nextId,{...prior,intentId:nextId,touched,assetHash:undefined,ancestors:[prior.intentId,...prior.ancestors].slice(0,64)})}
-          }
-          map.set(id,{intentId:id,clientId:this.document.clientID,ancestors:[...new Set(seen.flatMap(entry=>[entry.intentId,...entry.ancestors]))].slice(0,64),base:baseline,revision:at,geometry:{...baseline.geometry},assetHash,touched:['assetHash'],...(page!==undefined?{page}:{})})
-        },'hcd-image-edit')
+        applyImageReplacement(this.document,capture,assetHash)
         committed=true;this.changed()
+        this.note({...baseline,assetHash:previous?.assetHash??baseline.assetHash},{...baseline,assetHash},at,page,'replace')
       },
       finish:()=>{if(!ended){ended=true;this.uploads--;this.changed()}},
     }
@@ -222,22 +277,60 @@ export class CollaborativeImageDraftStore extends ImageDraftStore {
     if(!hash.test(assetHash)) throw new Error('Invalid replacement asset')
     const current=this.currentImage(value,atRevision),previous=this.drafts.get(value.nodeId)
     if(previous?.collaborationConflict) throw new Error('Resolve the collaborative image conflict first')
+    const beforeImage=previous?visibleImage(previous):cleanImage(current)
     this.drafts.set(value.nodeId,{base:previous?.base??cleanImage(current),revision:previous?.revision??Math.max(atRevision,Number((this.document.getMap(imageReceiptMap).get(value.nodeId) as any)?.revision)||0),geometry:{...(previous?.geometry??current.geometry)},assetHash,intentId:crypto.randomUUID(),clientId:this.document.clientID,touched:[...new Set([...(previous as SharedImageDraft|undefined)?.touched??[],'assetHash'])],...(page!==undefined?{page}:previous?.page!==undefined?{page:previous.page}:{})} as SharedImageDraft)
     this.changed()
+    this.note(beforeImage,{...beforeImage,assetHash},atRevision,page,'replace')
   }
   override resolve(id:string,keepLocal:boolean) {
     const previous=this.drafts.get(id)
     if(this.saving || !previous?.remote) return
     const choice=keepLocal?previous:previous.remote.image
     const geometry=choice.geometry
+    const beforeImage=visibleImage(previous)
     this.drafts.set(id,{base:previous.base,revision:previous.revision,geometry:{...geometry},...(choice.assetHash?{assetHash:choice.assetHash}:{}),intentId:crypto.randomUUID(),clientId:this.document.clientID,touched:(previous as SharedImageDraft).touched,...(previous.page!==undefined?{page:previous.page}:{})} as SharedImageDraft)
     this.changed()
+    this.note(beforeImage,{...beforeImage,geometry:{...geometry},...(choice.assetHash?{assetHash:choice.assetHash}:{})},previous.revision,previous.page,'choose')
   }
   override resolveVariant(id:string,intentId:string) {
     const previous=this.drafts.get(id), choice=previous?.alternatives?.find(value=>value.intentId===intentId)
     if(this.saving || !previous || !choice) return
+    const beforeImage=visibleImage(previous)
     this.drafts.set(id,{base:previous.base,revision:previous.revision,geometry:{...choice.geometry},...(choice.assetHash?{assetHash:choice.assetHash}:{}),intentId:crypto.randomUUID(),clientId:this.document.clientID,touched:(previous as SharedImageDraft).touched,...(previous.page!==undefined?{page:previous.page}:{})} as SharedImageDraft)
     this.changed()
+    this.note(beforeImage,{...beforeImage,geometry:{...choice.geometry},...(choice.assetHash?{assetHash:choice.assetHash}:{})},previous.revision,previous.page,'choose')
+  }
+  /** Inverse of one local action. Peer intents stay; this does not roll the shared map back. */
+  override applyHistory(baseline:PositionedImage,atRevision:number,desired:PositionedImage,page?:number,inverseFields:readonly Field[]=fields) {
+    if(this.saving||this.uploading) throw new Error('historyBusy')
+    if(!image(baseline)||!image(desired)||baseline.nodeId!==desired.nodeId||baseline.geometry.unit!==desired.geometry.unit) throw new Error('historyInvalid')
+    const entries=imageIntents(this.document).filter(entry=>entry.base.nodeId===baseline.nodeId)
+    const own=(entry:SharedImageDraft)=>{const receipt=this.serverAuthored.get(entry.intentId);return entry.clientId===this.document.clientID||!!receipt&&receipt.nodeId===entry.base.nodeId&&receipt.clientId===entry.clientId&&receipt.assetHash===entry.assetHash&&entry.touched.length===1&&entry.touched[0]==='assetHash'}
+    const local=entries.filter(own)
+    const peers=entries.filter(entry=>!own(entry))
+    // Keep earlier local fields, but do not claim unrelated unsaved peer fields.
+    const next=cleanImage(baseline)
+    const assign=(field:Field,value:DesiredImage)=>{if(field==='assetHash')next.assetHash=fieldValue(value,field) as string;else next.geometry[field]=value.geometry[field]}
+    for(const entry of local)for(const field of entry.touched){
+      if(!inverseFields.includes(field)&&!Object.is(fieldValue(baseline,field),fieldValue(entry.base,field))&&!Object.is(fieldValue(baseline,field),fieldValue(entry,field)))throw new Error('historyConflict')
+      assign(field,entry)
+    }
+    inverseFields.forEach(field=>assign(field,desired))
+    const changed=fields.filter(field=>!Object.is(fieldValue(next,field),fieldValue(baseline,field)))
+    if(peers.some(peer=>inverseFields.some(field=>peer.touched.includes(field)&&!Object.is(fieldValue(peer,field),fieldValue(next,field))))) throw new Error('historyConflict')
+    const map=this.document.getMap(imageDraftMap),id=crypto.randomUUID()
+    this.document.transact(()=> {
+      local.forEach(entry=>map.delete(entry.intentId))
+      if(!changed.length) return
+      const geometry={...baseline.geometry}
+      changed.forEach(field=>{if(field!=='assetHash')geometry[field]=next.geometry[field]})
+      map.set(id,{intentId:id,clientId:this.document.clientID,ancestors:[...new Set(local.flatMap(entry=>[entry.intentId,...entry.ancestors]))].slice(0,64),base:cleanImage(baseline),geometry,...(changed.includes('assetHash')?{assetHash:next.assetHash}:{}),touched:changed,revision:atRevision,...(page!==undefined?{page}:{})})
+    },'hcd-history')
+    this.changed()
+  }
+  private note(before:PositionedImage,after:PositionedImage,atRevision:number,page:number|undefined,kind:'edit'|'replace'|'choose') {
+    if(fields.every(field=>Object.is(fieldValue(before,field),fieldValue(after,field)))) return
+    this.actions.emit({before:cleanImage(before),after:cleanImage(after),revision:atRevision,page,kind})
   }
   override reconcile(_images:ImageNode[],_revision:number) { /* Only immutable coordinator receipts mutate intents. */ }
   override markDeleted(_id:string,_revision:number) { /* Canonical changes are handled by the room owner. */ }

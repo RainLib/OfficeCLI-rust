@@ -1,3 +1,5 @@
+import {readExtensionNode} from './extensionNode.ts'
+import {referenceText} from './inlineReference.ts'
 import * as Y from 'yjs'
 import type { JSONContent } from '@tiptap/core'
 import { editorSurface, jsonToSnapshot, projectionToJson, type Block, type BlockContent, type Projection } from './schema.ts'
@@ -58,6 +60,12 @@ export function upgradeSourceIdentity(document: Y.Doc, projection: Projection, l
     const block = canonical[index]
     if (node.getAttribute('hcdBlockId') !== block.blockId) throw new Error('Legacy block identity differs; retain draft for recovery')
     const source = parts(block.content)
+    if(node.nodeName==='hcdExtensionBlock'){
+      const actual=readExtensionNode(node.getAttribute('extension')),expected=readExtensionNode(block.content.extension)
+      const stable=(value:unknown)=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item)
+      if(stable(actual)!==stable(expected))throw new Error('Legacy extension differs; retain draft for recovery')
+      continue
+    }
     if (node.nodeName === 'hcdOpaque') {
       const content = node.getAttribute('hcdContent') as unknown as BlockContent | undefined
       if (!content) throw new Error('Legacy opaque content is absent')
@@ -84,6 +92,8 @@ export function upgradeSourceIdentity(document: Y.Doc, projection: Projection, l
           return item.insert
         }).join('') })
         else if (child instanceof Y.XmlElement && child.nodeName === 'hardBreak') leaves.push({ text: '\n' })
+        else if (child instanceof Y.XmlElement && child.nodeName === 'hcdExtensionInline') leaves.push({text:readExtensionNode(child.getAttribute('extension')).fallback.text})
+        else if (child instanceof Y.XmlElement && child.nodeName === 'hcdMention') leaves.push({text:referenceText(child.getAttribute('reference'))})
         else if (child instanceof Y.XmlElement) collect(child, depth + 1)
         else throw new Error('Unsupported legacy source element')
       }
@@ -139,8 +149,8 @@ export function upgradeSourceIdentity(document: Y.Doc, projection: Projection, l
 /** A structural checkpoint can assign new canonical source IDs. Clear only
  * obsolete receipts on surviving captured blocks, never replace their text or
  * formatting: the user may have kept typing while the save was in flight. */
-export function reconcileSourceIdentities(document: Y.Doc, captured: Y.XmlElement[], canonical: Block[], origin: unknown): void {
-  const live = new Set(yBlocks(document))
+export function reconcileSourceIdentities(document: Y.Doc, captured: Y.XmlElement[], canonical: Block[], origin: unknown, surviving?:Iterable<Y.XmlElement>): void {
+  const live = new Set(surviving??yBlocks(document))
   let work = 0
   const actions: Array<() => void> = []
   const expectedBlocks = blockJsons({documentId:'receipt',revision:0,blocks:canonical})

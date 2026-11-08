@@ -8,15 +8,18 @@ const orderedJson = (input: unknown): string => JSON.stringify(input, (_key, val
  * semantic digest ignores them; the exact request body is separately signed,
  * and the API checks source membership/order before any source rewrite.
  * The frozen legacy form retains IDs for verification of v1 receipts. */
-function normalizedContent(content: BlockContent, keepSourceIds: boolean): BlockContent {
+function normalizedContent<C extends {inlines:Inline[];children?:BlockContent[]}>(content:C,keepSourceIds:boolean,inlineBody=false):C {
   const inlines: Inline[] = []
   for (const source of content.inlines) {
+    // Native keeps an empty mapped source carrier. It has no visible body
+    // content; its source/default metadata needs a separate receipt binding.
+    if(!keepSourceIds&&inlineBody&&!source.content&&source.text==='')continue
     const { nodeId: _sourceId, ...withoutSourceId } = source
-    const inline = keepSourceIds ? source : withoutSourceId
+    const inline = keepSourceIds ? source : {...withoutSourceId,...(source.content?{content:normalizedContent(source.content,false,true)}:{})}
     const previous = inlines.at(-1)
     const { text: _text, ...style } = inline
     const { text: _previousText, ...previousStyle } = previous ?? { text: '' }
-    if (previous && !previous.hardBreak && !inline.hardBreak && orderedJson(style) === orderedJson(previousStyle)) previous.text += inline.text
+    if (previous && (keepSourceIds||!previous.content&&!inline.content) && !previous.hardBreak && !inline.hardBreak && orderedJson(style) === orderedJson(previousStyle)) previous.text += inline.text
     else inlines.push({ ...inline })
   }
   return { ...content, inlines, ...(content.children ? { children: content.children.map(child => normalizedContent(child, keepSourceIds)) } : {}) }

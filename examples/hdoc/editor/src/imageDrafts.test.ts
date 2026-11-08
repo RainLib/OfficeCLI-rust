@@ -115,6 +115,8 @@ test('one save sends text and all image drafts with their original preconditions
   images.edit({ ...image, nodeId: 'off-screen' }, 1, positioned(18).geometry, 99)
   const fetchBefore = globalThis.fetch
   let finish!: (response: Response) => void
+  let submitted!: () => void
+  const started = new Promise<void>(resolve => { submitted = resolve })
   let requests = 0
   globalThis.fetch = async (_url, init) => {
     requests++
@@ -122,10 +124,11 @@ test('one save sends text and all image drafts with their original preconditions
     assert.equal(patch.baseRevision, 1)
     assert.deepEqual(patch.operations.map((operation: { op: string }) => operation.op), ['text.splice', 'image.geometry', 'image.geometry'])
     assert.equal(patch.operations[1].precondition.visualHash, 'original')
-    return new Promise<Response>(resolve => { finish = resolve })
+    return new Promise<Response>(resolve => { finish = resolve; submitted() })
   }
   try {
     const save = saveEdits({ documentId: 'doc', token: 'test', format: 'pptx', scope: 'write', apiUrl: 'http://test' }, 1, texts, images)
+    await Promise.race([started, save])
     texts.edit(text, 1, 'newer text')
     images.edit(image, 1, positioned(15).geometry)
     finish(Response.json({ revision: 2, nodeHashes: { text: createHash('sha256').update('after').digest('hex') }, images: [positioned(12), { ...positioned(18), nodeId: 'off-screen' }] }))
@@ -192,14 +195,17 @@ test('one joint save captures the replacement and keeps a newer resource choice 
  texts.edit({nodeId:'text',text:'old',nodeHash:'before'},1,'new');replace(images)
  const originalFetch=globalThis.fetch
  let finish!:(response:Response)=>void
+ let submitted!:()=>void
+ const started=new Promise<void>(resolve=>{submitted=resolve})
  globalThis.fetch=async(_url,init)=>{
   const patch=JSON.parse(String(init!.body))
   assert.deepEqual(patch.operations.map((op:{op:string})=>op.op),['text.splice','image.replace','image.geometry'])
   assert.equal(patch.operations[1].assetHash,replacement)
-  return new Promise<Response>(resolve=>{finish=resolve})
+  return new Promise<Response>(resolve=>{finish=resolve;submitted()})
  }
  try{
   const pending=saveEdits(session,1,texts,images)
+  await Promise.race([started,pending])
   replace(images,laterReplacement)
   finish(Response.json({revision:2,nodeHashes:{text:createHash('sha256').update('new').digest('hex')},images:[{...image,assetHash:replacement,visualHash:'saved-replacement'}]}))
   await pending

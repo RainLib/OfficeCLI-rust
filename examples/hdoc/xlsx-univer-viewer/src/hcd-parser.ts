@@ -10,6 +10,8 @@ import {
 import type { LoadedChunk, NodeMapEntry } from './hcd.ts';
 
 export interface NodeLink {
+  /** Revision of these canonical bytes, distinct from the current head. */
+  revision?: number;
   nodeId: string;
   nodeHash: string;
   chunkId: string;

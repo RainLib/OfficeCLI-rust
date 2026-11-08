@@ -1,15 +1,20 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ImageDraftStore, validGeometry, sameGeometry, type PositionedImage } from './imageDrafts.ts'
 import { saveEdits, refreshImageDrafts } from './saveEdits.ts'
 import { TextDraftStore } from './textDrafts.ts'
-import { api, type Session } from './api.ts'
+import { api, stageImageAsset, type Session } from './api.ts'
 import { useI18n } from './i18n.tsx'
+import {readImageAssetBackup} from './imageAssetBackup.ts'
+import {imageFileHash,verifyImageStage} from './imageFileIntegrity.ts'
 
 export type ImageGeometry = { x: number; y: number; width: number; height: number; unit: 'emu' | 'pt' }
 export type ImageNode = { nodeId: string; assetHash?: string | null; visualHash: string; label?: string; preview?: string; geometry?: ImageGeometry }
 
-export function ImagePanel({ session, revision, disabled, onRevised, nodes, showEmpty = false, emptyMessage, selectedNodeId, onSelected, drafts, page, onSaveGeometry, saveGeometryLabel, showDrafts = true, prepareReplacement }: {
+export function ImagePanel({ session, revision, disabled, onRevised, nodes, showEmpty = false, emptyMessage, selectedNodeId, onSelected, drafts, page, onSaveGeometry, saveGeometryLabel, showDrafts = true, prepareReplacement, allowReplacement = true, onReplace, replacementPending }: {
   session: Session
+  allowReplacement?: boolean
+  onReplace?: (file:File,image:PositionedImage,revision:number)=>Promise<void>
+  replacementPending?:boolean
   prepareReplacement?: (image: PositionedImage, revision: number, page?: number) => { commit: (hash: string) => void; finish: () => void }
   revision: number | null
   disabled: boolean
@@ -32,6 +37,8 @@ export function ImagePanel({ session, revision, disabled, onRevised, nodes, show
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState<{nodeId:string;assetHash:string;shared:boolean}|null>(null)
+  const wasPending=useRef(replacementPending)
+  useEffect(()=>{if(wasPending.current&&!replacementPending)setError('');wasPending.current=replacementPending},[replacementPending])
 
   useEffect(() => {
     if (nodes) { setImages(nodes); return }
@@ -67,25 +74,27 @@ export function ImagePanel({ session, revision, disabled, onRevised, nodes, show
     let upload: ReturnType<NonNullable<typeof prepareReplacement>>|undefined
     try {
       if(!selectedImage?.geometry)throw new Error(t('imageGeometryInvalid'))
+      if(onReplace){await onReplace(file,selectedImage as PositionedImage,revision);return}
       upload=prepareReplacement?prepareReplacement(selectedImage as PositionedImage,revision,page):drafts.prepareReplacement(selectedImage as PositionedImage,revision,page)
-      const staged = await (await api(session, `/staged-assets?extension=${extension}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
-      })).json() as { hash: string }
+      if(!file.size||file.size>8*1024*1024)throw new Error(t('imageFileSize'))
+      const expectedHash=await imageFileHash(new Uint8Array(await file.arrayBuffer()))
+      const staged = await stageImageAsset(session,extension,file)
+      verifyImageStage(expectedHash,staged.hash)
       upload.commit(staged.hash);setNotice({nodeId:visibleSelected,assetHash:staged.hash,shared:true})
-    } catch (cause) { setError(String(cause)) }
+    } catch (cause) { setError(cause instanceof Error&&cause.message==='image-resource-integrity'?t('imageFileIntegrity'):String(cause)) }
     finally { upload?.finish();setBusy(false) }
   }
 
-  if (!visibleImages.length && !error) return <>{showEmpty && <p className="presentation-empty-panel">{emptyMessage || t('noSlideImages')}</p>}{showDrafts && <ImageDraftList disabled={disabled} drafts={drafts} />}</>
+  if (!visibleImages.length && !error) return <>{showEmpty && <p className="presentation-empty-panel">{emptyMessage || t('noSlideImages')}</p>}{showDrafts && <ImageDraftList session={session} disabled={disabled} drafts={drafts} />}</>
   return <div className="image-panel">
-    {showDrafts && <ImageDraftList disabled={disabled} drafts={drafts} onSelect={id => { setSelected(id); onSelected?.(id) }} />}
+    {showDrafts && <ImageDraftList session={session} disabled={disabled} drafts={drafts} onSelect={id => { setSelected(id); onSelected?.(id) }} />}
     <strong>{t('images')}</strong>
     <select aria-label={t('images')} value={visibleSelected} onChange={event => { setSelected(event.target.value); onSelected?.(event.target.value) }} disabled={busy}>
       {visibleImages.map((image, index) => <option key={image.nodeId} value={image.nodeId}>{t('imageNumber', { count: index + 1 })}{image.label ? ` · ${image.label}` : ''}</option>)}
     </select>
     {selectedDraft?.restoreSource ? <p role="status">{t('imageSourceRestorePending')}</p> : (selectedDraft?.assetHash??selectedCurrent?.assetHash) ? <ImageAssetPreview key={selectedDraft?.assetHash??selectedCurrent?.assetHash} session={session} assetHash={(selectedDraft?.assetHash??selectedCurrent?.assetHash)!} /> : selectedImage?.preview ? <img className="presentation-image-preview" src={selectedImage.preview} alt={t('images')} /> : null}
-    <label className={disabled || busy ? 'disabled' : ''}>{busy ? t('replacingImage') : t('replaceImage')}
-      <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" disabled={disabled || busy || !!selectedDraft?.collaborationConflict || revision === null} onChange={event => {
+    <label className={!allowReplacement || disabled || busy ? 'disabled' : ''}>{busy ? t('replacingImage') : t('replaceImage')}
+      <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" disabled={!allowReplacement || disabled || busy || !!selectedDraft?.collaborationConflict || revision === null} onChange={event => {
         const file = event.target.files?.[0]
         event.target.value = ''
         if (file) void replace(file)
@@ -117,7 +126,7 @@ function ImageGeometryPanel({ session, image, revision, disabled, onRevised, dra
     catch { setError(t('imageCollaborationConflict')) }
   }} /></label>)}</div>
     {!valid && <p role="alert">{t('imageGeometryInvalid')}</p>}
-    {draft?.remote && <div className="presentation-conflict" role="alert"><p>{t(draft.collaborationConflict?'imageCollaborationConflict':busy?'fixedSaveUnknown':'imageGeometryConflict')}</p>{!!draft.conflictingFields?.length&&<p>{t('imageConflictingFields',{fields:new Intl.ListFormat(locale,{style:'short',type:'conjunction'}).format(draft.conflictingFields.map(field=>t(field==='assetHash'?'imageResourceField':field)))})} {t('imageFieldChoicesHint')}</p>}{compareGeometry && <dl>{(['x', 'y', 'width', 'height'] as const).map(key => <div key={key}><dt>{t(key)}</dt><dd>{Number((draft.remote!.image.geometry[key] / factor).toFixed(2))} pt</dd></div>)}</dl>}{!draft.alternatives && <><button disabled={disabled || busy} onClick={() => drafts.resolve(image.nodeId, false)}>{t('useRemoteText')}</button><button disabled={disabled || busy || draft.geometry.unit!==draft.remote.image.geometry.unit} onClick={() => drafts.resolve(image.nodeId, true)}>{t('keepLocalText')}</button></>}{draft.alternatives && <details><summary>{t('imageDraftAlternatives')} ({draft.alternatives.length})</summary>{draft.alternatives.slice(0,conflictCount).map((choice,index)=><div key={choice.intentId}>{choice.assetHash && <ImageCandidatePreview session={session} assetHash={choice.assetHash} />}{compareGeometry && <dl>{(['x','y','width','height'] as const).map(key=><div key={key}><dt>{t(key)}</dt><dd>{Number((choice.geometry[key]/factor).toFixed(2))} pt</dd></div>)}</dl>}<button type="button" disabled={disabled || busy} onClick={()=>drafts.resolveVariant(image.nodeId,choice.intentId)}>{t('useImageDraft',{count:index+1})}</button></div>)}{draft.alternatives.length>conflictCount && <button type="button" onClick={()=>setConflictCount(count=>count+20)}>{t('imageDraftAlternatives')}…</button>}</details>}</div>}
+    {draft?.remote && <div className="presentation-conflict" role="alert"><p>{t(draft.collaborationConflict?'imageCollaborationConflict':busy?'fixedSaveUnknown':'imageGeometryConflict')}</p>{!!draft.conflictingFields?.length&&<p>{t('imageConflictingFields',{fields:new Intl.ListFormat(locale,{style:'short',type:'conjunction'}).format(draft.conflictingFields.map(field=>t(field==='assetHash'?'imageResourceField':field)))})} {t('imageFieldChoicesHint')}</p>}{compareGeometry && <dl>{(['x', 'y', 'width', 'height'] as const).map(key => <div key={key}><dt>{t(key)}</dt><dd>{Number((draft.remote!.image.geometry[key] / factor).toFixed(2))} pt</dd></div>)}</dl>}{!draft.alternatives && <><button disabled={disabled || busy} onClick={() => drafts.resolve(image.nodeId, false)}>{t('useRemoteText')}</button><button disabled={disabled || busy || draft.geometry.unit!==draft.remote.image.geometry.unit} onClick={() => drafts.resolve(image.nodeId, true)}>{t('keepLocalText')}</button></>}{draft.alternatives && <details><summary>{t('imageDraftAlternatives')} ({draft.alternatives.length})</summary>{draft.alternatives.slice(0,conflictCount).map((choice,index)=><div key={choice.intentId}>{choice.assetHash && <><ImageCandidatePreview session={session} assetHash={choice.assetHash} /><ImageAssetBackupButton session={session} assetHash={choice.assetHash}/></>}{compareGeometry && <dl>{(['x','y','width','height'] as const).map(key=><div key={key}><dt>{t(key)}</dt><dd>{Number((choice.geometry[key]/factor).toFixed(2))} pt</dd></div>)}</dl>}<button type="button" disabled={disabled || busy} onClick={()=>drafts.resolveVariant(image.nodeId,choice.intentId)}>{t('useImageDraft',{count:index+1})}</button></div>)}{draft.alternatives.length>conflictCount && <button type="button" onClick={()=>setConflictCount(count=>count+20)}>{t('imageDraftAlternatives')}…</button>}</details>}</div>}
     <button disabled={disabled || busy || !draft || !valid || !!draft.remote || draft.deleted || revision === null} onClick={() => {
       if (revision === null) return
       setError('')
@@ -127,19 +136,23 @@ function ImageGeometryPanel({ session, image, revision, disabled, onRevised, dra
   </section>
 }
 
-export function ImageDraftList({ drafts, onSelect, disabled = false }: { drafts: ImageDraftStore; disabled?: boolean; onSelect?: (nodeId: string, page?: number) => void }) {
+export function ImageDraftList({ drafts, session, onSelect, disabled = false }: { drafts: ImageDraftStore; session?:Session; disabled?: boolean; onSelect?: (nodeId: string, page?: number) => void }) {
   const { t } = useI18n()
   useSyncExternalStore(drafts.subscribe, drafts.snapshot)
   const [error, setError] = useState('')
   if (!drafts.size) return null
   return <details className="inspector-object-list"><summary>{t('unsavedImageCount', { count: drafts.size })}</summary><div>{drafts.entries().map(([id, draft], index) => <div key={id}>
     <button type="button" disabled={!onSelect} onClick={() => onSelect?.(id, draft.page)}>{draft.base.label || t('imageNumber', { count: index + 1 })}</button>
-    {draft.deleted && <p role="alert">{t('imageDraftDeleted')}</p>}
+    {draft.deleted && <p role="alert">{t('imageDraftDeleted')}</p>}{session&&draft.assetHash&&draft.assetHash!==draft.base.assetHash&&<ImageAssetBackupButton session={session} assetHash={draft.assetHash}/>}
     <button type="button" onClick={() => { void navigator.clipboard.writeText(JSON.stringify({geometry:draft.geometry,...(draft.restoreSource?{restoreSource:true}:draft.assetHash?{assetHash:draft.assetHash}:{})})).catch(cause => setError(String(cause))) }}>{t('copyDraftText')}</button>
     <button type="button" disabled={disabled || drafts.saving} onClick={() => drafts.discard(id)}>{t('discardDraftText')}</button>
   </div>)}</div>{error && <p role="alert">{error}</p>}</details>
 }
 
+function ImageAssetBackupButton({session,assetHash}:{session:Session;assetHash:string}){
+ const {t}=useI18n(),[busy,setBusy]=useState(false),[error,setError]=useState(false)
+ return <><button type="button" disabled={busy} onClick={()=>{setBusy(true);setError(false);void readImageAssetBackup(session,assetHash,AbortSignal.timeout(45000)).then(({bytes,extension})=>{const url=URL.createObjectURL(new Blob([Uint8Array.from(bytes)])),a=document.createElement('a');a.href=url;a.download=`image-${assetHash.slice(0,12)}.${extension}`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000)}).catch(()=>setError(true)).finally(()=>setBusy(false))}}>{t('wordNodeResourceDownload')}</button>{error&&<p role="alert">{t('imageBackupFailed')}</p>}</>
+}
 function ImageAssetPreview({session,assetHash}:{session:Session;assetHash:string}) {
   const {t}=useI18n(),[url,setUrl]=useState(''),[error,setError]=useState('')
   useEffect(()=> {

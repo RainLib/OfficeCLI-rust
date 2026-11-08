@@ -1,3 +1,5 @@
+import {readFixedReceipt} from './fixedReceiptRead.ts'
+import {awaitRecoveryPreparation} from './boundedResponse.ts'
 import { api,ApiError, type Session } from './api.ts'
 import { ImageDraftStore, validGeometry, matchesImageDraft } from './imageDrafts.ts'
 import type { ImageNode } from './ImagePanel.tsx'
@@ -21,18 +23,21 @@ export function fixedEditPatch(session:Session,sent:FixedEditAttempt){
     ]),
   ]}
 }
-export async function verifyFixedReceipt(sent:FixedEditAttempt,result:FixedEditReceipt){
+export async function verifyFixedReceipt(sent:FixedEditAttempt,result:FixedEditReceipt,signal?:AbortSignal){
+  signal?.throwIfAborted()
   if(!Number.isSafeInteger(result.revision)||result.revision<=sent.baseRevision||(result.patchId!==undefined&&result.patchId!==sent.id)
     ||sent.texts.some(([id])=>!result.nodeHashes?.[id])||sent.images.some(([id,draft])=>!result.images?.some(image=>image.nodeId===id&&matchesImageDraft(image,draft))))throw new Error('invalidSaveReceipt')
   await Promise.all(sent.texts.map(async([id,draft])=>{
-    const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(draft.text))
+    const digest=()=>crypto.subtle.digest('SHA-256',new TextEncoder().encode(draft.text))
+    const bytes=await (signal?awaitRecoveryPreparation(digest,signal):digest())
     const hash=[...new Uint8Array(bytes)].map(value=>value.toString(16).padStart(2,'0')).join('')
-    if(result.nodeHashes?.[id]!==hash)throw new Error('invalidSaveReceipt')
+    signal?.throwIfAborted();if(result.nodeHashes?.[id]!==hash)throw new Error('invalidSaveReceipt')
   }))
 }
 export async function submitFixedEdits(session:Session,sent:FixedEditAttempt,signal?:AbortSignal):Promise<FixedEditReceipt>{
-  const result=await(await api(session,'/edits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fixedEditPatch(session,sent)),signal})).json() as FixedEditReceipt
-  await verifyFixedReceipt(sent,result);return result
+  const wait=signal??AbortSignal.timeout(30_000)
+  const result=await readFixedReceipt(()=>api(session,'/edits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fixedEditPatch(session,sent)),signal:wait}),wait) as FixedEditReceipt
+  await verifyFixedReceipt(sent,result,wait);return result
 }
 /** One CAS transaction. Workspace controllers additionally persist and resolve attempts. */
 export async function saveEdits(session:Session,revision:number,texts:TextDraftStore,images:ImageDraftStore,onlyImage?:string){

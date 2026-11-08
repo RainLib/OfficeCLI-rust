@@ -86,3 +86,32 @@ test('archived and older-epoch copies remain discoverable; new input makes an ac
   leaf(doc).insert(0,'new ');await first.flush();assert.equal((await first.metadata()).archived,false)
  }finally{first.close();second.close();newEpoch.close();doc.destroy()}
 })
+
+test('structural and legacy device journals stay separately discoverable without cross-protocol merge',async()=>{
+ const {structuralProtocol}=await import('./collaborationProtocol.ts'),factory=new IDBFactory(),legacy=await identity(),structural=await draftIdentity({...session,collaborationProtocol:structuralProtocol},'alice','https://editor.example/workspace')
+ assert.equal(legacy.prefix,structural.prefix);assert.notEqual(legacy.name,structural.name)
+ const a=await LocalDraftJournal.open(legacy,factory),b=await LocalDraftJournal.open(structural,factory),old=documentFor(),next=new Y.Doc()
+ try{next.getMap('hcd-semantic-blocks/3/meta').set('version',3);assert.throws(()=>restoreLocalDraft(old,next),/protocol differs/);const keys=await listDraftIdentities(structural,factory);assert.deepEqual(keys.map(value=>value.name).sort(),[legacy.name,structural.name].sort())}
+ finally{a.close();b.close();old.destroy();next.destroy()}
+})
+test('structural recovery preserves peer and device input while refusing cached canonical/source authority',async()=>{
+ const {getSchema}=await import('@tiptap/core'),{schemaExtensions}=await import('./schema.ts'),{SemanticStructureIdentity}=await import('./semanticStructureIdentity.ts'),{SemanticBlockStore}=await import('./semanticBlockStore.ts')
+ const schema=getSchema([...schemaExtensions,SemanticStructureIdentity]),original=new Y.Doc(),store=new SemanticBlockStore(original,schema)
+ store.initialize(schema.node('doc',null,[schema.node('paragraph',{hcdBlockId:'native-original'},schema.text('Original'))]))
+ const cached=clone(original),server=clone(original),local=new SemanticBlockStore(cached,schema),remote=new SemanticBlockStore(server,schema),key=store.blocks()[0].key
+ try{
+  local.update(key,local.content(key),schema.node('paragraph',local.content(key).attrs,schema.text('device Original')));remote.update(key,remote.content(key),schema.node('paragraph',remote.content(key).attrs,schema.text('peer Original')))
+  const owner=local.owners.get(key)!;local.canonicalIds.set(owner,'forged-cached-native');remote.canonicalIds.set(owner,'current-native')
+  local.attributes.get(key)!.set('hcdSourceId','retired-source');cached.getMap('hcdSave').set('receipt','stale');server.getMap('hcdSave').set('receipt','trusted')
+  const restored=restoreLocalDraft(cached,server)
+  try{const recovered=new SemanticBlockStore(restored,schema);assert.match(localDraftPreview(restored),/device /);assert.match(localDraftPreview(restored),/peer /);assert.equal(recovered.canonicalBlockId(key),'current-native');assert.equal(recovered.attributes.get(key)!.get('hcdSourceId'),null);assert.equal(restored.getMap('hcdSave').get('receipt'),'trusted')}
+  finally{restored.destroy()}
+ }finally{original.destroy();cached.destroy();server.destroy()}
+})
+test('device recovery preview retains forced line breaks and literal text',async()=>{
+ const {getSchema}=await import('@tiptap/core'),{schemaExtensions}=await import('./schema.ts'),{SemanticStructureIdentity}=await import('./semanticStructureIdentity.ts'),{SemanticBlockStore}=await import('./semanticBlockStore.ts')
+ const schema=getSchema([...schemaExtensions,SemanticStructureIdentity]),doc=new Y.Doc(),store=new SemanticBlockStore(doc,schema)
+ try{store.initialize(schema.node('doc',null,[schema.node('paragraph',{hcdBlockId:'native'},[schema.text('First'),schema.node('hardBreak'),schema.text('Second <b>literal</b>')])]))
+  assert.equal(localDraftPreview(doc),'First\nSecond <b>literal</b>')
+ }finally{doc.destroy()}
+})

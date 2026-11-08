@@ -1,7 +1,7 @@
 import type { FUniver, ICellData, IObjectMatrixPrimitiveType } from '@univerjs/presets';
 import type { FWorkbook, FWorksheet } from '@univerjs/preset-sheets-core';
 import { HcdBundleClient, type ChunkDescriptor } from './hcd.ts';
-import { parseGridChunk, type NodeLink, type ParsedGridChunk, type ParsedVisual } from './hcd-parser.ts';
+import type { NodeLink, ParsedGridChunk, ParsedVisual } from './hcd-parser.ts';
 
 export interface HcdTextSplice {
   type: 'text.splice';
@@ -28,6 +28,26 @@ export interface HcdPatchEventDetail {
 }
 
 export type HcdViewerMode = 'readonly' | 'editable';
+
+/** Optional owner-managed drafts. The reference editor owns persistence and
+ * submission; the standalone adapter retains its existing patch event API. */
+export interface HcdGridDraftPort {
+  text(link: Readonly<NodeLink>): string | undefined;
+  edit(changes: ReadonlyArray<{ link: Readonly<NodeLink>; text: string }>, revision: number): void;
+  writable(): boolean;
+  canStartEdit?():boolean;
+  observed?(nodeId:string,text:string):void;
+  rejected?(nodeId:string):void;
+  blankAllowed?(sheetId:string,row:number,column:number):boolean;
+  blankActive?(sheetId:string,row:number,column:number):boolean;
+  blankPrepare?(sheetId:string,row:number,column:number):boolean;
+  blankObserved?(sheetId:string,row:number,column:number,text:string):void;
+  /** Batch capture can be permitted independently of single-cell edits. */
+  blankBatchWritable?():boolean;
+  /** The owner must synchronously take responsibility for the whole batch,
+   * including a durable draft or an explicit recovery path, before returning true. */
+  stageBlankBatch?(cells:ReadonlyArray<{sheetId:string;row:number;column:number;text:string}>,revision:number,rootHash:string):boolean;
+}
 
 interface PendingPatch {
   links: NodeLink[];
@@ -71,14 +91,24 @@ function diffText(oldText: string, newText: string): Pick<HcdTextSplice, 'start'
 }
 
 export class HcdUniverAdapter {
+  private visibleLoadSequence = 0;
+  private disposed = false;
+  private readonly subscriptions: Array<{dispose():void}> = [];
+  private scheduledFrames = new Set<number>();
   private readonly loaded = new Set<string>();
+  private readonly remoteText = new Map<string,{text:string;nodeHash:string;revision:number}>();
   private readonly loading = new Map<string, Promise<void>>();
   private readonly appliedDimensions = new Set<string>();
   private readonly linksByCell = new Map<string, NodeLink>();
   private readonly linksByNode = new Map<string, NodeLink>();
+  private readonly canonicalCells = new Map<string, ICellData>();
+  private readonly canonicalGrid = new Map<string, ICellData>();
+  private readonly paintedDrafts = new Set<string>();
   private readonly pending = new Map<string, PendingPatch>();
   private readonly runtimes = new Map<string, ChunkRuntime>();
-  private readonly rangeGeneration = new Map<string, number>();
+  private rangeGeneration = 0;
+  private requestedWindow?: { sheetId: string; keep: Set<string> };
+  private editingChunk?: string;
   private readonly dimensions = new Map<string, SheetDimensions>();
   private applying = 0;
 
@@ -88,6 +118,7 @@ export class HcdUniverAdapter {
     readonly workbook: FWorkbook,
     readonly mode: HcdViewerMode,
     private readonly onStatus: (message: string) => void,
+    private readonly drafts?: HcdGridDraftPort,
   ) {
     for (const sheet of client.sheets()) {
       const defaults = client.sheetDefaults(sheet.sheetId);
@@ -101,43 +132,102 @@ export class HcdUniverAdapter {
   }
 
   async start(): Promise<void> {
-    for (const address of this.client.sheets()) {
-      const sheet = this.workbook.getSheetBySheetId(address.sheetId);
-      if (!sheet) continue;
-      sheet.onScroll(() => this.scheduleVisible(sheet));
-    }
-    this.univerAPI.addEvent(this.univerAPI.Event.ActiveSheetChanged, ({ activeSheet }) => {
+    // The worksheet onScroll facade can be registered before its render exists,
+    // in which case it silently installs no listener. The global Scroll event
+    // is attached by Univer once rendering is ready.
+    this.subscriptions.push(this.univerAPI.addEvent(this.univerAPI.Event.Scroll, ({ workbook, worksheet }) => {
+      if (workbook.getId() === this.workbook.getId()) this.scheduleVisible(worksheet);
+    }));
+    this.subscriptions.push(this.univerAPI.addEvent(this.univerAPI.Event.ActiveSheetChanged, ({ activeSheet }) => {
       this.scheduleVisible(activeSheet);
-    });
-    this.univerAPI.addEvent(this.univerAPI.Event.BeforeSheetEditStart, (event) => {
-      if (this.mode === 'readonly') {
+    }));
+    this.subscriptions.push(this.univerAPI.addEvent(this.univerAPI.Event.BeforeSheetEditStart, (event) => {
+      if (this.mode === 'readonly' || this.drafts && (!this.drafts.writable()||this.drafts.canStartEdit?.()===false)) {
         event.cancel = true;
         return;
       }
       const key = cellKey(event.worksheet.getSheetId(), event.row, event.column);
       const link = this.linksByCell.get(key);
-      if (!link?.editable || [...this.pending.values()].some(({ links }) => links.includes(link))) {
+      if (!link) {
+        if (!this.drafts?.blankAllowed?.(event.worksheet.getSheetId(),event.row,event.column)) {
+          event.cancel = true;
+          this.onStatus(this.drafts?.blankPrepare?.(event.worksheet.getSheetId(),event.row,event.column)?'workbookBlankPreparing':'workbookCellUnmapped');
+        }
+      } else if (!link.editable) {
         event.cancel = true;
+        this.onStatus('workbookCellProtected');
+      } else if ([...this.pending.values()].some(({ links }) => links.includes(link))) {
+        event.cancel = true;
+        this.onStatus('workbookCellPending');
       }
-    });
-    this.univerAPI.addEvent(this.univerAPI.Event.BeforeCommandExecute, (event) => {
+    }));
+    this.subscriptions.push(this.univerAPI.addEvent(this.univerAPI.Event.BeforeCommandExecute, (event) => {
       if (
-        this.mode === 'readonly'
+        (this.mode === 'readonly' || this.drafts && !this.drafts.writable())
         && !this.applying
         && event.type === this.univerAPI.Enum.CommandType.MUTATION
       ) {
         event.cancel = true;
       }
-    });
-    this.univerAPI.addEvent(this.univerAPI.Event.SheetValueChanged, (event) => {
+    }));
+    this.subscriptions.push(this.univerAPI.addEvent(this.univerAPI.Event.SheetValueChanged, (event) => {
       if (this.applying) return;
       void this.captureChanges(event.effectedRanges);
-    });
+    }));
+    this.subscriptions.push(this.univerAPI.addEvent(this.univerAPI.Event.SheetEditStarted, (event) => {
+      this.editingChunk=this.linksByCell.get(cellKey(event.worksheet.getSheetId(),event.row,event.column))?.chunkId;
+    }));
+    this.subscriptions.push(this.univerAPI.addEvent(this.univerAPI.Event.SheetEditEnded, () => {
+      this.editingChunk=undefined;
+      const frame=window.requestAnimationFrame(()=>{this.scheduledFrames.delete(frame);this.trimToVisibleWindow()});
+      this.scheduledFrames.add(frame);
+    }));
     await this.ensureVisible(this.workbook.getActiveSheet());
   }
 
   getNodeAt(sheetId: string, row: number, column: number): NodeLink | undefined {
     return this.linksByCell.get(cellKey(sheetId, row, column));
+  }
+
+  /** Never treat an unloaded window, formula, numeric cell or other visible
+   * non-text cell as an empty source coordinate. A server check is still
+   * required after this local readiness check. */
+  canInspectBlank(sheetId: string, row: number, column: number): boolean {
+    if (this.disposed || !Number.isInteger(row) || !Number.isInteger(column)
+      || row < 0 || row >= 1_048_576 || column < 0 || column >= 16_384
+      || !this.client.sheets().some(sheet => sheet.sheetId === sheetId)
+      || this.requestedWindow?.sheetId !== sheetId
+      || this.canonicalGrid.has(cellKey(sheetId, row, column))
+      || this.linksByCell.has(cellKey(sheetId, row, column))) return false;
+    const windows = this.client.cellWindows(sheetId, row + 1, row + 1);
+    return windows.every(chunk => this.requestedWindow!.keep.has(chunk.chunkId) && this.loaded.has(chunk.chunkId));
+  }
+
+  cellLabel(nodeId:string):string|undefined {
+    const link=this.linksByNode.get(nodeId);
+    if(!link)return undefined;
+    let column=link.column+1,letters='';
+    while(column>0){column--;letters=String.fromCharCode(65+column%26)+letters;column=Math.floor(column/26);}
+    const name=this.client.sheets().find(sheet=>sheet.sheetId===link.sheetId)?.sheetName;
+    return `${name ? name+'!':''}${letters}${link.row+1}`;
+  }
+
+  /** Repaint loaded cells only. Offscreen drafts stay in the workspace store. */
+  refreshDrafts(): void {
+    // Univer may replace the active in-cell editor's data stream when a
+    // programmatic setValues targets that cell. Repaint after editing ends.
+    if (!this.drafts || this.workbook.isCellEditing?.()) return;
+    this.withApplying(() => {
+      for (const link of this.linksByNode.values()) {
+        const text = this.drafts!.text(link);
+        if (text === undefined && !this.paintedDrafts.has(link.nodeId)) continue;
+        const original = this.canonicalCells.get(link.nodeId) ?? { v: link.text };
+        this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column)
+          .setValues([[text === undefined ? original : { ...original, v: text, t: 1, f: null }]]);
+        if (text === undefined) this.paintedDrafts.delete(link.nodeId);
+        else this.paintedDrafts.add(link.nodeId);
+      }
+    });
   }
 
   async focusNode(nodeId: string): Promise<boolean> {
@@ -151,34 +241,50 @@ export class HcdUniverAdapter {
     return true;
   }
 
-  async loadRange(sheetId: string, startRow: number, endRow: number): Promise<void> {
-    const generation = (this.rangeGeneration.get(sheetId) ?? 0) + 1;
-    this.rangeGeneration.set(sheetId, generation);
-    const cellDescriptors = this.client.cellWindows(sheetId, startRow + 1, endRow + 1);
+  async loadRange(sheetId: string, startRow: number, endRow: number, pinnedRows: ReadonlyArray<{startRow:number;endRow:number}> = []): Promise<void> {
+    if (this.disposed) return;
+    const generation = ++this.rangeGeneration;
+    const ranges = [{startRow,endRow}, ...pinnedRows];
+    const cellDescriptors = [...new Map(ranges.flatMap(range => this.client.cellWindows(sheetId, range.startRow + 1, range.endRow + 1)).map(descriptor => [descriptor.chunkId, descriptor])).values()];
     const visualDescriptors = this.client.visuals(sheetId).filter(({ grid }) => grid?.rowStart === undefined
       || grid.rowEnd === undefined
-      || (grid.rowEnd >= startRow + 1 && grid.rowStart <= endRow + 1));
+      || ranges.some(range => grid.rowEnd! >= range.startRow + 1 && grid.rowStart! <= range.endRow + 1));
+    const descriptors = [...cellDescriptors, ...visualDescriptors];
+    const keep = new Set(descriptors.map(({ chunkId }) => chunkId));
+    this.requestedWindow = { sheetId, keep };
     // Cell chunks establish the real row/column geometry. Drawings must be
     // inserted afterwards or their two-cell anchors are measured against the
     // temporary default grid.
     await Promise.all(cellDescriptors.map((descriptor) => this.loadChunk(descriptor)));
-    if (this.rangeGeneration.get(sheetId) !== generation) return;
+    if (this.disposed || this.rangeGeneration !== generation) return;
     await Promise.all(visualDescriptors.map((descriptor) => this.loadChunk(descriptor)));
-    if (this.rangeGeneration.get(sheetId) !== generation) return;
-    const descriptors = [...cellDescriptors, ...visualDescriptors];
-    const keep = new Set(descriptors.map(({ chunkId }) => chunkId));
+    if (this.disposed || this.rangeGeneration !== generation) return;
     this.evictOutsideWindow(sheetId, keep);
   }
 
+  /** Revisit the latest window after the in-cell editor has closed. */
+  trimToVisibleWindow(): void {
+    if (this.disposed || !this.requestedWindow) return;
+    this.evictOutsideWindow(this.requestedWindow.sheetId, this.requestedWindow.keep);
+  }
+
   applyRemoteText(nodeId: string, text: string, nodeHash: string, revision: number): boolean {
-    this.client.manifest.revision = Math.max(this.client.manifest.revision, revision);
     const link = this.linksByNode.get(nodeId);
-    if (!link || [...this.pending.values()].some(({ links }) => links.includes(link))) return false;
+    if (link && [...this.pending.values()].some(({ links }) => links.includes(link))) return false;
+    const existing=this.remoteText.get(nodeId);
+    if(existing&&existing.revision>revision)return true;
+    if(!existing&&this.remoteText.size>=10_000)return false;
+    this.remoteText.set(nodeId,{text,nodeHash,revision});
+    this.client.manifest.revision = Math.max(this.client.manifest.revision, revision);
+    if(!link)return true;
     this.withApplying(() => {
-      this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column).setValue(text);
+      this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column).setValue(this.drafts?.text({ ...link, text, nodeHash, revision }) ?? text);
     });
     link.text = text;
     link.nodeHash = nodeHash;
+    link.revision = revision;
+    this.canonicalCells.set(nodeId, { ...this.canonicalCells.get(nodeId), v: text, t: 1, f: null, si: null, ref: null, xf: null, p: null });
+    this.canonicalGrid.set(cellKey(link.sheetId,link.row,link.column),this.canonicalCells.get(nodeId)!);
     return true;
   }
 
@@ -209,26 +315,72 @@ export class HcdUniverAdapter {
   }
 
   private scheduleVisible(sheet: FWorksheet): void {
-    window.requestAnimationFrame(() => void this.ensureVisible(sheet));
+    if(this.disposed)return;
+    const frame=window.requestAnimationFrame(() => {this.scheduledFrames.delete(frame);if(!this.disposed)void this.loadVisible(sheet)});
+    this.scheduledFrames.add(frame);
+  }
+
+  dispose():void {
+    this.disposed=true;this.visibleLoadSequence++;
+    for (const subscription of this.subscriptions.splice(0)) subscription?.dispose?.();
+    for(const frame of this.scheduledFrames)window.cancelAnimationFrame(frame);
+    this.scheduledFrames.clear();
+  }
+
+  /** Retry only the active window, retaining local drafts and loaded data. */
+  async retryVisible(): Promise<void> {
+    if(this.disposed)return;
+    await this.loadVisible(this.workbook.getActiveSheet());
+  }
+
+  private async loadVisible(sheet: FWorksheet): Promise<void> {
+    if(this.disposed)return;
+    if (sheet.getSheetId() !== this.workbook.getActiveSheet().getSheetId()) return;
+    const sequence = ++this.visibleLoadSequence;
+    try {
+      await this.ensureVisible(sheet);
+      if (!this.disposed && sequence === this.visibleLoadSequence && sheet.getSheetId() === this.workbook.getActiveSheet().getSheetId()) this.onStatus('workbookVisibleLoaded');
+    } catch {
+      if (!this.disposed && sequence === this.visibleLoadSequence && sheet.getSheetId() === this.workbook.getActiveSheet().getSheetId()) this.onStatus('workbookVisibleLoadFailed');
+    }
   }
 
   private async ensureVisible(sheet: FWorksheet): Promise<void> {
     const range = sheet.getVisibleRange();
     const start = Math.max(0, (range?.startRow ?? 0) - 128);
     const end = Math.min(sheet.getMaxRows() - 1, (range?.endRow ?? 127) + 128);
-    await this.loadRange(sheet.getSheetId(), start, end);
+    // Frozen rows remain visible even when the main viewport is far away.
+    // Keep their chunks in the same generation and eviction set as the window.
+    const frozen = Math.min(sheet.getMaxRows(), Math.max(0, sheet.getFreeze()?.ySplit ?? 0));
+    const pinnedRows: Array<{startRow:number;endRow:number}> = [];
+    if (frozen) {
+      const viewports = sheet.getVisibleRangesOfAllViewports?.();
+      const keys = this.univerAPI.Enum?.SHEET_VIEWPORT_KEY;
+      for (const key of keys ? [keys.VIEW_MAIN_TOP, keys.VIEW_MAIN_LEFT_TOP] : []) {
+        const visible = viewports?.get(key);
+        if (visible && visible.startRow < frozen) pinnedRows.push({startRow:Math.max(0, visible.startRow),endRow:Math.min(frozen-1,visible.endRow)});
+      }
+      // Before the frozen viewport is rendered, bound the fallback so an
+      // unusually large freeze does not materialize the entire worksheet.
+      if (!pinnedRows.length) pinnedRows.push({startRow:0,endRow:Math.min(frozen-1,127)});
+    }
+    await this.loadRange(sheet.getSheetId(), start, end, pinnedRows);
   }
 
   private async loadChunk(descriptor: ChunkDescriptor): Promise<void> {
+    if (this.disposed) return;
     if (this.loaded.has(descriptor.chunkId)) return;
     const existing = this.loading.get(descriptor.chunkId);
     if (existing) return existing;
     const operation = (async () => {
       const chunk = await this.client.readChunk(descriptor);
-      const parsed = parseGridChunk(chunk, (href) => this.client.resolve(href).toString());
+      if (this.disposed) return;
+      const parsed = await this.parseChunk(chunk);
+      if (this.disposed) return;
       const sheet = this.workbook.getSheetBySheetId(descriptor.grid!.sheetId);
       if (!sheet) throw new Error(`工作表不存在: ${descriptor.grid!.sheetName}`);
-      await this.applyParsedChunk(sheet, descriptor, parsed);
+      await this.applyParsedChunk(sheet, descriptor, parsed, this.client.chunkRevision());
+      if (this.disposed) return;
       this.runtimes.set(descriptor.chunkId, {
         sheetId: descriptor.grid!.sheetId,
         kind: descriptor.grid!.kind,
@@ -237,12 +389,27 @@ export class HcdUniverAdapter {
       });
       this.loaded.add(descriptor.chunkId);
       this.onStatus(`revision ${this.client.manifest.revision} · ${this.loaded.size}/${this.client.descriptors.length} 个分片已加载`);
-    })().finally(() => this.loading.delete(descriptor.chunkId));
+    })().finally(() => {
+      this.loading.delete(descriptor.chunkId);
+      // A superseded load can finish after the latest window was cleaned up.
+      // Reconcile every completion against the current window, including
+      // when another chunk in the same request has already failed.
+      if (!this.disposed && this.requestedWindow
+        && (descriptor.grid?.sheetId !== this.requestedWindow.sheetId || !this.requestedWindow.keep.has(descriptor.chunkId))) {
+        this.evictOutsideWindow(this.requestedWindow.sheetId, this.requestedWindow.keep);
+      }
+    });
     this.loading.set(descriptor.chunkId, operation);
     return operation;
   }
 
-  private async applyParsedChunk(sheet: FWorksheet, descriptor: ChunkDescriptor, parsed: ParsedGridChunk): Promise<void> {
+  private async parseChunk(chunk: Awaited<ReturnType<HcdBundleClient['readChunk']>>): Promise<ParsedGridChunk> {
+    const { parseGridChunk } = await import('./hcd-parser.ts');
+    return parseGridChunk(chunk, (href) => this.client.resolve(href).toString());
+  }
+
+  private async applyParsedChunk(sheet: FWorksheet, descriptor: ChunkDescriptor, parsed: ParsedGridChunk, revision:number): Promise<void> {
+    if (this.disposed) return;
     const dimensions = this.dimensions.get(sheet.getSheetId());
     if (dimensions) {
       if (parsed.defaultColumnWidth) dimensions.defaultColumnWidth = parsed.defaultColumnWidth;
@@ -256,12 +423,23 @@ export class HcdUniverAdapter {
         let minColumn = Number.MAX_SAFE_INTEGER;
         let maxColumn = 0;
         for (const cell of parsed.cells) {
-          (values[cell.row] ??= {})[cell.column] = cell.data;
+          const update=cell.link&&this.remoteText.get(cell.link.nodeId);
+          if(update&&update.revision>=revision){
+            if(cell.formula||!cell.link!.editable)throw new Error('workbook remote text target is protected');
+            cell.link!.text=update.text;cell.link!.nodeHash=update.nodeHash;cell.link!.revision=update.revision;
+            cell.data={...cell.data,v:update.text,t:1,f:null,si:null,ref:null,xf:null,p:null};
+          }
+          this.canonicalGrid.set(cellKey(sheet.getSheetId(),cell.row,cell.column),cell.data);
+          if(cell.link&&(!update||update.revision<revision))cell.link.revision=revision;
+          const draft = cell.link && this.drafts?.text(cell.link);
+          (values[cell.row] ??= {})[cell.column] = draft === undefined ? cell.data : { ...cell.data, v: draft, t: 1, f: null };
           minRow = Math.min(minRow, cell.row);
           maxRow = Math.max(maxRow, cell.row);
           minColumn = Math.min(minColumn, cell.column);
           maxColumn = Math.max(maxColumn, cell.column);
           if (cell.link) {
+            this.canonicalCells.set(cell.link.nodeId, cell.data);
+            if (draft !== undefined) this.paintedDrafts.add(cell.link.nodeId);
             this.linksByCell.set(cellKey(cell.link.sheetId, cell.row, cell.column), cell.link);
             this.linksByNode.set(cell.link.nodeId, cell.link);
           }
@@ -308,6 +486,7 @@ export class HcdUniverAdapter {
       if (parsed.showGridlines !== undefined) sheet.setHiddenGridlines(!parsed.showGridlines);
     });
     for (const visual of parsed.visuals) {
+      if (this.disposed) return;
       const key = `${sheet.getSheetId()}:visual:${visual.nodeId}`;
       if (this.appliedDimensions.has(key)) continue;
       const geometry = this.resolveVisualGeometry(sheet, visual);
@@ -320,6 +499,7 @@ export class HcdUniverAdapter {
         .setWidth(geometry.width)
         .setHeight(geometry.height)
         .buildAsync();
+      if (this.disposed) return;
       this.withApplying(() => sheet.insertImages([{ ...built, drawingId: visual.nodeId }]));
       this.appliedDimensions.add(key);
       window.dispatchEvent(new CustomEvent('hcd-visual-ready', { detail: visual }));
@@ -395,20 +575,36 @@ export class HcdUniverAdapter {
     return { index: Math.max(0, maximum - 1), offset: 0 };
   }
 
-  private async captureChanges(ranges: Array<{ getSheetId(): string; getRow(): number; getColumn(): number; getHeight(): number; getWidth(): number; getValues(): unknown[][] }>): Promise<void> {
+  private async captureChanges(ranges: Array<{ getSheetId(): string; getRow(): number; getColumn(): number; getHeight(): number; getWidth(): number; getValues(): unknown[][]; getCellDataGrid(): (ICellData|null|undefined|void)[][] }>): Promise<void> {
+    const drafts: Array<{ link: Readonly<NodeLink>; text: string }> = [];
+    const accepted = new Map<string,NodeLink>();
     const operations: HcdTextSplice[] = [];
     const changes: HcdPatchEventDetail['changes'] = [];
     const links: NodeLink[] = [];
     const previous: string[] = [];
-    const rejected: Array<{ sheetId: string; row: number; column: number; value: string }> = [];
+    const rejected: Array<{ sheetId: string; row: number; column: number; value?: string }> = [];
+    const observed = new Map<string,string>();
+    let blank: {sheetId:string;row:number;column:number;text:string}|undefined;
+    const batch: Array<{sheetId:string;row:number;column:number;text:string}> = [];
+    let unsupportedFormula = false;
     for (const range of ranges) {
       const values = range.getValues();
+      const cellData = range.getCellDataGrid();
       for (let rowOffset = 0; rowOffset < range.getHeight(); rowOffset += 1) {
         for (let columnOffset = 0; columnOffset < range.getWidth(); columnOffset += 1) {
           const row = range.getRow() + rowOffset;
           const column = range.getColumn() + columnOffset;
           const link = this.linksByCell.get(cellKey(range.getSheetId(), row, column));
-          if (!link?.editable) {
+          const data = cellData[rowOffset]?.[columnOffset];
+          const formula = Boolean(data?.f || data?.si);
+          if(formula) unsupportedFormula = true;
+          if (!formula && !link && ranges.length===1 && range.getHeight()===1 && range.getWidth()===1
+            && this.mode==='editable' && this.drafts?.writable() && this.drafts.blankActive?.(range.getSheetId(),row,column)) {
+            blank={sheetId:range.getSheetId(),row,column,text:String(values[rowOffset]?.[columnOffset]??'')};
+            continue;
+          }
+          if (formula || !link?.editable || this.mode === 'readonly' || this.drafts && !this.drafts.writable()
+            || [...this.pending.values()].some(({ links }) => links.includes(link))) {
             // Editing can enter through paste/fill commands without first
             // emitting BeforeSheetEditStart. Revert both read-only mapped
             // cells and blank cells that have no HCD/source-map node.
@@ -416,11 +612,22 @@ export class HcdUniverAdapter {
               sheetId: range.getSheetId(),
               row,
               column,
-              value: link?.text ?? '',
+              value: link ? this.drafts?.text(link) ?? link.text : undefined,
             });
+            const value=values[rowOffset]?.[columnOffset];
+            if (!formula && !link && this.mode==='editable' && (this.drafts?.blankBatchWritable?.() ?? this.drafts?.writable()) && this.drafts?.stageBlankBatch
+              && typeof value==='string' && value.length>0 && !value.startsWith('=') && this.canInspectBlank(range.getSheetId(),row,column)) {
+              batch.push({sheetId:range.getSheetId(),row,column,text:value});
+            }
             continue;
           }
           const next = String(values[rowOffset]?.[columnOffset] ?? '');
+          accepted.set(link.nodeId,link);
+          if (this.drafts) {
+            observed.set(link.nodeId,next);
+            if (next !== (this.drafts.text(link) ?? link.text)) drafts.push({ link, text: next });
+            continue;
+          }
           if (next === link.text) continue;
           operations.push({
             type: 'text.splice',
@@ -435,10 +642,44 @@ export class HcdUniverAdapter {
       }
     }
     if (rejected.length) {
-      this.withApplying(() => rejected.forEach((cell) => {
-        this.workbook.getSheetBySheetId(cell.sheetId)?.getRange(cell.row, cell.column).setValue(cell.value);
-      }));
+      this.withApplying(() => {
+        rejected.forEach((cell) => {
+          const original=this.canonicalGrid.get(cellKey(cell.sheetId,cell.row,cell.column))??{v:null,s:null};
+          this.workbook.getSheetBySheetId(cell.sheetId)?.getRange(cell.row, cell.column).setValue({...original,v:cell.value ?? original.v ?? null,f:null,si:null,ref:null,xf:null,p:null});
+        });
+        // A mixed paste is one user operation: if any target is protected,
+        // restore supported cells too and never leave a partially staged paste.
+        accepted.forEach(link=>{
+          const original=this.canonicalCells.get(link.nodeId)??{v:link.text};
+          this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row,link.column).setValue({...original,v:this.drafts?.text(link)??link.text,f:null,si:null,ref:null,xf:null,p:null});
+        });
+      });
+      for(const cell of rejected){const link=this.linksByCell.get(cellKey(cell.sheetId,cell.row,cell.column));if(link)this.drafts?.rejected?.(link.nodeId);}
+      accepted.forEach(link=>this.drafts?.rejected?.(link.nodeId));
+      if (!unsupportedFormula && !accepted.size && !blank && batch.length>=2 && batch.length<=4000 && batch.length===rejected.length && this.drafts?.stageBlankBatch) {
+        try { if (this.drafts.stageBlankBatch(batch,this.client.chunkRevision(),this.client.manifest.rootHash)) return; }
+        catch { /* The unchanged grid and clipboard remain available for retry. */ }
+      }
+      this.onStatus(unsupportedFormula?'workbookUnsupportedFormula':'workbookUnsupportedPaste');
+      return;
     }
+    if (blank) { this.drafts?.blankObserved?.(blank.sheetId,blank.row,blank.column,blank.text); return; }
+    if (this.drafts && drafts.length) {
+      drafts.forEach(({ link }) => this.paintedDrafts.add(link.nodeId));
+      try { this.drafts.edit(drafts, this.client.manifest.revision); }
+      catch (error) {
+        // No successful cell observation follows a rejected draft batch.
+        // Release any matching editor capture while keeping its private
+        // buffer available for explicit review and recovery.
+        accepted.forEach(link=>this.drafts?.rejected?.(link.nodeId));
+        this.refreshDrafts();
+        this.onStatus(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      observed.forEach((text,id)=>this.drafts?.observed?.(id,text));
+      return;
+    }
+    if(this.drafts){observed.forEach((text,id)=>this.drafts?.observed?.(id,text));return;}
     if (!operations.length) return;
     const patchId = crypto.randomUUID();
     const patch: HcdPatchBatch = {
@@ -456,10 +697,14 @@ export class HcdUniverAdapter {
   }
 
   private evictOutsideWindow(activeSheetId: string, keep: Set<string>): void {
+    // Clearing the active cell can replace its editor's input stream. If the
+    // start event did not identify a chunk, retain everything until it ends.
+    const editing=this.workbook.isCellEditing?.()===true;
+    if (editing&&!this.editingChunk) return;
     for (const [chunkId, runtime] of this.runtimes) {
       const isPending = [...this.pending.values()].some(({ links }) =>
         links.some((link) => link.chunkId === chunkId));
-      if (isPending || (runtime.sheetId === activeSheetId && keep.has(chunkId))) continue;
+      if (isPending || (editing&&chunkId===this.editingChunk) || (runtime.sheetId === activeSheetId && keep.has(chunkId))) continue;
       const sheet = this.workbook.getSheetBySheetId(runtime.sheetId);
       if (!sheet) continue;
       this.withApplying(() => {
@@ -470,6 +715,7 @@ export class HcdUniverAdapter {
           let minColumn = Number.MAX_SAFE_INTEGER;
           let maxColumn = 0;
           for (const cell of runtime.cells) {
+            this.canonicalGrid.delete(cellKey(runtime.sheetId,cell.row,cell.column));
             (values[cell.row] ??= {})[cell.column] = { v: null, s: null };
             minRow = Math.min(minRow, cell.row);
             maxRow = Math.max(maxRow, cell.row);
@@ -478,6 +724,8 @@ export class HcdUniverAdapter {
             if (cell.link) {
               this.linksByCell.delete(cellKey(cell.link.sheetId, cell.row, cell.column));
               this.linksByNode.delete(cell.link.nodeId);
+              this.canonicalCells.delete(cell.link.nodeId);
+              this.paintedDrafts.delete(cell.link.nodeId);
             }
           }
           sheet.getRange(minRow, minColumn, maxRow - minRow + 1, maxColumn - minColumn + 1).setValues(values);

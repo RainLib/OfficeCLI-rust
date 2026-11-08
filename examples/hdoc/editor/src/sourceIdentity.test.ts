@@ -23,6 +23,23 @@ const legacyDocument = (value: Projection) => {
   return document
 }
 
+test('mixed nested lists migrate source identities without a phantom bullet start attribute', () => {
+  const canonical:Projection={documentId:'sources',revision:1,blocks:[{blockId:'mixed',blockHash:'hash',region:'body',readOnly:false,content:{kind:'list_item',level:1,listStart:4,inlines:[],children:[
+    {kind:'paragraph',inlines:[{nodeId:one,text:'Parent'}]},
+    {kind:'ordered_list',listStart:7,inlines:[],children:[{kind:'list_item',level:1,inlines:[],children:[
+      {kind:'paragraph',inlines:[{nodeId:two,text:'Child'}]},
+      {kind:'bullet_list',inlines:[],children:[{kind:'list_item',level:0,inlines:[{nodeId:`n_${'3'.repeat(32)}`,text:'Leaf'}]}]},
+    ]}]},
+  ]}}]}
+  const expected=projectionToJson(canonical),document=TiptapTransformer.toYdoc(expected,'default',schemaExtensions)
+  const before=checkpointContents(jsonToSnapshot(expected))
+  try {
+    upgradeSourceIdentity(document,canonical,true)
+    assert.equal(checkpointContents(jsonToSnapshot(TiptapTransformer.fromYdoc(document,'default'))),before)
+    assert.equal(document.getMap('hcdSchema').get('sourceIdentity'),1)
+  } finally {document.destroy()}
+})
+
 test('identical adjacent source runs keep identities through partial size and text edits', () => {
   const editor = new Editor({element:null,extensions:schemaExtensions,content:projectionToJson(projection())})
   assert.equal(editor.state.doc.firstChild!.childCount,2)
@@ -117,6 +134,20 @@ test('empty imported paragraphs retain their source and font for subsequent typi
   const inline = jsonToSnapshot(editor.getJSON())[0].content.inlines[0]
   assert.equal(inline.text,'中文😀'); assert.equal(inline.nodeId,one); assert.equal(inline.typography?.sizePt,14)
   assert.equal(inline.fontSizeExplicit,undefined)
+  editor.destroy()
+})
+
+test('a new paragraph split at the end does not lend its previous paragraph source to pasted text',()=>{
+  const editor=new Editor({element:null,extensions:schemaExtensions,content:projectionToJson(projection())})
+  editor.view.updateState(editor.state.reconfigure({plugins:editor.extensionManager.plugins}))
+  editor.commands.setTextSelection(editor.state.doc.content.size-1)
+  assert.ok(editor.commands.splitBlock())
+  editor.view.dispatch(editor.state.tr.insertText('Copied text'))
+  const snapshot=jsonToSnapshot(editor.getJSON())
+  assert.equal(snapshot.length,2)
+  assert.equal(snapshot[1].content.inlines[0].text,'Copied text')
+  assert.equal(snapshot[1].content.inlines[0].nodeId,undefined)
+  assert.deepEqual(snapshot[0].content.inlines.map(inline=>inline.nodeId),[one,two])
   editor.destroy()
 })
 

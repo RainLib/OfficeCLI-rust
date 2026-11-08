@@ -1,19 +1,22 @@
 import {DraftActions} from './draftActions.ts'
-export type TextRun = { nodeId: string; nodeHash: string; text: string; font?: { family: string; sizePt: number; bold: boolean; italic: boolean } }
+export type TextRun = { nodeId: string; nodeHash: string; text: string; font?: { family: string; sizePt: number; bold: boolean; italic: boolean;families?:string[];mixedFamily?:boolean;mixedSize?:boolean;mixedStyle?:boolean } }
 export type TextDraft = { base: TextRun; revision: number; text: string; page?:number; remote?: TextRun; stale?: 'refresh' | 'deleted' }
 
 /** Drafts outlive viewport-mounted editors. The workspace controller owns
  * scoped persistence; a remote revision never overwrites a draft. */
 export class TextDraftStore {
-  readonly actions=new DraftActions<TextRun>()
+  readonly actions=new DraftActions<TextRun,TextDraft>()
   private drafts = new Map<string, TextDraft>()
   private inFlight = new Map<string, TextDraft>()
   private confirmed = new Map<string, { run: TextRun; revision: number }>()
   private listeners = new Set<() => void>()
   private generation = 0
+  private batching=0
+  private batchChanged=false
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   snapshot = () => this.generation
-  private changed() { this.generation += 1; this.listeners.forEach(listener => listener()) }
+  private changed() { if(this.batching){this.batchChanged=true;return};this.generation += 1; this.listeners.forEach(listener => listener()) }
+  batch(work:()=>void){this.batching++;try{work()}finally{this.batching--;if(!this.batching&&this.batchChanged){this.batchChanged=false;this.changed()}}}
   get(nodeId: string) { return this.drafts.get(nodeId) }
   get size() { return this.drafts.size }
   entries() { return [...this.drafts.entries()] }
@@ -32,7 +35,7 @@ export class TextDraftStore {
     run = this.currentRun(run, revision)
     revision = Math.max(revision, saved?.revision ?? 0)
     const before={...run,text:this.drafts.get(run.nodeId)?.text??run.text}
-    if (text === run.text && !this.inFlight.has(run.nodeId)) this.drafts.delete(run.nodeId)
+    if (text === run.text && !this.inFlight.has(run.nodeId) && !this.drafts.get(run.nodeId)?.remote && !this.drafts.get(run.nodeId)?.stale) this.drafts.delete(run.nodeId)
     else {
       const previous = this.drafts.get(run.nodeId)
       this.drafts.set(run.nodeId, previous ? { ...previous, text } : { base: { ...run }, revision, text,...(page!==undefined?{page}:{}) })
@@ -95,10 +98,26 @@ export class TextDraftStore {
     run = this.currentRun(run, revision)
     const draft = this.drafts.get(run.nodeId)
     if (!draft) return
-    this.actions.emit({before:run,after:run,revision,kind:'reset'})
+    const before=structuredClone({...draft,remote:{...run},stale:undefined})
     if (!keepLocal || draft.text === run.text) this.drafts.delete(run.nodeId)
     else this.drafts.set(run.nodeId, { base: { ...run }, revision, text: draft.text,...(draft.page!==undefined?{page:draft.page}:{}) })
     this.changed()
+    this.actions.emit({before:{...run,text:before.text},after:{...run,text:this.drafts.get(run.nodeId)?.text??run.text},revision,page:draft.page,kind:'choose',choice:{before,after:this.drafts.get(run.nodeId)??null,canonical:{...run}}})
+  }
+
+  applyChoiceHistory(run:TextRun,revision:number,expected:TextDraft|null,desired:TextDraft|null,guard?:TextRun,requireResolvedExpected=false){
+    if(this.inFlight.has(run.nodeId))throw new Error('historyBusy')
+    if(guard&&run.nodeHash!==guard.nodeHash)throw new Error('historyConflict')
+    const rebase=(snapshot:TextDraft|null):TextDraft|null=>!snapshot||snapshot.text===run.text?null:{...structuredClone(snapshot),revision,remote:snapshot.base.nodeHash!==run.nodeHash?{...run}:undefined,stale:undefined}
+    const signature=(snapshot:TextDraft|null)=>snapshot?JSON.stringify({text:snapshot.text,conflict:!!snapshot.remote}):'none'
+    const actual=rebase(this.drafts.get(run.nodeId)??null),next=rebase(desired)
+    const wantedExpected=rebase(expected)
+    if(requireResolvedExpected&&wantedExpected?.remote)throw new Error('historyConflict')
+    if(signature(actual)!==signature(wantedExpected))throw new Error('historyConflict')
+    this.confirmed.set(run.nodeId,{run:{...run},revision})
+    if(next)this.drafts.set(run.nodeId,next);else this.drafts.delete(run.nodeId)
+    this.changed()
+    return {before:structuredClone(actual),after:structuredClone(next)}
   }
 
   beginSave(sent: Array<[string, TextDraft]>) {

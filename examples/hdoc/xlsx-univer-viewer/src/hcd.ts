@@ -37,6 +37,17 @@ export interface HcdManifest {
   indexRootHref?: string;
   indexPageCount: number;
   stylesHref: string;
+  warnings?: Array<{ code: string }>;
+}
+
+/** Only the recognized code controls UI; arbitrary server text is not shown. */
+export function hasStoredBlankMappingLimit(manifest: HcdManifest): boolean {
+  return Array.isArray(manifest.warnings) && manifest.warnings.some(warning => warning?.code === 'XLSX_STORED_BLANK_MAPPING_LIMIT');
+}
+
+/** Imported protected worksheets currently use conservative read-only mapping. */
+export function hasProtectedSheetReadOnly(manifest: HcdManifest): boolean {
+  return Array.isArray(manifest.warnings) && manifest.warnings.some(warning => warning?.code === 'XLSX_PROTECTED_SHEET_READ_ONLY');
 }
 
 export interface NodeMapEntry {
@@ -142,6 +153,7 @@ async function fetchDecoded(url: URL, maxBytes: number, expectedHash?: string): 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 
 export class HcdBundleClient {
+  chunkRevision():number { return this.manifest.revision; }
   readonly baseUrl: URL;
   manifest!: HcdManifest;
   descriptors: ChunkDescriptor[] = [];

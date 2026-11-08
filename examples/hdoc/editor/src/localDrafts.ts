@@ -1,11 +1,23 @@
 import * as Y from 'yjs'
+import {getSchema} from '@tiptap/core'
+import {schemaExtensions} from './schema.ts'
+import {SemanticStructureIdentity} from './semanticStructureIdentity.ts'
+import {SemanticInlineContainerNode} from './semanticInlineNode.ts'
+import {inlineContainerFields} from './semanticInlineContainers.ts'
+import {inlineContainerEditFields} from './inlineContainerEdits.ts'
+import {sourceDefaultNames} from './semanticSourceDefaults.ts'
+import {textFlowFields} from './semanticTextFlow.ts'
+import {inlineRoomGuard} from './inlineRoomGuard.ts'
+import {inlineDeletionField} from './inlineDeletionReview.ts'
+import {SemanticBlockStore,semanticBlockFields} from './semanticBlockStore.ts'
+import {legacyProtocol,structuralProtocol,inlineProtocol,type CollaborationProtocol} from './collaborationProtocol.ts'
 import type { Session } from './api.ts'
 
 const prefix='hcd-local-draft-v1-'
 const maxUpdate=8*1024*1024, maxJournal=64*1024*1024
 const maxRows=100000
 export type LocalDraftState='idle'|'writing'|'stored'|'failed'
-export type DraftIdentity={prefix:string;name:string;epoch:number}
+export type DraftIdentity={prefix:string;name:string;epoch:number;protocol?:CollaborationProtocol}
 function endpoint(value:string,base:string){
   const url=new URL(value,base)
   // Credentials and routing query parameters must never become cache keys.
@@ -13,7 +25,9 @@ function endpoint(value:string,base:string){
   if(url.username || url.password || url.search || url.hash)throw new Error('Unsupported local draft endpoint')
   return url.href.replace(/\/$/,'')
 }
-export async function draftIdentity(session:Session,userId:string,base:string):Promise<DraftIdentity>{
+/** Specialized journals add their own model suffix. This shared hash is not
+ * itself permission to open an ordinary semantic draft under that protocol. */
+export async function draftNamespace(session:Session,userId:string,base:string):Promise<Pick<DraftIdentity,'prefix'|'name'|'epoch'>>{
   const epoch=session.collaborationEpoch??0
   if(!Number.isSafeInteger(epoch)||epoch<0||!userId)throw new Error('Invalid local draft identity')
   const scope=JSON.stringify([endpoint(session.apiUrl||'/v1/documents',base),endpoint(session.collabUrl||'ws://127.0.0.1:8768',base),session.documentId,userId])
@@ -21,6 +35,13 @@ export async function draftIdentity(session:Session,userId:string,base:string):P
   const key=prefix+[...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('')+'-'
   return {prefix:key,name:key+epoch,epoch}
 }
+export async function draftIdentity(session:Session,userId:string,base:string):Promise<DraftIdentity>{
+  const protocol=session.collaborationProtocol??legacyProtocol
+  if(protocol!==legacyProtocol&&protocol!==structuralProtocol&&protocol!==inlineProtocol)throw new Error('Unsupported local draft protocol')
+  const identity=await draftNamespace(session,userId,base)
+  return {...identity,name:identity.name+(protocol===structuralProtocol?'-structure3':protocol===inlineProtocol?'-inlinecontainers1':''),...(protocol!==legacyProtocol?{protocol}:{})}
+}
+export function createDraftDocument(session:Pick<Session,'collaborationProtocol'>){return new Y.Doc({gc:session.collaborationProtocol!==inlineProtocol})}
 function transactionDone(tx:IDBTransaction):Promise<void>{
   return new Promise((resolve,reject)=>{tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error??new Error('Local draft transaction aborted'));tx.onerror=()=>{/* abort is authoritative */}})
 }
@@ -63,7 +84,7 @@ export class LocalDraftJournal {
     const records=await request(store.getAll());await done
     const updates=records.map(bytes)
     if(updates.reduce((sum,value)=>sum+value.byteLength,0)>maxJournal)throw new Error('Local draft journal exceeds byte limit')
-    const doc=new Y.Doc()
+    const doc=createDraftDocument({collaborationProtocol:this.identity.protocol})
     try {if(updates.length)Y.applyUpdate(doc,Y.mergeUpdates(updates),'hcd-local-load');return doc}
     catch(error){doc.destroy();throw error}
   }
@@ -124,12 +145,14 @@ export class LocalDraftJournal {
   close(){this.detach?.();this.detach=undefined;this.closed=true;this.db.close()}
 }
 export function cacheAddsChanges(cached:Y.Doc,server:Y.Doc):boolean{
-  const merged=new Y.Doc()
+  const merged=new Y.Doc({gc:false})
   try{Y.applyUpdate(merged,Y.encodeStateAsUpdate(server));const before=Y.snapshot(merged);Y.applyUpdate(merged,Y.encodeStateAsUpdate(cached));return !Y.equalSnapshots(before,Y.snapshot(merged))}
   finally{merged.destroy()}
 }
 export function restoreLocalDraft(cached:Y.Doc,server:Y.Doc):Y.Doc{
-  const result=new Y.Doc()
+  if(localDocumentProtocol(cached)!==localDocumentProtocol(server))throw new Error('Draft protocol differs')
+  const protocol=localDocumentProtocol(server),inline=protocol===inlineProtocol,result=createDraftDocument({collaborationProtocol:protocol})
+  try{
   Y.applyUpdate(result,Y.encodeStateAsUpdate(server));Y.applyUpdate(result,Y.encodeStateAsUpdate(cached))
   // Disk is a draft, never authority for coordinator receipts or schema. Keep
   // source identities and image intents, but use the authenticated room metadata.
@@ -137,7 +160,42 @@ export function restoreLocalDraft(cached:Y.Doc,server:Y.Doc):Y.Doc{
     const target=result.getMap(name),canonical=server.getMap(name)
     result.transact(()=>{for(const key of target.keys())if(!canonical.has(key))target.delete(key);for(const[key,value]of canonical)target.set(key,value)},'hcd-local-restore')
   }
+  if(protocol===structuralProtocol||inline){
+    const canonical=result.getMap<string|null>(semanticBlockFields.canonical),trusted=server.getMap<string|null>(semanticBlockFields.canonical)
+    result.transact(()=>{
+      for(const owner of result.getMap<string|null>(semanticBlockFields.owners).values())if(owner&&!trusted.has(owner))canonical.set(owner,null)
+      for(const [owner,value]of trusted)canonical.set(owner,value)
+      const metadata=result.getMap(semanticBlockFields.metadata),actual=server.getMap(semanticBlockFields.metadata)
+      for(const key of metadata.keys())if(!actual.has(key))metadata.delete(key)
+      for(const [key,value]of actual)metadata.set(key,value)
+      // A late device update may retain source IDs retired by a committed save.
+      // Keep its text and style while dropping only untrusted source identity.
+      const schema=draftSchema(inline)
+      const allowed=new Set<string>(),projected=new SemanticBlockStore(server,schema,undefined,inline?{inlineContainers:true}:{}).project()
+      projected.descendants(node=>{if(typeof node.attrs.hcdSourceId==='string')allowed.add(node.attrs.hcdSourceId);for(const mark of node.marks)if(mark.type.name==='hcdSource'&&typeof mark.attrs.nodeId==='string')allowed.add(mark.attrs.nodeId)})
+      for(const attrs of result.getMap<Y.Map<unknown>>(semanticBlockFields.attributes).values()){const id=attrs.get('hcdSourceId');if(typeof id==='string'&&!allowed.has(id))attrs.set('hcdSourceId',null)}
+      for(const fragment of result.getMap<Y.XmlFragment>(semanticBlockFields.content).values())for(const child of fragment.toArray())if(child instanceof Y.XmlText){let offset=0;for(const delta of child.toDelta()){const length=typeof delta.insert==='string'?delta.insert.length:1,id=delta.attributes?.hcdSource?.nodeId;if(typeof id==='string'&&!allowed.has(id))child.format(offset,length,{hcdSource:null});offset+=length}}
+      if(inline){
+       const metadata=result.getMap(textFlowFields.metadata),actual=server.getMap(textFlowFields.metadata)
+       for(const key of metadata.keys())if(!actual.has(key))metadata.delete(key)
+       for(const[key,value]of actual)metadata.set(key,value)
+       const bodies=result.getMap<Y.XmlText>(inlineContainerFields.bodies),trusted=server.getMap<Y.XmlText>(inlineContainerFields.bodies)
+       for(const[id,body]of bodies){
+        if(!(body instanceof Y.XmlText))throw new Error('Invalid inline draft body')
+        const current=trusted.get(id)
+        // A receipt updates source defaults without replacing body characters.
+        // Cached metadata never supersedes the authenticated permanent body.
+        for(const name of sourceDefaultNames){const value=current?.getAttribute(name);if(value===undefined)body.removeAttribute(name);else body.setAttribute(name,value)}
+        let offset=0
+        for(const delta of body.toDelta()){const length=typeof delta.insert==='string'?delta.insert.length:1,source=delta.attributes?.hcdSource?.nodeId;if(typeof source==='string'&&!allowed.has(source))body.format(offset,length,{hcdSource:null});offset+=length}
+       }
+      }
+
+    },'hcd-local-restore')
+  }
+  if(inline){const guard=inlineRoomGuard(server,draftSchema(true));try{guard.accept(Y.encodeStateAsUpdate(result,Y.encodeStateVector(server)))}finally{guard.destroy()}}
   return result
+  }catch(error){result.destroy();throw error}
 }
 
 export function forkDraftIdentity(identity:DraftIdentity):DraftIdentity{return {...identity,name:identity.name+'-copy-'+crypto.randomUUID()}}
@@ -145,13 +203,38 @@ export async function listDraftIdentities(identity:DraftIdentity,factory:IDBFact
   const databases=await factory.databases()
   return databases.flatMap(({name})=>{
     if(!name?.startsWith(identity.prefix))return []
-    const suffix=name.slice(identity.prefix.length),match=/^(0|[1-9][0-9]*)(?:-copy-[a-f0-9-]{36})?$/.exec(suffix)
+    const suffix=name.slice(identity.prefix.length),match=/^(0|[1-9][0-9]*)(-structure3|-inlinecontainers1)?(?:-copy-[a-f0-9-]{36})?$/.exec(suffix)
     if(!match || !Number.isSafeInteger(Number(match[1])))return []
-    return [{prefix:identity.prefix,name,epoch:Number(match[1])}]
+    return [{prefix:identity.prefix,name,epoch:Number(match[1]),...(match[2]?{protocol:match[2]==='-inlinecontainers1'?inlineProtocol:structuralProtocol}:{})}]
   })
+}
+let structureSchema:ReturnType<typeof getSchema>|undefined
+let inlineSchema:ReturnType<typeof getSchema>|undefined
+function draftSchema(inline=false){return inline?inlineSchema??=getSchema([...schemaExtensions,SemanticInlineContainerNode,SemanticStructureIdentity]):structureSchema??=getSchema([...schemaExtensions,SemanticStructureIdentity])}
+export function localDocumentProtocol(document:Y.Doc):CollaborationProtocol|undefined{
+ const metadata=document.getMap(semanticBlockFields.metadata),version=metadata.get('version'),inline=metadata.get('inlineContainers'),schemaInline=document.getMap('hcdSchema').get('inlineContainers')
+ if(inline!==undefined||schemaInline!==undefined||[...Object.values(inlineContainerFields),...Object.values(inlineContainerEditFields)].some(field=>document.getMap(field).size>0)||[...document.getMap(inlineDeletionField).values()].some(value=>!!value&&typeof value==='object'&&'version' in value&&value.version===2)){
+  if(version!==3||inline!==1||schemaInline!==1||document.getXmlFragment('default').length)throw new Error('Unsupported local inline protocol')
+  return inlineProtocol
+ }
+ if(version===3){if(document.getXmlFragment('default').length)throw new Error('Mixed local body protocols');return structuralProtocol}
+ if(version!==undefined||['hcd-semantic-blocks/1/meta','hcd-semantic-blocks/2/meta'].some(name=>document.getMap(name).get('version')!==undefined))throw new Error('Unsupported local body protocol')
+ return document.getXmlFragment('default').length?legacyProtocol:undefined
+}
+export function localDraftHasContent(document:Y.Doc){return localDocumentProtocol(document)!==undefined||document.getMap('hcdImageDrafts').size>0}
+/** Recovery downloads must work even when a future/malformed body cannot be
+ * interpreted. Preserve exact bytes without assigning it a guessed protocol. */
+export function localDraftBackup(documentId:string,document:Y.Doc,epoch:number){
+ const bytes=Y.encodeStateAsUpdate(document),chunks:string[]=[]
+ for(let offset=0;offset<bytes.length;offset+=8192)chunks.push(String.fromCharCode(...bytes.subarray(offset,offset+8192)))
+ let protocol:CollaborationProtocol|undefined
+ try{protocol=localDocumentProtocol(document)}catch{/* Unknown models still have a downloadable raw copy. */}
+ return{schemaVersion:'hcd-recovery/1',documentId,collaborationEpoch:epoch,...(protocol?{collaborationProtocol:protocol}:{}),crdt:btoa(chunks.join(''))}
 }
 /** A bounded plain-text preview. It never interprets cached XML as HTML. */
 export function localDraftPreview(doc:Y.Doc):string{
+  const protocol=localDocumentProtocol(doc)
+  if(protocol===structuralProtocol||protocol===inlineProtocol){const projected=new SemanticBlockStore(doc,draftSchema(protocol===inlineProtocol),undefined,protocol===inlineProtocol?{inlineContainers:true}:{}).project();return projected.textBetween(0,projected.content.size,'\n',node=>node.type.name==='hardBreak'?'\n':node.type.spec.leafText?.(node)??'').slice(0,1500)}
   let result='',visited=0
   const walk=(node:Y.XmlFragment|Y.XmlElement|Y.XmlText)=>{
     if(result.length>=1500 || ++visited>2000)return

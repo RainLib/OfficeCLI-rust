@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Editor } from '@tiptap/core'
 import { TiptapTransformer } from '@hocuspocus/transformer'
-import { applyFontSize, fontSizeValue } from './fontSize.ts'
+import {applyFontSize,fontSizeValue,captureFontSizeTarget,applyFontSizeCommand} from './fontSize.ts'
 import { jsonToSnapshot, projectionToJson, schemaExtensions } from './schema.ts'
 
 test('size edits affect only the selected range and retain mixed font families through Yjs and reopen', () => {
@@ -53,4 +53,27 @@ test('font changes never split surrogate pairs, emoji sequences or combining cha
   assert.equal(jsonToSnapshot(editor.getJSON())[0].content.inlines[0].text, '👩‍💻')
   assert.equal(editor.state.doc.textContent, '👩‍💻é中文')
   editor.destroy()
+})
+
+test('font command draft tokens bind editor, document, selection and stored marks without rejecting metadata-only updates',()=>{
+ const content={type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'ABCD'}]}]},a=new Editor({element:null,extensions:schemaExtensions,content}),b=new Editor({element:null,extensions:schemaExtensions,content})
+ try{
+  a.commands.setTextSelection({from:1,to:3});const target=captureFontSizeTarget(a),original=a.getJSON()
+  assert.equal(applyFontSizeCommand(b,{sizePt:18,target}),'changed');assert.deepEqual(a.getJSON(),original)
+  a.commands.setTextSelection({from:2,to:4});assert.equal(applyFontSizeCommand(a,{sizePt:18,target}),'changed')
+  a.commands.setTextSelection({from:1,to:3});a.view.dispatch(a.state.tr.setMeta('view-only',true));assert.equal(applyFontSizeCommand(a,{sizePt:18,target}),'applied')
+  const next=captureFontSizeTarget(a);a.view.dispatch(a.state.tr.insertText('peer',4));const before=a.getJSON();assert.equal(applyFontSizeCommand(a,{sizePt:24,target:next}),'changed');assert.deepEqual(a.getJSON(),before)
+  a.commands.setTextSelection(1);const caret=captureFontSizeTarget(a);a.commands.setMark('bold');assert.equal(applyFontSizeCommand(a,{sizePt:20,target:caret}),'changed')
+ }finally{a.destroy();b.destroy()}
+})
+
+test('font command validates external numeric inputs and never accepts a fabricated draft token',()=>{
+ const editor=new Editor({element:null,extensions:schemaExtensions,content:{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'Text'}]}]}})
+ try{
+  editor.commands.setTextSelection({from:1,to:5});const before=editor.getJSON()
+  for(const input of [undefined,[],{}, {sizePt:'18'},{sizePt:NaN},{sizePt:Infinity},{sizePt:0},{sizePt:12.25},{sizePt:1638.5},{sizePt:18,extra:true}]){assert.equal(applyFontSizeCommand(editor,input),'invalid');assert.deepEqual(editor.getJSON(),before)}
+  for(const target of [{},null,'stale']){assert.equal(applyFontSizeCommand(editor,{sizePt:18,target}),'changed');assert.deepEqual(editor.getJSON(),before)}
+  assert.equal(applyFontSizeCommand(editor,{sizePt:10.5}),'applied')
+  editor.setEditable(false);assert.equal(applyFontSizeCommand(editor,{sizePt:24}),'readOnly')
+ }finally{editor.destroy()}
 })
