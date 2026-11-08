@@ -68,7 +68,9 @@ import {resolveDeletionReview,canConfirmDeletion,type DeletionReview} from './de
 import {restoreInlineDeletion,negotiateSession} from './protocolClient.ts'
 import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
 import {installRestoreHandoff,waitRestoreSync,restoreHandoffReady,followCommittedRestore,submitRestore,RestoreClientError,type RestoreSubmission} from './restoreClient.ts'
-import {RevisionReview,type RevisionSelection} from './RevisionReview.tsx'
+import {RevisionReview} from './RevisionReview.tsx'
+import {semanticRevisionSelection} from './revisionDiff.ts'
+import type {RevisionSelection} from './revisionSelection.ts'
 import {SemanticActivity} from './SemanticActivity.tsx'
 import {ProtocolUpgrade} from './ProtocolUpgrade.tsx'
 import {inlineCollaborationUrl,nodeEditCollaborationUrl,nodeEditWireVersion,legacyProtocol,structuralProtocol,wordRegionalProtocol,wordLayoutProtocol,inlineProtocol,requireCollaborationSession,type CollaborationSession} from './collaborationProtocol.ts'
@@ -663,7 +665,7 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
       if(controller.signal.aborted)return
       if(!historical)liveScroll.current=documentScroll.current?.scrollTop??0
       const item=history.find(item=>item.revision===number)
-      setHistorical(before);setRevisionSelection({before,after,author:item?.authorName||(number===0?t('initialImport'):undefined),createdAt:item?.createdAtEpochMs});setRightPanel('revisions');setMenu(null);setPaletteOpen(false);setLinkOpen(false)
+      setHistorical(before);setRevisionSelection(semanticRevisionSelection(before,after,{author:item?.authorName||(number===0?t('initialImport'):undefined),createdAt:item?.createdAtEpochMs}));setRightPanel('revisions');setMenu(null);setPaletteOpen(false);setLinkOpen(false)
       requestAnimationFrame(()=>{if(!controller.signal.aborted)documentScroll.current?.scrollTo({top:0})})
     }catch(cause){if(!controller.signal.aborted)setError(String(cause))}
     finally{if(!controller.signal.aborted)setHistoryLoading(false)}
@@ -675,7 +677,7 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
     if(!pendingRestore.current){
       const head=await save()
       if(head===null)throw new Error(t('restoreCouldNotConfirm'))
-      if(head!==revisionSelection.after.revision)throw new Error(t('restoreComparisonChanged'))
+      if(head!==revisionSelection.comparedWith)throw new Error(t('restoreComparisonChanged'))
       pendingRestore.current={requestId:crypto.randomUUID().replaceAll('-',''),target:historical.revision,expectedRevision:head,fromEpoch:session.collaborationEpoch??0}
     }
     try {
@@ -876,7 +878,7 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
       <SemanticActivity editor={historical?null:editor} awareness={provider.awareness} localId={localUser.id} rightInset={rightPanel?sidebarWidth+5:0} members={presence} panelHost={collaborationHost} onClose={()=>commands.run('view.panel.close')}/>
       {layout.showOutline&&!historical && <SemanticOutlineNavigation entries={outline} canInsert={commands.registry.item('outline.snapshot.insert')?.enabled===true} onInsert={()=>{void commands.run('outline.snapshot.insert')}} onClose={()=>commands.run('view.navigation',{enabled:false})} onLocate={item=>{if(!editor||editor.isDestroyed)return;const pos=semanticOutlinePosition(editor.state.doc,item);if(pos===null)return;editor.commands.focus();editor.commands.setTextSelection(pos+1);editor.view.domAtPos(pos+1).node.parentElement?.scrollIntoView({block:'center',behavior:'smooth'})}}/>}
       {layout.showOutline&&!historical && <PanelResizeHandle side="left" width={outlineWidth} onResize={setOutlineWidth} label={t('resizeNavigation')} />}
-      <div ref={documentScroll} className="document-scroll">{restoreLocked&&<p className="hcd-revision-note" role="status">{t(restoreUncertain?'restoreOutcomeUnknown':'restoreInProgress')}</p>}{historyLoading&&<div className="hcd-revision-loading" role="status">{t('loadingRevision')}</div>}{revisionSelection&&<RevisionReview key={historical?.revision} session={session} selection={revisionSelection} latest={revision} canRestore={restoreSupported&&!accessLocked&&!scopeReadOnly&&session.scope==='write'} unsaved={semanticDirty.current||!!imageDrafts.size} onClose={()=>commands.run('revision.current')} onRefresh={()=>commands.run('revision.open',{revision:revisionSelection.before.revision})} onRestore={()=>commands.run('revision.restore.review')} referenceNavigation={historicalReference} onReferenceLocated={(requestId,found)=>{if(historicalReferenceRef.current?.requestId===requestId)setHistoricalReferenceStatus(found?'found':'missing')}}/>}<main hidden={!!historical} aria-hidden={!!historical}  className="document" style={{ zoom: documentZoom / 100 }} onContextMenu={event => {
+      <div ref={documentScroll} className="document-scroll">{restoreLocked&&<p className="hcd-revision-note" role="status">{t(restoreUncertain?'restoreOutcomeUnknown':'restoreInProgress')}</p>}{historyLoading&&<div className="hcd-revision-loading" role="status">{t('loadingRevision')}</div>}{revisionSelection&&<RevisionReview key={historical?.revision} session={session} selection={revisionSelection} latest={revision} canRestore={restoreSupported&&!accessLocked&&!scopeReadOnly&&session.scope==='write'} unsaved={semanticDirty.current||!!imageDrafts.size} onClose={()=>commands.run('revision.current')} onRefresh={()=>commands.run('revision.open',{revision:revisionSelection.target})} onRestore={()=>commands.run('revision.restore.review')} referenceNavigation={historicalReference} onReferenceLocated={(requestId,found)=>{if(historicalReferenceRef.current?.requestId===requestId)setHistoricalReferenceStatus(found?'found':'missing')}}/>}<main hidden={!!historical} aria-hidden={!!historical}  className="document" style={{ zoom: documentZoom / 100 }} onContextMenu={event => {
         if(historical)return
         event.preventDefault()
         const selection = window.getSelection()

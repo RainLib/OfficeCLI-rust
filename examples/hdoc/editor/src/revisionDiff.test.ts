@@ -1,6 +1,7 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {revisionDifferences,revisionTextDifference,revisionBlockText} from './revisionDiff.ts'
+import {revisionDifferences,revisionTextDifference,revisionBlockText,semanticRevisionSelection} from './revisionDiff.ts'
+import {revisionChangedRows} from './revisionSelection.ts'
 import {InlineContainerRegistry} from './inlineContainerRegistry.ts'
 import type {Block,Projection} from './schema.ts'
 const block=(id:string,text:string):Block=>({blockId:id,blockHash:'hash',region:'body',readOnly:false,content:{kind:'paragraph',inlines:[{text}]}})
@@ -47,4 +48,13 @@ test('revision text differences show nested inline bodies even when their retain
  const format=revisionDifferences(projection([a]),projection([c],2))[0];assert.equal(format.textChanged,false);assert.equal(format.formatChanged,true)
  const receipt=structuredClone(a);receipt.content.inlines[1].content!.inlines[1].content!.inlines[0].nodeId='fresh-source'
  assert.equal(revisionDifferences(projection([a]),projection([receipt],3))[0].kind,'same')
+})
+test('the semantic adapter folds a Projection pair into the neutral review contract',()=>{
+ const before=[block('a','旧内容'),block('b','保留'),block('c','未变')],after=[block('a','新内容'),block('b','保留'),block('c','未变')]
+ const selection=semanticRevisionSelection(projection(before,2),projection(after,4),{author:'林',createdAt:1730000000000})
+ assert.equal(selection.target,2);assert.equal(selection.comparedWith,4);assert.equal(selection.author,'林');assert.equal(selection.createdAt,1730000000000)
+ assert.equal(selection.changes.length,3);assert.equal(selection.changes[1].kind,'same')
+ const changed=revisionChangedRows(selection)
+ assert.equal(changed.length,1);assert.equal(changed[0].kind,'modified');assert.equal(changed[0].oldIndex,0);assert.equal(changed[0].newIndex,0)
+ assert.equal(changed[0].beforeText,'旧内容');assert.equal(changed[0].afterText,'新内容')
 })

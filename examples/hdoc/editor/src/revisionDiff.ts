@@ -1,4 +1,5 @@
 import {checkpointContents} from './checkpointSnapshot.ts'
+import type {RevisionChangeRow,RevisionSelection} from './revisionSelection.ts'
 import type {Block,BlockContent,Inline,Projection} from './schema.ts'
 export type RevisionDifference={before?:Block;after?:Block;oldIndex?:number;newIndex?:number;kind:'same'|'added'|'removed'|'modified';moved:boolean;textChanged:boolean;formatChanged:boolean;objectChanged:boolean}
 export type TextDifference={kind:'same'|'added'|'removed';text:string}
@@ -39,6 +40,12 @@ export function revisionDifferences(before:Projection,after:Projection):Revision
  })
  while(deleted<removed.length){const index=removed[deleted++];result.push({before:old[index],oldIndex:index,kind:'removed',moved:false,textChanged:true,formatChanged:false,objectChanged:false})}
  return result
+}
+/** Semantic-flow adapter: folds a Projection pair into the neutral review
+ * contract. Row text is captured eagerly so the mounted UI stays format-free. */
+export function semanticRevisionSelection(before:Projection,after:Projection,meta:{author?:string;createdAt?:number}={}):RevisionSelection{
+ const changes:RevisionChangeRow[]=revisionDifferences(before,after).map(diff=>({kind:diff.kind,moved:diff.moved,formatChanged:diff.formatChanged,objectChanged:diff.objectChanged,oldIndex:diff.oldIndex,newIndex:diff.newIndex,beforeText:diff.before?revisionBlockText(diff.before.content):'',afterText:diff.after?revisionBlockText(diff.after.content):''}))
+ return {target:before.revision,comparedWith:after.revision,...meta,changes}
 }
 /** Word/Chinese token diff, with a bounded matrix and a linear fallback for
  * very large paragraphs. Internal IDs never appear as a content change. */
