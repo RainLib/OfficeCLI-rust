@@ -22,7 +22,13 @@ export function installRestoreHandoff(provider:Transport,host:{freeze:()=>void;r
    current=message.requestId;host.freeze()
    void host.ready().catch(()=>false).then(ready=>{if(!closed&&current===message.requestId)provider.sendStateless(JSON.stringify({type:'hcd-restore-ready',requestId:current,ready}))})
   }else if(message.type==='hcd-restore-release'&&current===message.requestId){current=null;host.release()}
-  else if(message.type==='hcd-restore-committed'&&Number.isSafeInteger(message.collaborationEpoch)){host.freeze();host.committed(message.collaborationEpoch)}
+  // The committed frame closes the round. The sidecar normally follows it
+  // with a 4409 close, but a close that races or fails would otherwise leave
+  // the old requestId pinned here: the prepare guard above would then
+  // silently swallow EVERY later round, the member never answers ready, and
+  // coordinated restore stays dead for the whole document until this tab
+  // reloads. Clearing on commit makes the handoff self-healing.
+  else if(message.type==='hcd-restore-committed'&&Number.isSafeInteger(message.collaborationEpoch)){current=null;host.freeze();host.committed(message.collaborationEpoch)}
  }
  provider.on('stateless',receive)
  return()=>{closed=true;provider.off('stateless',receive)}

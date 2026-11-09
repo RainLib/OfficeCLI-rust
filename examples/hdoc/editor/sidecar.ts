@@ -856,9 +856,19 @@ const restores=new SidecarRestore(migrationGate,restoreJournal,{
   // this broadcast, so delivering first is what makes the follow reliable.
   for(const[,document]of rounds)document.broadcastStateless(JSON.stringify({type:'hcd-restore-committed',...receipt}))
   for(const[name,document]of rounds){const selected=room(name)
-   coordinators.get(name)?.dispose()
-   coordinators.delete(name)
-   if(isWordRoomProtocol(selected.protocol)){closeWordBinding(name);wordCoordinators.delete(name);await wordLeases.get(name)?.close();wordLeases.delete(name);wordUploadTokens.delete(name)}
+   // Per-room isolation: the word lease close is an owner-store exchange
+   // with native and can throw. Unguarded, one failing room aborted this
+   // loop, so later rooms never got their 4409 close or unload while the
+   // journal was already committed — their members kept a live socket past
+   // the round and swallowed every future prepare. Dispose what can fail,
+   // always drop the maps, then always close connections and unload.
+   try{
+    coordinators.get(name)?.dispose()
+    if(isWordRoomProtocol(selected.protocol)){closeWordBinding(name);await wordLeases.get(name)?.close()}
+   }catch{}finally{
+    coordinators.delete(name)
+    if(isWordRoomProtocol(selected.protocol)){wordCoordinators.delete(name);wordLeases.delete(name);wordUploadTokens.delete(name)}
+   }
    for(const connection of document.getConnections())connection.close({code:4409,reason:'HCD document restored; reopen current revision'})
    setTimeout(()=>{void server.hocuspocus.unloadDocument(document)},0)
   }

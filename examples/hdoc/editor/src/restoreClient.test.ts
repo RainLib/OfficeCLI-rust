@@ -34,3 +34,18 @@ test('layout version restore declares the word-regions model and only accepts a 
  assert.equal((await submitRestore(session,submission,AbortSignal.timeout(1000))).revision,7)
  for(const altered of [{restoredFrom:3},{collaborationProtocol:'hcd-semantic-blocks/3'},{collaborationEpoch:3}]){wrong=altered;await assert.rejects(submitRestore(session,submission,AbortSignal.timeout(1000)),(error:unknown)=>error instanceof RestoreClientError&&error.uncertain)}
 })
+test('a committed frame clears the round even when the close never lands',async()=>{
+ let receive:any
+ const sent:string[]=[],events:string[]=[]
+ const provider={on:(_event:string,cb:any)=>{receive=cb},off:()=>{},sendStateless:(s:string)=>sent.push(s)}
+ const clean=installRestoreHandoff(provider,{freeze:()=>events.push('locked'),ready:async()=>true,release:()=>events.push('released'),committed:epoch=>events.push(`epoch:${epoch}`)})
+ const send=(type:string,requestId:string,extra={})=>receive({payload:JSON.stringify({type,requestId,...extra})})
+ send('hcd-restore-prepare','a'.repeat(32));await new Promise(resolve=>setTimeout(resolve,0))
+ assert.equal(JSON.parse(sent[0]).ready,true)
+ send('hcd-restore-committed','a'.repeat(32),{collaborationEpoch:4});assert.equal(events.at(-1),'epoch:4')
+ // The 4409 close that normally follows the commit never reached this
+ // connection; a later round must still be locked and answered, not swallowed.
+ send('hcd-restore-prepare','b'.repeat(32));await new Promise(resolve=>setTimeout(resolve,0))
+ assert.equal(sent.length,2);assert.equal(JSON.parse(sent[1]).requestId,'b'.repeat(32));assert.equal(JSON.parse(sent[1]).ready,true)
+ clean()
+})
