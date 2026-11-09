@@ -2,7 +2,9 @@ import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {loadWorkbookRevisionSelection} from './workbookRevisionReview.ts'
 const info=(sequence:number,chunkId:string,htmlHash:string,mapHash:string,over:Record<string,unknown>={})=>({sequence,chunkId,region:'sheet',continuation:false,htmlHash,mapHash,blockCount:1,textChars:4,...over})
-const sheetHtml=(text:string,asset?:string)=>`<section class="hcd-sheet" data-hcd-sheet="Sheet1"><table class="hcd-grid"><tbody><tr><td class="hcd-cell"><span>${text}</span>${asset?`<img src="../assets/sha256/${asset}.png">`:''}</td></tr></tbody></table></section>`
+// Mirrors the real grid chunk body (crates/hcd-formats/src/xlsx.rs): the
+// drawing layer is its own section and embeds `src="asset://sha256/{hash}"`.
+const sheetHtml=(text:string,asset?:string)=>`<section class="hcd-sheet" data-hcd-sheet="Sheet1"><table class="hcd-grid"><tbody><tr><td class="hcd-cell"><span>${text}</span></td></tr></tbody></table></section>${asset?`<section class="hcd-sheet-drawing-layer" data-hcd-sheet="Sheet1" data-hcd-sheet-index="0" data-hcd-sheet-state="visible"><div class="hcd-sheet-picture" style="left:0.00px;top:0.00px;width:100.00px;height:50.00px"><img src="asset://sha256/${asset}" data-hcd-asset-href="xl/media/image1.png" alt="picture"/></div></section>`:''}`
 test('the workbook selection pairs sheet windows, extracts cell text, and flags image swaps',async()=>{
  const session={documentId:'doc',token:'t',scope:'read' as const,format:'xlsx',apiUrl:'http://grid.test'}
  const pages:Record<string,unknown>={

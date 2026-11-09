@@ -1,6 +1,6 @@
 import {api,type Session} from './api.ts'
 import {boundedAsyncPool} from './boundedAsyncPool.ts'
-import {fixedChunkText,fixedChunkInfos,fixedReviewTextLimit,fixedRevisionRows} from './fixedRevisionReview.ts'
+import {assetHashes,fixedChunkText,fixedChunkInfos,fixedReviewTextLimit,fixedRevisionRows} from './fixedRevisionReview.ts'
 import type {RevisionSelection} from './revisionSelection.ts'
 
 /** Workbook history review over the native grid routes.
@@ -11,14 +11,14 @@ import type {RevisionSelection} from './revisionSelection.ts'
  * crates/hcd-core/src/grid_create.rs), so the same chunkId-first pairing with a
  * sequence fallback applies, and `/chunks/{sequence}?revision=` returns a
  * LoadedChunk whose `html` field the review reads while ignoring the extra
- * descriptor/map fields. Only the asset signature differs: grid bodies embed
- * `assets/sha256/{hash}.{ext}` paths instead of the fixed `asset://{hash}` URIs. */
+ * descriptor/map fields. The asset signature is shared with the fixed review:
+ * grid drawing layers embed the same `asset://sha256/{hash}` URIs the fixed
+ * pages emit (crates/hcd-formats/src/xlsx.rs), so `assetHashes` is the one
+ * signature source for both entries. */
 
 async function readChunkHtml(session:Session,revision:number,sequence:number,signal:AbortSignal):Promise<string>{
 	return (await (await api(session,`/chunks/${sequence}?revision=${revision}`,{signal})).json() as {html:string}).html
 }
-
-const assetSignatures=(html:string):string=>[...new Set([...html.matchAll(/assets\/sha256\/([0-9a-f]{64})\.[a-z0-9]+/g)].map(match=>match[0]))].sort().join(',')
 
 /** Build the review selection comparing `target` against the head revision
  * `comparedWith`: descriptor rows for the whole document, then bounded body
@@ -33,7 +33,7 @@ export async function loadWorkbookRevisionSelection(session:Session,target:numbe
 		row.beforeText=fixedChunkText(oldHtml)
 		row.afterText=fixedChunkText(newHtml)
 		if(row.kind==='modified'&&row.oldIndex!==undefined&&row.newIndex!==undefined){
-			const textChanged=row.beforeText!==row.afterText,assetChanged=assetSignatures(oldHtml)!==assetSignatures(newHtml)
+			const textChanged=row.beforeText!==row.afterText,assetChanged=assetHashes(oldHtml)!==assetHashes(newHtml)
 			row.objectChanged=assetChanged
 			row.formatChanged=!textChanged&&!assetChanged
 		}

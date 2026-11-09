@@ -110,7 +110,10 @@ export function fixedChunkText(html:string):string{
 		.trim()
 }
 
-const assetHashes=(html:string):string=>[...new Set([...html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g)].map(match=>match[1]))].sort().join(',')
+// The chunk HTML both backends actually serves embeds assets as
+// `src="asset://sha256/{hash}"` (hcd-formats xlsx.rs/pptx.rs/pdf.rs); the
+// export lets the workbook review share the exact signature source.
+export const assetHashes=(html:string):string=>[...new Set([...html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g)].map(match=>match[1]))].sort().join(',')
 
 async function readChunkHtml(session:Session,revision:number,sequence:number,signal:AbortSignal):Promise<string>{
 	return (await (await api(session,`/chunks/${sequence}?revision=${revision}`,{signal})).json() as {html:string}).html
