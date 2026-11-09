@@ -10,6 +10,7 @@ import {setTimeout as delay} from 'node:timers/promises'
 import {HocuspocusProvider} from '@hocuspocus/provider'
 import * as Y from 'yjs'
 import {WordCheckpointJournal,wordSaveCapsule,wordStoryRequestHash,wordStoryPendingHash,type WordPendingStory} from './wordCheckpointJournal.ts'
+import {RestoreJournal} from './restoreJournal.ts'
 import {WordRegionStore,wordRegionSchema,type WordRegionProjection} from './wordRegionStore.ts'
 const id=(n:number)=>`n_${n.toString(16).padStart(32,'0')}`,hash=(v:Uint8Array|string)=>createHash('sha256').update(v).digest('hex'),secret='test-only-sidecar-secret-over-thirty-two-bytes'
 async function wait(check:()=>boolean|Promise<boolean>){for(let n=0;n<200;n++){if(await check())return;await delay(50)}throw Error('sidecar test timed out')}
@@ -65,4 +66,41 @@ for(const corrupt of [false,true])test(`sidecar fences old room on story recover
   await wait(()=>released>0);const loaded=await new WordCheckpointJournal(root,api,'doc',0,lineage,secret,true,true).load();assert.ok(loaded);assert.equal(provider.isSynced,false)
   if(corrupt){assert.equal(receipts,1);assert.equal(loaded.hash,tip);assert.ok(loaded.capsule.pendingStory)}else{assert.equal(receipts,2);assert.ok(loaded.capsule.storyAcknowledgement);assert.equal(loaded.capsule.pendingStory,undefined);const restored=new Y.Doc();try{Y.applyUpdate(restored,Buffer.from(loaded.capsule.document,'base64'));const recovered=new WordRegionStore(restored,schema,'doc',next.flowLayout,next.flowLayoutHash);assert.equal(recovered.project(id(2)).textContent,'unsaved header');assert.equal(recovered.project(id(3)).textContent,'New footer')}finally{restored.destroy()}}
  }finally{provider?.destroy();client.destroy();doc.destroy();child.kill('SIGTERM');if(child.exitCode===null)await new Promise<void>(resolve=>child.once('exit',()=>resolve()));await new Promise<void>(resolve=>backend.close(()=>resolve()));await fs.rm(root,{recursive:true,force:true})}
+})
+test('layout negotiate replays a prepared restore journal and answers with the rotated epoch',async()=>{
+ const root=await fs.mkdtemp(join(tmpdir(),'hcd-layout-recover-')),requestId='a'.repeat(32)
+ let restored=false,unexpected=0
+ const backend=createServer(async(req,res)=>{
+  const chunks:Buffer[]=[];for await(const part of req)chunks.push(Buffer.from(part))
+  const route=new URL(req.url!,'http://localhost').pathname.replace('/v1/documents/doc','')
+  let data:unknown
+  if(route==='/auth')data={scope:'write',userId:'alice',displayName:'Alice',expiresAt:Math.floor(Date.now()/1000)+3600,collaborationEpoch:restored?1:0,collaborationProtocol:'hcd-word-regions/2',coordinatedRestore:true}
+  else if(route==='/collaboration/restore/1'&&req.method==='POST'){
+   const body=JSON.parse(Buffer.concat(chunks).toString())
+   assert.equal(body.requestId,requestId);assert.equal(body.expectedRevision,2);assert.equal(body.fromEpoch,0)
+   assert.equal(req.headers['x-hcd-word-regions-version'],'2');assert.equal(req.headers['x-hcd-word-layout-version'],'1')
+   restored=true
+   data={requestId,revision:body.expectedRevision+1,restoredFrom:1,collaborationEpoch:body.fromEpoch+1,collaborationProtocol:'hcd-word-regions/2'}
+  }
+  else{unexpected++;res.writeHead(500);res.end('unexpected '+route);return}
+  res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(data))
+ })
+ await new Promise<void>(resolve=>backend.listen(0,'127.0.0.1',resolve));const api=`http://127.0.0.1:${(backend.address() as {port:number}).port}`
+ const reserve=createServer();await new Promise<void>(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=(reserve.address() as {port:number}).port;await new Promise<void>(resolve=>reserve.close(()=>resolve()))
+ // A previous process died after persisting the restore intent: the journal
+ // still says prepared while native has not rotated the epoch yet, so the
+ // authority read underneath negotiate reports the stale E=0.
+ const journal=new RestoreJournal(root,api)
+ await journal.save({version:1,documentId:'doc',target:1,request:{requestId,expectedRevision:2,fromEpoch:0,fromProtocol:'hcd-word-regions/2',sourceHash:'c'.repeat(64),authorId:'alice',authorName:'Alice'},status:'prepared'})
+ const child=spawn(process.execPath,['--import','tsx','sidecar.ts'],{cwd:process.cwd(),env:{...process.env,HCD_API_URL:api,HCD_COLLAB_PORT:String(port),HCD_TOKEN_SECRET:secret,HCD_SIDECAR_STATE_DIR:root,HCD_WORD_ROOMS:'1',HCD_WORD_LAYOUT_ROOMS:'1'},stdio:'ignore'})
+ try{
+  await wait(async()=>{if(child.exitCode!==null)throw Error('sidecar exited');try{return(await fetch(`http://127.0.0.1:${port}`,{signal:AbortSignal.timeout(200)})).ok}catch{return false}})
+  const response=await fetch(`http://127.0.0.1:${port}/v1/documents/doc/collaboration/negotiate`,{method:'POST',headers:{Authorization:'Bearer test','X-HCD-Word-Regions-Version':'2','X-HCD-Word-Layout-Version':'1','X-HCD-Node-Edits-Version':'7'}})
+  assert.equal(response.status,200)
+  const answer=await response.json() as Record<string,unknown>
+  assert.deepEqual(answer,{collaborationEpoch:1,collaborationProtocol:'hcd-word-regions/2',wordRegionVersion:2,wordLayoutVersion:1,nodeEditVersion:7})
+  assert.ok(restored)
+  const job=await journal.load('doc');assert.equal(job?.status,'committed');assert.equal(job?.receipt?.collaborationEpoch,1)
+  assert.equal(unexpected,0)
+ }finally{child.kill('SIGTERM');if(child.exitCode===null)await new Promise<void>(resolve=>child.once('exit',()=>resolve()));await new Promise<void>(resolve=>backend.close(()=>resolve()));await fs.rm(root,{recursive:true,force:true})}
 })

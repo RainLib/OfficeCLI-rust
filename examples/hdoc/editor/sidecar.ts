@@ -465,9 +465,14 @@ const server = new Server({
         if(!wordLayoutRoomsEnabled||user.coordinatedRestore!==true)throw new MigrationRejected(426,'word-layout-room-unavailable')
         try{requireWordHttpModel(user.collaborationProtocol,incoming.headers,true)}catch{throw new MigrationRejected(426,'word-layout-client-upgrade')}
         // Replay a committed-but-unacknowledged layout restore journal before
-        // admitting a new room; an unknown outcome stays fenced as 503.
-        await restores.recover(match[1])
-        result={collaborationEpoch:user.collaborationEpoch,collaborationProtocol:wordLayoutProtocol,wordRegionVersion:2,wordLayoutVersion:1}
+        // admitting a new room; an unknown outcome stays fenced as 503. A
+        // replay that commits rotates the epoch, so the answer must carry the
+        // receipt's epoch and protocol like the structural branch below:
+        // answering with the pre-recover epoch would send members into a room
+        // that onAuthenticate then rejects for the rotated epoch (stale-room
+        // loop) or admit them to the disposed old-epoch room.
+        const recovered=await restores.recover(match[1]),effective=recovered??user
+        result={collaborationEpoch:effective.collaborationEpoch,collaborationProtocol:effective.collaborationProtocol,wordRegionVersion:2,wordLayoutVersion:1}
        }else{
        const manifestResponse=await request(match[1],'');if(!manifestResponse.ok)throw new MigrationRejected(409,'document-unavailable');const manifest=await manifestResponse.json()
        const requestedInline=incoming.headers['x-hcd-inline-containers-version'],inlineDocument=user.collaborationProtocol===inlineProtocol||manifest.capabilities?.extensionNodes===3

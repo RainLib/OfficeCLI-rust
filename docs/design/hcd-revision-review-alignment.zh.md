@@ -133,3 +133,7 @@ cargo clippy --all-targets                                                      
 - 实机 15 项 harness 从零 reseed 重跑（独立端口 18766/18768，r0→r1→r2 重新生成）第一次暴露了新的真实竞态：sidecar `committed()` 在广播 committed 帧**之前**拆解旧 epoch 房间（`closeWordBinding`/租约 close 可能先行掉线），两名在线 writer 都收不到帧、只能围栏重载。修复为"先收集本轮参与房间并全部广播 committed，再 dispose/关 4409/延迟 unload"（commit c5b8129）；修复后 harness 再次全绿，committed 与 close 在 0.48s 同窗到达且双方均 follow。
 - §5 浏览器验收链（区域 Word 入口，经 `ao browser` 自动化操作真实 UI 完成）：alice 登录 → 打开 wrb（r1，Saved、在线协作者）→ 段落续写标记 → Save → 状态 "Saved · r2" 且原生 head r2 → View → Revision history（r2 Alice / r1 / r0）→ View revision r1 → "Compare with saved r1" 出 diff 行（1 条 Modified，含 "… browser verified"）→ Restore this revision → 确认框 Target r1 / Current r2 / Changed regions 1 → 确认 → 状态 "Saved · r3"，在线内容回到无标记的 "Alpha report section one"，原生 r3 `patchId=restore-1-3`，房间 `wrb.epoch` 恰轮转为 epoch 1（protocol `hcd-word-regions/2`），对话框自动关闭，页面错误 0。截图存档见会话产物 `hcd-3b-browser-restore-r3.png`。
 - 浏览器侧未覆盖项：同伴草稿/在场不受影响（本轮为单客户端）；"关闭重开内容一致"由实机 harness 的 epoch 1 重连（A2/B2 就绪且内容校验）背书；固定版本导出目检未做。
+
+### AO 评审收口（head 48391d6）
+
+评审第一条：layout `negotiate` 分支丢弃 `restores.recover()` 回执——若 journal 留有 prepared 的布局还原，recover 重放并提交后 epoch 已轮转，但响应仍带 recover 前 `/auth` 读到的旧 epoch，成员按旧 epoch 连房间会被 `onAuthenticate` 依新 epoch 拒绝（stale-room 循环）或入已拆除的旧房间。修复按 structural 分支样板取 `recovered??user` 重算 epoch 与协议，并新增真实拉起 sidecar 的回归测试（预置 prepared journal → negotiate 重放提交 → 断言响应 epoch 1/protocol /2 且 journal 转为 committed）。前端全量随之 **2099 pass / 0 fail**。
