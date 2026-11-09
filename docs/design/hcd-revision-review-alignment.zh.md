@@ -97,3 +97,28 @@ npm run build                                       # tsc + vite 主构建 + emb
 ```
 
 `RevisionReview.tsx`/`RestoreRevisionDialog.tsx` 两个重写文件与 HEAD 做过字符级 opcode 比对：除 §4 阶段 0 表中列出的替换外无任何其它差异（过程中曾捕获并修复两处漏写 `}` 的转写错误，说明该比对是必要的）。语义入口的浏览器手工回归（§5 阶段 0 步骤）不在本次自动化范围内；改动为纯类型与数据搬运，行为等价性由 opcode 比对、全量测试与双构建背书。
+
+### 阶段 1-4 统一验收链增补（2026-11-09 实测）
+
+自动化：
+
+```bash
+# 前端（examples/hdoc/editor，阶段 4 落地后重跑）
+npx tsc --noEmit                                                                # 通过
+node --import tsx --test --test-concurrency=2 --test-force-exit src/*.test.ts   # 2095 pass / 0 fail（阶段 0 基线 2081）
+npm run build                                                                   # tsc + vite 主构建 + embed 构建成功
+# 原生
+cargo test --workspace                                                          # 954 passed / 1 failed / 1 ignored
+cargo fmt -- --check                                                            # 通过
+cargo clippy --all-targets                                                      # exit 0；本窗口改动文件零告警
+```
+
+`cargo test --workspace` 唯一失败为 pdf-handler `reader::tests::real_ascii85_flate_pages_decode_in_order_with_the_same_limits`：其夹具 `docs/assets/hcd-pdf-search-2026-10-25/ascii85-content-source.pdf` 从未提交进仓库（测试与夹具自 82a121f 起未变），在任何检出上都失败，属基线既有故障，与本窗口改动无关。`cargo clippy --all-targets -- -D warnings`（CLAUDE.md 标准门禁）在当前 clippy 0.1.99 下被未改动 crate（hcd-core、oxml 等）的既有 lint 挡住；放宽为不带 `-D` 的整仓运行 exit 0，且 officecli 内两条 `hdoc_server.rs` 告警（:7285、:10234）均在本分支触碰区之外。
+
+实机运行（`officecli hdoc serve` 于 127.0.0.1:18766，导入 md/wb2/wr 三份文档）：
+
+- 直接还原：`POST /v1/documents/{id}/restore/0`（`{"expectedRevision":1}`）→ 200，`patchId=restore-0-2`，head 变 r2；过期 CAS → 409；`expectedRevision` 不符 → 409；r2 分片回读与 r0 内容一致；`officecli hdoc validate` 通过；`/revisions` 列表出现带作者的还原条目。
+- 真实客户端模块走 HTTP 验证（tsx 直接 import 编辑器源码）：`loadFixedRevisionSelection(md,1,2)` 产出 modified 行（新→旧）；`loadWorkbookRevisionSelection(wb2,0,1)` 产出 GRID modified（旧值→新值）；`directRestoreSupported` 为 true；`submitDirectRestore(wb2,0,1)` 成功返回 r2 且回读一致；区域文档经 `fixedChunkInfos` 拿到中立分片描述符 `[{s:0,r:'body',bc:1}]`。
+- 实机发现并修复一个原生路由不一致：还原复用目标版本的内容寻址 index 对象后，`index_page` 回显存储的旧 revision，与 `/chunks` 的回显矛盾，触发客户端 `fixed-index-mismatch` 严格校验。修复为两个分支都以解析后的 manifest revision 覆写 `revision` 字段（不放松客户端校验），并新增回归测试 `index_page_echoes_the_resolved_revision_after_restore_reuses_history`。阶段 3 的 layout 协调还原另由 Rust 测试 `layout_coordinated_restore_pins_the_word_layout_model_and_rotates_the_epoch` 覆盖（ack 缺失 426 先于 journal、epoch 恰轮转一次）。
+
+未覆盖：阶段 3b（词客户端 drain 握手、跨 epoch 再投影、region diff 直接产行——在线区域房间还原仍失败关闭）；§5 的浏览器手工验收链步骤未跑。
