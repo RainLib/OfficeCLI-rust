@@ -424,7 +424,11 @@ function WorkbookContent({session,onClose,embedded,allowClose=true,binding}:Prop
  // and a verified restore reboots the grid through the generation bump.
  const canRestoreRevision=ready&&session.scope==='write'&&accessState==='write'&&revision!==null&&!workbookLeaveBlocked()&&!!journal&&!withoutBackup&&journal.state!=='failed'
  const clearRevisionSelection=()=>{selectionRequest.current?.abort();selectionRequest.current=null;setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setSelectionLoading(false)}
- const closeRevisionHistory=()=>{clearRevisionSelection();setHistoryOpen(false)}
+ // The list is a point-in-time snapshot: a restore (or a later save) moves
+ // the head, and reopening history must offer the new revision instead of a
+ // stale cached page, so every exit from the review drops the cached list.
+ const resetRevisionList=()=>{setRevisionList([]);setRevisionNextBefore(undefined)}
+ const closeRevisionHistory=()=>{clearRevisionSelection();resetRevisionList();setHistoryOpen(false)}
  const loadRevisionPage=async(before:number|null)=>{
   setRevisionsLoading(true)
   try{
@@ -453,12 +457,29 @@ function WorkbookContent({session,onClose,embedded,allowClose=true,binding}:Prop
   let submitting=false
   try{
    const head=await workbookServerHead(session,binding.sourceHash,controller.signal)
-   if(head!==revisionSelection.comparedWith)throw new Error(t('restoreComparisonChanged'))
+   if(head!==revisionSelection.comparedWith){
+    // After an outcome-unknown submit the first restore may in fact have
+    // committed. The direct endpoint has no idempotent replay to re-verify
+    // the original request, but a head exactly one past the fence is that
+    // advance, so adopt it; otherwise the dialog stays stranded on a
+    // comparison that can never match again while the retry button promises
+    // a check that always fails.
+    if(restoreUncertain&&head===revisionSelection.comparedWith+1){
+     revised(head)
+     if(mounted.current){
+      setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setError('');resetRevisionList()
+      pendingViewport.current=workbookRef.current?captureWorkbookViewport(workbookRef.current):null
+      gridReady.current=false;setReady(false);setGeneration(value=>value+1)
+     }
+     return
+    }
+    throw new Error(t('restoreComparisonChanged'))
+   }
    submitting=true
    const result=await submitDirectRestore(session,revisionSelection.target,head,controller.signal)
    revised(result.revision)
    if(mounted.current){
-    setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setError('')
+    setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setError('');resetRevisionList()
     pendingViewport.current=workbookRef.current?captureWorkbookViewport(workbookRef.current):null
     gridReady.current=false;setReady(false);setGeneration(value=>value+1)
    }
