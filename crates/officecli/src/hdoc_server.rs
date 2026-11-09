@@ -8570,19 +8570,28 @@ mod tests {
         )
         .await
         .unwrap();
-        let bytes = b"layout room before restore";
-        durable_collaboration_file(
-            &collaboration_current_path(&state, "doc", 0).await.unwrap(),
-            bytes,
+        // A layout room fences with the confirmed journal tip in its owner
+        // store, never with a persisted collaboration state file.
+        let tip = "c".repeat(64);
+        let owners = root.path().join("collaboration/word-owners");
+        std::fs::create_dir_all(&owners).unwrap();
+        std::fs::write(
+            owners.join("doc.0.store.json"),
+            serde_json::to_vec(&json!({"version":1,"documentId":"doc","epoch":0,"storeId":"e".repeat(32),"journalHash":tip}))
+                .unwrap(),
         )
-        .await
         .unwrap();
+        assert!(!collaboration_current_path(&state, "doc", 0)
+            .await
+            .unwrap()
+            .try_exists()
+            .unwrap_or(false));
         let request = coordinated_restore::Request {
             request_id: "d".repeat(32),
             expected_revision: 1,
             from_epoch: 0,
             from_protocol: Some(CollaborationProtocol::WordRegions2),
-            source_hash: hash_bytes(bytes),
+            source_hash: tip.clone(),
             author_id: "alice".into(),
             author_name: "Alice".into(),
         };
@@ -8614,6 +8623,23 @@ mod tests {
                 )
                 .await,
                 Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+            assert!(!coordinated_restore::pending(&state, "doc").await);
+        }
+        // A stale or never-recorded tip fails closed at the fence, not the
+        // request grammar, and leaves no pending journal behind.
+        for source_hash in ["a".repeat(64), "none".into()] {
+            let mut stale = request.clone();
+            stale.source_hash = source_hash;
+            assert!(matches!(
+                coordinated_restore::restore(
+                    State(state.clone()),
+                    Path(("doc".into(), 0)),
+                    service.clone(),
+                    Json(stale)
+                )
+                .await,
+                Err(ApiError(StatusCode::PRECONDITION_FAILED, _))
             ));
             assert!(!coordinated_restore::pending(&state, "doc").await);
         }

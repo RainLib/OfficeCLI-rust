@@ -241,7 +241,10 @@ const server = new Server({
       if(incoming.method!=='POST')throw new MigrationRejected(405)
       const authorization=incoming.headers.authorization
       if(!authorization?.startsWith('Bearer '))throw new MigrationRejected(401)
-      const user=await access(match[1],authorization.slice(7),['negotiate',...(wordLayoutRoomsEnabled?['word-recovery']:[]),'word-checkpoint-recovery','word-topology-recovery','word-stopped-draft','word-stopped-draft-cancel','word-stopped-layout','word-stopped-story','word-topology-cancel','word-active-layout','word-active-layout-status','word-active-layout-cancel','word-active-layout-check'].includes(match[2])?{wordLayoutV2:true}:undefined)
+      // Coordinated restore is the one shared route a layout document can hit,
+      // so the authority read must accept the `/2` protocol there too. The
+      // restore branch still fails closed for `/2` unless layout rooms are on.
+      const user=await access(match[1],authorization.slice(7),['negotiate',...(wordLayoutRoomsEnabled?['word-recovery']:[]),'word-checkpoint-recovery','word-topology-recovery','word-stopped-draft','word-stopped-draft-cancel','word-stopped-layout','word-stopped-story','word-topology-cancel','word-active-layout','word-active-layout-status','word-active-layout-cancel','word-active-layout-check'].includes(match[2])||match[2].startsWith('restore/')?{wordLayoutV2:true}:undefined)
       if(!['read','write'].includes(user.scope))throw new MigrationRejected(403)
       if(match[2]==='word-active-layout'||match[2]==='word-active-layout-status'||match[2]==='word-active-layout-cancel'||match[2]==='word-active-layout-check'){
        const statusOnly=match[2]==='word-active-layout-status'
@@ -580,6 +583,7 @@ const server = new Server({
      const protocol=room(documentName).protocol;if(!isWordRoomProtocol(protocol))return
      if(payload.length>4096)return
      let message:any;try{message=JSON.parse(payload)}catch{return}
+     if(message.type==='hcd-restore-ready'){const round=restoreRounds.get(room(documentName).documentId);if(round&&message.requestId===round.requestId&&round.asked.has(connection)){if(message.ready===true)round.ready.add(connection);else round.failed=true}return}
      if(message.type==='hcd-word-topology-ready'){if(protocol===wordLayoutProtocol){await revalidate(documentName,connection);wordTopologyRounds.accept(room(documentName).documentId,connection,message)}return}
      if(message.type==='hcd-save-state'){connection.sendStateless(JSON.stringify(wordState(regional.state(),protocol)));return}
      if(message.type!=='hcd-save'||!/^[a-f0-9-]{36}$/.test(message.requestId??'')||!/^[a-f0-9]{64}$/.test(message.digest??'')||!/^[a-f0-9]{64}$/.test(message.imageDigest??''))return
@@ -727,7 +731,7 @@ function activeTopologyContext(selected:ReturnType<typeof room>,action:ActiveTop
 
 type FrozenSource={document:Y.Doc;coordinator:SemanticSaveCoordinator;release:()=>void;owned:boolean}
 const frozenSources=new Map<string,FrozenSource>()
-async function sessionForService(id:string){const response=await request(id,'/auth');if(!response.ok)throw new Error('HCD authority unavailable');return requireCollaborationSession(await response.json())}
+async function sessionForService(id:string){const response=await request(id,'/auth');if(!response.ok)throw new Error('HCD authority unavailable');return requireCollaborationSession(await response.json(),{wordLayoutV2:true})}
 const inlineMigrations=inlineRoomBootstrap(migrationGate,migrationJournal,inlineSchema,{
  session:sessionForService,request,
  active:id=>[...server.hocuspocus.documents].some(([name])=>{const selected=room(name);return !selected.fixed&&selected.documentId===id&&selected.protocol!==inlineProtocol}),
@@ -797,10 +801,10 @@ const restores=new SidecarRestore(migrationGate,restoreJournal,{
  async quiesce(id,requestId,context){
   if(migrationGate.blocked(id))throw new MigrationRejected(409,'restore-pending')
   const round:RestoreRound={...context,requestId,asked:new Set(),ready:new Set(),failed:false};restoreRounds.set(id,round)
-  // Word room clients do not speak the drain handshake, so a layout restore
-  // is admitted only while the room holds no write connection at all; the
-  // freeze recheck still refuses a writer that joins before the gate opens.
-  if(restoreProtocol(round)===wordLayoutProtocol){if(restoreWriters(id,round).length)throw new MigrationRejected(409,'restore-online-clients');return}
+  // Layout-word writers drain through the same hcd-restore-prepare handshake;
+  // a client predating it never answers, so the round fails closed on the
+  // timeout below. Writers in a mismatched room (v1, presence, stale epoch)
+  // still throw from restoreWriters.
   const deadline=Date.now()+15000
   while(true){const writers=restoreWriters(id,round)
    for(const connection of writers)if(!round.asked.has(connection)){round.asked.add(connection);connection.sendStateless(JSON.stringify({type:'hcd-restore-prepare',requestId}))}
@@ -815,11 +819,18 @@ const restores=new SidecarRestore(migrationGate,restoreJournal,{
   const session=await sessionForService(id)
   if(session.collaborationProtocol!==restoreProtocol(context)||session.collaborationEpoch!==context.fromEpoch)throw new MigrationRejected(409,'restore-session-changed')
   if(restoreProtocol(context)===wordLayoutProtocol){
-   // quiesce/freeze proved no writer holds the room, so the checkpointed room
-   // file is stable; the native journal re-reads and fences these exact bytes.
-   const response=await request(id,'/collaboration/state',{},session)
-   if(!response.ok)throw new MigrationRejected(409,'restore-room-unavailable')
-   return createHash('sha256').update(new Uint8Array(await response.arrayBuffer())).digest('hex')
+   // quiesce/freeze proved every writer is paused and synced; flush the room
+   // checkpoint once more so a drained update lands durably and moves the
+   // journal tip. Native refuses `/collaboration/state` for regional rooms,
+   // so the fence is the tip the owner store confirmed from this lease, not
+   // room bytes: any durable room write after quiesce advances it and the
+   // native journal fails the commit closed.
+   const name=wordSidecarRoomName({documentId:id,epoch:context.fromEpoch,fixed:false,protocol:wordLayoutProtocol})
+   const lease=wordLeases.get(name)
+   if(!lease)throw new MigrationRejected(409,'restore-room-unavailable')
+   const roomCoordinator=wordCoordinators.get(name)
+   if(roomCoordinator){try{await roomCoordinator.persist()}catch{throw new MigrationRejected(409,'restore-room-unavailable')}}
+   return lease.headers()['X-HCD-Word-Journal-Hash']
   }
   const entry=[...coordinators].find(([name])=>{const selected=room(name);return selected.documentId===id&&selected.epoch===session.collaborationEpoch&&selected.protocol===restoreProtocol(context)})
   if(!entry)throw new MigrationRejected(409,'restore-room-unavailable')
@@ -835,6 +846,7 @@ const restores=new SidecarRestore(migrationGate,restoreJournal,{
   for(const[name,document]of server.hocuspocus.documents){const selected=room(name);if(selected.documentId!==id||selected.fixed||selected.epoch>=receipt.collaborationEpoch)continue
    coordinators.get(name)?.dispose()
    coordinators.delete(name)
+   if(isWordRoomProtocol(selected.protocol)){closeWordBinding(name);wordCoordinators.delete(name);await wordLeases.get(name)?.close();wordLeases.delete(name);wordUploadTokens.delete(name)}
    document.broadcastStateless(JSON.stringify({type:'hcd-restore-committed',...receipt}))
    for(const connection of document.getConnections())connection.close({code:4409,reason:'HCD document restored; reopen current revision'})
    setTimeout(()=>{void server.hocuspocus.unloadDocument(document)},0)

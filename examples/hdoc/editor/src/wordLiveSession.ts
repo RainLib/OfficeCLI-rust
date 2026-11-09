@@ -18,7 +18,7 @@ import {awaitRecoveryPreparation} from './boundedResponse.ts'
 import {requireWordBrowserProtocol} from './wordBrowserProtocol.ts'
 
 export type WordLiveBinding={document:Y.Doc;provider:HocuspocusProvider;controller:WordBrowserState;cache:WordDeviceDraft}
-type Options={session:Session;document:Y.Doc;cache:WordDeviceDraft;provider:(document:Y.Doc)=>HocuspocusProvider;beforeApply:()=>void;projection?:typeof readWordBrowserProjection;storyProjection?:typeof readWordStorySessionProjection;linkProof?:typeof readWordLinkSessionProof;status?:typeof readWordActiveTopologyStatus;timeoutMs?:number}
+type Options={session:Session;document:Y.Doc;cache:WordDeviceDraft;provider:(document:Y.Doc)=>HocuspocusProvider;beforeApply:()=>void;onEpochChange?:(epoch:number)=>void;projection?:typeof readWordBrowserProjection;storyProjection?:typeof readWordStorySessionProjection;linkProof?:typeof readWordLinkSessionProof;status?:typeof readWordActiveTopologyStatus;timeoutMs?:number}
 export class WordLiveSession{
  private lifetime=new AbortController()
  private listeners=new Set<()=>void>()
@@ -46,9 +46,9 @@ export class WordLiveSession{
   const verified=new Map<number,WordRegionProjection>()
   return async(revision:number,signal:AbortSignal)=>{signal.throwIfAborted();const saved=verified.get(revision);if(saved)return saved;const result=await(this.options.projection??readWordBrowserProjection)(this.options.session,revision,signal);signal.throwIfAborted();verified.set(revision,result);for(const key of [...verified.keys()].sort((a,b)=>b-a).slice(2))verified.delete(key);return result}
  }
- private controller(document:Y.Doc,provider:HocuspocusProvider,projection:ReturnType<WordLiveSession['projectionReader']>,cache?:WordDeviceDraft){
+ private controller(document:Y.Doc,provider:HocuspocusProvider,projection:ReturnType<WordLiveSession['projectionReader']>,cache?:WordDeviceDraft,live=false){
   let controller!:WordBrowserState
-  controller=new WordBrowserState({document,provider,scope:this.options.session.scope,protocol:requireWordBrowserProtocol(this.options.session.collaborationProtocol),cache,projection,largeRecovery:(update,baseline,signal)=>sendWordLargeRecovery(this.options.session,update,baseline,signal),onDisconnect:event=>{provider.disconnect();if(this.connection?.controller===controller)this.disconnected(event)}})
+  controller=new WordBrowserState({document,provider,scope:this.options.session.scope,protocol:requireWordBrowserProtocol(this.options.session.collaborationProtocol),cache,projection,largeRecovery:(update,baseline,signal)=>sendWordLargeRecovery(this.options.session,update,baseline,signal),...(live&&this.options.onEpochChange?{onEpochChange:this.options.onEpochChange}:{}),onDisconnect:event=>{provider.disconnect();if(this.connection?.controller===controller)this.disconnected(event)}})
   return controller
  }
  private wait(controller:WordBrowserState,signal:AbortSignal){
@@ -60,7 +60,7 @@ export class WordLiveSession{
  }
  async start(){
   if(this.connection||this.disposed)throw Error('word-session-already-started')
-  const provider=this.options.provider(this.options.document),controller=this.controller(this.options.document,provider,this.projectionReader(),this.options.cache)
+  const provider=this.options.provider(this.options.document),controller=this.controller(this.options.document,provider,this.projectionReader(),this.options.cache,true)
   this.wire=this.options.document;this.connection={document:this.options.document,provider,controller,cache:this.options.cache}
   try{await this.wait(controller,AbortSignal.any([this.lifetime.signal,AbortSignal.timeout(this.options.timeoutMs??60000)]));this.viewModel=controller.model!;this.phase='ready';this.emit()}
   catch(error){if(!this.disposed){provider.disconnect();this.phase='failed';this.problem=error instanceof Error?error.message:'word-session-unavailable';this.emit()}throw error}
@@ -102,7 +102,7 @@ export class WordLiveSession{
    // fails; draft download remains available on this same open database.
    await awaitRecoveryPreparation(()=>this.options.cache.unbind(this.options.document),signal)
    await awaitRecoveryPreparation(()=>this.options.cache.append(Y.encodeStateAsUpdate(this.options.document),false),signal)
-   viewController=this.controller(this.options.document,provider,projection,this.options.cache)
+   viewController=this.controller(this.options.document,provider,projection,this.options.cache,true)
    this.bridge=nextBridge;this.wire=wire;this.connection={document:this.options.document,provider,controller:viewController,cache:this.options.cache};adopted=true
    await this.wait(viewController,signal);signal.throwIfAborted()
    wireController.dispose();this.viewModel=viewController.model!;if(previousWire!==this.options.document)previousWire.destroy()

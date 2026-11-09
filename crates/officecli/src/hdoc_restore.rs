@@ -118,8 +118,13 @@ pub(super) async fn restore(
             && s.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     };
+    // A layout room that has never recorded a durable journal entry fences
+    // with the owner store's initial "none" tip; every other protocol and
+    // every recorded tip must be a canonical hash.
+    let hash_fenced = hex(&request.source_hash, 64)
+        || protocol == CollaborationProtocol::WordRegions2 && request.source_hash == "none";
     if !hex(&request.request_id, 32)
-        || !hex(&request.source_hash, 64)
+        || !hash_fenced
         || !super::access_policy::valid_subject(&request.author_id)
         || request.author_name.len() > 256
         || target >= request.expected_revision
@@ -217,10 +222,46 @@ pub(super) async fn restore(
                 "restore comparison changed".into(),
             ));
         }
-        let bytes = tokio::fs::read(collaboration_current_path(&state, &id, metadata.epoch).await?)
-            .await
-            .map_err(internal)?;
-        if hash_bytes(&bytes) != intent.request.source_hash {
+        // Structural and inline rooms fence against the persisted collaboration
+        // state. A layout room never writes that file (its bytes persist only in
+        // the private checkpoint journal), so it fences with the journal tip the
+        // owner store confirmed from the last acquire/renew/record round-trip;
+        // any durable room write after quiesce moves that tip and fails closed.
+        let fenced = if protocol == CollaborationProtocol::WordRegions2 {
+            let path = state
+                .root
+                .join("collaboration/word-owners")
+                .join(format!("{id}.{}.store.json", metadata.epoch));
+            let bytes = tokio::fs::read(&path).await.map_err(|_| {
+                ApiError(
+                    StatusCode::PRECONDITION_FAILED,
+                    "restore room changed".into(),
+                )
+            })?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(internal)?;
+            let tip = value
+                .get("journalHash")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if value.get("version").and_then(Value::as_u64) != Some(1)
+                || value.get("documentId").and_then(Value::as_str) != Some(id.as_str())
+                || value.get("epoch").and_then(Value::as_u64) != Some(metadata.epoch)
+                || (tip != "none" && !hex(tip, 64))
+            {
+                return Err(ApiError(
+                    StatusCode::PRECONDITION_FAILED,
+                    "restore room changed".into(),
+                ));
+            }
+            tip.to_string()
+        } else {
+            let bytes =
+                tokio::fs::read(collaboration_current_path(&state, &id, metadata.epoch).await?)
+                    .await
+                    .map_err(internal)?;
+            hash_bytes(&bytes)
+        };
+        if fenced != intent.request.source_hash {
             return Err(ApiError(
                 StatusCode::PRECONDITION_FAILED,
                 "restore room changed".into(),
