@@ -843,11 +843,17 @@ const restores=new SidecarRestore(migrationGate,restoreJournal,{
  },
  async committed(id,receipt){
   restoreRounds.delete(id)
-  for(const[name,document]of server.hocuspocus.documents){const selected=room(name);if(selected.documentId!==id||selected.fixed||selected.epoch>=receipt.collaborationEpoch)continue
+  const rounds=[...server.hocuspocus.documents].filter(([name])=>{const selected=room(name);return selected.documentId===id&&!selected.fixed&&selected.epoch<receipt.collaborationEpoch})
+  // Broadcast before any teardown: closing a layout room binding can drop
+  // the room's connections, and a member that misses the committed frame
+  // can only fence and reload instead of following the rotated epoch. The
+  // client follow already tolerates the 4409 close that lands right behind
+  // this broadcast, so delivering first is what makes the follow reliable.
+  for(const[,document]of rounds)document.broadcastStateless(JSON.stringify({type:'hcd-restore-committed',...receipt}))
+  for(const[name,document]of rounds){const selected=room(name)
    coordinators.get(name)?.dispose()
    coordinators.delete(name)
    if(isWordRoomProtocol(selected.protocol)){closeWordBinding(name);wordCoordinators.delete(name);await wordLeases.get(name)?.close();wordLeases.delete(name);wordUploadTokens.delete(name)}
-   document.broadcastStateless(JSON.stringify({type:'hcd-restore-committed',...receipt}))
    for(const connection of document.getConnections())connection.close({code:4409,reason:'HCD document restored; reopen current revision'})
    setTimeout(()=>{void server.hocuspocus.unloadDocument(document)},0)
   }
