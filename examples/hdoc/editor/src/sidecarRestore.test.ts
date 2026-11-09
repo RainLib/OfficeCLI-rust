@@ -4,7 +4,7 @@ import {mkdtemp,rm,stat,mkdir,writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {SidecarRestore} from './sidecarRestore.ts'
-import {RestoreJournal,type RestoreJob} from './restoreJournal.ts'
+import {RestoreJournal,validRestoreRequest,type RestoreJob} from './restoreJournal.ts'
 import {RoomMigrationGate,MigrationUncertain} from './roomMigrationGate.ts'
 import {MigrationRejected} from './sidecarMigration.ts'
 const input={requestId:'a'.repeat(32),expectedRevision:4,target:0,fromEpoch:2,authorId:'alice',authorName:'Alice'}
@@ -114,4 +114,13 @@ test('layout restore refuses a structural success receipt and keeps the exact in
  const f=await fixture(t);f.host.submit=async job=>Response.json(receipt(job))
  await assert.rejects(f.service.run('doc',{...input,fromProtocol:'hcd-word-regions/2' as const}),MigrationUncertain)
  assert.equal(f.gate.blocked('doc'),true);assert.equal((await f.journal.load('doc'))?.status,'prepared')
+})
+test('the journal carries a none tip only for word-layout rooms',()=>{
+ const base={requestId:'a'.repeat(32),expectedRevision:2,fromEpoch:0,sourceHash:'none',authorId:'alice',authorName:'Alice'}
+ assert.ok(validRestoreRequest({...base,fromProtocol:'hcd-word-regions/2' as const}))
+ assert.ok(!validRestoreRequest({...base,fromProtocol:'hcd-semantic-inline/1' as const}))
+ assert.ok(!validRestoreRequest(base as never))
+ assert.ok(validRestoreRequest({...base,sourceHash:'c'.repeat(64)}))
+ assert.ok(!validRestoreRequest({...base,fromProtocol:'hcd-word-regions/2' as const,sourceHash:'none '}))
+ assert.ok(!validRestoreRequest({...base,fromProtocol:'hcd-word-regions/2' as const,sourceHash:'NONE'}))
 })
