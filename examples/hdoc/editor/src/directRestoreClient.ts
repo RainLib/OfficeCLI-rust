@@ -20,10 +20,9 @@ export function directRestoreSupported(session:Session):boolean{
 
 export async function submitDirectRestore(session:Session,target:number,expectedRevision:number,signal?:AbortSignal):Promise<DirectRestoreResult>{
 	if(!Number.isSafeInteger(target)||target<0||!Number.isSafeInteger(expectedRevision)||expectedRevision<0)throw new DirectRestoreError(0,'failed','invalid-restore-request')
-	let value:DirectRestoreResult
+	let response:Response
 	try{
-		const response=await api(session,`/restore/${target}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expectedRevision}),signal})
-		value=await response.json() as DirectRestoreResult
+		response=await api(session,`/restore/${target}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expectedRevision}),signal})
 	}catch(cause){
 		if(cause instanceof ApiError&&cause.status===409)throw new DirectRestoreError(409,'conflict',cause.message)
 		if(cause instanceof ApiError&&cause.status===426)throw new DirectRestoreError(426,'coordinator',cause.message)
@@ -32,6 +31,13 @@ export async function submitDirectRestore(session:Session,target:number,expected
 	}
 	// The mutation may have committed even when the response is unusable, so a
 	// bad answer is an unknown outcome to verify, never a safe retry signal.
+	// Parsing lives outside the transport classification for exactly this
+	// reason: a committed restore whose body is truncated or swapped for an
+	// HTML error page is unparseable — more unusable than a field mismatch —
+	// and must land on the unknown side, not be read as a safe retry.
+	let value:DirectRestoreResult
+	try{value=await response.json() as DirectRestoreResult}
+	catch{throw new DirectRestoreError(0,'outcome-unknown','restore-response-unparseable')}
 	if(!value||typeof value!=='object'||value.documentId!==session.documentId||!Number.isSafeInteger(value.revision)||value.revision<=expectedRevision){
 		throw new DirectRestoreError(0,'outcome-unknown','restore-response-invalid')
 	}

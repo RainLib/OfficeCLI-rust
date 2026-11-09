@@ -33,3 +33,9 @@ test('an unusable success response is an unknown outcome, never a safe retry',as
   await assert.rejects(withFetch(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'content-type':'application/json'}}),()=>submitDirectRestore(session,3,5)),(cause:unknown)=>cause instanceof DirectRestoreError&&cause.kind==='outcome-unknown')
  }
 })
+
+test('a committed restore whose body cannot be parsed is outcome-unknown, not failed',async()=>{
+ for(const body of ['<html><body>bad gateway</body></html>','{"documentId":"doc","revis','']){
+  await assert.rejects(withFetch(async()=>new Response(body,{status:200,headers:{'content-type':'text/html'}}),()=>submitDirectRestore(session,3,5)),(cause:unknown)=>cause instanceof DirectRestoreError&&cause.kind==='outcome-unknown'&&cause.message==='restore-response-unparseable')
+ }
+})
