@@ -25,3 +25,12 @@ test('inline version restore declares its model and only accepts the reviewed ta
  assert.equal((await submitRestore(session,submission,AbortSignal.timeout(1000))).revision,9)
  for(const altered of [{restoredFrom:4},{collaborationProtocol:'hcd-semantic-blocks/3'},{collaborationEpoch:4}]){wrong=altered;await assert.rejects(submitRestore(session,submission,AbortSignal.timeout(1000)),(error:unknown)=>error instanceof RestoreClientError&&error.uncertain)}
 })
+
+test('layout version restore declares the word-regions model and only accepts a layout receipt',async t=>{
+ const {submitRestore,RestoreClientError}=await import('./restoreClient.ts'),{wordLayoutProtocol}=await import('./collaborationProtocol.ts')
+ const submission={requestId:'d'.repeat(32),expectedRevision:6,target:2,fromEpoch:1},session={documentId:'doc',token:'private',apiUrl:'/v1/documents',collabUrl:'ws://127.0.0.1:8768',format:'docx',scope:'write' as const,collaborationProtocol:wordLayoutProtocol,collaborationEpoch:1}
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original});let wrong:Record<string,unknown>={}
+ globalThis.fetch=async(url,init)=>{assert.match(String(url),/restore\/2$/);const headers=new Headers(init?.headers);assert.equal(headers.get('x-hcd-node-edits-version'),'7');assert.equal(headers.get('x-hcd-word-regions-version'),'2');assert.equal(headers.get('x-hcd-word-layout-version'),'1');assert.equal(headers.get('x-hcd-inline-containers-version'),null);assert.deepEqual(JSON.parse(String(init?.body)),{requestId:submission.requestId,expectedRevision:6,fromEpoch:1});return Response.json({requestId:submission.requestId,revision:7,restoredFrom:2,collaborationEpoch:2,collaborationProtocol:wordLayoutProtocol,...wrong})}
+ assert.equal((await submitRestore(session,submission,AbortSignal.timeout(1000))).revision,7)
+ for(const altered of [{restoredFrom:3},{collaborationProtocol:'hcd-semantic-blocks/3'},{collaborationEpoch:3}]){wrong=altered;await assert.rejects(submitRestore(session,submission,AbortSignal.timeout(1000)),(error:unknown)=>error instanceof RestoreClientError&&error.uncertain)}
+})

@@ -438,8 +438,14 @@ const server = new Server({
        const leave=migrationGate.enter(match[1]);try{result=await coordinator.restoreInline(body.review,{userId:user.userId,displayName:user.displayName})}finally{leave()}
       }else if(match[2]!=='negotiate'){
        if(user.coordinatedRestore!==true)throw new MigrationRejected(409,'restore-unavailable')
-       if(user.scope!=='write'||!user.userId||user.collaborationProtocol!==structuralProtocol&&user.collaborationProtocol!==inlineProtocol)throw new MigrationRejected(403,'restore-not-allowed')
+       if(user.scope!=='write'||!user.userId||user.collaborationProtocol!==structuralProtocol&&user.collaborationProtocol!==inlineProtocol&&user.collaborationProtocol!==wordLayoutProtocol)throw new MigrationRejected(403,'restore-not-allowed')
        if(user.collaborationProtocol===inlineProtocol)requireInlineRestoreModel(incoming.headers)
+       // A layout restore may only come from the exact model the layout room
+       // guards require; a downgraded client is refused before any journal work.
+       if(user.collaborationProtocol===wordLayoutProtocol){
+        if(!wordLayoutRoomsEnabled)throw new MigrationRejected(426,'word-layout-room-unavailable')
+        try{requireWordHttpModel(wordLayoutProtocol,incoming.headers,true)}catch{throw new MigrationRejected(426,'restore-model-upgrade')}
+       }
        let raw='';for await(const chunk of incoming){raw+=chunk;if(raw.length>2048)throw new MigrationRejected(413,'restore-invalid')}
        const body=JSON.parse(raw),target=Number(match[3])
        if(!body||Object.keys(body).sort().join(',')!=='expectedRevision,fromEpoch,requestId'||!/^[a-f0-9]{32}$/.test(body.requestId??'')||!Number.isSafeInteger(body.expectedRevision)||!Number.isSafeInteger(target)||target<0||target>=body.expectedRevision||!Number.isSafeInteger(body.fromEpoch)||body.fromEpoch<0)throw new MigrationRejected(400,'restore-invalid')
@@ -455,6 +461,9 @@ const server = new Server({
        if(user.collaborationProtocol===wordLayoutProtocol){
         if(!wordLayoutRoomsEnabled||user.coordinatedRestore!==true)throw new MigrationRejected(426,'word-layout-room-unavailable')
         try{requireWordHttpModel(user.collaborationProtocol,incoming.headers,true)}catch{throw new MigrationRejected(426,'word-layout-client-upgrade')}
+        // Replay a committed-but-unacknowledged layout restore journal before
+        // admitting a new room; an unknown outcome stays fenced as 503.
+        await restores.recover(match[1])
         result={collaborationEpoch:user.collaborationEpoch,collaborationProtocol:wordLayoutProtocol,wordRegionVersion:2,wordLayoutVersion:1}
        }else{
        const manifestResponse=await request(match[1],'');if(!manifestResponse.ok)throw new MigrationRejected(409,'document-unavailable');const manifest=await manifestResponse.json()
@@ -788,6 +797,10 @@ const restores=new SidecarRestore(migrationGate,restoreJournal,{
  async quiesce(id,requestId,context){
   if(migrationGate.blocked(id))throw new MigrationRejected(409,'restore-pending')
   const round:RestoreRound={...context,requestId,asked:new Set(),ready:new Set(),failed:false};restoreRounds.set(id,round)
+  // Word room clients do not speak the drain handshake, so a layout restore
+  // is admitted only while the room holds no write connection at all; the
+  // freeze recheck still refuses a writer that joins before the gate opens.
+  if(restoreProtocol(round)===wordLayoutProtocol){if(restoreWriters(id,round).length)throw new MigrationRejected(409,'restore-online-clients');return}
   const deadline=Date.now()+15000
   while(true){const writers=restoreWriters(id,round)
    for(const connection of writers)if(!round.asked.has(connection)){round.asked.add(connection);connection.sendStateless(JSON.stringify({type:'hcd-restore-prepare',requestId}))}
@@ -801,11 +814,18 @@ const restores=new SidecarRestore(migrationGate,restoreJournal,{
  async prepare(id,expected,context){
   const session=await sessionForService(id)
   if(session.collaborationProtocol!==restoreProtocol(context)||session.collaborationEpoch!==context.fromEpoch)throw new MigrationRejected(409,'restore-session-changed')
+  if(restoreProtocol(context)===wordLayoutProtocol){
+   // quiesce/freeze proved no writer holds the room, so the checkpointed room
+   // file is stable; the native journal re-reads and fences these exact bytes.
+   const response=await request(id,'/collaboration/state',{},session)
+   if(!response.ok)throw new MigrationRejected(409,'restore-room-unavailable')
+   return createHash('sha256').update(new Uint8Array(await response.arrayBuffer())).digest('hex')
+  }
   const entry=[...coordinators].find(([name])=>{const selected=room(name);return selected.documentId===id&&selected.epoch===session.collaborationEpoch&&selected.protocol===restoreProtocol(context)})
   if(!entry)throw new MigrationRejected(409,'restore-room-unavailable')
   try{return await entry[1].prepareRestore(expected)}catch{throw new MigrationRejected(409,'restore-comparison-changed')}
  },
- submit:job=>request(job.documentId,`/collaboration/restore/${job.target}`,{method:'POST',headers:{'Content-Type':'application/json','X-HCD-Coordinator-Version':'4'},body:JSON.stringify(job.request)},{collaborationEpoch:job.request.fromEpoch,collaborationProtocol:restoreProtocol(job.request)}),
+ submit:job=>request(job.documentId,`/collaboration/restore/${job.target}`,{method:'POST',headers:{'Content-Type':'application/json','X-HCD-Coordinator-Version':'4',...(restoreProtocol(job.request)===wordLayoutProtocol?{'X-HCD-Word-Regions-Version':'2','X-HCD-Word-Layout-Version':'1'}:{})},body:JSON.stringify(job.request)},{collaborationEpoch:job.request.fromEpoch,collaborationProtocol:restoreProtocol(job.request)}),
  async release(id){
   const round=restoreRounds.get(id);restoreRounds.delete(id)
   for(const[name,document]of server.hocuspocus.documents){if(room(name).documentId!==id)continue;if(!migrationGate.blocked(id))coordinators.get(name)?.resume();if(round)document.broadcastStateless(JSON.stringify({type:'hcd-restore-release',requestId:round.requestId}))}

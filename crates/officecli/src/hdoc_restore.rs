@@ -71,7 +71,9 @@ pub(super) async fn restore(
     let protocol = request.protocol();
     if !matches!(
         protocol,
-        CollaborationProtocol::Structure3 | CollaborationProtocol::Inline1
+        CollaborationProtocol::Structure3
+            | CollaborationProtocol::Inline1
+            | CollaborationProtocol::WordRegions2
     ) {
         return Err(bad("unsupported restore protocol"));
     }
@@ -87,6 +89,26 @@ pub(super) async fn restore(
                 return Err(ApiError(
                     StatusCode::UPGRADE_REQUIRED,
                     "inline restore model acknowledgement required".into(),
+                ));
+            }
+        }
+    }
+    // A layout room persists only through its private checkpoint journal, so
+    // this endpoint is its only legal head advance; it must speak the same
+    // model handshake the layout room guards require (crates/officecli/src/
+    // hdoc_server.rs layout-aware gates). Story-link documents (capability
+    // word_layout_edits 2|3) stayed refused earlier by require_story_link_
+    // editor_safe, so only basic layout rooms reach this acknowledgement.
+    if protocol == CollaborationProtocol::WordRegions2 {
+        for (key, expected) in [
+            ("x-hcd-word-regions-version", "2"),
+            ("x-hcd-word-layout-version", "1"),
+            ("x-hcd-node-edits-version", "7"),
+        ] {
+            if headers.get(key).and_then(|value| value.to_str().ok()) != Some(expected) {
+                return Err(ApiError(
+                    StatusCode::UPGRADE_REQUIRED,
+                    "layout restore model acknowledgement required".into(),
                 ));
             }
         }

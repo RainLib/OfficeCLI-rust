@@ -1,14 +1,14 @@
 import {createHash,randomUUID} from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import {join} from 'node:path'
-export type RestoreProtocol='hcd-semantic-blocks/3'|'hcd-semantic-inline/1'
+export type RestoreProtocol='hcd-semantic-blocks/3'|'hcd-semantic-inline/1'|'hcd-word-regions/2'
 export const restoreProtocol=(request:{fromProtocol?:RestoreProtocol}):RestoreProtocol=>request.fromProtocol??'hcd-semantic-blocks/3'
 export type RestoreRequest={requestId:string;expectedRevision:number;fromEpoch:number;fromProtocol?:RestoreProtocol;sourceHash:string;authorId:string;authorName:string}
 export type RestoreJob={version:1;documentId:string;target:number;request:RestoreRequest;status:'prepared'|'committed';receipt?:RestoreReceipt}
 export type RestoreReceipt={requestId:string;revision:number;restoredFrom:number;collaborationEpoch:number;collaborationProtocol:RestoreProtocol}
 export function validRestoreRequest(value:unknown):value is RestoreRequest{
  const v=value as RestoreRequest
- return !!v&&(v.fromProtocol===undefined||v.fromProtocol==='hcd-semantic-blocks/3'||v.fromProtocol==='hcd-semantic-inline/1')&&/^[a-f0-9]{32}$/.test(v.requestId)&&Number.isSafeInteger(v.expectedRevision)&&v.expectedRevision>0&&Number.isSafeInteger(v.fromEpoch)&&v.fromEpoch>=0&&v.fromEpoch<Number.MAX_SAFE_INTEGER&&/^[a-f0-9]{64}$/.test(v.sourceHash)&&typeof v.authorId==='string'&&!!v.authorId&&v.authorId.length<=128&&typeof v.authorName==='string'&&v.authorName.length<=256
+ return !!v&&(v.fromProtocol===undefined||v.fromProtocol==='hcd-semantic-blocks/3'||v.fromProtocol==='hcd-semantic-inline/1'||v.fromProtocol==='hcd-word-regions/2')&&/^[a-f0-9]{32}$/.test(v.requestId)&&Number.isSafeInteger(v.expectedRevision)&&v.expectedRevision>0&&Number.isSafeInteger(v.fromEpoch)&&v.fromEpoch>=0&&v.fromEpoch<Number.MAX_SAFE_INTEGER&&/^[a-f0-9]{64}$/.test(v.sourceHash)&&typeof v.authorId==='string'&&!!v.authorId&&v.authorId.length<=128&&typeof v.authorName==='string'&&v.authorName.length<=256
 }
 export function validRestoreJob(value:unknown,documentId:string):value is RestoreJob{
  const v=value as RestoreJob

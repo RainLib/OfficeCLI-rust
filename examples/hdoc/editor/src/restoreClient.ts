@@ -1,4 +1,4 @@
-import {inlineProtocol,structuralProtocol,nodeEditWireVersion} from './collaborationProtocol.ts'
+import {inlineProtocol,structuralProtocol,wordLayoutProtocol,nodeEditWireVersion} from './collaborationProtocol.ts'
 import type {Session} from './api.ts'
 import {negotiationURL,protocolDelay} from './protocolClient.ts'
 type Transport={on:(event:string,handler:(value:any)=>void)=>unknown;off:(event:string,handler:(value:any)=>void)=>unknown;sendStateless:(value:string)=>void}
@@ -6,7 +6,7 @@ export type RestoreSubmission={requestId:string;target:number;expectedRevision:n
 export class RestoreClientError extends Error{constructor(readonly code:string,readonly uncertain=false){super(code)}}
 export async function submitRestore(session:Session,submission:RestoreSubmission,signal:AbortSignal){
  let response:Response
- try{response=await fetch(negotiationURL(session).replace(/negotiate$/,`restore/${submission.target}`),{method:'POST',headers:{'X-HCD-Node-Edits-Version':String(nodeEditWireVersion),'X-HCD-Custom-Marks-Version':'1',...(session.collaborationProtocol===inlineProtocol?{'X-HCD-Inline-Containers-Version':'1','X-HCD-Extension-Version':'3'}:{}),Authorization:`Bearer ${session.token}`,'Content-Type':'application/json'},body:JSON.stringify({requestId:submission.requestId,expectedRevision:submission.expectedRevision,fromEpoch:submission.fromEpoch}),signal:AbortSignal.any([signal,AbortSignal.timeout(45000)])})}catch{throw new RestoreClientError('restore-pending',true)}
+ try{response=await fetch(negotiationURL(session).replace(/negotiate$/,`restore/${submission.target}`),{method:'POST',headers:{'X-HCD-Node-Edits-Version':String(nodeEditWireVersion),'X-HCD-Custom-Marks-Version':'1',...(session.collaborationProtocol===inlineProtocol?{'X-HCD-Inline-Containers-Version':'1','X-HCD-Extension-Version':'3'}:{}),...(session.collaborationProtocol===wordLayoutProtocol?{'X-HCD-Word-Regions-Version':'2','X-HCD-Word-Layout-Version':'1'}:{}),Authorization:`Bearer ${session.token}`,'Content-Type':'application/json'},body:JSON.stringify({requestId:submission.requestId,expectedRevision:submission.expectedRevision,fromEpoch:submission.fromEpoch}),signal:AbortSignal.any([signal,AbortSignal.timeout(45000)])})}catch{throw new RestoreClientError('restore-pending',true)}
  if(!response.ok){let code='restore-rejected';try{code=(await response.json()).code??code}catch{};throw new RestoreClientError(code,response.status>=500||code==='restore-pending'||code==='restore-busy')}
  try{const receipt=await response.json();if(receipt.requestId!==submission.requestId||receipt.revision!==submission.expectedRevision+1||receipt.restoredFrom!==submission.target||receipt.collaborationEpoch!==submission.fromEpoch+1||receipt.collaborationProtocol!==(session.collaborationProtocol??structuralProtocol))throw new Error();return receipt as {revision:number;collaborationEpoch:number}}catch{throw new RestoreClientError('restore-pending',true)}
 }

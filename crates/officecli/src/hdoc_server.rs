@@ -8513,6 +8513,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn layout_coordinated_restore_pins_the_word_layout_model_and_rotates_the_epoch() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        write_collaboration_metadata(
+            &state,
+            "doc",
+            &CollaborationMetadata {
+                epoch: 0,
+                protocol: CollaborationProtocol::WordRegions2,
+                node_edits: Some(7),
+                migration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let bytes = b"layout room before restore";
+        durable_collaboration_file(
+            &collaboration_current_path(&state, "doc", 0).await.unwrap(),
+            bytes,
+        )
+        .await
+        .unwrap();
+        let request = coordinated_restore::Request {
+            request_id: "d".repeat(32),
+            expected_revision: 1,
+            from_epoch: 0,
+            from_protocol: Some(CollaborationProtocol::WordRegions2),
+            source_hash: hash_bytes(bytes),
+            author_id: "alice".into(),
+            author_name: "Alice".into(),
+        };
+        let mut service = edit_headers_for(&state, "write", "hcd-collaboration");
+        for (key, value) in [
+            ("x-hcd-coordinator-version", "4"),
+            ("x-hcd-collaboration-epoch", "0"),
+            ("x-hcd-collaboration-protocol", "hcd-word-regions/2"),
+            ("x-hcd-word-regions-version", "2"),
+            ("x-hcd-word-layout-version", "1"),
+            ("x-hcd-node-edits-version", "7"),
+        ] {
+            service.insert(key, value.parse().unwrap());
+        }
+        // A missing layout acknowledgement fails closed before any journal write.
+        for key in [
+            "x-hcd-word-regions-version",
+            "x-hcd-word-layout-version",
+            "x-hcd-node-edits-version",
+        ] {
+            let mut old = service.clone();
+            old.remove(key);
+            assert!(matches!(
+                coordinated_restore::restore(
+                    State(state.clone()),
+                    Path(("doc".into(), 0)),
+                    old,
+                    Json(request.clone())
+                )
+                .await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+            assert!(!coordinated_restore::pending(&state, "doc").await);
+        }
+        let Json(receipt) = coordinated_restore::restore(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            service,
+            Json(request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt["revision"], 2);
+        assert_eq!(receipt["collaborationEpoch"], 1);
+        assert_eq!(receipt["collaborationProtocol"], "hcd-word-regions/2");
+        let metadata = collaboration_metadata(&state, "doc").await.unwrap();
+        assert_eq!(metadata.protocol, CollaborationProtocol::WordRegions2);
+        assert_eq!(metadata.node_edits, Some(7));
+        assert_eq!(metadata.epoch, 1);
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert!(!coordinated_restore::pending(&state, "doc").await);
+        assert_eq!(
+            bundle.manifest().unwrap().root_hash,
+            bundle.revision(0).unwrap().root_hash
+        );
+    }
+
+    #[tokio::test]
     async fn coordinated_restore_requires_matching_room_head_and_authority() {
         let root = tempfile::tempdir().unwrap();
         let bundle = word_image_bundle(root.path());
