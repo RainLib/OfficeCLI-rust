@@ -137,3 +137,13 @@ cargo clippy --all-targets                                                      
 ### AO 评审收口（head 48391d6）
 
 评审第一条：layout `negotiate` 分支丢弃 `restores.recover()` 回执——若 journal 留有 prepared 的布局还原，recover 重放并提交后 epoch 已轮转，但响应仍带 recover 前 `/auth` 读到的旧 epoch，成员按旧 epoch 连房间会被 `onAuthenticate` 依新 epoch 拒绝（stale-room 循环）或入已拆除的旧房间。修复按 structural 分支样板取 `recovered??user` 重算 epoch 与协议，并新增真实拉起 sidecar 的回归测试（预置 prepared journal → negotiate 重放提交 → 断言响应 epoch 1/protocol /2 且 journal 转为 committed）。前端全量随之 **2099 pass / 0 fail**。
+
+评审第二条起共六条（cf14a88..2618653，逐 thread 修复并全部 resolve）：
+
+- **7b227e7** journal 尖校验跟随服务端语义：`validSourceHash` 仅对 `hcd-word-regions/2` 放行 `none`（从未持久化写入的布局房间初始尖，hdoc_restore.rs 同规则），其余协议维持 64hex；否则 sidecar 在 journal 写入前就 503，服务端为首间布局房开的窗口被 TS 侧堵死。validation 测试钉住。
+- **6a0e400** committed 拆解逐房间隔离 + 客户端 committed 分支清 `current`：word lease close 是可抛的原生 owner-store 交换，原循环一房失败即中断后续房间的 4409/unload；而错过关连的连接把手一房停在旧轮次，会无声吞掉之后每一轮 prepare，quiesce 烧满 15s，整篇文档的协调还原直到标签页重载才恢复。try/catch/finally 隔离 + commit 即清轮次自愈；prepare→committed→（无关连）→prepare 回归测试。改后用从零 reseed 的 15 项实机 harness 复跑全绿（committed+close 0.43s 同窗、双方 follow epoch 1）。
+- **ad87616** 直接还原响应解析移出传输分类 try：已提交但响应体截断/HTML 的 200 此前被归 `failed`（安全重试信号），与"不可用响应=未知结局"的自述不变量矛盾；统一归 `outcome-unknown`（`restore-response-unparseable`），HTML/截断/空体三例钉住。
+- **f1fbf52** 工作簿资产签名改与实际后端产出一致：xlsx.rs 的 drawing layer 与固定版式同形 `asset://sha256/{hash}`（`assets/sha256/{hash}.{ext}` 从不经 `/chunks` 服务），原正则恒空匹配、真实图片/图表替换永不误报为"格式变化"；与 fixed 评审共用导出的 `assetHashes`，注释修正，fixture 按真实 markup 重写。
+- **2618653** outcome-unknown 还原的收敛出路 + 历史列表快照过期：两直接入口在 uncertain 且 head 恰为 fence+1 时采纳该推进（直接端点无幂等重放可核对，此前对话框永久卡在"比较已变"而重试按钮承诺的核对必败）；共享对话框 uncertain 态允许关闭并给出刷新比较提示（三语新键）；关闭审阅与还原收敛后重置 `revisionList/revisionNextBefore`，重开重取首页（新 head 立即可点选、审阅元数据不再取自过期列表）。
+
+前端全量 **2102 pass / 0 fail**（本轮 +3 用例），`npx tsc --noEmit` 与双构建通过。
