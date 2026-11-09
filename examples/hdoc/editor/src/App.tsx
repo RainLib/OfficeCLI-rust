@@ -665,7 +665,7 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
       if(controller.signal.aborted)return
       if(!historical)liveScroll.current=documentScroll.current?.scrollTop??0
       const item=history.find(item=>item.revision===number)
-      setHistorical(before);setRevisionSelection(semanticRevisionSelection(before,after,{author:item?.authorName||(number===0?t('initialImport'):undefined),createdAt:item?.createdAtEpochMs}));setRightPanel('revisions');setMenu(null);setPaletteOpen(false);setLinkOpen(false)
+      const selection=semanticRevisionSelection(before,after,{author:item?.authorName||(number===0?t('initialImport'):undefined),createdAt:item?.createdAtEpochMs});setHistorical(before);setRevisionSelection(selection);setRightPanel('revisions');setMenu(null);setPaletteOpen(false);setLinkOpen(false)
       requestAnimationFrame(()=>{if(!controller.signal.aborted)documentScroll.current?.scrollTo({top:0})})
     }catch(cause){if(!controller.signal.aborted)setError(String(cause))}
     finally{if(!controller.signal.aborted)setHistoryLoading(false)}

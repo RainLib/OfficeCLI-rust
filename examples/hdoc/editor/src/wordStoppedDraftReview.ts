@@ -8,7 +8,6 @@ import {wordDraftObservation} from './wordDraftObservation.ts'
 import {imageIntents} from './collaborativeImages.ts'
 import {businessDraftProblem} from './businessDrafts.ts'
 import {revisionDifferences,revisionBlockText} from './revisionDiff.ts'
-import type {Projection} from './schema.ts'
 import type {WordLayout} from './wordRegions.ts'
 import {wordDeviceBackupPreview} from './wordDeviceBackupPreview.ts'
 import {planWordStaleMerge} from './wordStaleMergePlan.ts'
@@ -72,7 +71,7 @@ export async function inspectStaleWordDraft(journal:WordCheckpointJournal,reques
   }
   const group=(projection:WordRegionProjection)=>{const result=new Map<string,typeof projection.blocks>();for(const block of projection.blocks){if(!block.flowRegionId)throw new WordRecoveryError('word-recovery-baseline-invalid');const rows=result.get(block.flowRegionId)??[];rows.push(block);result.set(block.flowRegionId,rows)}return result},beforeGroups=group(previous),afterGroups=group(latest)
   for(const regionId of new Set([...beforeGroups.keys(),...afterGroups.keys()])){const before=beforeGroups.get(regionId)??[],after=afterGroups.get(regionId)??[]
-   for(const diff of revisionDifferences({blocks:before} as Projection,{blocks:after} as Projection))if(diff.kind!=='same'||diff.moved){const a=diff.before?revisionBlockText(diff.before.content):'',b=diff.after?revisionBlockText(diff.after.content):'';currentRows.push({regionId,kind:diff.kind,moved:diff.moved,formatChanged:diff.formatChanged||diff.objectChanged,before:a,after:b,truncated:false})}}
+   for(const diff of revisionDifferences({blocks:before},{blocks:after}))if(diff.kind!=='same'||diff.moved){const a=diff.before?revisionBlockText(diff.before.content):'',b=diff.after?revisionBlockText(diff.after.content):'';currentRows.push({regionId,kind:diff.kind,moved:diff.moved,formatChanged:diff.formatChanged||diff.objectChanged,before:a,after:b,truncated:false})}}
   const oldCatalog=wordStaleRegionCatalog(previous.flowLayout),newCatalog=wordStaleRegionCatalog(latest.flowLayout)
   const limit=(rows:typeof draftRows,primary:typeof oldCatalog,secondary:typeof oldCatalog)=>rows.slice(offset,offset+25).map(row=>{const region=primary.get(row.regionId)??secondary.get(row.regionId);return{...row,region:region?{kind:region.kind,sections:region.sections.slice(0,50),sectionsTruncated:region.sections.length>50}:null,before:row.before.slice(0,2000),after:row.after.slice(0,2000),truncated:row.truncated||row.before.length>2000||row.after.length>2000}})
   const final=await journal.load(),finalHead=await json('/revisions?limit=1');guard();if(final?.hash!==saved.hash||finalHead.headRevision!==current)throw new WordRecoveryError('word-recovery-review-changed')

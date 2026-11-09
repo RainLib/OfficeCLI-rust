@@ -10,7 +10,7 @@ import {imageDraftContents,imageDraftMap,captureImages} from './collaborativeIma
 import {ReferenceAuthorLedger,snapshotReferences,validActorId,actorName,type ReferenceAuthorEntry} from './referenceAuthors.ts'
 import {businessDraftProblem} from './businessDrafts.ts'
 import {revisionDifferences,revisionBlockText} from './revisionDiff.ts'
-import type {Block,Projection} from './schema.ts'
+import type {Block} from './schema.ts'
 import {validateWordUploads,type WordUploadRecord} from './wordUploads.ts'
 import {wordRegionalProtocol,wordLayoutProtocol} from './collaborationProtocol.ts'
 import {requireWordBrowserProtocol,type WordBrowserProtocol} from './wordBrowserProtocol.ts'
@@ -23,7 +23,7 @@ export const compareWordRegions=(a:WordRegionStore,b:WordRegionStore)=>{
     const aa=new Map(a.capture().regions.map(region=>[region.regionId,region.blocks])),bb=new Map(b.capture().regions.map(region=>[region.regionId,region.blocks])),keys=(model:WordRegionStore)=>{const groups=new Map<string,string[]>();let region='';for(const block of model.structure.blocks()){if(block.node.type.name===wordBoundaryName){region=block.node.attrs.regionId;groups.set(region,[])}else groups.get(region)!.push(block.key)}return groups},ak=keys(a),bk=keys(b),rows:Array<{regionId:string;kind:string;moved:boolean;formatChanged:boolean;before:string;after:string;truncated:boolean}>=[]
     for(const regionId of new Set([...aa.keys(),...bb.keys()])){
      const blocks=(captured:typeof aa,ids:Map<string,string[]>)=>(captured.get(regionId)??[]).map((entry,index)=>({...entry,blockId:ids.get(regionId)![index],blockHash:'recovery',region:'body'} as Block))
-     for(const diff of revisionDifferences({blocks:blocks(aa,ak)} as Projection,{blocks:blocks(bb,bk)} as Projection))if(diff.kind!=='same'||diff.moved){const before=diff.before?revisionBlockText(diff.before.content):'',after=diff.after?revisionBlockText(diff.after.content):'';rows.push({regionId,kind:diff.kind,moved:diff.moved,formatChanged:diff.formatChanged,before:before.slice(0,16000),after:after.slice(0,16000),truncated:before.length>16000||after.length>16000})}
+     for(const diff of revisionDifferences({blocks:blocks(aa,ak)},{blocks:blocks(bb,bk)}))if(diff.kind!=='same'||diff.moved){const before=diff.before?revisionBlockText(diff.before.content):'',after=diff.after?revisionBlockText(diff.after.content):'';rows.push({regionId,kind:diff.kind,moved:diff.moved,formatChanged:diff.formatChanged,before:before.slice(0,16000),after:after.slice(0,16000),truncated:before.length>16000||after.length>16000})}
     }
     return rows
    }

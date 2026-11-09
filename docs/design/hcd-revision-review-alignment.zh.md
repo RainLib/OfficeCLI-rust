@@ -52,21 +52,23 @@
 
 语义入口行为不变的判据：diff 计算从组件 render 移到选择构造（同一次选择只算一次，成本不升反降）；`key`/`data-revision-change` 导航、`onlyChanges`、`latest` 过期提示、restore 禁用条件（`target>=comparedWith`）逐字保留（两个重写文件与原文件做过字符级 opcode 对比，除上述列出的替换外无其它差异）。
 
-### 阶段 1 —— 固定版式接入（纯客户端）
+### 阶段 1 —— 固定版式接入（纯客户端，已落地 2026-11-09 commit 31151cc）
 
 `src/directRestoreClient.ts`（新增：`POST /restore/{revision}` + `expectedRevision` CAS + 409/426/501 错误映射）、`src/fixedRevisionReview.ts`（新增：manifest/index page/分片双 revision → `RevisionChangeRow[]`，页/块粒度 kind + 文本粒度 beforeText/afterText）、`src/FixedLayoutEditor.tsx`（历史列表 + 挂载两组件，门闩复用 `exportBlocked`）、`src/api.ts`（`fetchRevisions` 视需要）。实测点：fixed 文档 metadata 是否保持 Default1（§2 备注）、`reset_collaboration` 后 presence 通道重连语义（sidecar.ts:781）。
 
-### 阶段 2 —— 工作簿接入（纯客户端）
+### 阶段 2 —— 工作簿接入（纯客户端，已落地 2026-11-09 commit 9adbae1）
 
 `src/workbookRevisionReview.ts`（按 sheet/chunk JSON 快照比较产出 `RevisionChangeRow[]`，避免整簿矩阵）、`src/WorkbookEditor.tsx`（历史入口 + 还原门 = `batchReady` 全量条件）。复用阶段 1 的 `directRestoreClient`。
 
 ### 阶段 3 —— 区域 Word 协调还原（含服务端）
 
+阶段 3a（服务端围栏 + 停房协调还原 + 区域入口只读审阅）已落地 2026-11-09 commit b1d0ca8：`hdoc_restore.rs` 白名单加入 `WordRegions2` 并在 journal 写入前钉住 layout 模型 ack（regions 2 / layout 1 / node edits 7，缺失 426，Rust 测试覆盖）；`sidecar.ts` 在任意 writer 在线时对 layout 房间失败关闭（词客户端尚不识别 drain 握手），停房后经 `/collaboration/state` 哈希围栏还原，negotiate 时重放已提交未确认的崩溃日志；`restoreJournal.ts`/`restoreClient.ts` 贯通 `hcd-word-regions/2`；`RegionalWordEditor.tsx` 挂载共享审阅对话框，走中立分片描述符读取器（与固定版式同一 `loadFixedRevisionSelection`），还原按钮保持 `canRestore=false`。阶段 3b 未落地：词客户端 drain 握手、跨 epoch 的 topology 再投影与分阶段许可恢复、region diff 直接产行；落地前在线房间还原继续失败关闭。
+
 Rust：`crates/officecli/src/hdoc_restore.rs`（协议白名单加入 `WordRegions2`，配套 model ack 头），`hdoc_server.rs`（editor head 426 协调头要求核对），Rust 测试。TS：`sidecar.ts`（restore 分支协议/ack 校验，:430,441）、`src/restoreJournal.ts`+`src/restoreClient.ts`（`RestoreProtocol` 联合扩展）、`src/RegionalWordEditor.tsx`（历史 + 审阅挂载；region diff 直接产行，消除 §1 的 cast 旁证入口之一）。区域房间需要验证跨 epoch 轮转后的 topology 再投影与分阶段许可恢复。
 
 ### 阶段 4 —— 收口
 
-`wordRecoveryReview.ts`/`wordStoppedDraftReview.ts` 改用中立行 API 去掉 `as Projection`；更新 `hcd-current-capabilities.zh.md` 与审计状态；统一验收链跑满四入口。
+已落地 2026-11-09：`revisionDifferences` 签名收窄为只读块序列（`{blocks:Block[]}`），`wordRecoveryReview.ts`/`wordStoppedDraftReview.ts` 去掉 `as Projection`；评审可选意见一并处理——`App.tsx` `showRevision` 先构造选择再落 state（diff 抛错不再留下"编辑器已隐藏、审阅未挂载"的半开态），`RestoreRevisionDialog` 改用 `revisionChangedCount`（判定谓词收敛到 `revisionSelection.ts` 单处）。`hcd-current-capabilities.zh.md` 增补 2026-11-09 条目；统一验收链实测结果见 §7 增补。
 
 ## 5 验收链
 

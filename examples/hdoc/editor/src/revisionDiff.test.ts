@@ -1,7 +1,7 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {revisionDifferences,revisionTextDifference,revisionBlockText,semanticRevisionSelection} from './revisionDiff.ts'
-import {revisionChangedRows} from './revisionSelection.ts'
+import {revisionChangedCount,revisionChangedRows} from './revisionSelection.ts'
 import {InlineContainerRegistry} from './inlineContainerRegistry.ts'
 import type {Block,Projection} from './schema.ts'
 const block=(id:string,text:string):Block=>({blockId:id,blockHash:'hash',region:'body',readOnly:false,content:{kind:'paragraph',inlines:[{text}]}})
@@ -55,6 +55,7 @@ test('the semantic adapter folds a Projection pair into the neutral review contr
  assert.equal(selection.target,2);assert.equal(selection.comparedWith,4);assert.equal(selection.author,'林');assert.equal(selection.createdAt,1730000000000)
  assert.equal(selection.changes.length,3);assert.equal(selection.changes[1].kind,'same')
  const changed=revisionChangedRows(selection)
+ assert.equal(revisionChangedCount(selection),changed.length)
  assert.equal(changed.length,1);assert.equal(changed[0].kind,'modified');assert.equal(changed[0].oldIndex,0);assert.equal(changed[0].newIndex,0)
  assert.equal(changed[0].beforeText,'旧内容');assert.equal(changed[0].afterText,'新内容')
 })

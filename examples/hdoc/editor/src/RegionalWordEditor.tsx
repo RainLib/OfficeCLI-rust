@@ -157,7 +157,7 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
  // revisions back the same chunk descriptors the fixed entry reads, so this
  // entry shows what changed without touching the live room. Coordinated
  // restore for layout rooms stays fail-closed until word clients learn the
- // sidecar drain handshake (docs/design/hcd-revision-review-alignment.md §4).
+ // sidecar drain handshake (docs/design/hcd-revision-review-alignment.zh.md §4).
  const [historyOpen,setHistoryOpen]=useState(false),[revisionList,setRevisionList]=useState<Array<{revision:number;patchId?:string;authorName?:string;createdAtEpochMs?:number}>>([]),[revisionNextBefore,setRevisionNextBefore]=useState<number|null|undefined>(undefined),[revisionsLoading,setRevisionsLoading]=useState(false),[revisionSelection,setRevisionSelection]=useState<RevisionSelection|null>(null),[selectionLoading,setSelectionLoading]=useState(false),[historyProblem,setHistoryProblem]=useState('')
  const historyDialog=useRef<HTMLDialogElement|null>(null),selectionRequest=useRef<AbortController|null>(null)
  useEffect(()=>()=>{selectionRequest.current?.abort()},[])

@@ -1,11 +1,11 @@
 import {useEffect,useId,useMemo,useRef,useState} from 'react'
 import {useI18n} from './i18n.tsx'
-import {revisionChangedRows,type RevisionSelection} from './revisionSelection.ts'
+import {revisionChangedCount,type RevisionSelection} from './revisionSelection.ts'
 /** The confirmation surface is intentionally separate from the restore
  * transport: an older server must never bypass the coordinated restore gate. */
 export function RestoreRevisionDialog({selection,latest,uploading,allowed,supported,uncertain,onCancel,onConfirm}:{selection:RevisionSelection;latest:number|null;uploading:boolean;allowed:boolean;supported:boolean;uncertain:boolean;onCancel:()=>void;onConfirm:()=>Promise<void>}){
  const {t}=useI18n(),dialog=useRef<HTMLDialogElement>(null),cancel=useRef<HTMLButtonElement>(null),[busy,setBusy]=useState(false),[problem,setProblem]=useState(''),titleId=useId()
- const changed=latest!==null&&latest!==selection.comparedWith,changes=useMemo(()=>revisionChangedRows(selection).length,[selection])
+ const changed=latest!==null&&latest!==selection.comparedWith,changes=useMemo(()=>revisionChangedCount(selection),[selection])
  useEffect(()=>{const element=dialog.current;element?.showModal();cancel.current?.focus();return()=>element?.close()},[])
  const confirm=async()=>{if(busy||uploading||(changed&&!uncertain)||!allowed||!supported)return;setBusy(true);setProblem('');try{await onConfirm()}catch(error){setProblem(error instanceof Error?error.message:t('restoreCouldNotConfirm'))}finally{setBusy(false)}}
  return <dialog ref={dialog} className="hcd-restore-dialog" aria-labelledby={titleId} onCancel={event=>{event.preventDefault();if(!busy&&!uncertain)onCancel()}}><h2 id={titleId}>{t('confirmRestoreRevision',{revision:selection.target})}</h2><p>{t('restoreCreatesNewRevision')}</p><dl><dt>{t('restoreTargetVersion')}</dt><dd>r{selection.target} · {selection.author||t('unknownAuthor')}</dd><dt>{t('restoreCurrentVersion')}</dt><dd>r{selection.comparedWith}</dd><dt>{t('restoreChangeCount')}</dt><dd>{changes}</dd></dl><p className="hcd-revision-note">{t('restorePreservesCurrent')}</p>{!supported&&<p role="status">{t('restoreCoordinationRequired')}</p>}{uploading&&<p role="alert">{t('imageUploadPending')}</p>}{changed&&<p role="alert">{t('restoreComparisonChanged')}</p>}{problem&&<p role="alert">{problem}</p>}<footer><button ref={cancel} type="button" disabled={busy||uncertain} onClick={onCancel}>{t('cancel')}</button><button type="button" disabled={busy||uploading||(changed&&!uncertain)||!allowed||!supported} onClick={()=>void confirm()}>{t(busy?'saving':uncertain?'checkRestoreResult':'saveAndRestoreRevision',{revision:selection.target})}</button></footer></dialog>

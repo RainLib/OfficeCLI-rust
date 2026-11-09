@@ -12,8 +12,10 @@ function retained(pairs:Array<{old:number;next:number}>){
  pairs.forEach((pair,index)=>{let low=0,high=tails.length;while(low<high){const middle=(low+high)>>1;if(pairs[tails[middle]].old<pair.old)low=middle+1;else high=middle}previous[index]=low?tails[low-1]:-1;tails[low]=index})
  const result=new Set<number>();for(let index=tails.at(-1)??-1;index>=0;index=previous[index])result.add(pairs[index].next);return result
 }
-/** Stable IDs first, then semantic anchors. No whole-document text matrix. */
-export function revisionDifferences(before:Projection,after:Projection):RevisionDifference[]{
+/** Stable IDs first, then semantic anchors. No whole-document text matrix.
+ * Only the block sequences are read, so callers may pass partial surfaces
+ * without claiming a full network Projection. */
+export function revisionDifferences(before:{blocks:Block[]},after:{blocks:Block[]}):RevisionDifference[]{
  const old=before.blocks,next=after.blocks,paired=new Map<number,number>(),used=new Set<number>(),ids=new Map(old.map((block,index)=>[block.blockId,index]))
  next.forEach((block,index)=>{const found=ids.get(block.blockId);if(found!==undefined&&!used.has(found)){paired.set(index,found);used.add(found)}})
  const content=new Map<string,number[]>()
