@@ -5168,7 +5168,12 @@ async fn index_page(
     let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
     let index = bundle.read_index_page(&manifest, page).map_err(bad)?;
     if query.word_regions != Some(true) {
-        return Ok(Json(serde_json::to_value(index).map_err(internal)?));
+        // A restore reuses the target's content-addressed index objects, which
+        // carry the older stored revision stamp. Echo the resolved revision so
+        // this route matches /chunks and clients can trust the page identity.
+        let mut value = serde_json::to_value(index).map_err(internal)?;
+        value["revision"] = serde_json::json!(manifest.revision);
+        return Ok(Json(value));
     }
     let result = tokio::task::spawn_blocking(move || {
         let regions = if query.word_bodies == Some(true) {
@@ -5177,6 +5182,7 @@ async fn index_page(
             hcd_core::word_region_index_page(&bundle, &manifest, &index)?
         };
         let mut value = serde_json::to_value(index)?;
+        value["revision"] = json!(manifest.revision);
         let chunks = value["chunks"]
             .as_array_mut()
             .ok_or_else(|| HcdError::InvalidBundle("invalid index".into()))?;
@@ -8510,6 +8516,41 @@ mod tests {
             .await,
             Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
         ));
+    }
+
+    #[tokio::test]
+    async fn index_page_echoes_the_resolved_revision_after_restore_reuses_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/assets/hcd-flow-layout-2026-10-26/source.docx");
+        let mut options = hcd_docx::ImportOptions::new("doc");
+        options.flow_layout = true;
+        let path = temp.path().join("doc.hcd");
+        hcd_docx::import_docx(source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let state = edit_state(temp.path());
+        let headers = edit_headers(&state, "read");
+        // A restore copies the target's content-addressed index objects, whose
+        // stored stamp still names the old revision; the route must answer with
+        // the resolved revision so page identity matches /chunks.
+        hcd_core::restore_revision(&bundle, 0, 1, Some("alice".into()), Some("Alice".into()))
+            .unwrap();
+        let Json(index) = index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(2),
+                word_regions: None,
+                word_bodies: None,
+            }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(index["revision"], 2);
+        assert_eq!(index["page"], 0);
+        assert_eq!(index["chunks"][0]["sequence"], 0);
     }
 
     #[tokio::test]
