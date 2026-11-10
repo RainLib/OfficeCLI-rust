@@ -3,12 +3,22 @@ import type {Session} from './api.ts'
 import {negotiationURL,protocolDelay} from './protocolClient.ts'
 type Transport={on:(event:string,handler:(value:any)=>void)=>unknown;off:(event:string,handler:(value:any)=>void)=>unknown;sendStateless:(value:string)=>void}
 export type RestoreSubmission={requestId:string;target:number;expectedRevision:number;fromEpoch:number}
-/** Reuse a prepared restore only when it is still the selection on screen and
- * the head just read. A different revision gets a new request; the previous
- * prepare then fails closed instead of committing the old target. */
+/** Reuse a prepared restore only when it is still the selection on screen.
+ * A different revision gets a new request; the previous prepare then fails
+ * closed instead of committing the old target. */
 export function restoreIntentForSelection(pending:RestoreSubmission|null,target:number,comparedWith:number):RestoreSubmission|null{
  if(!pending||pending.target!==target||pending.expectedRevision!==comparedWith)return null
  return pending
+}
+/** Replay a matching prepared request without saving. The submitting room
+ * stays paused until release, so a live save cannot run in that window.
+ * Save and the head fence run only when this selection needs a new request. */
+export async function prepareRestoreSubmission(pending:RestoreSubmission|null,target:number,comparedWith:number,save:()=>Promise<number>,fromEpoch:number):Promise<RestoreSubmission>{
+ const replay=restoreIntentForSelection(pending,target,comparedWith)
+ if(replay)return replay
+ const head=await save()
+ if(head!==comparedWith)throw new Error('restoreComparisonChanged')
+ return {requestId:crypto.randomUUID().replaceAll('-',''),target,expectedRevision:head,fromEpoch}
 }
 export class RestoreClientError extends Error{constructor(readonly code:string,readonly uncertain=false){super(code)}}
 export async function submitRestore(session:Session,submission:RestoreSubmission,signal:AbortSignal){

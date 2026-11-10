@@ -87,7 +87,7 @@ import {readWordBrowserProjection,readWordStorySessionProjection} from './wordBr
 import {semanticRevisionSelection} from './revisionDiff.ts'
 import type {RevisionSelection} from './revisionSelection.ts'
 import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
-import {submitRestore,RestoreClientError,restoreIntentForSelection,type RestoreSubmission} from './restoreClient.ts'
+import {submitRestore,RestoreClientError,prepareRestoreSubmission,type RestoreSubmission} from './restoreClient.ts'
 const noPageSubscribe=(_listener:()=>void)=>()=>{},noPageSnapshot=()=>0
 
 type Props={session:Session;onClose:()=>void;allowClose?:boolean;embedded?:boolean;openRecovery?:()=>void;onEditorPresence?:(value:boolean)=>void;onEpochChange?:(epoch:number)=>void}
@@ -199,17 +199,15 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
   }catch(cause){if(!controller.signal.aborted&&selectionRequest.current===controller)setHistoryProblem(String(cause))}
   finally{if(!controller.signal.aborted&&selectionRequest.current===controller)setSelectionLoading(false)}
  }
- // The submitting client saves first so the CAS head matches the reviewed
- // comparison. An uncertain outcome keeps that exact intent only while this
- // selection is still the same target and head; a later revision starts a new
- // request and the previous prepare fails closed.
+ // A prepared request is replayed without saving: the room stays paused
+ // until release, so save() throws word-restore-paused inside that window.
+ // showRevision already stored the head it compared. A new selection saves
+ // and checks that head; a stale replay is rejected by the server's 409.
  const confirmRestore=async()=>{
   if(session.scope!=='write')throw new Error(t('readOnlyMode'))
   const selection=revisionSelection
   if(!selection)throw new Error(t('restoreCouldNotConfirm'))
-  const head=await controller.save()
-  if(head!==selection.comparedWith)throw new Error(t('restoreComparisonChanged'))
-  const intent=restoreIntentForSelection(pendingRestore.current,selection.target,head)??{requestId:crypto.randomUUID().replaceAll('-',''),target:selection.target,expectedRevision:head,fromEpoch:session.collaborationEpoch??0}
+  const intent=await prepareRestoreSubmission(pendingRestore.current,selection.target,selection.comparedWith,()=>controller.save(),session.collaborationEpoch??0).catch(cause=>{if(cause instanceof Error&&cause.message==='restoreComparisonChanged')throw new Error(t('restoreComparisonChanged'));throw cause})
   pendingRestore.current=intent
   restoreRequest.current?.abort();const abort=new AbortController();restoreRequest.current=abort
   try{

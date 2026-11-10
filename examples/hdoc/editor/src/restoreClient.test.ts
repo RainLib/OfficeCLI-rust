@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {installRestoreHandoff,restoreIntentForSelection,type RestoreSubmission} from './restoreClient.ts'
+import {installRestoreHandoff,prepareRestoreSubmission,restoreIntentForSelection,type RestoreSubmission} from './restoreClient.ts'
 test('a prepared restore is replayed only for the same target and the head just read',()=>{
  const pending:RestoreSubmission={requestId:'a'.repeat(32),target:2,expectedRevision:4,fromEpoch:1}
  assert.equal(restoreIntentForSelection(pending,2,4),pending)
@@ -8,6 +8,15 @@ test('a prepared restore is replayed only for the same target and the head just 
  assert.equal(restoreIntentForSelection(pending,5,4),null)
  assert.equal(restoreIntentForSelection(pending,2,5),null)
  assert.equal(restoreIntentForSelection(pending,5,9),null)
+})
+test('a matching prepared restore is submitted without saving while the room is paused',async()=>{
+ const pending:RestoreSubmission={requestId:'a'.repeat(32),target:2,expectedRevision:4,fromEpoch:1}
+ let saved=0
+ const replayed=await prepareRestoreSubmission(pending,2,4,async()=>{saved++;throw new Error('word-restore-paused')},1)
+ assert.equal(replayed,pending);assert.equal(saved,0)
+ const created=await prepareRestoreSubmission(pending,5,9,async()=>{saved++;return 9},3)
+ assert.equal(saved,1);assert.equal(created.target,5);assert.equal(created.expectedRevision,9);assert.notEqual(created.requestId,pending.requestId);assert.match(created.requestId,/^[a-f0-9]{32}$/)
+ await assert.rejects(prepareRestoreSubmission(pending,5,8,async()=>9,3),/restoreComparisonChanged/)
 })
 test('handoff locks before asynchronous flush and ignores stale ready/release after teardown',async()=>{
  let listener:((value:{payload:string})=>void)|undefined,finish!:()=>void

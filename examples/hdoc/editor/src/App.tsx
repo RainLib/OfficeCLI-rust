@@ -67,7 +67,7 @@ import {DeletionReviewPanel,useDeletionReviews} from './DeletionReviewPanel.tsx'
 import {resolveDeletionReview,canConfirmDeletion,type DeletionReview} from './deletionReview.ts'
 import {restoreInlineDeletion,negotiateSession} from './protocolClient.ts'
 import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
-import {installRestoreHandoff,waitRestoreSync,restoreHandoffReady,followCommittedRestore,submitRestore,RestoreClientError,restoreIntentForSelection,type RestoreSubmission} from './restoreClient.ts'
+import {installRestoreHandoff,waitRestoreSync,restoreHandoffReady,followCommittedRestore,submitRestore,RestoreClientError,prepareRestoreSubmission,type RestoreSubmission} from './restoreClient.ts'
 import {RevisionReview} from './RevisionReview.tsx'
 import {semanticRevisionSelection} from './revisionDiff.ts'
 import type {RevisionSelection} from './revisionSelection.ts'
@@ -674,10 +674,7 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
 
   async function restoreHistorical() {
     if (!historical || !revisionSelection || accessLocked || scopeReadOnly || session.scope!=='write') throw new Error(t('readOnlyMode'))
-    const head=await save()
-    if(head===null)throw new Error(t('restoreCouldNotConfirm'))
-    if(head!==revisionSelection.comparedWith)throw new Error(t('restoreComparisonChanged'))
-    const intent=restoreIntentForSelection(pendingRestore.current,revisionSelection.target,head)??{requestId:crypto.randomUUID().replaceAll('-',''),target:revisionSelection.target,expectedRevision:head,fromEpoch:session.collaborationEpoch??0}
+    const intent=await prepareRestoreSubmission(pendingRestore.current,revisionSelection.target,revisionSelection.comparedWith,async()=>{const head=await save();if(head===null)throw new Error(t('restoreCouldNotConfirm'));return head},session.collaborationEpoch??0).catch(cause=>{if(cause instanceof Error&&cause.message==='restoreComparisonChanged')throw new Error(t('restoreComparisonChanged'));throw cause})
     pendingRestore.current=intent
     try {
       const receipt=await submitRestore({...session,collabUrl:session.collabUrl||import.meta.env.VITE_HCD_COLLAB_URL},intent,saveAbort.signal)
