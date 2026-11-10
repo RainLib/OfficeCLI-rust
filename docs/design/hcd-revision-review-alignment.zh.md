@@ -144,6 +144,12 @@ cargo clippy --all-targets                                                      
 - **6a0e400** committed 拆解逐房间隔离 + 客户端 committed 分支清 `current`：word lease close 是可抛的原生 owner-store 交换，原循环一房失败即中断后续房间的 4409/unload；而错过关连的连接把手一房停在旧轮次，会无声吞掉之后每一轮 prepare，quiesce 烧满 15s，整篇文档的协调还原直到标签页重载才恢复。try/catch/finally 隔离 + commit 即清轮次自愈；prepare→committed→（无关连）→prepare 回归测试。改后用从零 reseed 的 15 项实机 harness 复跑全绿（committed+close 0.43s 同窗、双方 follow epoch 1）。
 - **ad87616** 直接还原响应解析移出传输分类 try：已提交但响应体截断/HTML 的 200 此前被归 `failed`（安全重试信号），与"不可用响应=未知结局"的自述不变量矛盾；统一归 `outcome-unknown`（`restore-response-unparseable`），HTML/截断/空体三例钉住。
 - **f1fbf52** 工作簿资产签名改与实际后端产出一致：xlsx.rs 的 drawing layer 与固定版式同形 `asset://sha256/{hash}`（`assets/sha256/{hash}.{ext}` 从不经 `/chunks` 服务），原正则恒空匹配、真实图片/图表替换永不误报为"格式变化"；与 fixed 评审共用导出的 `assetHashes`，注释修正，fixture 按真实 markup 重写。
-- **2618653** outcome-unknown 还原的收敛出路 + 历史列表快照过期：两直接入口在 uncertain 且 head 恰为 fence+1 时采纳该推进（直接端点无幂等重放可核对，此前对话框永久卡在"比较已变"而重试按钮承诺的核对必败）；共享对话框 uncertain 态允许关闭并给出刷新比较提示（三语新键）；关闭审阅与还原收敛后重置 `revisionList/revisionNextBefore`，重开重取首页（新 head 立即可点选、审阅元数据不再取自过期列表）。
+- **2618653** outcome-unknown 还原的收敛出路 + 历史列表快照过期：两直接入口在 uncertain 且 head 恰为 fence+1 时采纳该推进（直接端点无幂等重放可核对，此前对话框永久卡在"比较已变"而重试按钮承诺的核对必败）；共享对话框 uncertain 态允许关闭并给出刷新比较提示（三语新键）；关闭审阅与还原收敛后重置 `revisionList/revisionNextBefore`，重开重取首页（新 head 立即可点选、审阅元数据不再取自过期列表）。该数值判据随后被 **730e746** 收紧，见下一节。
 
 前端全量 **2102 pass / 0 fail**（本轮 +3 用例），`npx tsc --noEmit` 与双构建通过。
+
+### AO 评审收口（head 730e746）
+
+未决项：2618653 在 uncertain 窗口里只凭 `head === comparedWith + 1` 采纳还原。同伴保存或另一次还原也可以落在同一个序号上，对话框会静默关掉，内容并未回到目标 revision。
+
+**730e746** 改为读取 `GET /revisions/{head}`。只有 `documentId`、`revision` 与确定性 `patchId=restore-{target}-{head}`（`hcd-core` `restore.rs` 写入、协调路径 `hdoc_restore.rs` 自验）三者都对上才采纳。不匹配、记录缺失或响应不可读仍抛 `restoreComparisonChanged`；调用方中止继续上抛，取消中的复查不会被当成已经核对失败。`directRestoreClient.test.ts` 覆盖匹配、普通保存、另一目标、缺 `patchId`、异文档、旧 revision、404、传输错误、非 JSON 与 abort。
