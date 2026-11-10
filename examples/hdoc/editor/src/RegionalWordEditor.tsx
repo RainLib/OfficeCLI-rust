@@ -87,7 +87,7 @@ import {readWordBrowserProjection,readWordStorySessionProjection} from './wordBr
 import {semanticRevisionSelection} from './revisionDiff.ts'
 import type {RevisionSelection} from './revisionSelection.ts'
 import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
-import {submitRestore,RestoreClientError,type RestoreSubmission} from './restoreClient.ts'
+import {submitRestore,RestoreClientError,restoreIntentForSelection,type RestoreSubmission} from './restoreClient.ts'
 const noPageSubscribe=(_listener:()=>void)=>()=>{},noPageSnapshot=()=>0
 
 type Props={session:Session;onClose:()=>void;allowClose?:boolean;embedded?:boolean;openRecovery?:()=>void;onEditorPresence?:(value:boolean)=>void;onEpochChange?:(epoch:number)=>void}
@@ -170,7 +170,7 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
  const historyDialog=useRef<HTMLDialogElement|null>(null),selectionRequest=useRef<AbortController|null>(null),pendingRestore=useRef<RestoreSubmission|null>(null),restoreRequest=useRef<AbortController|null>(null)
  useEffect(()=>()=>{selectionRequest.current?.abort();restoreRequest.current?.abort()},[])
  useEffect(()=>{const element=historyDialog.current;if(!element)return;if(historyOpen){if(!element.open)element.showModal()}else element.close()},[historyOpen])
- const clearRevisionSelection=()=>{selectionRequest.current?.abort();selectionRequest.current=null;setRevisionSelection(null);setSelectionLoading(false);setHistoryProblem('');setRestoreAsk(false)}
+ const clearRevisionSelection=()=>{selectionRequest.current?.abort();selectionRequest.current=null;setRevisionSelection(null);setSelectionLoading(false);setHistoryProblem('');setRestoreAsk(false);setRestoreUncertain(false)}
  const closeRevisionHistory=()=>{clearRevisionSelection();setHistoryOpen(false)}
  const loadRevisionPage=async(before:number|null)=>{
   setRevisionsLoading(true)
@@ -186,7 +186,7 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
   const latest=state.revision
   if(latest===null)return
   selectionRequest.current?.abort();const controller=new AbortController();selectionRequest.current=controller
-  setSelectionLoading(true);setRevisionSelection(null);setHistoryProblem('')
+  setSelectionLoading(true);setRevisionSelection(null);setHistoryProblem('');setRestoreUncertain(false)
   try{
    const item=revisionList.find(entry=>entry.revision===number)
    // The reviewed side is immutable native history (older than the room's
@@ -200,20 +200,20 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
   finally{if(!controller.signal.aborted&&selectionRequest.current===controller)setSelectionLoading(false)}
  }
  // The submitting client saves first so the CAS head matches the reviewed
- // comparison; an uncertain outcome keeps the exact intent for an idempotent
- // replay, mirroring the semantic entry (App.tsx restoreHistorical).
+ // comparison. An uncertain outcome keeps that exact intent only while this
+ // selection is still the same target and head; a later revision starts a new
+ // request and the previous prepare fails closed.
  const confirmRestore=async()=>{
   if(session.scope!=='write')throw new Error(t('readOnlyMode'))
   const selection=revisionSelection
   if(!selection)throw new Error(t('restoreCouldNotConfirm'))
-  if(!pendingRestore.current){
-   const head=await controller.save()
-   if(head!==selection.comparedWith)throw new Error(t('restoreComparisonChanged'))
-   pendingRestore.current={requestId:crypto.randomUUID().replaceAll('-',''),target:selection.target,expectedRevision:head,fromEpoch:session.collaborationEpoch??0}
-  }
+  const head=await controller.save()
+  if(head!==selection.comparedWith)throw new Error(t('restoreComparisonChanged'))
+  const intent=restoreIntentForSelection(pendingRestore.current,selection.target,head)??{requestId:crypto.randomUUID().replaceAll('-',''),target:selection.target,expectedRevision:head,fromEpoch:session.collaborationEpoch??0}
+  pendingRestore.current=intent
   restoreRequest.current?.abort();const abort=new AbortController();restoreRequest.current=abort
   try{
-   const receipt=await submitRestore({...session,collabUrl:session.collabUrl||import.meta.env.VITE_HCD_COLLAB_URL},pendingRestore.current,abort.signal)
+   const receipt=await submitRestore({...session,collabUrl:session.collabUrl||import.meta.env.VITE_HCD_COLLAB_URL},intent,abort.signal)
    pendingRestore.current=null;setRestoreAsk(false);setRestoreUncertain(false)
    controller.notifyRestoreCommitted(receipt.collaborationEpoch)
   }catch(cause){

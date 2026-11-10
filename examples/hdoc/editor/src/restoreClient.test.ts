@@ -1,6 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {installRestoreHandoff} from './restoreClient.ts'
+import {installRestoreHandoff,restoreIntentForSelection,type RestoreSubmission} from './restoreClient.ts'
+test('a prepared restore is replayed only for the same target and the head just read',()=>{
+ const pending:RestoreSubmission={requestId:'a'.repeat(32),target:2,expectedRevision:4,fromEpoch:1}
+ assert.equal(restoreIntentForSelection(pending,2,4),pending)
+ assert.equal(restoreIntentForSelection(null,2,4),null)
+ assert.equal(restoreIntentForSelection(pending,5,4),null)
+ assert.equal(restoreIntentForSelection(pending,2,5),null)
+ assert.equal(restoreIntentForSelection(pending,5,9),null)
+})
 test('handoff locks before asynchronous flush and ignores stale ready/release after teardown',async()=>{
  let listener:((value:{payload:string})=>void)|undefined,finish!:()=>void
  const sent:string[]=[],events:string[]=[],provider={on:(_event:string,cb:any)=>{listener=cb},off:()=>{listener=undefined},sendStateless:(value:string)=>sent.push(value)}

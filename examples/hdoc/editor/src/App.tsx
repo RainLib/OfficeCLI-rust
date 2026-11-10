@@ -67,7 +67,7 @@ import {DeletionReviewPanel,useDeletionReviews} from './DeletionReviewPanel.tsx'
 import {resolveDeletionReview,canConfirmDeletion,type DeletionReview} from './deletionReview.ts'
 import {restoreInlineDeletion,negotiateSession} from './protocolClient.ts'
 import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
-import {installRestoreHandoff,waitRestoreSync,restoreHandoffReady,followCommittedRestore,submitRestore,RestoreClientError,type RestoreSubmission} from './restoreClient.ts'
+import {installRestoreHandoff,waitRestoreSync,restoreHandoffReady,followCommittedRestore,submitRestore,RestoreClientError,restoreIntentForSelection,type RestoreSubmission} from './restoreClient.ts'
 import {RevisionReview} from './RevisionReview.tsx'
 import {semanticRevisionSelection} from './revisionDiff.ts'
 import type {RevisionSelection} from './revisionSelection.ts'
@@ -657,7 +657,7 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
   useEffect(()=>()=>historyRequest.current?.abort(),[])
   async function showRevision(number:number){
     historyRequest.current?.abort();const controller=new AbortController();historyRequest.current=controller
-    setHistoryLoading(true);setError('')
+    setHistoryLoading(true);setError('');setRestoreUncertain(false)
     try{
       const head=revision??(await(await api(session,'/revisions?limit=1',{signal:controller.signal})).json()).headRevision
       const [before,after]=await Promise.all([api(session,`/editor?revision=${number}`,{signal:controller.signal}).then(response=>response.json()),api(session,`/editor?revision=${head}`,{signal:controller.signal}).then(response=>response.json())]) as [Projection,Projection]
@@ -670,18 +670,17 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
     }catch(cause){if(!controller.signal.aborted)setError(String(cause))}
     finally{if(!controller.signal.aborted)setHistoryLoading(false)}
   }
-  function closeHistorical(){historyRequest.current?.abort();setHistoryLoading(false);setHistorical(null);setRevisionSelection(null);requestAnimationFrame(()=>documentScroll.current?.scrollTo({top:liveScroll.current}))}
+  function closeHistorical(){historyRequest.current?.abort();setHistoryLoading(false);setHistorical(null);setRevisionSelection(null);setRestoreUncertain(false);requestAnimationFrame(()=>documentScroll.current?.scrollTo({top:liveScroll.current}))}
 
   async function restoreHistorical() {
     if (!historical || !revisionSelection || accessLocked || scopeReadOnly || session.scope!=='write') throw new Error(t('readOnlyMode'))
-    if(!pendingRestore.current){
-      const head=await save()
-      if(head===null)throw new Error(t('restoreCouldNotConfirm'))
-      if(head!==revisionSelection.comparedWith)throw new Error(t('restoreComparisonChanged'))
-      pendingRestore.current={requestId:crypto.randomUUID().replaceAll('-',''),target:historical.revision,expectedRevision:head,fromEpoch:session.collaborationEpoch??0}
-    }
+    const head=await save()
+    if(head===null)throw new Error(t('restoreCouldNotConfirm'))
+    if(head!==revisionSelection.comparedWith)throw new Error(t('restoreComparisonChanged'))
+    const intent=restoreIntentForSelection(pendingRestore.current,revisionSelection.target,head)??{requestId:crypto.randomUUID().replaceAll('-',''),target:revisionSelection.target,expectedRevision:head,fromEpoch:session.collaborationEpoch??0}
+    pendingRestore.current=intent
     try {
-      const receipt=await submitRestore({...session,collabUrl:session.collabUrl||import.meta.env.VITE_HCD_COLLAB_URL},pendingRestore.current,saveAbort.signal)
+      const receipt=await submitRestore({...session,collabUrl:session.collabUrl||import.meta.env.VITE_HCD_COLLAB_URL},intent,saveAbort.signal)
       pendingRestore.current=null;restoreLockedRef.current=true;imageUploadGate.current=true;historyScope.current='read';editorRef.current?.setEditable(false);setRestoreLocked(true);handoffRef.current.committed(receipt.collaborationEpoch)
     } catch (cause) {
       if(cause instanceof RestoreClientError&&!cause.uncertain)pendingRestore.current=null
@@ -709,9 +708,9 @@ function ConnectedSemanticEditor({session,onClose,onEpochChange,embedded,onWindo
       'revision.history':{enabled:true,active:rightPanel==='revisions'},
       'revision.save':{enabled:!readOnly&&status!=='saving'&&!wordHistory.busy&&!imageDrafts.uploading&&!nodeResourcePendingRef.current()},
       'file.recovery':{enabled:session.collaborationProtocol===structuralProtocol||session.collaborationProtocol===inlineProtocol,active:recoveryOpen},'revision.localCopies':{enabled:true,active:recoveryOpen},
-      'revision.open':{enabled:revision!==null&&!restoreLocked&&!restoreUncertain},
-      'revision.current':{enabled:(!!historical||historyLoading)&&!restoreLocked&&!restoreUncertain},
-      'revision.restore.review':{enabled:!!historical&&!!revisionSelection&&restoreSupported&&session.scope==='write'&&!accessLocked&&!scopeReadOnly&&!restoreLocked&&!restoreUncertain&&!historyLoading},
+      'revision.open':{enabled:revision!==null&&!restoreLocked},
+      'revision.current':{enabled:(!!historical||historyLoading)&&!restoreLocked},
+      'revision.restore.review':{enabled:!!historical&&!!revisionSelection&&restoreSupported&&session.scope==='write'&&!accessLocked&&!scopeReadOnly&&!restoreLocked&&!historyLoading},
       ...semanticActionStates(editor),'mark.apply':{enabled:!!editor&&editor.state.selection.$from.parent.inlineContent&&editor.state.selection.$from.parent.type.name!=='codeBlock'},'mark.toggle':{enabled:!!editor&&editor.state.selection.$from.parent.inlineContent&&editor.state.selection.$from.parent.type.name!=='codeBlock'},'mark.remove':{enabled:!!editor&&(editor.state.selection.empty?(editor.state.storedMarks??editor.state.selection.$from.marks()).some(mark=>mark.type.name==='hcdCustomMark'):editor.state.doc.rangeHasMark(editor.state.selection.from,editor.state.selection.to,editor.schema.marks.hcdCustomMark))},'ai.autocomplete.toggle':{enabled:!!autoController&&(!readOnly||autoEnabled),active:autoEnabled},'ai.autocomplete.accept':{enabled:autoState.phase==='ready'&&autoService.current?.ready()===true},'ai.autocomplete.dismiss':{enabled:!!autoState.requestId},'ai.open':{enabled:true,active:!!aiComposer||rightPanel==='ai'},'ai.compose':{enabled:aiCan('insert')},'ai.cancel':{enabled:['requesting','streaming','applying'].includes(aiState.phase)},'ai.dismiss':{enabled:!!aiState.requestId},'ai.locate':{enabled:!!aiState.requestId},'ai.replace':{enabled:aiCan('replace')},'ai.insert':{enabled:aiCan('insert')},'ai.request':{enabled:aiCan('replace')||aiCan('insert')},'ai.accept':{enabled:aiState.phase==='ready'},'node.insert':{enabled:!!editor&&(session.collaborationProtocol===structuralProtocol||session.collaborationProtocol===inlineProtocol)&&(canInsertExtension(editor.state)||!!blockTargetRef.current&&blockTargetRef.current.intent!=='operate'&&blockActionStates(editor.state,blockTargetRef.current)['text.insert']?.enabled===true)},'node.migrate':{enabled:!!selectedNode&&codec.migrationAvailable(selectedNode.value)&&(!selectedNodeEdits||selectedNodeEdits.ready&&!Object.keys(selectedNodeEdits.conflicts).length)},'node.resources':{enabled:!!selectedNode&&!!codec.resolve(selectedNode.value)&&!Object.keys(selectedNodeEdits?.conflicts??{}).length},'node.update':{enabled:!!selectedNode&&!!codec.resolve(selectedNode.value)&&!Object.keys(selectedNodeEdits?.conflicts??{}).length},'node.delete':{enabled:!!selectedNode&&!!codec.resolve(selectedNode.value)},'node.properties':{enabled:!!selectedNode},'deletion.review':{enabled:deletionConflicts.length>0},'deletion.restore':{enabled:deletionConflicts.length>0},'deletion.confirm':{enabled:deletionConflicts.length>0},'node.conflicts':{enabled:nodeProblems.length>0},'node.resolve':{enabled:!!selectedNodeEdits&&(!selectedNodeEdits.ready||Object.keys(selectedNodeEdits.conflicts).length>0)&&(!!selectedNodeEdits.conflicts['\u0000envelope']||!!codec.resolve(selectedNodeEdits.base))},'reference.retarget':{enabled:!!editor&&(session.collaborationProtocol===structuralProtocol||session.collaborationProtocol===inlineProtocol)},'reference.resolve':{enabled:!!editor&&referenceConflicts.length>0},'reference.keepSaved':{enabled:!!editor&&referenceConflicts.length>0},'reference.person':{enabled:!!editor&&(session.collaborationProtocol===structuralProtocol||session.collaborationProtocol===inlineProtocol)&&canMentionAt(editor.state)},'reference.person.insert':{enabled:!!editor&&(session.collaborationProtocol===structuralProtocol||session.collaborationProtocol===inlineProtocol)&&canMentionAt(editor.state)},'block.appendParagraph':{enabled:!!editor&&!readOnly},...(editor&&blockTargetRef.current?blockActionStates(editor.state,blockTargetRef.current):{}),'file.save':{enabled:!readOnly&&status!=='saving'&&!wordHistory.busy&&!(imageDrafts.uploading||nodeResourcePendingRef.current())},'file.export':{enabled:revision!==null,active:activeTab==='export'},'edit.undo':{enabled:!readOnly&&wordHistory.canUndo},'edit.redo':{enabled:!readOnly&&wordHistory.canRedo},'view.images':{enabled:!!editor,active:rightPanel==='images'},'view.references':{enabled:revision!==null&&!accessLocked,active:rightPanel==='references'},'editor.palette':{enabled:true,active:paletteOpen},'block.menu':{enabled:!!editor&&!readOnly&&blockActionStates(editor.state)['block.duplicate']?.enabled===true}},
   }),async(id,input,signal,insertion)=>{
     if(signal.aborted)return false
