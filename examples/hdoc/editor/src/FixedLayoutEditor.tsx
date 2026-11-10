@@ -27,7 +27,7 @@ import {fixedDocumentHead,verifyFixedDownload} from './fixedExportGuard.ts'
 import {RevisionReview} from './RevisionReview.tsx'
 import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
 import {loadFixedRevisionSelection} from './fixedRevisionReview.ts'
-import {DirectRestoreError,directRestoreSupported,submitDirectRestore} from './directRestoreClient.ts'
+import {DirectRestoreError,committedRestoreAdvance,directRestoreSupported,submitDirectRestore} from './directRestoreClient.ts'
 import type {RevisionSelection} from './revisionSelection.ts'
 
 type PageLoader = ReturnType<typeof createPageLoader>
@@ -374,12 +374,15 @@ export function FixedLayoutEditor({ sourceHash,accessState,saveController, image
       const head=await fixedDocumentHead(session,sourceHash,controller.signal)
       if(head!==revisionSelection.comparedWith){
        // After an outcome-unknown submit the first restore may in fact have
-       // committed. The direct endpoint has no idempotent replay to re-verify
-       // the original request, but a head exactly one past the fence is that
-       // advance, so adopt it; otherwise the dialog stays stranded on a
-       // comparison that can never match again while the retry button
-       // promises a check that always fails.
-       if(restoreUncertain&&head===revisionSelection.comparedWith+1){onRevised(head);setStatus(head);setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);onError('');resetRevisionList();return}
+       // committed. The direct endpoint has no idempotent replay, so the
+       // number alone (head exactly one past the fence) is not identity: a
+       // peer save can land on the same head and a coincidental adopt would
+       // hide a failed restore. Adopt only when the head revision carries
+       // this restore's deterministic `restore-{target}-{head}` patch id;
+       // anything else — including an unreadable record — stays a comparison
+       // change, which the dialog can now leave instead of stranding the
+       // user.
+       if(restoreUncertain&&head===revisionSelection.comparedWith+1&&await committedRestoreAdvance(session,revisionSelection.target,head,controller.signal)){onRevised(head);setStatus(head);setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);onError('');resetRevisionList();return}
        throw new Error(t('restoreComparisonChanged'))
       }
       submitting=true

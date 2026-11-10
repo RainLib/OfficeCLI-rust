@@ -43,3 +43,21 @@ export async function submitDirectRestore(session:Session,target:number,expected
 	}
 	return value
 }
+
+/** The direct endpoint has no idempotent replay, so an outcome-unknown submit
+ * may only be adopted as "this restore committed" when the head revision's
+ * own record says so: hcd-core writes the deterministic
+ * `restore-{target}-{revision}` patch id (crates/hcd-core/src/restore.rs) and
+ * the coordinated path self-verifies the same shape (hdoc_restore.rs). A
+ * plain save — or a restore to a different target — that merely lands on
+ * comparedWith+1 fails the identity check and stays a comparison change,
+ * instead of silently closing the window over content that never moved.
+ * An unreadable record (missing revision, transport error, malformed body)
+ * is treated as not-this-restore; the caller's abort still propagates so a
+ * cancelled recheck is never mistaken for a mismatch. */
+export async function committedRestoreAdvance(session:Session,target:number,head:number,signal?:AbortSignal):Promise<boolean>{
+	let value:{documentId?:string;revision?:number;patchId?:string}
+	try{value=await (await api(session,`/revisions/${head}`,{signal})).json() as {documentId?:string;revision?:number;patchId?:string}}
+	catch(cause){if(signal?.aborted)throw cause;return false}
+	return !!value&&value.documentId===session.documentId&&value.revision===head&&value.patchId===`restore-${target}-${head}`
+}
