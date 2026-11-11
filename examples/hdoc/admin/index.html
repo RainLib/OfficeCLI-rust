@@ -32,6 +32,7 @@
   button { font:inherit; border:1px solid var(--line); background:var(--bg); color:var(--ink);
            border-radius:6px; padding:6px 12px; cursor:pointer; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { border-color:#c33; color:#c33; font-size:12px; padding:2px 8px; }
   button:disabled { opacity:.5; cursor:default; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);
@@ -298,14 +299,20 @@ async function refresh() {
     if (!fonts.length) { $("fontList").textContent = "目录为空。"; }
     else {
       $("fontList").innerHTML =
-        "<table><tr><th>fontId</th><th>字族</th><th>修订</th><th>字面</th><th>许可证</th></tr>" +
+        "<table><tr><th>fontId</th><th>字族</th><th>修订</th><th>字面</th><th>许可证</th><th>操作</th></tr>" +
         fonts.map((font) => font.revisions.map((revision, index) => {
           const first = index === 0;
-          return `<tr>${first ? `<td rowspan="${font.revisions.length}"><code>${esc(font.fontId)}</code></td><td rowspan="${font.revisions.length}">${esc(font.family)}</td>` : ""}` +
+          const deleteFont = first
+            ? `<button class="danger" data-action="deleteFont" data-font="${esc(font.fontId)}" title="删除该字体的全部修订；仍被主题引用时会失败">删除字体</button>`
+            : "";
+          const deleteRevision =
+            `<button class="danger" data-action="deleteRevision" data-font="${esc(font.fontId)}" data-rev="${esc(revision.fontRevisionId)}" title="删除这一修订；被引用时失败，共享字库会保留">删除修订</button>`;
+          return `<tr>${first ? `<td rowspan="${font.revisions.length}"><code>${esc(font.fontId)}</code></td><td rowspan="${font.revisions.length}">${esc(font.family)}<br>${deleteFont}</td>` : ""}` +
             `<td><code title="${esc(revision.fontRevisionId)}">${esc(revision.fontRevisionId.slice(0, 12))}…</code></td>` +
             `<td>${revision.faces.map((face) =>
               `<span class="pill">${esc(face.subfamily)} ${face.weight} ${esc(face.style)} · ${esc(face.scripts.join("/"))} · ${face.byteLength.toLocaleString()}B</span>`).join("")}</td>` +
-            `<td>${esc(revision.license.name)} ${flag("网页", revision.license.webPreview)} ${flag("OOXML", revision.license.ooxmlEmbed)} ${flag("PDF", revision.license.pdfEmbed)}${revision.license.expiresAtEpochMs ? ` <span class="warn">到期 ${new Date(revision.license.expiresAtEpochMs).toLocaleDateString()}</span>` : ""}</td></tr>`;
+            `<td>${esc(revision.license.name)} ${flag("网页", revision.license.webPreview)} ${flag("OOXML", revision.license.ooxmlEmbed)} ${flag("PDF", revision.license.pdfEmbed)}${revision.license.expiresAtEpochMs ? ` <span class="warn">到期 ${new Date(revision.license.expiresAtEpochMs).toLocaleDateString()}</span>` : ""}</td>` +
+            `<td>${deleteRevision}</td></tr>`;
         }).join("")).join("") + "</table>";
     }
     const themesResponse = await api("/v1/catalog/themes");
@@ -377,6 +384,29 @@ $("saveToken").addEventListener("click", () => {
   refresh();
 });
 $("reload").addEventListener("click", refresh);
+
+$("fontList").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const action = button.dataset.action;
+  const fontId = button.dataset.font;
+  const revision = button.dataset.rev || "";
+  if (action === "deleteFont") {
+    if (!confirm(`删除字体 ${fontId} 的全部修订？仅当没有任何主题引用时才会成功。`) ) return;
+    try {
+      const report = await (await api(`/v1/catalog/fonts/${encodeURIComponent(fontId)}`, { method: "DELETE" })).json();
+      setStatus(`已删除字体 ${fontId}：${report.removedRevisions.length} 个修订，回收 ${report.removedBlobs.length} 个字库。`, "ok");
+      refresh();
+    } catch (error) { setStatus(String(error.message || error), "err"); }
+  } else if (action === "deleteRevision") {
+    if (!confirm(`删除修订 ${fontId}/${revision.slice(0, 12)}…？被主题引用时会失败。`) ) return;
+    try {
+      const report = await (await api(`/v1/catalog/fonts/${encodeURIComponent(fontId)}/revisions/${encodeURIComponent(revision)}`, { method: "DELETE" })).json();
+      setStatus(`已删除修订：回收 ${report.removedBlobs.length} 个字库。`, "ok");
+      refresh();
+    } catch (error) { setStatus(String(error.message || error), "err"); }
+  }
+});
 
 const saved = sessionStorage.getItem("hcdAdminToken");
 if (saved) { $("token").value = saved; refresh(); }

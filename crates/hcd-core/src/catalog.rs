@@ -213,6 +213,15 @@ pub struct DocumentThemeResolution {
     pub theme: ResolvedTheme,
 }
 
+/// What a catalog delete removed: the font revision ids dropped, and the blobs
+/// that lost their last reference and were garbage-collected.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FontDeleteReport {
+    pub removed_revisions: Vec<String>,
+    pub removed_blobs: Vec<String>,
+}
+
 impl DiskCatalog {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, HcdError> {
         let root = root.as_ref();
@@ -475,6 +484,130 @@ impl DiskCatalog {
         }
         themes.sort_by(|left, right| left.theme_revision_id.cmp(&right.theme_revision_id));
         Ok(themes)
+    }
+
+    /// Delete one immutable font revision.
+    ///
+    /// A document can only reach a font revision through a theme that cites it,
+    /// so removal is refused while any stored theme still references it. Once
+    /// the revision is dropped, every blob that loses its last reference is
+    /// garbage-collected.
+    pub fn delete_font_revision(
+        &self,
+        font_id: &str,
+        font_revision_id: &str,
+    ) -> Result<FontDeleteReport, HcdError> {
+        let revision = self.font_revision(font_id, font_revision_id)?;
+        if let Some(theme_id) = self.first_theme_referencing(font_id, Some(font_revision_id))? {
+            return Err(HcdError::Unsupported(format!(
+                "font revision {font_id}/{font_revision_id} is still used by theme {theme_id}"
+            )));
+        }
+        let candidates: Vec<(String, FontFileFormat)> = revision
+            .faces
+            .iter()
+            .map(|face| (face.sha256.clone(), face.format))
+            .collect();
+        let path = self.font_revision_path(font_id, font_revision_id)?;
+        fs::remove_file(&path)?;
+        self.remove_font_dir_if_empty(font_id);
+        let removed_blobs = self.gc_blobs(&candidates)?;
+        Ok(FontDeleteReport {
+            removed_revisions: vec![font_revision_id.to_string()],
+            removed_blobs,
+        })
+    }
+
+    /// Delete every revision of one font, refusing while any theme references
+    /// the font. Shared blobs survive until no other revision cites them.
+    pub fn delete_font(&self, font_id: &str) -> Result<FontDeleteReport, HcdError> {
+        require_font_id(font_id)?;
+        let revisions = self.font_revisions(font_id)?;
+        if revisions.is_empty() {
+            return Err(HcdError::NotFound(format!(
+                "font {font_id} has no revisions"
+            )));
+        }
+        if let Some(theme_id) = self.first_theme_referencing(font_id, None)? {
+            return Err(HcdError::Unsupported(format!(
+                "font {font_id} is still used by theme {theme_id}"
+            )));
+        }
+        let mut candidates: Vec<(String, FontFileFormat)> = Vec::new();
+        let mut removed_revisions = Vec::new();
+        for revision in &revisions {
+            for face in &revision.faces {
+                candidates.push((face.sha256.clone(), face.format));
+            }
+            let path = self.font_revision_path(font_id, &revision.font_revision_id)?;
+            fs::remove_file(&path)?;
+            removed_revisions.push(revision.font_revision_id.clone());
+        }
+        let _ = fs::remove_dir(self.root.join("fonts").join(font_id));
+        removed_revisions.sort();
+        let removed_blobs = self.gc_blobs(&candidates)?;
+        Ok(FontDeleteReport {
+            removed_revisions,
+            removed_blobs,
+        })
+    }
+
+    /// The first theme revision that references `font_id` (and, when given, a
+    /// specific revision). Themes are few, so a linear scan is the reference
+    /// check that makes deletion safe without touching the document store.
+    fn first_theme_referencing(
+        &self,
+        font_id: &str,
+        font_revision_id: Option<&str>,
+    ) -> Result<Option<String>, HcdError> {
+        for theme in self.list_themes()? {
+            let hit = theme_refs(&theme).iter().any(|reference| {
+                reference.font_id == font_id
+                    && font_revision_id.is_none_or(|id| reference.font_revision_id == id)
+            });
+            if hit {
+                return Ok(Some(theme.theme_revision_id));
+            }
+        }
+        Ok(None)
+    }
+
+    fn remove_font_dir_if_empty(&self, font_id: &str) {
+        let dir = self.root.join("fonts").join(font_id);
+        let removable = fs::read_dir(&dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if removable {
+            let _ = fs::remove_dir(&dir);
+        }
+    }
+
+    /// Remove blobs that no surviving font revision still references. Callers
+    /// delete their revision files first, so the surviving scan reflects the
+    /// post-deletion state.
+    fn gc_blobs(&self, candidates: &[(String, FontFileFormat)]) -> Result<Vec<String>, HcdError> {
+        let mut live: BTreeSet<String> = BTreeSet::new();
+        for font_id in self.list_font_ids()? {
+            for revision in self.font_revisions(&font_id)? {
+                for face in revision.faces {
+                    live.insert(face.sha256);
+                }
+            }
+        }
+        let mut seen = BTreeSet::new();
+        let mut removed = Vec::new();
+        for (sha256, format) in candidates {
+            if live.contains(sha256) || !seen.insert(sha256.clone()) {
+                continue;
+            }
+            let path = self.blob_path(sha256, *format)?;
+            if path.exists() {
+                fs::remove_file(&path)?;
+                removed.push(sha256.clone());
+            }
+        }
+        removed.sort();
+        Ok(removed)
     }
 
     fn read_blob(&self, sha256: &str, format: FontFileFormat) -> Result<Vec<u8>, HcdError> {
@@ -1795,5 +1928,106 @@ mod tests {
         assert_eq!(rev0.styles_href, "styles.css");
         let report = crate::validate_bundle(&bundle).unwrap();
         assert!(report.valid, "{:?}", report.issues);
+    }
+
+    fn store_font_without_theme(catalog: &DiskCatalog) -> FontRevision {
+        let reg = catalog
+            .put_font_bytes(b"fake-woff2", FontFileFormat::Woff2)
+            .unwrap();
+        let mut font = sample_font(&reg, b"fake-woff2".len() as u64);
+        font.faces[1].sha256 = catalog
+            .put_font_bytes(b"fake-otf-bold", FontFileFormat::Otf)
+            .unwrap();
+        font.faces[1].byte_length = b"fake-otf-bold".len() as u64;
+        catalog.put_font_revision(&font).unwrap()
+    }
+
+    fn store_revision(catalog: &DiskCatalog, reg: &str, bold: &str) -> FontRevision {
+        let mut font = sample_font(reg, b"shared-regular".len() as u64);
+        font.faces[1].sha256 = bold.to_string();
+        font.faces[1].byte_length = b"bold-A".len() as u64;
+        catalog.put_font_revision(&font).unwrap()
+    }
+
+    fn blob_names(catalog: &DiskCatalog) -> Vec<String> {
+        std::fs::read_dir(catalog.root().join("blobs"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn delete_is_refused_while_a_theme_references_the_font() {
+        let (_temp, catalog, font_revision_id, _theme_id) = install();
+        assert!(matches!(
+            catalog.delete_font_revision("source-han-sans", &font_revision_id),
+            Err(HcdError::Unsupported(_))
+        ));
+        assert!(matches!(
+            catalog.delete_font("source-han-sans"),
+            Err(HcdError::Unsupported(_))
+        ));
+        // Nothing was removed while a theme cites it.
+        assert_eq!(catalog.font_revisions("source-han-sans").unwrap().len(), 1);
+        assert_eq!(
+            catalog.list_font_ids().unwrap(),
+            vec!["source-han-sans".to_string()]
+        );
+    }
+
+    #[test]
+    fn delete_font_revision_drops_it_and_garbage_collects_orphan_blobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = DiskCatalog::open(temp.path()).unwrap();
+        let stored = store_font_without_theme(&catalog);
+        assert_eq!(catalog.list_font_ids().unwrap().len(), 1);
+        assert_eq!(blob_names(&catalog).len(), 2);
+
+        let report = catalog
+            .delete_font_revision("source-han-sans", &stored.font_revision_id)
+            .unwrap();
+        assert_eq!(report.removed_revisions, vec![stored.font_revision_id]);
+        assert_eq!(report.removed_blobs.len(), 2);
+        assert!(catalog.list_font_ids().unwrap().is_empty());
+        assert!(blob_names(&catalog).is_empty());
+    }
+
+    #[test]
+    fn delete_keeps_a_shared_blob_until_the_last_revision_goes() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = DiskCatalog::open(temp.path()).unwrap();
+        let reg = catalog
+            .put_font_bytes(b"shared-regular", FontFileFormat::Woff2)
+            .unwrap();
+        let bold_a = catalog
+            .put_font_bytes(b"bold-A", FontFileFormat::Otf)
+            .unwrap();
+        let bold_b = catalog
+            .put_font_bytes(b"bold-B", FontFileFormat::Otf)
+            .unwrap();
+        let rev_a = store_revision(&catalog, &reg, &bold_a);
+        let _rev_b = store_revision(&catalog, &reg, &bold_b);
+        assert_eq!(blob_names(&catalog).len(), 3);
+
+        let report = catalog
+            .delete_font_revision("source-han-sans", &rev_a.font_revision_id)
+            .unwrap();
+        // bold_a is now unreferenced, but reg is still cited by the survivor.
+        assert_eq!(report.removed_blobs, vec![bold_a]);
+        assert_eq!(blob_names(&catalog).len(), 2);
+        assert!(blob_names(&catalog)
+            .iter()
+            .any(|name| name.starts_with(&reg)));
+
+        // Removing the whole font releases the shared regular blob too.
+        let report = catalog.delete_font("source-han-sans").unwrap();
+        assert!(report.removed_blobs.contains(&reg));
+        assert_eq!(report.removed_revisions.len(), 1);
+        assert!(blob_names(&catalog).is_empty());
+        assert!(catalog.list_font_ids().unwrap().is_empty());
     }
 }

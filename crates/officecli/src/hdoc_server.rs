@@ -7,7 +7,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use futures::StreamExt;
@@ -15,10 +15,10 @@ use hcd_core::{
     apply_patch, apply_structure_patch, detect_font_format, editor_projection, hash_file,
     manifest_at_revision, pin_document_theme, project_editor, resolve_document_theme,
     restore_revision, search_bundle, BlockPrecondition, Bundle, DiskCatalog, EditorBlockContent,
-    EditorInline, FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch,
-    FontStyle, HcdError, PatchBatch, StructureOperation, StructurePatchBatch, ThemeFontSlots,
-    ThemeRevision, FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES,
-    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
+    EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRevision,
+    FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
+    StructurePatchBatch, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
+    HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -174,7 +174,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             get(theme_file),
         )
         .route("/v1/catalog/fonts", get(catalog_fonts))
-        .route("/v1/catalog/fonts/{font_id}", get(catalog_font))
+        .route(
+            "/v1/catalog/fonts/{font_id}",
+            get(catalog_font).delete(catalog_delete_font),
+        )
         .route(
             "/v1/catalog/fonts/{font_id}/blobs",
             post(catalog_put_blob).route_layer(DefaultBodyLimit::max(MAX_FONT_BYTES as usize)),
@@ -182,6 +185,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route(
             "/v1/catalog/fonts/{font_id}/revisions",
             post(catalog_put_font_revision),
+        )
+        .route(
+            "/v1/catalog/fonts/{font_id}/revisions/{revision}",
+            delete(catalog_delete_font_revision),
         )
         .route(
             "/v1/catalog/themes",
@@ -1627,6 +1634,46 @@ async fn catalog_font(
     ))
 }
 
+async fn catalog_delete_font(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<FontDeleteReport>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    let report = state.catalog.delete_font(&font_id).map_err(hcd_error)?;
+    Ok(Json(report))
+}
+
+async fn catalog_delete_font_revision(
+    State(state): State<ServerState>,
+    Path((font_id, revision)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<FontDeleteReport>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    if revision.len() != 64
+        || !revision
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(bad("fontRevisionId must be a lowercase SHA-256 digest"));
+    }
+    let report = state
+        .catalog
+        .delete_font_revision(&font_id, &revision)
+        .map_err(hcd_error)?;
+    Ok(Json(report))
+}
+
 #[derive(Deserialize)]
 struct BlobQuery {
     format: String,
@@ -2291,6 +2338,162 @@ mod tests {
         let themes = catalog_themes(State(state), admin).await.unwrap();
         assert_eq!(themes.0.len(), 1);
         assert_eq!(themes.0[0].theme_revision_id, theme_revision_id);
+    }
+
+    #[tokio::test]
+    async fn catalog_delete_refuses_referenced_fonts_and_removes_loose_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let demo_rev = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .font_revision_id;
+
+        // A theme pins the demo-serif revision, so it is not removable.
+        let _ = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: demo_rev.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let error = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("demo-serif".to_string(), demo_rev.clone())),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        let error = catalog_delete_font(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(catalog_font(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0
+        .iter()
+        .any(|revision| revision.font_revision_id == demo_rev));
+
+        // A loose font that shares the same blob can be deleted.
+        let _ = catalog_put_blob(
+            State(state.clone()),
+            Path("loose-font".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let loose_rev = catalog_put_font_revision(
+            State(state.clone()),
+            Path("loose-font".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Loose Font".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .font_revision_id;
+
+        let report = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("loose-font".to_string(), loose_rev.clone())),
+            admin.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.0.removed_revisions, vec![loose_rev]);
+        // The blob is still cited by demo-serif, so GC keeps it.
+        assert!(report.0.removed_blobs.is_empty());
+        let fonts = catalog_fonts(State(state.clone()), admin.clone())
+            .await
+            .unwrap();
+        assert_eq!(fonts.0.len(), 1);
+        assert_eq!(fonts.0[0].font_id, "demo-serif");
+
+        // Malformed revision id is rejected before lookup.
+        let error = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("demo-serif".to_string(), "nope".to_string())),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        // A well-formed but unknown revision id is a 404.
+        let error = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("demo-serif".to_string(), "cd".repeat(32))),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        // A non-admin token cannot delete.
+        let reader = bearer(secret, "doc", "read");
+        let error = catalog_delete_font(State(state), Path("demo-serif".to_string()), reader)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
