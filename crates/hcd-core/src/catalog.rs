@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const FONT_CATALOG_SCHEMA: &str = "hcd-font-catalog/1";
 pub const THEME_SCHEMA: &str = "hcd-theme/1";
-const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CATALOG_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_FACES: usize = 32;
 const MAX_PRESENTATION_FACE_BYTES: u64 = 8 * 1024 * 1024;
@@ -147,7 +147,7 @@ pub struct FontRef {
     pub font_revision_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThemeFontSlots {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,7 +247,9 @@ impl DiskCatalog {
         Ok(sha256)
     }
 
-    pub fn put_font_revision(&self, revision: &FontRevision) -> Result<(), HcdError> {
+    /// Store one immutable font revision and return it with its computed
+    /// `fontRevisionId`. Writing the same revision again succeeds.
+    pub fn put_font_revision(&self, revision: &FontRevision) -> Result<FontRevision, HcdError> {
         let mut revision = revision.clone();
         validate_font_revision(&revision)?;
         revision.font_revision_id = content_id(&revision, "fontRevisionId")?;
@@ -267,7 +269,8 @@ impl DiskCatalog {
             }
         }
         let path = self.font_revision_path(&revision.font_id, &revision.font_revision_id)?;
-        write_immutable_json(&path, &revision)
+        write_immutable_json(&path, &revision)?;
+        Ok(revision)
     }
 
     pub fn put_theme(&self, theme: &ThemeRevision) -> Result<String, HcdError> {
@@ -400,6 +403,77 @@ impl DiskCatalog {
         Ok((bytes, format))
     }
 
+    /// Every font ID stored in the catalog, sorted. Directories with invalid
+    /// names cannot be addressed and are skipped.
+    pub fn list_font_ids(&self) -> Result<Vec<String>, HcdError> {
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(self.root.join("fonts"))? {
+            let entry = entry?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if require_font_id(&name).is_ok() {
+                ids.push(name);
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Every stored revision of one font, each verified against its contents.
+    /// A revision whose file no longer matches returns an error instead of an
+    /// incomplete listing.
+    pub fn font_revisions(&self, font_id: &str) -> Result<Vec<FontRevision>, HcdError> {
+        require_font_id(font_id)?;
+        let mut revisions = Vec::new();
+        let entries = fs::read_dir(self.root.join("fonts").join(font_id)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                HcdError::NotFound(format!("font {font_id} has no revisions"))
+            } else {
+                HcdError::Io(error)
+            }
+        })?;
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            revisions.push(self.font_revision(font_id, &stem)?);
+        }
+        revisions.sort_by(|left, right| left.font_revision_id.cmp(&right.font_revision_id));
+        Ok(revisions)
+    }
+
+    /// Read one stored theme revision.
+    pub fn get_theme(&self, theme_revision_id: &str) -> Result<ThemeRevision, HcdError> {
+        self.theme(theme_revision_id)
+    }
+
+    /// Every stored theme revision, each verified against its contents.
+    pub fn list_themes(&self) -> Result<Vec<ThemeRevision>, HcdError> {
+        let mut themes = Vec::new();
+        for entry in fs::read_dir(self.root.join("themes"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            themes.push(self.theme(&stem)?);
+        }
+        themes.sort_by(|left, right| left.theme_revision_id.cmp(&right.theme_revision_id));
+        Ok(themes)
+    }
+
     fn read_blob(&self, sha256: &str, format: FontFileFormat) -> Result<Vec<u8>, HcdError> {
         require_sha256(sha256)?;
         let path = self.blob_path(sha256, format)?;
@@ -480,6 +554,22 @@ impl DiskCatalog {
             .root
             .join("blobs")
             .join(format!("{sha256}.{}", format.extension())))
+    }
+}
+
+/// Recognise a catalog-supported font file by its magic bytes.
+///
+/// Unknown or unsupported binaries (woff, ttc, images) return `None`, so an
+/// upload endpoint can reject them before storing a blob.
+pub fn detect_font_format(bytes: &[u8]) -> Option<FontFileFormat> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    match &bytes[..4] {
+        b"wOF2" => Some(FontFileFormat::Woff2),
+        b"OTTO" => Some(FontFileFormat::Otf),
+        [0x00, 0x01, 0x00, 0x00] | b"true" => Some(FontFileFormat::Ttf),
+        _ => None,
     }
 }
 
@@ -1097,10 +1187,11 @@ mod tests {
             .put_font_bytes(b"fake-otf-bold", FontFileFormat::Otf)
             .unwrap();
         font.faces[1].byte_length = b"fake-otf-bold".len() as u64;
-        catalog.put_font_revision(&font).unwrap();
-        let stored = catalog
-            .font_revision(&font.font_id, &content_id(&font, "fontRevisionId").unwrap())
-            .unwrap();
+        let stored = catalog.put_font_revision(&font).unwrap();
+        assert_eq!(
+            stored.font_revision_id,
+            content_id(&font, "fontRevisionId").unwrap()
+        );
         let theme = ThemeRevision {
             schema_version: THEME_SCHEMA.to_string(),
             theme_revision_id: String::new(),
@@ -1125,6 +1216,60 @@ mod tests {
         };
         let theme_id = catalog.put_theme(&theme).unwrap();
         (temp, catalog, stored.font_revision_id, theme_id)
+    }
+
+    #[test]
+    fn listing_returns_stored_fonts_and_themes() {
+        let (_temp, catalog, font_revision_id, theme_id) = install();
+        assert_eq!(
+            catalog.list_font_ids().unwrap(),
+            vec!["source-han-sans".to_string()]
+        );
+        let revisions = catalog.font_revisions("source-han-sans").unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].font_revision_id, font_revision_id);
+        assert_eq!(revisions[0].faces.len(), 2);
+        assert_eq!(catalog.get_theme(&theme_id).unwrap().name, "Office default");
+        let themes = catalog.list_themes().unwrap();
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].theme_revision_id, theme_id);
+    }
+
+    #[test]
+    fn listing_rejects_a_tampered_object_instead_of_a_partial_view() {
+        let (temp, catalog, _font_revision_id, _theme_id) = install();
+        fs::write(
+            temp.path()
+                .join("themes")
+                .join(format!("{}.json", "ab".repeat(32))),
+            b"{}",
+        )
+        .unwrap();
+        let error = catalog.list_themes().unwrap_err();
+        assert!(matches!(error, HcdError::InvalidBundle(_)));
+    }
+
+    #[test]
+    fn detect_font_format_reads_magic_bytes() {
+        assert_eq!(
+            detect_font_format(b"wOF2 payload"),
+            Some(FontFileFormat::Woff2)
+        );
+        assert_eq!(
+            detect_font_format(b"OTTO payload"),
+            Some(FontFileFormat::Otf)
+        );
+        assert_eq!(
+            detect_font_format(&[0x00, 0x01, 0x00, 0x00, b'g', b'p', b'f', b'x']),
+            Some(FontFileFormat::Ttf)
+        );
+        assert_eq!(
+            detect_font_format(b"true payload"),
+            Some(FontFileFormat::Ttf)
+        );
+        assert_eq!(detect_font_format(b"wOFF payload"), None);
+        assert_eq!(detect_font_format(b"PK\x03\x04 zip"), None);
+        assert_eq!(detect_font_format(b"ab"), None);
     }
 
     #[test]

@@ -12,10 +12,13 @@ use axum::{Json, Router};
 use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
-    apply_patch, apply_structure_patch, editor_projection, hash_file, manifest_at_revision,
-    pin_document_theme, project_editor, resolve_document_theme, restore_revision, search_bundle,
-    BlockPrecondition, Bundle, DiskCatalog, EditorBlockContent, EditorInline, HcdError, PatchBatch,
-    StructureOperation, StructurePatchBatch, HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
+    apply_patch, apply_structure_patch, detect_font_format, editor_projection, hash_file,
+    manifest_at_revision, pin_document_theme, project_editor, resolve_document_theme,
+    restore_revision, search_bundle, BlockPrecondition, Bundle, DiskCatalog, EditorBlockContent,
+    EditorInline, FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch,
+    FontStyle, HcdError, PatchBatch, StructureOperation, StructurePatchBatch, ThemeFontSlots,
+    ThemeRevision, FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES,
+    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -71,10 +74,14 @@ fn load_secret(name: &str) -> Result<Vec<u8>> {
 
 pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
     if !(valid_id(&command.document_id)
-        || command.document_id == "*" && matches!(command.scope, HdocTokenScope::Upload))
+        || command.document_id == "*"
+            && matches!(
+                command.scope,
+                HdocTokenScope::Upload | HdocTokenScope::Admin
+            ))
     {
         return Err(anyhow!(
-            "document ID must be 1-128 ASCII letters, digits, _ or -"
+            "document ID must be 1-128 ASCII letters, digits, _ or -, or '*' for an upload or admin token"
         ));
     }
     let secret = load_secret(&command.secret_env)?;
@@ -85,6 +92,7 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
             HdocTokenScope::Read => "read",
             HdocTokenScope::Write => "write",
             HdocTokenScope::Upload => "upload",
+            HdocTokenScope::Admin => "admin",
         }
         .to_string(),
         sub: command.user_id.clone(),
@@ -163,6 +171,20 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route(
             "/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}",
             get(theme_file),
+        )
+        .route("/v1/catalog/fonts", get(catalog_fonts))
+        .route("/v1/catalog/fonts/{font_id}", get(catalog_font))
+        .route(
+            "/v1/catalog/fonts/{font_id}/blobs",
+            post(catalog_put_blob).route_layer(DefaultBodyLimit::max(MAX_FONT_BYTES as usize)),
+        )
+        .route(
+            "/v1/catalog/fonts/{font_id}/revisions",
+            post(catalog_put_font_revision),
+        )
+        .route(
+            "/v1/catalog/themes",
+            get(catalog_themes).post(catalog_put_theme),
         )
         .route("/v1/documents/{id}/export/{format}", get(export_document))
         .route(
@@ -611,6 +633,10 @@ fn authorize_catalog(state: &ServerState, headers: &HeaderMap) -> Result<(), Api
             )
         })?
         .claims;
+    if claims.scope == "admin" && claims.doc == "*" {
+        // The management console previews themes and font files.
+        return Ok(());
+    }
     if !matches!(claims.scope.as_str(), "read" | "write") || !valid_id(&claims.doc) {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -618,6 +644,38 @@ fn authorize_catalog(state: &ServerState, headers: &HeaderMap) -> Result<(), Api
         ));
     }
     Ok(())
+}
+
+/// Catalog administration requires an operator token: scope `admin` issued for
+/// `doc: "*"`. Document-scoped read or write tokens never reach these routes.
+fn authorize_admin(state: &ServerState, headers: &HeaderMap) -> Result<Claims, ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "bearer token required".to_string(),
+            )
+        })?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["hcd-core"]);
+    let actor = decode::<Claims>(token, &DecodingKey::from_secret(&state.secret), &validation)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired token".to_string(),
+            )
+        })?
+        .claims;
+    if actor.scope != "admin" || actor.doc != "*" {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "catalog management requires an admin token".to_string(),
+        ));
+    }
+    Ok(actor)
 }
 
 fn write_claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
@@ -1488,6 +1546,216 @@ fn font_response(bytes: Vec<u8>, format: hcd_core::FontFileFormat) -> Result<Res
     Ok(response)
 }
 
+fn valid_font_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+}
+
+fn parse_font_format(value: &str) -> Result<FontFileFormat, ApiError> {
+    match value {
+        "woff2" => Ok(FontFileFormat::Woff2),
+        "otf" => Ok(FontFileFormat::Otf),
+        "ttf" => Ok(FontFileFormat::Ttf),
+        other => Err(bad(format!("unsupported font format {other}"))),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogFontEntry {
+    font_id: String,
+    family: String,
+    revisions: Vec<FontRevision>,
+}
+
+async fn catalog_fonts(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<CatalogFontEntry>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    let mut fonts = Vec::new();
+    for font_id in state.catalog.list_font_ids().map_err(hcd_error)? {
+        let revisions = state.catalog.font_revisions(&font_id).map_err(hcd_error)?;
+        let family = revisions
+            .first()
+            .map(|revision| revision.family.clone())
+            .unwrap_or_default();
+        fonts.push(CatalogFontEntry {
+            font_id,
+            family,
+            revisions,
+        });
+    }
+    Ok(Json(fonts))
+}
+
+async fn catalog_font(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FontRevision>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    Ok(Json(
+        state.catalog.font_revisions(&font_id).map_err(hcd_error)?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct BlobQuery {
+    format: String,
+}
+
+async fn catalog_put_blob(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    Query(query): Query<BlobQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    let format = parse_font_format(&query.format)?;
+    if body.is_empty() {
+        return Err(bad("empty font file"));
+    }
+    match detect_font_format(&body) {
+        Some(detected) if detected == format => {}
+        Some(detected) => {
+            return Err(bad(format!(
+                "font file magic is {} but format={}",
+                detected.media_type(),
+                query.format
+            )))
+        }
+        None => return Err(bad("unrecognized font file; expected woff2, otf, or ttf")),
+    }
+    let sha256 = state
+        .catalog
+        .put_font_bytes(&body, format)
+        .map_err(hcd_error)?;
+    Ok(Json(json!({
+        "sha256": sha256,
+        "byteLength": body.len(),
+        "format": query.format,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UploadedFace {
+    subfamily: String,
+    weight: u16,
+    style: FontStyle,
+    stretch: FontStretch,
+    scripts: Vec<FontScript>,
+    format: FontFileFormat,
+    sha256: String,
+    byte_length: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NewFontRevisionBody {
+    family: String,
+    faces: Vec<UploadedFace>,
+    license: FontLicense,
+}
+
+async fn catalog_put_font_revision(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<NewFontRevisionBody>,
+) -> Result<Json<FontRevision>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    let family = body.family;
+    let revision = FontRevision {
+        schema_version: FONT_CATALOG_SCHEMA.to_string(),
+        font_id,
+        font_revision_id: String::new(),
+        family: family.clone(),
+        faces: body
+            .faces
+            .into_iter()
+            .map(|face| FontFace {
+                family: family.clone(),
+                subfamily: face.subfamily,
+                weight: face.weight,
+                style: face.style,
+                stretch: face.stretch,
+                scripts: face.scripts,
+                format: face.format,
+                sha256: face.sha256,
+                byte_length: face.byte_length,
+            })
+            .collect(),
+        license: body.license,
+    };
+    let stored = state
+        .catalog
+        .put_font_revision(&revision)
+        .map_err(hcd_error)?;
+    Ok(Json(stored))
+}
+
+async fn catalog_themes(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ThemeRevision>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    Ok(Json(state.catalog.list_themes().map_err(hcd_error)?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NewThemeBody {
+    name: String,
+    major: ThemeFontSlots,
+    minor: ThemeFontSlots,
+    fallback_families: Vec<String>,
+}
+
+async fn catalog_put_theme(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<NewThemeBody>,
+) -> Result<Json<ThemeRevision>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    let theme = ThemeRevision {
+        schema_version: THEME_SCHEMA.to_string(),
+        theme_revision_id: String::new(),
+        name: body.name,
+        major: body.major,
+        minor: body.minor,
+        fallback_families: body.fallback_families,
+    };
+    let theme_revision_id = state.catalog.put_theme(&theme).map_err(hcd_error)?;
+    let stored = state
+        .catalog
+        .get_theme(&theme_revision_id)
+        .map_err(hcd_error)?;
+    Ok(Json(stored))
+}
+
 #[derive(Clone, Copy, Deserialize)]
 struct ExportQuery {
     revision: Option<u64>,
@@ -1787,4 +2055,313 @@ async fn export_document_inner(
         "no-referrer".parse().map_err(internal)?,
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hcd_core::FontRef;
+
+    const TTF: &[u8] = b"\x00\x01\x00\x00glyh font";
+
+    fn test_state(secret: &[u8], root: &std::path::Path) -> ServerState {
+        ServerState {
+            root: root.to_path_buf(),
+            catalog: DiskCatalog::open(root.join("catalog")).unwrap(),
+            secret: Arc::new(secret.to_vec()),
+            remote: None,
+            collaboration_lock: Arc::new(Mutex::new(())),
+            downloads: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn bearer(secret: &[u8], doc: &str, scope: &str) -> HeaderMap {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        let jwt = encode(
+            &Header::new(Algorithm::HS256),
+            &Claims {
+                doc: doc.to_string(),
+                scope: scope.to_string(),
+                sub: None,
+                name: None,
+                aud: "hcd-core".to_string(),
+                iat: now,
+                exp: now + 600,
+            },
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {jwt}").parse().unwrap(),
+        );
+        headers
+    }
+
+    fn face(sha256: &str) -> UploadedFace {
+        UploadedFace {
+            subfamily: "Regular".to_string(),
+            weight: 400,
+            style: FontStyle::Normal,
+            stretch: FontStretch::Normal,
+            scripts: vec![FontScript::Latin, FontScript::Hans],
+            format: FontFileFormat::Ttf,
+            sha256: sha256.to_string(),
+            byte_length: TTF.len() as u64,
+        }
+    }
+
+    fn license() -> FontLicense {
+        FontLicense {
+            name: "OFL-1.1".to_string(),
+            web_preview: true,
+            ooxml_embed: true,
+            pdf_embed: false,
+            redistribution: false,
+            expires_at_epoch_ms: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_routes_require_an_admin_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let error = catalog_fonts(State(state.clone()), HeaderMap::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+        for (doc, scope) in [
+            ("doc-a", "read"),
+            ("doc-a", "write"),
+            ("*", "upload"),
+            ("*", "write"),
+        ] {
+            let headers = bearer(secret, doc, scope);
+            let error = catalog_fonts(State(state.clone()), headers.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{doc}/{scope} leaked");
+            let error = catalog_put_theme(
+                State(state.clone()),
+                headers.clone(),
+                Json(NewThemeBody {
+                    name: "x".to_string(),
+                    major: ThemeFontSlots::default(),
+                    minor: ThemeFontSlots::default(),
+                    fallback_families: vec![],
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{doc}/{scope} wrote");
+        }
+        assert!(catalog_fonts(State(state), bearer(secret, "*", "admin"))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn admin_uploads_font_then_saves_and_lists_a_theme() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let error = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "woff2".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("magic"));
+
+        let error = catalog_put_blob(
+            State(state.clone()),
+            Path("Demo-Serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        assert_eq!(sha256.len(), 64);
+
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let font_revision_id = revision.0.font_revision_id.clone();
+        assert_eq!(font_revision_id.len(), 64);
+        assert_eq!(revision.0.faces[0].family, "Demo Serif");
+
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        let theme_revision_id = theme.0.theme_revision_id.clone();
+
+        let fonts = catalog_fonts(State(state.clone()), admin.clone())
+            .await
+            .unwrap();
+        assert_eq!(fonts.0.len(), 1);
+        assert_eq!(fonts.0[0].font_id, "demo-serif");
+        assert_eq!(fonts.0[0].family, "Demo Serif");
+
+        let one = catalog_font(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(one.0[0].font_revision_id, font_revision_id);
+        assert!(!one.0[0].license.pdf_embed);
+
+        let themes = catalog_themes(State(state), admin).await.unwrap();
+        assert_eq!(themes.0.len(), 1);
+        assert_eq!(themes.0[0].theme_revision_id, theme_revision_id);
+    }
+
+    #[tokio::test]
+    async fn catalog_write_rejects_missing_blobs_and_unknown_fonts() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let error = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&"ab".repeat(32))],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let error = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: "cd".repeat(32),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec![],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let error = catalog_font(
+            State(state.clone()),
+            Path("missing-font".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let error = catalog_font(State(state), Path("Bad Id".to_string()), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn theme_read_routes_accept_document_and_admin_tokens_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let unknown = || Path("ab".repeat(32));
+        let error = theme_revision(
+            State(state.clone()),
+            unknown(),
+            bearer(secret, "*", "upload"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        let error = theme_revision(
+            State(state.clone()),
+            unknown(),
+            bearer(secret, "*", "admin"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        let error = theme_revision(State(state), unknown(), bearer(secret, "doc-a", "read"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
 }

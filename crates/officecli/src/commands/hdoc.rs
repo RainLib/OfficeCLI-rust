@@ -364,6 +364,9 @@ pub enum HdocTokenScope {
     Read,
     Write,
     Upload,
+    /// Font catalog administrator. Pairs with `--document-id '*'` and unlocks
+    /// the `/v1/catalog` write API used by the management console.
+    Admin,
 }
 
 #[derive(Args)]
