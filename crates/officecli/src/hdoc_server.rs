@@ -143,6 +143,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
     };
     let router = Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true})) }))
+        .route("/admin", get(catalog_admin))
         .route("/v1/documents/{id}", get(manifest))
         .route("/v1/import", post(import_document))
         .route("/v1/jobs/{job_id}", get(job_status))
@@ -1546,6 +1547,22 @@ fn font_response(bytes: Vec<u8>, format: hcd_core::FontFileFormat) -> Result<Res
     Ok(response)
 }
 
+/// Same-machine font catalog console. The HTML is embedded so `hdoc serve`
+/// serves it same-origin; every call carries the pasted admin token.
+const CATALOG_ADMIN_HTML: &str = include_str!("../../../examples/hdoc/admin/index.html");
+
+async fn catalog_admin() -> Result<Response, ApiError> {
+    let mut response = Response::new(Body::from(CATALOG_ADMIN_HTML));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        "text/html; charset=utf-8".parse().map_err(internal)?,
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().map_err(internal)?);
+    Ok(response)
+}
+
 fn valid_font_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     (1..=64).contains(&bytes.len())
@@ -2363,5 +2380,22 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_console_is_served_same_origin() {
+        let response = catalog_admin().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("/v1/catalog/fonts"));
+        assert!(html.contains("/v1/catalog/themes"));
+        assert!(html.contains("--scope admin"));
     }
 }

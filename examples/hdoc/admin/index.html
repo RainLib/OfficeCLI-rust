@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HCD 字体目录管理</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2128; --muted: #61697a;
+    --line: #d8dde6; --accent: #2456d6; --warn: #b3541e; --bad: #b42318; --ok: #1d7a3d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161b; --panel:#1d2027; --ink:#e8ebf1; --muted:#9aa3b5;
+            --line:#333947; --accent:#7aa2ff; --warn:#e0a458; --bad:#f0716a; --ok:#5dc983; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--ink);
+         font:14px/1.5 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  .sub { color:var(--muted); margin:0 0 18px; }
+  .bar, .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+                 padding:14px 16px; margin:0 0 16px; }
+  .bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .grid { display:grid; gap:10px 14px; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); }
+  label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--muted); }
+  input, select { font:inherit; color:var(--ink); background:var(--bg);
+                  border:1px solid var(--line); border-radius:6px; padding:6px 8px; min-width:0; }
+  input[type=checkbox] { width:15px; height:15px; }
+  .check { flex-direction:row; align-items:center; gap:6px; }
+  button { font:inherit; border:1px solid var(--line); background:var(--bg); color:var(--ink);
+           border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);
+           vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  code { font:12px ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg);
+         border:1px solid var(--line); border-radius:4px; padding:1px 5px; }
+  .pill { display:inline-block; border:1px solid var(--line); border-radius:999px;
+          padding:0 8px; font-size:11px; color:var(--muted); margin:1px 2px 1px 0; }
+  .yes { color:var(--ok); } .no { color:var(--muted); } .deny { color:var(--bad); }
+  .msg { min-height:20px; font-size:13px; } .msg.err { color:var(--bad); } .msg.ok { color:var(--ok); }
+  .rows { display:flex; flex-direction:column; gap:8px; }
+  .face { display:grid; gap:6px 10px; grid-template-columns:2fr 70px 90px 90px 1fr auto;
+          align-items:center; border:1px dashed var(--line); border-radius:8px; padding:8px; }
+  .scripts { display:flex; flex-wrap:wrap; gap:4px 10px; font-size:12px; }
+  .slot { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:8px; }
+  #preview { border:1px solid var(--line); border-radius:8px; background:var(--panel);
+             padding:16px; margin-top:10px; display:none; }
+  #preview h3 { margin:0 0 6px; font-family:var(--hcd-major-latin,var(--hcd-major-east-asia,sans-serif)); }
+  #preview p { margin:0 0 6px; font-family:var(--hcd-minor-latin,var(--hcd-minor-east-asia,sans-serif)); }
+  .warn { color:var(--warn); font-size:12px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<h1>HCD 字体目录管理</h1>
+<p class="sub">同机字体目录：上传字库、登记修订与许可证、组合主题。页面只和当前源的 <code>/v1/catalog</code> 接口通信。</p>
+
+<div class="bar">
+  <label style="flex:1;min-width:260px">管理令牌（<code>hdoc issue-token --document-id '*' --scope admin</code>）
+    <input id="token" type="password" placeholder="Bearer JWT" autocomplete="off">
+  </label>
+  <button id="saveToken" class="primary">保存令牌</button>
+  <button id="reload">刷新目录</button>
+</div>
+<div id="status" class="msg"></div>
+
+<div class="panel">
+  <h2>字体</h2>
+  <div id="fontList" class="sub">未加载。</div>
+</div>
+
+<div class="panel">
+  <h2>上传字库并登记字体修订</h2>
+  <div class="grid">
+    <label>fontId（小写字母、数字、连字符）<input id="fFontId" placeholder="source-han-sans"></label>
+    <label>字族名 family<input id="fFamily" placeholder="Source Han Sans"></label>
+    <label>许可证名称<input id="fLicense" placeholder="OFL-1.1"></label>
+    <label>许可证到期（可选）<input id="fExpires" type="date"></label>
+  </div>
+  <div class="scripts" style="margin:8px 0">
+    <label class="check"><input id="lWeb" type="checkbox" checked>网页预览</label>
+    <label class="check"><input id="lOoxml" type="checkbox" checked>OOXML 嵌入</label>
+    <label class="check"><input id="lPdf" type="checkbox">PDF 嵌入</label>
+    <label class="check"><input id="lRedist" type="checkbox">允许再分发</label>
+  </div>
+  <label>字库文件（woff2 / otf / ttf，可多选）<input id="fFiles" type="file" multiple
+    accept=".woff2,.otf,.ttf,.ttc,.otc"></label>
+  <div id="faceRows" class="rows" style="margin:10px 0"></div>
+  <div class="msg" id="uploadMsg"></div>
+  <button id="uploadBtn" class="primary">上传并登记修订</button>
+</div>
+
+<div class="panel">
+  <h2>主题</h2>
+  <div id="themeList" class="sub">未加载。</div>
+</div>
+
+<div class="panel">
+  <h2>新建主题</h2>
+  <div class="grid">
+    <label>主题名<input id="tName" placeholder="Brand default"></label>
+    <div class="slot">
+      <label>标题 西文 major.latin <select id="tMajorLatin"></select></label>
+      <label>标题 东亚 major.eastAsia <select id="tMajorEastAsia"></select></label>
+      <label>标题 双向 major.bidi <select id="tMajorBidi"></select></label>
+      <label>正文 西文 minor.latin <select id="tMinorLatin"></select></label>
+      <label>正文 东亚 minor.eastAsia <select id="tMinorEastAsia"></select></label>
+      <label>正文 双向 minor.bidi <select id="tMinorBidi"></select></label>
+    </div>
+  </div>
+  <div class="scripts" style="margin:8px 0">
+    <span style="color:var(--muted);font-size:12px">回退族（最多 4）：</span>
+    <label class="check"><input type="checkbox" class="fallback" value="serif">serif</label>
+    <label class="check"><input type="checkbox" class="fallback" value="sans-serif">sans-serif</label>
+    <label class="check"><input type="checkbox" class="fallback" value="monospace">monospace</label>
+    <label class="check"><input type="checkbox" class="fallback" value="cursive">cursive</label>
+    <label class="check"><input type="checkbox" class="fallback" value="fantasy">fantasy</label>
+    <label class="check"><input type="checkbox" class="fallback" value="system-ui">system-ui</label>
+  </div>
+  <div class="msg" id="themeMsg"></div>
+  <button id="themeBtn" class="primary">保存主题</button>
+</div>
+
+<div class="panel">
+  <h2>主题预览</h2>
+  <div class="bar" style="border:0;padding:0;margin:0">
+    <label style="flex:1">已存主题 <select id="previewTheme"></select></label>
+    <button id="previewBtn">解析并预览</button>
+    <button id="copyThemeId">复制 themeRevisionId</button>
+  </div>
+  <div id="previewWarn" class="warn"></div>
+  <div id="preview">
+    <h3>标题 Aa 汉字 日本語한국어</h3>
+    <p>正文 Aa 汉字 日本語 한국어 The quick brown fox 0123456789.</p>
+    <p style="font-size:12px;color:var(--muted)" id="previewInfo"></p>
+  </div>
+</div>
+
+<script>
+const SCRIPTS = ["latin","eastAsia","bidi","hans","hant","arab"];
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value).replace(/[&<>"']/g,
+  (ch) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+
+let fonts = [];
+let themeIds = [];
+
+function token() { return $("token").value.trim(); }
+function setStatus(text, cls) {
+  const el = $("status"); el.textContent = text; el.className = "msg " + (cls || "");
+}
+
+async function api(path, options) {
+  const headers = Object.assign({ "Authorization": "Bearer " + token() }, (options || {}).headers || {});
+  const response = await fetch(path, Object.assign({}, options, { headers }));
+  if (response.status === 401 || response.status === 403) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || ("需要管理令牌 (" + response.status + ")"));
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || ("请求失败 " + response.status));
+  }
+  return response;
+}
+
+function guessFormat(name) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".woff2")) return "woff2";
+  if (lower.endsWith(".otf")) return "otf";
+  if (lower.endsWith(".ttf")) return "ttf";
+  return null;
+}
+
+function subfamilyOf(name) {
+  const base = name.replace(/\.[^.]*$/, "").replace(/^.*[-_]/, "");
+  return base || "Regular";
+}
+
+function faceRow(entry) {
+  const row = document.createElement("div");
+  row.className = "face";
+  const scripts = SCRIPTS.map((script) =>
+    `<label class="check"><input type="checkbox" class="sc" value="${script}"${script === "latin" ? " checked" : ""}>${script}</label>`
+  ).join("");
+  row.innerHTML =
+    `<span><code>${esc(entry.name)}</code><br><span class="sub">${entry.bytes.length.toLocaleString()} 字节 · ${entry.format}</span></span>` +
+    `<label>字重<input class="weight" type="number" value="400" min="1" max="1000" step="100"></label>` +
+    `<label>样式<select class="style"><option value="normal">normal</option><option value="italic">italic</option><option value="oblique">oblique</option></select></label>` +
+    `<label>宽度<select class="stretch"><option value="normal">normal</option><option value="condensed">condensed</option><option value="expanded">expanded</option></select></label>` +
+    `<div class="scripts">${scripts}</div>` +
+    `<label class="check">字面名<input class="subfam" size="10" value="${esc(subfamilyOf(entry.name))}"></label>`;
+  entry.el = row;
+  return row;
+}
+
+let picked = [];
+$("fFiles").addEventListener("change", async () => {
+  picked = []; $("faceRows").innerHTML = ""; $("uploadMsg").textContent = "";
+  for (const file of $("fFiles").files) {
+    const format = guessFormat(file.name);
+    if (!format) { $("uploadMsg").className = "msg err";
+      $("uploadMsg").textContent = `${file.name}：只支持 woff2 / otf / ttf`; continue; }
+    picked.push({ name: file.name, format, bytes: new Uint8Array(await file.arrayBuffer()) });
+  }
+  for (const entry of picked) $("faceRows").appendChild(faceRow(entry));
+});
+
+function readFace(entry) {
+  const el = entry.el;
+  return {
+    subfamily: el.querySelector(".subfam").value.trim() || "Regular",
+    weight: Number(el.querySelector(".weight").value),
+    style: el.querySelector(".style").value,
+    stretch: el.querySelector(".stretch").value,
+    scripts: [...el.querySelectorAll(".sc")].filter((box) => box.checked).map((box) => box.value),
+    format: entry.format,
+    sha256: "", byteLength: entry.bytes.length,
+  };
+}
+
+$("uploadBtn").addEventListener("click", async () => {
+  const say = (text, cls) => { $("uploadMsg").className = "msg " + cls; $("uploadMsg").textContent = text; };
+  try {
+    const fontId = $("fFontId").value.trim();
+    const family = $("fFamily").value.trim();
+    if (!picked.length) throw new Error("先选择字库文件");
+    if (!/^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/.test(fontId)) throw new Error("fontId 不合规格");
+    if (!family) throw new Error("填写字族名");
+    $("uploadBtn").disabled = true;
+    const faces = [];
+    for (const entry of picked) {
+      const response = await api(`/v1/catalog/fonts/${encodeURIComponent(fontId)}/blobs?format=${entry.format}`,
+        { method: "POST", body: entry.bytes, headers: { "Content-Type": "application/octet-stream" } });
+      const stored = await response.json();
+      const face = readFace(entry);
+      face.sha256 = stored.sha256;
+      faces.push(face);
+    }
+    const expires = $("fExpires").value ? new Date($("fExpires").value + "T23:59:59").getTime() : null;
+    const license = {
+      name: $("fLicense").value.trim() || "未命名",
+      webPreview: $("lWeb").checked, ooxmlEmbed: $("lOoxml").checked,
+      pdfEmbed: $("lPdf").checked, redistribution: $("lRedist").checked,
+    };
+    if (expires !== null) license.expiresAtEpochMs = expires;
+    const response = await api(`/v1/catalog/fonts/${encodeURIComponent(fontId)}/revisions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ family, faces, license }),
+    });
+    const stored = await response.json();
+    say(`已登记 ${stored.fontId} / ${stored.fontRevisionId.slice(0, 12)}…（${stored.faces.length} 个字面）`, "ok");
+    $("fFiles").value = ""; $("faceRows").innerHTML = ""; picked = [];
+    await refresh();
+  } catch (error) { say(String(error.message || error), "err"); }
+  finally { $("uploadBtn").disabled = false; }
+});
+
+$("themeBtn").addEventListener("click", async () => {
+  const say = (text, cls) => { $("themeMsg").className = "msg " + cls; $("themeMsg").textContent = text; };
+  try {
+    const slot = (id) => { const value = $(id).value; if (!value) return null;
+      const [fontId, fontRevisionId] = value.split("/"); return { fontId, fontRevisionId }; };
+    const fallbackFamilies = [...document.querySelectorAll(".fallback:checked")].map((box) => box.value);
+    if (fallbackFamilies.length > 4) throw new Error("回退族最多 4 个");
+    if (![$("tMajorLatin"), $("tMajorEastAsia"), $("tMajorBidi"),
+          $("tMinorLatin"), $("tMinorEastAsia"), $("tMinorBidi")].some((el) => el.value)) {
+      throw new Error("至少指定一个字体槽位");
+    }
+    const response = await api("/v1/catalog/themes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: $("tName").value.trim() || "未命名主题",
+        major: { latin: slot("tMajorLatin"), eastAsia: slot("tMajorEastAsia"), bidi: slot("tMajorBidi") },
+        minor: { latin: slot("tMinorLatin"), eastAsia: slot("tMinorEastAsia"), bidi: slot("tMinorBidi") },
+        fallbackFamilies,
+      }),
+    });
+    const theme = await response.json();
+    say(`主题已保存：${theme.themeRevisionId}`, "ok");
+    await refresh();
+  } catch (error) { say(String(error.message || error), "err"); }
+});
+
+function flag(text, allowed) {
+  return `<span class="${allowed ? "yes" : "deny"}">${text}</span>`;
+}
+
+async function refresh() {
+  try {
+    const fontsResponse = await api("/v1/catalog/fonts");
+    fonts = await fontsResponse.json();
+    if (!fonts.length) { $("fontList").textContent = "目录为空。"; }
+    else {
+      $("fontList").innerHTML =
+        "<table><tr><th>fontId</th><th>字族</th><th>修订</th><th>字面</th><th>许可证</th></tr>" +
+        fonts.map((font) => font.revisions.map((revision, index) => {
+          const first = index === 0;
+          return `<tr>${first ? `<td rowspan="${font.revisions.length}"><code>${esc(font.fontId)}</code></td><td rowspan="${font.revisions.length}">${esc(font.family)}</td>` : ""}` +
+            `<td><code title="${esc(revision.fontRevisionId)}">${esc(revision.fontRevisionId.slice(0, 12))}…</code></td>` +
+            `<td>${revision.faces.map((face) =>
+              `<span class="pill">${esc(face.subfamily)} ${face.weight} ${esc(face.style)} · ${esc(face.scripts.join("/"))} · ${face.byteLength.toLocaleString()}B</span>`).join("")}</td>` +
+            `<td>${esc(revision.license.name)} ${flag("网页", revision.license.webPreview)} ${flag("OOXML", revision.license.ooxmlEmbed)} ${flag("PDF", revision.license.pdfEmbed)}${revision.license.expiresAtEpochMs ? ` <span class="warn">到期 ${new Date(revision.license.expiresAtEpochMs).toLocaleDateString()}</span>` : ""}</td></tr>`;
+        }).join("")).join("") + "</table>";
+    }
+    const themesResponse = await api("/v1/catalog/themes");
+    const themes = await themesResponse.json();
+    themeIds = themes.map((theme) => theme.themeRevisionId);
+    $("themeList").innerHTML = themes.length
+      ? "<table><tr><th>themeRevisionId</th><th>名称</th><th>槽位</th><th>回退</th></tr>" +
+        themes.map((theme) => {
+          const slots = [];
+          for (const group of [["major", theme.major], ["minor", theme.minor]]) {
+            for (const key of ["latin", "eastAsia", "bidi"]) {
+              const ref = group[1][key];
+              if (ref) slots.push(`${group[0]}.${key}=<span class="pill">${esc(ref.fontId)}</span>`);
+            }
+          }
+          return `<tr><td><code title="${esc(theme.themeRevisionId)}">${esc(theme.themeRevisionId.slice(0, 12))}…</code></td>` +
+            `<td>${esc(theme.name)}</td><td>${slots.join(" ")}</td><td>${esc((theme.fallbackFamilies || []).join(", "))}</td></tr>`;
+        }).join("") + "</table>"
+      : '<span class="sub">暂无主题。</span>';
+
+    const options = fonts.flatMap((font) => font.revisions.flatMap((revision) =>
+      revision.faces.length
+        ? [`<option value="${esc(font.fontId)}/${esc(revision.fontRevisionId)}">${esc(font.fontId)} · ${esc(revision.family)} (${esc(revision.fontRevisionId.slice(0, 8))}…)</option>`]
+        : []));
+    for (const id of ["tMajorLatin", "tMajorEastAsia", "tMajorBidi", "tMinorLatin", "tMinorEastAsia", "tMinorBidi"]) {
+      const select = $(id); const previous = select.value;
+      select.innerHTML = '<option value="">（不钉）</option>' + options.join("");
+      if (options.some((text) => text.includes(`"${previous}"`))) select.value = previous;
+    }
+    $("previewTheme").innerHTML = themeIds.length
+      ? themeIds.map((id, index) => `<option value="${esc(id)}">${esc(themes[index].name)} · ${esc(id.slice(0, 12))}…</option>`).join("")
+      : '<option value="">（暂无主题）</option>';
+    setStatus("目录已加载。", "ok");
+  } catch (error) { setStatus(String(error.message || error), "err"); }
+}
+
+let lastThemeId = "";
+$("previewBtn").addEventListener("click", async () => {
+  const id = $("previewTheme").value;
+  if (!id) { setStatus("先选择一个主题。", "err"); return; }
+  try {
+    const response = await api(`/v1/themes/${encodeURIComponent(id)}`);
+    const theme = await response.json();
+    const style = document.getElementById("previewStyle") || Object.assign(document.createElement("style"), { id: "previewStyle" });
+    let css = theme.css;
+    for (const face of theme.faces.filter((item) => item.webPreview)) {
+      const file = await api(face.href);
+      const url = URL.createObjectURL(await file.blob());
+      css = css.split(face.href).join(url);
+    }
+    style.textContent = css;
+    document.head.appendChild(style);
+    $("previewWarn").textContent = (theme.warnings || []).join("；");
+    $("previewInfo").textContent = `${theme.name} · ${theme.faces.filter((face) => face.webPreview).length} 个可预览字面`;
+    $("preview").style.display = "block";
+    lastThemeId = id;
+    setStatus("主题已解析。", "ok");
+  } catch (error) { setStatus(String(error.message || error), "err"); }
+});
+
+$("copyThemeId").addEventListener("click", async () => {
+  if (!lastThemeId) { setStatus("先解析一个主题。", "err"); return; }
+  try { await navigator.clipboard.writeText(lastThemeId); setStatus("themeRevisionId 已复制，用于钉到文档。", "ok"); }
+  catch { setStatus(lastThemeId, "ok"); }
+});
+
+$("saveToken").addEventListener("click", () => {
+  sessionStorage.setItem("hcdAdminToken", token());
+  refresh();
+});
+$("reload").addEventListener("click", refresh);
+
+const saved = sessionStorage.getItem("hcdAdminToken");
+if (saved) { $("token").value = saved; refresh(); }
+else setStatus("粘贴管理令牌后保存。", "");
+</script>
+</body>
+</html>
