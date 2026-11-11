@@ -43,6 +43,7 @@ pub fn restore_revision(
         patch_base_revision: Some(expected_head),
         author_id: None,
         author_name: None,
+        theme_revision_id: historical.theme_revision_id.clone(),
         root_hash: target_record.root_hash.clone(),
         annotation_root_hash: target_record.annotation_root_hash.clone(),
         index_prefix: target_record.index_prefix.clone(),
@@ -63,6 +64,7 @@ pub fn restore_revision(
         grid_column_deletions: Vec::new(),
         structural_change: true,
     };
+    head.theme_revision_id = historical.theme_revision_id.clone();
     head.revision = revision;
     head.root_hash = record.root_hash.clone();
     head.annotation_root_hash = record.annotation_root_hash.clone();

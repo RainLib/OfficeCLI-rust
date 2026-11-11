@@ -163,6 +163,7 @@ pub(crate) fn base_manifest(
         index_page_count: 0,
         chunk_count: 0,
         styles_href: "styles.css".to_string(),
+        theme_revision_id: None,
         capabilities: hcd_core::HcdCapabilities::default(),
         fidelity: None,
         state: "IMPORTING".to_string(),

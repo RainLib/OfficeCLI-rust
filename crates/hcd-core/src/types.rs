@@ -60,6 +60,10 @@ pub struct HcdManifest {
     pub index_page_count: usize,
     pub chunk_count: usize,
     pub styles_href: String,
+    /// Immutable font-catalog theme pinned to this head.
+    /// Historical revisions keep the id stored on their own revision record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision_id: Option<String>,
     pub capabilities: HcdCapabilities,
     /// Import-time fidelity contract for the canonical HTML representation.
     /// A source-backed export can still preserve opaque package parts exactly.
@@ -670,6 +674,9 @@ pub struct RevisionRecord {
     pub author_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_name: Option<String>,
+    /// Catalog theme pinned when this revision was written. Older records omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision_id: Option<String>,
     pub root_hash: String,
     pub annotation_root_hash: String,
     pub index_prefix: String,

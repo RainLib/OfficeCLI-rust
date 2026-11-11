@@ -70,6 +70,9 @@
     "stylesHref": {
       "const": "styles.css"
     },
+    "themeRevisionId": {
+      "$ref": "#/$defs/sha256"
+    },
     "capabilities": {
       "$ref": "#/$defs/capabilities"
     },

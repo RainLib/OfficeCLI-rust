@@ -327,6 +327,9 @@ pub struct HdocServeCommand {
     /// Optional S3-compatible endpoint environment variable
     #[arg(long, default_value = "HCD_S3_ENDPOINT")]
     pub s3_endpoint_env: String,
+    /// Font catalog directory. Defaults to <root>/catalog on the same machine.
+    #[arg(long)]
+    pub catalog: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -1579,7 +1582,7 @@ fn handler_error(error: HcdError) -> HandlerError {
         HcdError::InvalidBundle(message) | HcdError::SourceMismatch(message) => {
             HandlerError::ValidationError(message)
         }
-        HcdError::NodeNotFound(node) => HandlerError::PathNotFound(node),
+        HcdError::NodeNotFound(node) | HcdError::NotFound(node) => HandlerError::PathNotFound(node),
         HcdError::Unsupported(message) => HandlerError::UnsupportedMode(message),
         HcdError::Io(error) => HandlerError::IoError(error),
         other => HandlerError::OperationFailed(other.to_string()),

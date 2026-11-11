@@ -626,6 +626,15 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
             "manifest.json",
         ));
     }
+    if let Some(theme_revision_id) = &manifest.theme_revision_id {
+        if !valid_sha256(theme_revision_id) {
+            issues.push(issue(
+                "THEME_REVISION_INVALID",
+                "themeRevisionId must be a lowercase SHA-256 digest".to_string(),
+                "manifest.json",
+            ));
+        }
+    }
     if manifest.styles_href != "styles.css" {
         issues.push(issue(
             "STYLES_HREF_INVALID",
@@ -693,6 +702,22 @@ fn validate_revision_chain(
             issues.push(issue(
                 "REVISION_SCHEMA_VERSION",
                 format!("unsupported revision schema {}", record.schema_version),
+                &path,
+            ));
+        }
+        if let Some(theme_revision_id) = &record.theme_revision_id {
+            if !valid_sha256(theme_revision_id) {
+                issues.push(issue(
+                    "THEME_REVISION_INVALID",
+                    "themeRevisionId must be a lowercase SHA-256 digest".to_string(),
+                    &path,
+                ));
+            }
+        }
+        if revision == manifest.revision && record.theme_revision_id != manifest.theme_revision_id {
+            issues.push(issue(
+                "THEME_REVISION_MISMATCH",
+                "head revision themeRevisionId does not match the manifest".to_string(),
                 &path,
             ));
         }

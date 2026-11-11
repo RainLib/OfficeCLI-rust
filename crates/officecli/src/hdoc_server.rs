@@ -13,9 +13,9 @@ use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, editor_projection, hash_file, manifest_at_revision,
-    project_editor, restore_revision, search_bundle, BlockPrecondition, Bundle, EditorBlockContent,
-    EditorInline, HcdError, PatchBatch, StructureOperation, StructurePatchBatch,
-    HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
+    pin_document_theme, project_editor, resolve_document_theme, restore_revision, search_bundle,
+    BlockPrecondition, Bundle, DiskCatalog, EditorBlockContent, EditorInline, HcdError, PatchBatch,
+    StructureOperation, StructurePatchBatch, HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 struct ServerState {
     root: PathBuf,
+    catalog: DiskCatalog,
     secret: Arc<Vec<u8>>,
     remote: Option<RemoteStore>,
     collaboration_lock: Arc<Mutex<()>>,
@@ -120,8 +121,13 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             ))
         }
     };
+    let catalog = DiskCatalog::open(match &command.catalog {
+        Some(path) => path.clone(),
+        None => root.join("catalog"),
+    })?;
     let state = ServerState {
         root,
+        catalog,
         secret,
         remote,
         collaboration_lock: Arc::new(Mutex::new(())),
@@ -145,6 +151,19 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/search", get(search))
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
+        .route(
+            "/v1/documents/{id}/theme",
+            get(document_theme).put(pin_theme),
+        )
+        .route(
+            "/v1/documents/{id}/theme/files/{sha256}",
+            get(document_theme_file),
+        )
+        .route("/v1/themes/{theme_revision_id}", get(theme_revision))
+        .route(
+            "/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}",
+            get(theme_file),
+        )
         .route("/v1/documents/{id}/export/{format}", get(export_document))
         .route(
             "/v1/documents/{id}/downloads/{format}",
@@ -496,7 +515,7 @@ fn hcd_error(error: HcdError) -> ApiError {
     let status = match &error {
         HcdError::RevisionConflict(_) => StatusCode::CONFLICT,
         HcdError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
-        HcdError::NodeNotFound(_) => StatusCode::NOT_FOUND,
+        HcdError::NodeNotFound(_) | HcdError::NotFound(_) => StatusCode::NOT_FOUND,
         HcdError::ResourceLimit(_) => StatusCode::PAYLOAD_TOO_LARGE,
         HcdError::Unsupported(_) => StatusCode::UNPROCESSABLE_ENTITY,
         HcdError::Io(_) | HcdError::Json(_) | HcdError::InvalidBundle(_) => {
@@ -566,6 +585,36 @@ fn authorize(
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "read-only token cannot write".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn authorize_catalog(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "bearer token required".to_string(),
+            )
+        })?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["hcd-core"]);
+    let claims = decode::<Claims>(token, &DecodingKey::from_secret(&state.secret), &validation)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired token".to_string(),
+            )
+        })?
+        .claims;
+    if !matches!(claims.scope.as_str(), "read" | "write") || !valid_id(&claims.doc) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "catalog read requires a document read or write token".to_string(),
         ));
     }
     Ok(())
@@ -1286,6 +1335,157 @@ async fn styles(
         Body::from(bytes),
     )
         .into_response())
+}
+
+fn document_font_href(
+    document_id: &str,
+    _font_id: &str,
+    _font_revision_id: &str,
+    sha256: &str,
+) -> String {
+    format!("/v1/documents/{document_id}/theme/files/{sha256}")
+}
+
+fn theme_font_href(
+    theme_revision_id: &str,
+    font_id: &str,
+    font_revision_id: &str,
+    sha256: &str,
+) -> String {
+    format!("/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}")
+}
+
+async fn document_theme(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let resolved = resolve_document_theme(
+        &state.catalog,
+        &bundle,
+        query.revision,
+        |font_id, revision, sha| document_font_href(&id, font_id, revision, sha),
+    )
+    .map_err(hcd_error)?;
+    Ok(Json(resolved))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinThemeBody {
+    theme_revision_id: String,
+}
+
+async fn pin_theme(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<PinThemeBody>,
+) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
+    authorize(&state, &headers, &id, true)?;
+    let bundle = open(&state, &id)?;
+    state
+        .catalog
+        .resolve(&body.theme_revision_id, |font_id, revision, sha| {
+            theme_font_href(&body.theme_revision_id, font_id, revision, sha)
+        })
+        .map_err(hcd_error)?;
+    pin_document_theme(&bundle, &body.theme_revision_id).map_err(hcd_error)?;
+    let resolved =
+        resolve_document_theme(&state.catalog, &bundle, None, |font_id, revision, sha| {
+            document_font_href(&id, font_id, revision, sha)
+        })
+        .map_err(hcd_error)?;
+    Ok(Json(resolved))
+}
+
+async fn document_theme_file(
+    State(state): State<ServerState>,
+    Path((id, sha256)): Path<(String, String)>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let resolved = resolve_document_theme(
+        &state.catalog,
+        &bundle,
+        query.revision,
+        |font_id, revision, sha| document_font_href(&id, font_id, revision, sha),
+    )
+    .map_err(hcd_error)?;
+    let face = resolved
+        .theme
+        .faces
+        .iter()
+        .find(|face| face.sha256 == sha256 && face.web_preview)
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "preview face is not in the pinned theme".to_string(),
+            )
+        })?;
+    let (bytes, format) = state
+        .catalog
+        .read_web_face(
+            &resolved.theme_revision_id,
+            &face.font_id,
+            &face.font_revision_id,
+            &sha256,
+        )
+        .map_err(hcd_error)?;
+    font_response(bytes, format)
+}
+
+async fn theme_revision(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<hcd_core::ResolvedTheme>, ApiError> {
+    authorize_catalog(&state, &headers)?;
+    let theme = state
+        .catalog
+        .resolve(&theme_revision_id, |font_id, revision, sha| {
+            theme_font_href(&theme_revision_id, font_id, revision, sha)
+        })
+        .map_err(hcd_error)?;
+    Ok(Json(theme))
+}
+
+async fn theme_file(
+    State(state): State<ServerState>,
+    Path((theme_revision_id, font_id, font_revision_id, sha256)): Path<(
+        String,
+        String,
+        String,
+        String,
+    )>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_catalog(&state, &headers)?;
+    let (bytes, format) = state
+        .catalog
+        .read_web_face(&theme_revision_id, &font_id, &font_revision_id, &sha256)
+        .map_err(hcd_error)?;
+    font_response(bytes, format)
+}
+
+fn font_response(bytes: Vec<u8>, format: hcd_core::FontFileFormat) -> Result<Response, ApiError> {
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        format.media_type().parse().map_err(internal)?,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "private, immutable, max-age=31536000"
+            .parse()
+            .map_err(internal)?,
+    );
+    Ok(response)
 }
 
 #[derive(Clone, Copy, Deserialize)]

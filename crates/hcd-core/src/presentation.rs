@@ -177,6 +177,7 @@ pub fn manifest_at_revision(
     manifest.index_root_href = record.index_root_href;
     manifest.index_page_count = record.index_page_count.unwrap_or(manifest.index_page_count);
     manifest.chunk_count = record.chunk_count.unwrap_or(manifest.chunk_count);
+    manifest.theme_revision_id = record.theme_revision_id;
     Ok((manifest, revision))
 }
 
