@@ -6,7 +6,8 @@ use crate::common::{
 use hcd_core::{
     hash_bytes, node_bloom_might_contain, stable_node_id, Bundle, BundleWriter, ChunkSourceMap,
     FidelityLevel, FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError,
-    HcdManifest, ImportEvent, NodeMapEntry, SourceAnchor, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    HcdManifest, ImportEvent, NodeMapEntry, SourceAnchor, XlsxCellFormatPatch, HCD_SCHEMA_VERSION,
+    MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -4901,6 +4902,28 @@ pub(crate) fn export_xlsx(
             &drawing_shifts,
         )?;
     }
+    let edited_cells = collect_edited_xlsx_cells(bundle, &manifest)?;
+    let empty_cell_styles = BTreeMap::new();
+    let cell_style_indexes = if edited_cells.is_empty() {
+        HashMap::new()
+    } else {
+        if !archive.contains("xl/styles.xml") {
+            return Err(HcdError::InvalidBundle(
+                "XLSX cell formatting requires xl/styles.xml".to_string(),
+            ));
+        }
+        let styles_xml = archive
+            .read_control_part("xl/styles.xml", MAX_CONTROL_BYTES)
+            .map_err(package_error)?;
+        let (rewritten, indexes) = assign_xlsx_cell_styles(&styles_xml, &edited_cells)?;
+        let path = scratch.path().join("xl-styles.xml");
+        std::fs::write(&path, rewritten)?;
+        replacement_paths.insert("xl/styles.xml".to_string(), path);
+        for part in indexes.keys() {
+            replacements.entry(part.clone()).or_default();
+        }
+        indexes
+    };
     let merge_ranges = collect_canonical_merge_ranges(bundle, &manifest, &workbook, &replacements)?;
     let canonical_rows = collect_canonical_sheet_rows(bundle, &manifest, &workbook, &replacements)?;
     let canonical_last_columns =
@@ -4956,6 +4979,7 @@ pub(crate) fn export_xlsx(
                     &shifts,
                     &column_shifts,
                     last_column,
+                    cell_style_indexes.get(part).unwrap_or(&empty_cell_styles),
                 )
                 .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
@@ -4996,7 +5020,9 @@ pub(crate) fn export_xlsx(
         },
         preserved: vec![
             "unmodified OOXML entries copied as raw compressed payloads".to_string(),
-            if row_insertions.is_empty() && column_shifts.is_empty() {
+            if !edited_cells.is_empty() {
+                "workbook structure, formulas, drawings, and cloned direct cell styles".to_string()
+            } else if row_insertions.is_empty() && column_shifts.is_empty() {
                 "cell style index, workbook structure, formulas and drawings".to_string()
             } else {
                 "cell style index, workbook structure and original cell identities".to_string()
@@ -5043,6 +5069,14 @@ pub(crate) fn export_xlsx(
                     message: "Formula cells were replaced with literal values; dependent formula and chart caches may remain stale until the workbook is recalculated".to_string(),
                     node_id: None,
                     source_part: Some("xl/workbook.xml".to_string()),
+                });
+            }
+            if edited_cells.iter().any(|cell| direct_format(&cell.format)) {
+                warnings.push(FidelityWarning {
+                    code: "XLSX_DIRECT_CELL_FORMAT".to_string(),
+                    message: "cell formatting clones the source style and writes direct bold, italic, underline, size, sRGB font color, and solid fill; number formats stay on the source style".to_string(),
+                    node_id: None,
+                    source_part: Some("xl/styles.xml".to_string()),
                 });
             }
             if chart_caches_may_be_stale {
@@ -5441,6 +5475,798 @@ fn write_merge_cells(
     Ok(())
 }
 
+struct EditedXlsxCell {
+    part: String,
+    reference: String,
+    base_style: usize,
+    format: XlsxCellFormatPatch,
+}
+
+fn collect_edited_xlsx_cells(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+) -> Result<Vec<EditedXlsxCell>, HcdError> {
+    let mut cells = Vec::new();
+    let mut seen = HashSet::new();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            for entry in bundle.read_map(&descriptor)?.entries {
+                if entry.source.node_kind != "cell" {
+                    continue;
+                }
+                let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
+                let Some(marker_at) = html.find(&marker) else {
+                    continue;
+                };
+                let Some(cell_start) = html[..marker_at].rfind("<td ") else {
+                    continue;
+                };
+                let Some(relative_end) = html[cell_start..].find('>') else {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX cell tag is not closed".to_string(),
+                    ));
+                };
+                let tag = &html[cell_start..cell_start + relative_end + 1];
+                let format_edited = html_attribute(tag, "data-hcd-format-edited") == Some("true");
+                if !format_edited {
+                    continue;
+                }
+                let reference = entry
+                    .source
+                    .source_cell_ref
+                    .clone()
+                    .or(entry.source.paragraph_id.clone())
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle(format!(
+                            "formatted XLSX cell {} has no address",
+                            entry.node_id
+                        ))
+                    })?;
+                let key = (entry.source.part.clone(), reference.clone());
+                if !seen.insert(key) {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "XLSX cell {reference} has more than one format"
+                    )));
+                }
+                let base_style = html_attribute(tag, "data-hcd-style-index")
+                    .map(|value| {
+                        value.parse::<usize>().map_err(|_| {
+                            HcdError::InvalidBundle("XLSX style index is invalid".to_string())
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                cells.push(EditedXlsxCell {
+                    part: entry.source.part,
+                    reference,
+                    base_style,
+                    format: if format_edited {
+                        xlsx_patch_from_tag(tag)?
+                    } else {
+                        XlsxCellFormatPatch::default()
+                    },
+                });
+            }
+        }
+    }
+    Ok(cells)
+}
+
+fn html_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!(" {name}=\"");
+    let start = tag.find(&marker)? + marker.len();
+    let end = tag[start..].find('"')? + start;
+    Some(&tag[start..end])
+}
+
+fn xlsx_patch_from_tag(tag: &str) -> Result<XlsxCellFormatPatch, HcdError> {
+    let flag = |name: &str| -> Result<Option<bool>, HcdError> {
+        match html_attribute(tag, name) {
+            Some("1") => Ok(Some(true)),
+            Some("0") => Ok(Some(false)),
+            Some(_) => Err(HcdError::InvalidBundle(format!("XLSX {name} is invalid"))),
+            None => Ok(None),
+        }
+    };
+    let font_size_pt = match html_attribute(tag, "data-hcd-font-size-pt") {
+        Some(value) => Some(value.parse::<f32>().map_err(|_| {
+            HcdError::InvalidBundle("XLSX stored font size is invalid".to_string())
+        })?),
+        None => None,
+    };
+    Ok(XlsxCellFormatPatch {
+        bold: flag("data-hcd-bold")?,
+        italic: flag("data-hcd-italic")?,
+        underline: flag("data-hcd-underline")?,
+        font_size_pt,
+        color: html_attribute(tag, "data-hcd-color").map(|value| format!("#{value}")),
+        fill: html_attribute(tag, "data-hcd-fill").map(|value| format!("#{value}")),
+    })
+}
+
+fn direct_format(format: &XlsxCellFormatPatch) -> bool {
+    format.bold.is_some()
+        || format.italic.is_some()
+        || format.underline.is_some()
+        || format.font_size_pt.is_some()
+        || format.color.is_some()
+        || format.fill.is_some()
+}
+
+type CellStyleIndexes = HashMap<String, BTreeMap<String, u32>>;
+
+fn assign_xlsx_cell_styles(
+    styles_xml: &[u8],
+    edits: &[EditedXlsxCell],
+) -> Result<(Vec<u8>, CellStyleIndexes), HcdError> {
+    let mut library = capture_style_library(styles_xml)?;
+    if library.fonts.is_empty() || library.fills.is_empty() || library.xfs.is_empty() {
+        return Err(HcdError::InvalidBundle(
+            "XLSX styles.xml is missing fonts, fills, or cellXfs".to_string(),
+        ));
+    }
+    let mut font_index = library
+        .fonts
+        .iter()
+        .enumerate()
+        .map(|(index, xml)| (xml.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut fill_index = library
+        .fills
+        .iter()
+        .enumerate()
+        .map(|(index, xml)| (xml.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut xf_index = library
+        .xfs
+        .iter()
+        .enumerate()
+        .map(|(index, xml)| (xml.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut assigned = CellStyleIndexes::new();
+    for edit in edits {
+        let base = library.xfs.get(edit.base_style).cloned().ok_or_else(|| {
+            HcdError::InvalidBundle(format!(
+                "XLSX cell {} uses missing style {}",
+                edit.reference, edit.base_style
+            ))
+        })?;
+        let font_id = first_attribute(&base, "fontId")
+            .unwrap_or_else(|| "0".to_string())
+            .parse::<usize>()
+            .map_err(|_| HcdError::InvalidBundle("XLSX fontId is invalid".to_string()))?;
+        let fill_id = first_attribute(&base, "fillId")
+            .unwrap_or_else(|| "0".to_string())
+            .parse::<usize>()
+            .map_err(|_| HcdError::InvalidBundle("XLSX fillId is invalid".to_string()))?;
+        let source_font = library
+            .fonts
+            .get(font_id)
+            .ok_or_else(|| HcdError::InvalidBundle(format!("XLSX font {font_id} is missing")))?;
+        let font_xml = rewrite_font_xml(source_font, &edit.format)?;
+        let new_font_id = intern_style(&mut library.fonts, &mut font_index, font_xml);
+        let new_fill_id = if let Some(fill) = &edit.format.fill {
+            let prefix = element_prefix_from_xml(
+                library
+                    .fills
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("<fill>"),
+            );
+            let rgb = argb_color(fill)?;
+            let fill_xml = format!(
+                "<{prefix}fill><{prefix}patternFill patternType=\"solid\"><{prefix}fgColor rgb=\"{rgb}\"/></{prefix}patternFill></{prefix}fill>"
+            );
+            intern_style(&mut library.fills, &mut fill_index, fill_xml)
+        } else {
+            fill_id
+        };
+        let xf_xml = rewrite_xf_xml(&base, new_font_id, new_fill_id, edit.format.fill.is_some())?;
+        let style_id = intern_style(&mut library.xfs, &mut xf_index, xf_xml);
+        let slot = assigned.entry(edit.part.clone()).or_default();
+        if slot
+            .insert(edit.reference.clone(), style_id as u32)
+            .is_some()
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "XLSX cell {} has more than one style",
+                edit.reference
+            )));
+        }
+    }
+    Ok((write_style_library(styles_xml, &library)?, assigned))
+}
+
+fn intern_style(items: &mut Vec<String>, index: &mut HashMap<String, usize>, xml: String) -> usize {
+    if let Some(existing) = index.get(&xml) {
+        return *existing;
+    }
+    let id = items.len();
+    index.insert(xml.clone(), id);
+    items.push(xml);
+    id
+}
+
+struct StyleLibrary {
+    fonts: Vec<String>,
+    fills: Vec<String>,
+    xfs: Vec<String>,
+}
+
+fn capture_style_library(xml: &[u8]) -> Result<StyleLibrary, HcdError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut section: Option<&'static str> = None;
+    let mut library = StyleLibrary {
+        fonts: Vec::new(),
+        fills: Vec::new(),
+        xfs: Vec::new(),
+    };
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid xl/styles.xml: {error}")))?;
+        match event {
+            Event::Start(ref start) => {
+                depth += 1;
+                let name = local_name(start.name().as_ref()).to_string();
+                if depth == 2 && matches!(name.as_str(), "fonts" | "fills" | "cellXfs") {
+                    section = Some(match name.as_str() {
+                        "fonts" => "fonts",
+                        "fills" => "fills",
+                        _ => "cellXfs",
+                    });
+                } else if depth == 3 && section == Some("fonts") && name == "font" {
+                    library
+                        .fonts
+                        .push(capture_element_xml(&mut reader, start, false)?);
+                    depth -= 1;
+                } else if depth == 3 && section == Some("fills") && name == "fill" {
+                    library
+                        .fills
+                        .push(capture_element_xml(&mut reader, start, false)?);
+                    depth -= 1;
+                } else if depth == 3 && section == Some("cellXfs") && name == "xf" {
+                    library
+                        .xfs
+                        .push(capture_element_xml(&mut reader, start, false)?);
+                    depth -= 1;
+                }
+            }
+            Event::Empty(ref start) => {
+                let name = local_name(start.name().as_ref()).to_string();
+                if depth == 2 && matches!(name.as_str(), "fonts" | "fills" | "cellXfs") {
+                    continue;
+                }
+                if depth == 2 && section == Some("fonts") && name == "font" {
+                    library
+                        .fonts
+                        .push(capture_element_xml(&mut reader, start, true)?);
+                } else if depth == 2 && section == Some("fills") && name == "fill" {
+                    library
+                        .fills
+                        .push(capture_element_xml(&mut reader, start, true)?);
+                } else if depth == 2 && section == Some("cellXfs") && name == "xf" {
+                    library
+                        .xfs
+                        .push(capture_element_xml(&mut reader, start, true)?);
+                }
+            }
+            Event::End(_) => {
+                if depth == 2 {
+                    section = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(library)
+}
+
+fn capture_element_xml(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart<'_>,
+    is_empty: bool,
+) -> Result<String, HcdError> {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let mut buffer = Vec::new();
+    if is_empty {
+        writer
+            .write_event(Event::Empty(start.to_owned()))
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX style element: {error}")))?;
+        return String::from_utf8(writer.into_inner().into_inner())
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX style UTF-8: {error}")));
+    }
+    writer
+        .write_event(Event::Start(start.to_owned()))
+        .map_err(|error| HcdError::InvalidBundle(format!("XLSX style element: {error}")))?;
+    let mut depth = 1usize;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid xl/styles.xml: {error}")))?;
+        match &event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            Event::Eof => {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX style element is not closed".to_string(),
+                ))
+            }
+            _ => {}
+        }
+        writer
+            .write_event(event)
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX style element: {error}")))?;
+        if depth == 0 {
+            break;
+        }
+        buffer.clear();
+    }
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|error| HcdError::InvalidBundle(format!("XLSX style UTF-8: {error}")))
+}
+
+fn write_style_library(original: &[u8], library: &StyleLibrary) -> Result<Vec<u8>, HcdError> {
+    let mut reader = Reader::from_reader(original);
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut skip_depth = 0usize;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid xl/styles.xml: {error}")))?;
+        if skip_depth > 0 {
+            match &event {
+                Event::Start(_) => skip_depth += 1,
+                Event::End(_) => skip_depth -= 1,
+                Event::Eof => {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX style section is not closed".to_string(),
+                    ))
+                }
+                _ => {}
+            }
+            buffer.clear();
+            continue;
+        }
+        match event {
+            Event::Start(ref start) => {
+                depth += 1;
+                let name = local_name(start.name().as_ref()).to_string();
+                if depth == 2 {
+                    if let Some(items) = style_section_items(&name, library) {
+                        write_style_section(&mut writer, start, items)?;
+                        skip_depth = 1;
+                        depth -= 1;
+                        buffer.clear();
+                        continue;
+                    }
+                }
+                writer.write_event(Event::Start(start.to_owned()))?;
+            }
+            Event::Empty(ref start) => {
+                let name = local_name(start.name().as_ref()).to_string();
+                if depth == 1 {
+                    if let Some(items) = style_section_items(&name, library) {
+                        write_style_section(&mut writer, start, items)?;
+                        buffer.clear();
+                        continue;
+                    }
+                }
+                writer.write_event(Event::Empty(start.to_owned()))?;
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                writer.write_event(event)?;
+            }
+            Event::Eof => break,
+            other => writer.write_event(other)?,
+        }
+        buffer.clear();
+    }
+    Ok(writer.into_inner().into_inner())
+}
+
+fn style_section_items<'a>(name: &str, library: &'a StyleLibrary) -> Option<&'a [String]> {
+    match name {
+        "fonts" => Some(&library.fonts),
+        "fills" => Some(&library.fills),
+        "cellXfs" => Some(&library.xfs),
+        _ => None,
+    }
+}
+
+fn write_style_section<W: Write>(
+    writer: &mut Writer<W>,
+    start: &BytesStart<'_>,
+    items: &[String],
+) -> Result<(), HcdError> {
+    let count = items.len().to_string();
+    let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+    let mut element = BytesStart::new(name);
+    let mut found = false;
+    for attribute in start.attributes().with_checks(false) {
+        let attribute = attribute
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX style attribute: {error}")))?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        if local_name(attribute.key.as_ref()) == "count" {
+            element.push_attribute((key.as_str(), count.as_str()));
+            found = true;
+        } else {
+            let value = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+            element.push_attribute((key.as_str(), value.as_str()));
+        }
+    }
+    if !found {
+        element.push_attribute(("count", count.as_str()));
+    }
+    writer.write_event(Event::Start(element))?;
+    for item in items {
+        writer
+            .get_mut()
+            .write_all(item.as_bytes())
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX style write: {error}")))?;
+    }
+    let end_name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+    writer.write_event(Event::End(BytesEnd::new(end_name)))?;
+    Ok(())
+}
+
+fn rewrite_font_xml(xml: &str, format: &XlsxCellFormatPatch) -> Result<String, HcdError> {
+    let current = font_properties(xml)?;
+    let bold = format.bold.unwrap_or(current.bold);
+    let italic = format.italic.unwrap_or(current.italic);
+    let underline = format.underline.unwrap_or(current.underline);
+    let size = format
+        .font_size_pt
+        .map(excel_font_size)
+        .or_else(|| current.size.clone());
+    let color = format
+        .color
+        .as_deref()
+        .map(argb_color)
+        .transpose()?
+        .or_else(|| current.color.clone());
+    if bold == current.bold
+        && italic == current.italic
+        && underline == current.underline
+        && size == current.size
+        && color == current.color
+    {
+        return Ok(xml.to_string());
+    }
+    let (name, children) = element_children(xml)?;
+    let mut kept = Vec::new();
+    for (local, child) in children {
+        if !matches!(local.as_str(), "b" | "i" | "u" | "sz" | "color") {
+            kept.push(child);
+        }
+    }
+    let prefix = element_prefix_from_xml(xml);
+    if bold {
+        kept.push(format!("<{prefix}b/>"));
+    }
+    if italic {
+        kept.push(format!("<{prefix}i/>"));
+    }
+    if underline {
+        kept.push(format!("<{prefix}u/>"));
+    }
+    if let Some(size) = size {
+        kept.push(format!("<{prefix}sz val=\"{size}\"/>"));
+    }
+    if let Some(color) = color {
+        kept.push(format!("<{prefix}color rgb=\"{color}\"/>"));
+    }
+    Ok(format!("<{name}>{}</{name}>", kept.join("")))
+}
+
+struct FontProperties {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    size: Option<String>,
+    color: Option<String>,
+}
+
+fn font_properties(xml: &str) -> Result<FontProperties, HcdError> {
+    let mut properties = FontProperties {
+        bold: false,
+        italic: false,
+        underline: false,
+        size: None,
+        color: None,
+    };
+    let mut reader = Reader::from_str(xml);
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX font XML: {error}")))?;
+        let (start, is_container) = match &event {
+            Event::Start(start) => (start.clone(), true),
+            Event::Empty(start) => (start.clone(), false),
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                buffer.clear();
+                continue;
+            }
+            Event::Eof => break,
+            _ => {
+                buffer.clear();
+                continue;
+            }
+        };
+        if is_container {
+            depth += 1;
+        }
+        if (is_container && depth == 2) || (!is_container && depth == 1) {
+            match local_name(start.name().as_ref()) {
+                "b" => properties.bold = flag_attribute(&start),
+                "i" => properties.italic = flag_attribute(&start),
+                "u" => {
+                    properties.underline = attribute(&start, "val")
+                        .map(|value| value != "none" && value != "0")
+                        .unwrap_or(true)
+                }
+                "sz" => properties.size = attribute(&start, "val"),
+                "color" => properties.color = attribute(&start, "rgb"),
+                _ => {}
+            }
+        }
+        buffer.clear();
+    }
+    Ok(properties)
+}
+
+fn flag_attribute(element: &BytesStart<'_>) -> bool {
+    !matches!(attribute(element, "val").as_deref(), Some("0" | "false"))
+}
+
+fn element_children(xml: &str) -> Result<(String, Vec<(String, String)>), HcdError> {
+    let mut reader = Reader::from_str(xml);
+    let mut buffer = Vec::new();
+    let mut name = String::new();
+    let mut children = Vec::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX style XML: {error}")))?;
+        match event {
+            Event::Start(ref start) if name.is_empty() => {
+                name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+            }
+            Event::Empty(ref start) if name.is_empty() => {
+                name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+                break;
+            }
+            Event::Start(ref start) => {
+                let local = local_name(start.name().as_ref()).to_string();
+                children.push((local, capture_element_xml(&mut reader, start, false)?));
+            }
+            Event::Empty(ref start) => {
+                let local = local_name(start.name().as_ref()).to_string();
+                children.push((local, capture_element_xml(&mut reader, start, true)?));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    if name.is_empty() {
+        return Err(HcdError::InvalidBundle(
+            "XLSX style element is empty".to_string(),
+        ));
+    }
+    Ok((name, children))
+}
+
+fn rewrite_xf_xml(
+    xml: &str,
+    font_id: usize,
+    fill_id: usize,
+    fill_changed: bool,
+) -> Result<String, HcdError> {
+    let mut reader = Reader::from_str(xml);
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let mut buffer = Vec::new();
+    let mut rewritten_root = false;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX cell style XML: {error}")))?;
+        match event {
+            Event::Start(ref start) if !rewritten_root => {
+                writer.write_event(Event::Start(rewrite_xf_attributes(
+                    start,
+                    font_id,
+                    fill_id,
+                    fill_changed,
+                )?))?;
+                rewritten_root = true;
+            }
+            Event::Empty(ref start) if !rewritten_root => {
+                writer.write_event(Event::Empty(rewrite_xf_attributes(
+                    start,
+                    font_id,
+                    fill_id,
+                    fill_changed,
+                )?))?;
+                break;
+            }
+            Event::Eof => break,
+            other => writer.write_event(other)?,
+        }
+        buffer.clear();
+    }
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|error| HcdError::InvalidBundle(format!("XLSX cell style UTF-8: {error}")))
+}
+
+fn rewrite_xf_attributes(
+    start: &BytesStart<'_>,
+    font_id: usize,
+    fill_id: usize,
+    fill_changed: bool,
+) -> Result<BytesStart<'static>, HcdError> {
+    let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+    let mut element = BytesStart::new(name);
+    let font = font_id.to_string();
+    let fill = fill_id.to_string();
+    let mut saw_font = false;
+    let mut saw_fill = false;
+    let mut saw_apply_font = false;
+    let mut saw_apply_fill = false;
+    for attribute in start.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("XLSX cell style attribute: {error}"))
+        })?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        let local = local_name(attribute.key.as_ref()).to_string();
+        match local.as_str() {
+            "fontId" => {
+                element.push_attribute((key.as_str(), font.as_str()));
+                saw_font = true;
+            }
+            "fillId" => {
+                element.push_attribute((key.as_str(), fill.as_str()));
+                saw_fill = true;
+            }
+            "applyFont" => {
+                element.push_attribute((key.as_str(), "1"));
+                saw_apply_font = true;
+            }
+            "applyFill" if fill_changed => {
+                element.push_attribute((key.as_str(), "1"));
+                saw_apply_fill = true;
+            }
+            _ => {
+                let value = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+                element.push_attribute((key.as_str(), value.as_str()));
+            }
+        }
+    }
+    if !saw_font {
+        element.push_attribute(("fontId", font.as_str()));
+    }
+    if !saw_fill {
+        element.push_attribute(("fillId", fill.as_str()));
+    }
+    if !saw_apply_font {
+        element.push_attribute(("applyFont", "1"));
+    }
+    if fill_changed && !saw_apply_fill {
+        element.push_attribute(("applyFill", "1"));
+    }
+    Ok(element)
+}
+
+fn first_attribute(xml: &str, name: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xml);
+    let mut buffer = Vec::new();
+    loop {
+        let Ok(event) = reader.read_event_into(&mut buffer) else {
+            return None;
+        };
+        match event {
+            Event::Start(ref start) | Event::Empty(ref start) => return attribute(start, name),
+            Event::Eof => return None,
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn element_prefix_from_xml(xml: &str) -> String {
+    let Some(start) = xml.find('<') else {
+        return String::new();
+    };
+    let name = xml[start + 1..]
+        .split(|character: char| character.is_whitespace() || character == '>' || character == '/')
+        .next()
+        .unwrap_or("");
+    match name.rsplit_once(':') {
+        Some((prefix, _)) => format!("{prefix}:"),
+        None => String::new(),
+    }
+}
+
+fn argb_color(color: &str) -> Result<String, HcdError> {
+    let hex = color.trim_start_matches('#').to_ascii_uppercase();
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(HcdError::InvalidBundle(format!(
+            "XLSX color {color} is invalid"
+        )));
+    }
+    Ok(format!("FF{hex}"))
+}
+
+fn excel_font_size(size: f32) -> String {
+    let rounded = (size * 100.0).round() / 100.0;
+    if (rounded - rounded.round()).abs() < 0.001 {
+        format!("{}", rounded.round() as i32)
+    } else {
+        let text = format!("{rounded:.2}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+fn styled_cell(
+    element: BytesStart<'_>,
+    reference: &str,
+    styles: &BTreeMap<String, u32>,
+) -> Result<BytesStart<'static>, HcdError> {
+    let Some(index) = styles.get(reference) else {
+        let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+        let mut copied = BytesStart::new(name);
+        for attribute in element.attributes().with_checks(false) {
+            let attribute = attribute.map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid XLSX attribute: {error}"))
+            })?;
+            let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+            let value = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+            copied.push_attribute((key.as_str(), value.as_str()));
+        }
+        return Ok(copied);
+    };
+    let index = index.to_string();
+    let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+    let mut rewritten = BytesStart::new(name);
+    let mut found = false;
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX attribute: {error}")))?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        if local_name(attribute.key.as_ref()) == "s" {
+            rewritten.push_attribute((key.as_str(), index.as_str()));
+            found = true;
+        } else {
+            let value = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+            rewritten.push_attribute((key.as_str(), value.as_str()));
+        }
+    }
+    if !found {
+        rewritten.push_attribute(("s", index.as_str()));
+    }
+    Ok(rewritten)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rewrite_worksheet(
     source: &mut dyn Read,
@@ -5458,6 +6284,7 @@ fn rewrite_worksheet(
     row_insertions: &[RowShift],
     column_shifts: &[ColumnShift],
     hcd_last_column: u32,
+    cell_styles: &BTreeMap<String, u32>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -5787,6 +6614,7 @@ fn rewrite_worksheet(
                     &row_cell_name,
                     row_heights,
                     &mut seen_created,
+                    cell_styles,
                 )?;
                 last_source_row = source_row;
                 last_row = row;
@@ -5824,6 +6652,7 @@ fn rewrite_worksheet(
                     &row_cell_name,
                     row_heights,
                     &mut seen_created,
+                    cell_styles,
                 )?;
                 last_source_row = source_row;
                 last_row = row;
@@ -5847,6 +6676,7 @@ fn rewrite_worksheet(
                         None,
                         &row_cell_name,
                         &mut seen_created,
+                        cell_styles,
                     )?;
                     writer.write_event(Event::End(BytesEnd::new(name)))?;
                 }
@@ -5872,11 +6702,13 @@ fn rewrite_worksheet(
                             Some(current_column),
                             &row_cell_name,
                             &mut seen_created,
+                            cell_styles,
                         )?;
                         created_here = row_pending.remove(&current_column);
                     }
                 }
                 let shifted = rewrite_xlsx_address_attribute(start, &shifted_reference)?;
+                let shifted = styled_cell(shifted, &reference, cell_styles)?;
                 if let Some((created_ref, text, kind)) = created_here {
                     if replacements.contains_key(&reference) {
                         return Err(HcdError::InvalidBundle(format!(
@@ -5927,11 +6759,13 @@ fn rewrite_worksheet(
                             Some(current_column),
                             &row_cell_name,
                             &mut seen_created,
+                            cell_styles,
                         )?;
                         created_here = row_pending.remove(&current_column);
                     }
                 }
                 let shifted = rewrite_xlsx_address_attribute(empty, &shifted_reference)?;
+                let shifted = styled_cell(shifted, &reference, cell_styles)?;
                 if let Some((created_ref, text, kind)) = created_here {
                     if replacements.contains_key(&reference) {
                         return Err(HcdError::InvalidBundle(format!(
@@ -5966,6 +6800,7 @@ fn rewrite_worksheet(
                     None,
                     &row_cell_name,
                     &mut seen_created,
+                    cell_styles,
                 )?;
                 active_row = None;
                 writer.write_event(event.into_owned())?;
@@ -5982,6 +6817,7 @@ fn rewrite_worksheet(
                     &row_cell_name,
                     row_heights,
                     &mut seen_created,
+                    cell_styles,
                 )?;
                 let name = end.name().as_ref().to_vec();
                 writer.write_event(event.into_owned())?;
@@ -6915,6 +7751,7 @@ fn write_missing_xlsx_rows(
     cell_name: &str,
     row_heights: &BTreeMap<u32, f64>,
     seen: &mut BTreeSet<String>,
+    cell_styles: &BTreeMap<String, u32>,
 ) -> Result<(), HcdError> {
     for &row in canonical_rows.range((last_row.saturating_add(1))..before_row) {
         let mut pending = replacement_rows.remove(&row).unwrap_or_default();
@@ -6930,7 +7767,7 @@ fn write_missing_xlsx_rows(
             writer.write_event(Event::Empty(element))?;
         } else {
             writer.write_event(Event::Start(element))?;
-            flush_new_xlsx_cells(writer, &mut pending, None, cell_name, seen)?;
+            flush_new_xlsx_cells(writer, &mut pending, None, cell_name, seen, cell_styles)?;
             writer.write_event(Event::End(BytesEnd::new(row_name)))?;
         }
     }
@@ -7091,6 +7928,7 @@ fn flush_new_xlsx_cells(
     before_column: Option<u32>,
     cell_name: &str,
     seen: &mut BTreeSet<String>,
+    cell_styles: &BTreeMap<String, u32>,
 ) -> Result<(), HcdError> {
     while let Some((&column, _)) = pending.first_key_value() {
         if before_column.is_some_and(|before| column >= before) {
@@ -7099,6 +7937,7 @@ fn flush_new_xlsx_cells(
         let (_, (reference, text, kind)) = pending.pop_first().expect("first key exists");
         let mut cell = BytesStart::new(cell_name);
         cell.push_attribute(("r", reference.as_str()));
+        let cell = styled_cell(cell, &reference, cell_styles)?;
         if kind == 1 {
             write_formula_cell(writer, &cell, &text)?;
         } else {
@@ -7349,7 +8188,8 @@ mod tests {
     use super::*;
     use hcd_core::{
         extract_text_page, validate_bundle, NodePrecondition, PatchBatch, PatchOperation,
-        HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_6,
+        XlsxCellFormatPatch, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_31,
+        HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -11783,6 +12623,7 @@ mod tests {
             &[],
             &[],
             5,
+            &BTreeMap::new(),
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();
@@ -11968,6 +12809,134 @@ mod tests {
         assert!(attributes.contains("data-hcd-absolute-y-emu=\"571500\""));
         assert!(attributes.contains("data-hcd-extent-width-emu=\"952500\""));
         assert!(attributes.contains("data-hcd-extent-height-emu=\"1905000\""));
+    }
+
+    #[test]
+    fn formats_native_cell_font_and_fill_without_rewriting_shared_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("styled.xlsx");
+        create_shared_string_fixture(&source);
+        let bundle_path = temp.path().join("styled.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let historical = temp.path().join("historical.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("cell-format"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = bundle
+            .read_index_page(&manifest, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.kind == GridChunkKind::Cells)
+            })
+            .unwrap();
+        let entry = bundle
+            .read_map(&descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_31.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "format-a1".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxCellFormat {
+                node_id: entry.node_id,
+                format: XlsxCellFormatPatch {
+                    bold: Some(false),
+                    italic: None,
+                    underline: Some(true),
+                    font_size_pt: Some(18.0),
+                    color: Some("#00AA00".into()),
+                    fill: Some("#00CC66".into()),
+                },
+                precondition: NodePrecondition {
+                    node_hash: entry.node_hash,
+                },
+            }],
+        };
+        let applied = hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert!(applied
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_DIRECT_CELL_FORMAT"));
+        let head = bundle.manifest().unwrap();
+        let descriptor = bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.kind == GridChunkKind::Cells)
+            })
+            .unwrap();
+        let html = bundle.read_chunk(&descriptor).unwrap();
+        assert!(html.contains("data-hcd-format-edited=\"true\""));
+        assert!(html.contains("data-hcd-bold=\"0\""));
+        assert!(html.contains("data-hcd-underline=\"1\""));
+        assert!(html.contains("font-weight:400"));
+        assert!(html.contains("background-color:#00cc66"));
+        let unchanged = PatchBatch {
+            patch_id: "format-a1-again".into(),
+            base_revision: 1,
+            ..patch
+        };
+        assert!(hcd_core::apply_patch(&bundle, &unchanged, 1).is_err());
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_DIRECT_CELL_FORMAT"));
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("t=\"s\""));
+        assert!(sheet.contains("<v>0</v>"));
+        assert!(sheet.contains("<c r=\"A1\" t=\"s\" s=\"6\"><v>0</v></c>"));
+        let styles = read_zip_entry(&exported, "xl/styles.xml");
+        assert!(styles.contains("<cellXfs count=\"7\">"));
+        assert!(styles.contains("fontId=\"2\""));
+        assert!(styles.contains("fillId=\"3\""));
+        assert!(styles.contains("val=\"18\""));
+        assert!(styles.contains("rgb=\"FF00AA00\""));
+        assert!(styles.contains("rgb=\"FF00CC66\""));
+        assert!(styles.contains(
+            "<font><name val=\"Arial\"/><i/><u/><sz val=\"18\"/><color rgb=\"FF00AA00\"/></font>"
+        ));
+        let shared = read_zip_entry(&exported, "xl/sharedStrings.xml");
+        assert!(shared.contains("Value"));
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "xl/styles.xml"),
+            read_zip_entry(&source, "xl/styles.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&historical, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+        );
     }
 
     fn create_shared_string_fixture(path: &Path) {

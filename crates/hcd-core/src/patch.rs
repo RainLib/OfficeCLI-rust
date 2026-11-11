@@ -11,14 +11,14 @@ use crate::{
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
     RevisionRecord, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
-    XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
-    HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
-    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
-    HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19,
-    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3,
-    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
-    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
-    MAX_PATCH_JSON_BYTES,
+    XlsxCellFormatPatch, XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION,
+    HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
+    HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
+    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
+    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -221,6 +221,7 @@ pub fn apply_patch(
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::PptxTextDelete { .. }
                         | PatchOperation::PptxRunFormat { .. }
+                        | PatchOperation::XlsxCellFormat { .. }
                         | PatchOperation::XlsxCellSet { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaToValue { .. }
@@ -276,6 +277,7 @@ pub fn apply_patch(
     let pptx_geometry = collect_pptx_geometry(patch);
     let pptx_deletions = collect_pptx_deletions(patch);
     let pptx_formats = collect_pptx_formats(patch);
+    let xlsx_formats = collect_xlsx_formats(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_blank_merge = collect_xlsx_blank_merge(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
@@ -368,6 +370,7 @@ pub fn apply_patch(
         .chain(pptx_geometry.keys().cloned())
         .chain(pptx_deletions.keys().cloned())
         .chain(pptx_formats.keys().cloned())
+        .chain(xlsx_formats.keys().cloned())
         .chain(pdf_geometry.keys().cloned())
         .chain(pdf_deletions.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
@@ -386,6 +389,7 @@ pub fn apply_patch(
         || !pptx_geometry.is_empty()
         || !pptx_deletions.is_empty()
         || !pptx_formats.is_empty()
+        || !xlsx_formats.is_empty()
         || !xlsx_merges.is_empty()
         || xlsx_blank_merge.is_some()
         || !xlsx_unmerges.is_empty()
@@ -834,6 +838,22 @@ pub fn apply_patch(
                     update_pptx_run_format(&mut html, entry, &change.format)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = xlsx_formats.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell" {
+                        return Err(HcdError::Unsupported(
+                            "XLSX cell formatting requires a worksheet cell".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "XLSX cell {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_xlsx_cell_format(&mut html, &entry.node_id, &change.format)?;
+                    dirty_grid_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
                 if let Some(expected_hash) = pptx_deletions.get(&entry.node_id) {
@@ -1677,6 +1697,12 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             }))
+            .chain(xlsx_formats.keys().map(|node_id| FidelityWarning {
+                code: "XLSX_DIRECT_CELL_FORMAT".to_string(),
+                message: "cell formatting clones the source style and writes direct bold, italic, underline, size, sRGB font color, and solid fill; borders and number formats stay on the source style".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .collect(),
         idempotent_replay: false,
     };
@@ -2080,6 +2106,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_31
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2296,6 +2323,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/30 accepts one PPTX run format operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_31
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxCellFormat { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/31 accepts one XLSX cell format operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2537,6 +2576,24 @@ fn validate_patch_identity(
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_pptx_run_format(format)?;
+            }
+            PatchOperation::XlsxCellFormat {
+                node_id,
+                format,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_31
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.cell.format requires one XLSX operation with hcd-patch/31"
+                            .to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                validate_xlsx_cell_format(format)?;
             }
             PatchOperation::XlsxMerge {
                 node_id,
@@ -3522,6 +3579,65 @@ fn collect_pptx_formats(patch: &PatchBatch) -> HashMap<String, PptxFormatChange>
             ))
         })
         .collect()
+}
+
+#[derive(Clone)]
+struct XlsxFormatChange {
+    format: XlsxCellFormatPatch,
+    node_hash: String,
+}
+
+fn collect_xlsx_formats(patch: &PatchBatch) -> HashMap<String, XlsxFormatChange> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::XlsxCellFormat {
+                node_id,
+                format,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                XlsxFormatChange {
+                    format: format.clone(),
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn validate_xlsx_cell_format(format: &XlsxCellFormatPatch) -> Result<(), HcdError> {
+    if format.bold.is_none()
+        && format.italic.is_none()
+        && format.underline.is_none()
+        && format.font_size_pt.is_none()
+        && format.color.is_none()
+        && format.fill.is_none()
+    {
+        return Err(HcdError::InvalidPatch(
+            "XLSX cell format must set bold, italic, underline, font size, color, or fill"
+                .to_string(),
+        ));
+    }
+    if let Some(size) = format.font_size_pt {
+        if !size.is_finite() || !(1.0..=409.0).contains(&size) {
+            return Err(HcdError::InvalidPatch(
+                "XLSX font size must be from 1 to 409 points".to_string(),
+            ));
+        }
+    }
+    if let Some(color) = &format.color {
+        validate_hex_color("color", color)?;
+    }
+    if let Some(fill) = &format.fill {
+        validate_hex_color("fill", fill)?;
+    }
+    Ok(())
 }
 
 fn validate_pptx_run_format(format: &PptxRunFormat) -> Result<(), HcdError> {
@@ -6582,6 +6698,200 @@ fn insert_pptx_text(
     Ok(())
 }
 
+fn update_xlsx_cell_format(
+    html: &mut String,
+    node_id: &str,
+    format: &XlsxCellFormatPatch,
+) -> Result<(), HcdError> {
+    let marker = format!("data-hcd-id=\"{node_id}\"");
+    let marker_at = html
+        .find(&marker)
+        .ok_or_else(|| HcdError::InvalidBundle(format!("XLSX cell node {node_id} is missing")))?;
+    let cell_start = html[..marker_at].rfind("<td ").ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX cell node has no containing cell".to_string())
+    })?;
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX cell tag is not closed".to_string()))?;
+    let mut cell = html[cell_start..=cell_end].to_string();
+    if !cell.contains("class=\"hcd-cell") {
+        return Err(HcdError::Unsupported(
+            "XLSX cell formatting requires a worksheet cell".to_string(),
+        ));
+    }
+    let existing = xlsx_format_from_tag(&cell)?;
+    let normalize =
+        |color: &String| format!("#{}", color.trim_start_matches('#').to_ascii_uppercase());
+    let color = format.color.as_ref().map(normalize);
+    let fill = format.fill.as_ref().map(normalize);
+    let merged = XlsxCellFormatPatch {
+        bold: format.bold.or(existing.bold),
+        italic: format.italic.or(existing.italic),
+        underline: format.underline.or(existing.underline),
+        font_size_pt: format.font_size_pt.or(existing.font_size_pt),
+        color: color.or_else(|| existing.color.clone()),
+        fill: fill.or_else(|| existing.fill.clone()),
+    };
+    if merged == existing {
+        return Err(HcdError::InvalidPatch(
+            "XLSX cell format is unchanged".to_string(),
+        ));
+    }
+    set_tag_attribute(&mut cell, "data-hcd-format-edited", "true");
+    write_xlsx_format_attributes(&mut cell, &merged);
+    apply_xlsx_cell_css(&mut cell, &merged)?;
+    html.replace_range(cell_start..=cell_end, &cell);
+    Ok(())
+}
+
+fn xlsx_format_from_tag(tag: &str) -> Result<XlsxCellFormatPatch, HcdError> {
+    if xlsx_attribute(tag, "data-hcd-format-edited") != Some("true") {
+        return Ok(XlsxCellFormatPatch::default());
+    }
+    let flag = |name: &str| -> Result<Option<bool>, HcdError> {
+        match xlsx_attribute(tag, name) {
+            Some("1") => Ok(Some(true)),
+            Some("0") => Ok(Some(false)),
+            Some(_) => Err(HcdError::InvalidBundle(format!("XLSX {name} is invalid"))),
+            None => Ok(None),
+        }
+    };
+    let font_size_pt = match xlsx_attribute(tag, "data-hcd-font-size-pt") {
+        Some(value) => Some(value.parse::<f32>().map_err(|_| {
+            HcdError::InvalidBundle("XLSX stored font size is invalid".to_string())
+        })?),
+        None => None,
+    };
+    let color = xlsx_attribute(tag, "data-hcd-color").map(|value| format!("#{value}"));
+    let fill = xlsx_attribute(tag, "data-hcd-fill").map(|value| format!("#{value}"));
+    Ok(XlsxCellFormatPatch {
+        bold: flag("data-hcd-bold")?,
+        italic: flag("data-hcd-italic")?,
+        underline: flag("data-hcd-underline")?,
+        font_size_pt,
+        color,
+        fill,
+    })
+}
+
+fn write_xlsx_format_attributes(tag: &mut String, format: &XlsxCellFormatPatch) {
+    if let Some(bold) = format.bold {
+        set_tag_attribute(tag, "data-hcd-bold", if bold { "1" } else { "0" });
+    }
+    if let Some(italic) = format.italic {
+        set_tag_attribute(tag, "data-hcd-italic", if italic { "1" } else { "0" });
+    }
+    if let Some(underline) = format.underline {
+        set_tag_attribute(tag, "data-hcd-underline", if underline { "1" } else { "0" });
+    }
+    if let Some(size) = format.font_size_pt {
+        let size = format!("{size:.2}");
+        set_tag_attribute(tag, "data-hcd-font-size-pt", &size);
+    }
+    if let Some(color) = &format.color {
+        let color = color.trim_start_matches('#').to_ascii_uppercase();
+        set_tag_attribute(tag, "data-hcd-color", &color);
+    }
+    if let Some(fill) = &format.fill {
+        let fill = fill.trim_start_matches('#').to_ascii_uppercase();
+        set_tag_attribute(tag, "data-hcd-fill", &fill);
+    }
+}
+
+fn apply_xlsx_cell_css(tag: &mut String, format: &XlsxCellFormatPatch) -> Result<(), HcdError> {
+    let style_marker = " style=\"";
+    let mut declarations = BTreeMap::new();
+    let style_range = tag.find(style_marker).map(|start| {
+        let value_start = start + style_marker.len();
+        let value_end = tag[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .unwrap_or(value_start);
+        (value_start, value_end)
+    });
+    if let Some((value_start, value_end)) = style_range {
+        for declaration in tag[value_start..value_end].split(';') {
+            let Some((property, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            declarations.insert(
+                property.trim().to_ascii_lowercase(),
+                value.trim().to_string(),
+            );
+        }
+    }
+    if let Some(bold) = format.bold {
+        declarations.insert(
+            "font-weight".to_string(),
+            if bold { "700" } else { "400" }.to_string(),
+        );
+    }
+    if let Some(italic) = format.italic {
+        declarations.insert(
+            "font-style".to_string(),
+            if italic { "italic" } else { "normal" }.to_string(),
+        );
+    }
+    if let Some(underline) = format.underline {
+        let mut tokens = declarations
+            .get("text-decoration")
+            .map(|value| {
+                value
+                    .split_whitespace()
+                    .filter(|token| *token != "underline" && *token != "none")
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if underline {
+            tokens.push("underline".to_string());
+        }
+        declarations.insert(
+            "text-decoration".to_string(),
+            if tokens.is_empty() {
+                "none".to_string()
+            } else {
+                tokens.join(" ")
+            },
+        );
+    }
+    if let Some(size) = format.font_size_pt {
+        declarations.insert("font-size".to_string(), format!("{size:.2}pt"));
+    }
+    if let Some(color) = &format.color {
+        declarations.insert(
+            "color".to_string(),
+            format!("#{}", color.trim_start_matches('#').to_ascii_lowercase()),
+        );
+    }
+    if let Some(fill) = &format.fill {
+        declarations.insert(
+            "background-color".to_string(),
+            format!("#{}", fill.trim_start_matches('#').to_ascii_lowercase()),
+        );
+    }
+    let style_value = declarations
+        .iter()
+        .map(|(property, value)| format!("{property}:{value}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    if !style_value.is_empty() {
+        crate::html::validate_inline_style(&style_value)?;
+    }
+    if let Some((value_start, value_end)) = style_range {
+        if style_value.is_empty() {
+            let style_start = tag[..value_start].rfind(" style=\"").unwrap_or(value_start);
+            tag.replace_range(style_start..value_end + 1, "");
+        } else {
+            tag.replace_range(value_start..value_end, &style_value);
+        }
+    } else if !style_value.is_empty() {
+        tag.insert_str(tag.len() - 1, &format!(" style=\"{style_value}\""));
+    }
+    Ok(())
+}
+
 fn update_pptx_run_format(
     html: &mut String,
     entry: &mut NodeMapEntry,
@@ -7587,6 +7897,7 @@ fn apply_annotations(
             | PatchOperation::PptxShapeGeometry { .. }
             | PatchOperation::PptxTextDelete { .. }
             | PatchOperation::PptxRunFormat { .. }
+            | PatchOperation::XlsxCellFormat { .. }
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
             | PatchOperation::XlsxMerge { .. }

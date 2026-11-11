@@ -85,6 +85,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [columnWidthChars, setColumnWidthChars] = useState('28')
   const [rowHeightBusy, setRowHeightBusy] = useState(false)
   const [rowHeightPoints, setRowHeightPoints] = useState('30')
+  const [formatBusy, setFormatBusy] = useState(false)
+  const [cellFontSize, setCellFontSize] = useState('11')
+  const [cellFontColor, setCellFontColor] = useState('#112233')
+  const [cellFillColor, setCellFillColor] = useState('#fff2cc')
   const [formulaAddress, setFormulaAddress] = useState('A1')
   const [formulaText, setFormulaText] = useState('')
   const [formulaDirty, setFormulaDirty] = useState(false)
@@ -450,6 +454,45 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     } catch (cause) {
       setError(`拆分失败：${String(cause)}`)
     } finally { setMergeBusy(false) }
+  }
+
+  function selectedCellLink() {
+    const current = runtime.current
+    const sheet = current?.adapter.workbook.getActiveSheet()
+    const range = sheet?.getActiveRange()
+    if (!current || !sheet || !range) return undefined
+    return current.adapter.getNodeAt(sheet.getSheetId(), range.getRow(), range.getColumn())
+  }
+
+  async function saveCellFormat(format: { bold?: boolean; italic?: boolean; underline?: boolean; fontSizePt?: number; color?: string; fill?: string }) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || formatBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const link = selectedCellLink()
+      if (!link) throw new Error('请先选中已有内容的单元格')
+      setFormatBusy(true)
+      setStatus('正在设置单元格格式…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/31', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.cell.format', nodeId: link.nodeId, format,
+            precondition: { nodeHash: link.nodeHash } }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了格式修改')
+      recordEdit(saved.revision, '设置单元格格式')
+      collaboration.announceRevision(saved.revision)
+      await current.adapter.refreshFromServer()
+      setRevision(saved.revision)
+      setError('')
+      setStatus(`revision ${saved.revision} · 已设置单元格格式`)
+    } catch (cause) {
+      setError(`设置格式失败：${String(cause)}`)
+    } finally {
+      setFormatBusy(false)
+    }
   }
 
   async function appendRow() {
@@ -902,7 +945,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => setSettingsOpen(true)}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button className={selectedCellLink()?.bold ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.bold} onClick={() => void saveCellFormat({ bold: !selectedCellLink()?.bold })}><LocalText source={"加粗"} /></button><button className={selectedCellLink()?.italic ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.italic} onClick={() => void saveCellFormat({ italic: !selectedCellLink()?.italic })}><LocalText source={"斜体"} /></button><button className={selectedCellLink()?.underline ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.underline} onClick={() => void saveCellFormat({ underline: !selectedCellLink()?.underline })}><LocalText source={"下划线"} /></button><label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="409" step="0.5" value={cellFontSize} disabled={!editing || formatBusy} onChange={event => setCellFontSize(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || formatBusy || !Number.isFinite(Number(cellFontSize)) || Number(cellFontSize) < 1 || Number(cellFontSize) > 409} onClick={() => void saveCellFormat({ fontSizePt: Number(cellFontSize) })}><LocalText source={"应用字号"} /></button><label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={cellFontColor} disabled={!editing || formatBusy} onChange={event => setCellFontColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ color: cellFontColor })}><LocalText source={"应用颜色"} /></button><label><LocalText source={"填充"} /><input aria-label={localizeSource(locale, "填充")} type="color" value={cellFillColor} disabled={!editing || formatBusy} onChange={event => setCellFillColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ fill: cellFillColor })}><LocalText source={"应用填充"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
       {activeTab === 'insert' && <><div className="tool-group">
         {gridSelectionKind !== 'column' && gridSelectionKind !== 'all' && <>
           <label className="xlsx-insert-count"><LocalText source={"插入行数 "} /><input aria-label={localizeSource(locale, "插入行数")} type="number" min="1" max="100" step="1" value={rowInsertCount} disabled={!editing || rowBusy} onChange={event => { setRowInsertCount(event.target.value); if (error.includes('插入行数必须')) setError('') }} /></label>

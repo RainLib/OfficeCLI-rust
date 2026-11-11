@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:31",
+  "title": "HTML Canonical Document XLSX cell formatting",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/31" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["op", "nodeId", "format", "precondition"],
+        "properties": {
+          "op": { "const": "xlsx.cell.format" },
+          "nodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
+          "format": {
+            "type": "object", "additionalProperties": false, "minProperties": 1,
+            "properties": {
+              "bold": { "type": "boolean" },
+              "italic": { "type": "boolean" },
+              "underline": { "type": "boolean" },
+              "fontSizePt": { "type": "number", "minimum": 1, "maximum": 409 },
+              "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+              "fill": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" }
+            }
+          },
+          "precondition": {
+            "type": "object", "additionalProperties": false,
+            "required": ["nodeHash"],
+            "properties": { "nodeHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+          }
+        }
+      }
+    }
+  }
+}

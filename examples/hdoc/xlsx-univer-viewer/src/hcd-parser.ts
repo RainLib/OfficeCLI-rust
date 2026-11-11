@@ -19,6 +19,12 @@ export interface NodeLink {
   formulaEdited?: boolean;
   formula?: string;
   text: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  fontSizePt?: number;
+  color?: string;
+  fill?: string;
   sheetId: string;
   row: number;
   column: number;
@@ -122,6 +128,27 @@ function border(value: string | undefined) {
   return { s: style, cl: { rgb: color } };
 }
 
+function flagNumber(value: string | undefined): boolean | undefined {
+  if (value === '1') return true;
+  if (value === '0') return false;
+  return undefined;
+}
+
+function explicitCellStyle(cell: HTMLElement): IStyleData {
+  const style: IStyleData = {};
+  const bold = flagNumber(cell.dataset.hcdBold);
+  if (bold !== undefined) style.bl = bold ? BooleanNumber.TRUE : BooleanNumber.FALSE;
+  const italic = flagNumber(cell.dataset.hcdItalic);
+  if (italic !== undefined) style.it = italic ? BooleanNumber.TRUE : BooleanNumber.FALSE;
+  const underline = flagNumber(cell.dataset.hcdUnderline);
+  if (underline !== undefined) style.ul = { s: underline ? BooleanNumber.TRUE : BooleanNumber.FALSE };
+  const size = Number(cell.dataset.hcdFontSizePt);
+  if (Number.isFinite(size) && size > 0) style.fs = size;
+  if (cell.dataset.hcdColor) style.cl = { rgb: `#${cell.dataset.hcdColor}` };
+  if (cell.dataset.hcdFill) style.bg = { rgb: `#${cell.dataset.hcdFill}` };
+  return style;
+}
+
 function toUniverStyle(declarations: Map<string, string>): IStyleData {
   const style: IStyleData = {};
   const fontFamily = declarations.get('font-family');
@@ -213,7 +240,12 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       && (!Number.isInteger(numericValue) || Number.isSafeInteger(numericValue));
     const styleKey = styleIndex ? `hcd-xs-${styleIndex}` : undefined;
     const pattern = cell.dataset.hcdNumFmtPattern;
-    const style = pattern ? { ...(styleKey ? styles[styleKey] : {}), n: { pattern } } : styleKey;
+    const catalogStyle = styleKey ? { ...(styles[styleKey] ?? {}) } : {};
+    const explicit = cell.dataset.hcdFormatEdited === 'true' ? explicitCellStyle(cell) : {};
+    const resolved = { ...catalogStyle, ...explicit };
+    const style = Object.keys(explicit).length
+      ? { ...resolved, ...(pattern ? { n: { pattern } } : {}) }
+      : pattern ? { ...catalogStyle, n: { pattern } } : styleKey;
     const link = nodeId && entry ? {
       nodeId,
       nodeHash: entry.nodeHash,
@@ -224,6 +256,12 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       formulaEdited: cell.dataset.hcdFormulaEdited === 'true',
       formula: cell.dataset.hcdFormulaExpression,
       text,
+      bold: resolved.bl === BooleanNumber.TRUE,
+      italic: resolved.it === BooleanNumber.TRUE,
+      underline: resolved.ul?.s === BooleanNumber.TRUE,
+      fontSizePt: resolved.fs ?? undefined,
+      color: resolved.cl?.rgb ?? undefined,
+      fill: resolved.bg?.rgb ?? undefined,
       sheetId: chunk.descriptor.grid.sheetId,
       row: position.row,
       column: position.column,

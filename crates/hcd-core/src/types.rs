@@ -256,6 +256,24 @@ pub struct PptxRunFormat {
     pub color: Option<String>,
 }
 
+/// Direct spreadsheet cell formatting. Absent fields keep the cell's current value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct XlsxCellFormatPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_pt: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfTextGeometry {
@@ -345,6 +363,13 @@ pub enum PatchOperation {
     PptxRunFormat {
         node_id: String,
         format: PptxRunFormat,
+        precondition: NodePrecondition,
+    },
+    /// Set direct font and solid fill formatting on one worksheet cell.
+    #[serde(rename = "xlsx.cell.format", rename_all = "camelCase")]
+    XlsxCellFormat {
+        node_id: String,
+        format: XlsxCellFormatPatch,
         precondition: NodePrecondition,
     },
     /// Merge a rectangle of existing XLSX cells. Covered cells must be empty.
@@ -513,6 +538,7 @@ impl PatchOperation {
             | Self::PptxShapeGeometry { node_id, .. }
             | Self::PptxTextDelete { node_id, .. }
             | Self::PptxRunFormat { node_id, .. }
+            | Self::XlsxCellFormat { node_id, .. }
             | Self::PdfTextGeometry { node_id, .. }
             | Self::PdfTextDelete { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
@@ -549,6 +575,7 @@ impl PatchOperation {
                 | Self::PptxShapeGeometry { .. }
                 | Self::PptxTextDelete { .. }
                 | Self::PptxRunFormat { .. }
+                | Self::XlsxCellFormat { .. }
                 | Self::PdfTextGeometry { .. }
                 | Self::PdfTextDelete { .. }
                 | Self::XlsxMerge { .. }
