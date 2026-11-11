@@ -2,6 +2,7 @@ use crate::bundle::{
     finalize_root_hash, hash_descriptor, now_epoch_ms, read_json_bounded, Bundle, INDEX_PAGE_SIZE,
 };
 use crate::hash::{hash_bytes, node_bloom, node_bloom_might_contain, stable_node_id};
+use crate::rename_formula_sheet_references;
 #[cfg(test)]
 use crate::HCD_SCHEMA_VERSION;
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
-    RevisionRecord, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
+    RevisionRecord, SheetRename, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
     XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch, XlsxGridAction,
     XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
     HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
@@ -181,6 +182,14 @@ struct XlsxRowHeight {
     height_points: f64,
 }
 
+#[derive(Clone)]
+struct XlsxSheetRenameTarget {
+    sheet_id: String,
+    old_name: String,
+    new_name: String,
+    sheet_part: String,
+}
+
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
@@ -235,6 +244,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxRowRemoveLast { .. }
                         | PatchOperation::XlsxColumnWidth { .. }
                         | PatchOperation::XlsxRowHeight { .. }
+                        | PatchOperation::XlsxSheetRename { .. }
                         | PatchOperation::XlsxRowInsert { .. }
                         | PatchOperation::XlsxRowDelete { .. }
                         | PatchOperation::XlsxColumnInsert { .. }
@@ -356,6 +366,10 @@ pub fn apply_patch(
         .as_ref()
         .map(|height| find_xlsx_sheet_part(bundle, &manifest, &height.sheet_id))
         .transpose()?;
+    let xlsx_sheet_rename = collect_xlsx_sheet_rename(patch)
+        .as_ref()
+        .map(|rename| resolve_xlsx_sheet_rename(bundle, &manifest, rename))
+        .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -411,7 +425,8 @@ pub fn apply_patch(
         || xlsx_column_delete.is_some()
         || xlsx_row_removal.is_some()
         || xlsx_column_width.is_some()
-        || xlsx_row_height.is_some();
+        || xlsx_row_height.is_some()
+        || xlsx_sheet_rename.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -435,6 +450,7 @@ pub fn apply_patch(
     let mut removed_xlsx_row = false;
     let mut changed_xlsx_column = false;
     let mut changed_xlsx_row_height = false;
+    let mut renamed_xlsx_sheet = false;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -558,6 +574,12 @@ pub fn apply_patch(
                         && grid.row_end.is_some_and(|end| u64::from(height.row) <= end)
                 })
             });
+            let rename_here = xlsx_sheet_rename.as_ref().is_some_and(|rename| {
+                descriptor
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_id == rename.sheet_id)
+            });
             let cell_insertions: Vec<&XlsxCellInsertion> = descriptor
                 .grid
                 .as_ref()
@@ -599,6 +621,9 @@ pub fn apply_patch(
                 && !remove_here
                 && width_here.is_none()
                 && height_here.is_none()
+                // A rename can touch a formula in any worksheet, so every chunk
+                // is inspected for references to the old tab name.
+                && xlsx_sheet_rename.is_none()
             {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
@@ -1534,6 +1559,22 @@ pub fn apply_patch(
                 changed_xlsx_row_height = true;
                 chunk_changed = true;
             }
+            if let Some(rename) = xlsx_sheet_rename.as_ref() {
+                let mut sheet_changed_here = rename_here;
+                if rename_here {
+                    rename_xlsx_sheet_sections(&mut html, &rename.old_name, &rename.new_name)?;
+                    let grid = descriptor
+                        .grid
+                        .as_mut()
+                        .expect("validated worksheet rename target");
+                    grid.sheet_name = rename.new_name.clone();
+                    renamed_xlsx_sheet = true;
+                }
+                if rename_xlsx_formula_references(&mut html, &rename.old_name, &rename.new_name)? {
+                    sheet_changed_here = true;
+                }
+                chunk_changed |= sheet_changed_here;
+            }
 
             if chunk_changed {
                 page_changed = true;
@@ -1664,6 +1705,11 @@ pub fn apply_patch(
     if xlsx_row_height.is_some() && !changed_xlsx_row_height {
         return Err(HcdError::InvalidBundle(
             "XLSX row height target disappeared".to_string(),
+        ));
+    }
+    if xlsx_sheet_rename.is_some() && !renamed_xlsx_sheet {
+        return Err(HcdError::InvalidBundle(
+            "XLSX worksheet rename target disappeared".to_string(),
         ));
     }
 
@@ -1861,6 +1907,15 @@ pub fn apply_patch(
                         Vec::new()
                     },
                 })
+            })
+            .collect(),
+        sheet_renames: xlsx_sheet_rename
+            .as_ref()
+            .into_iter()
+            .map(|rename| SheetRename {
+                sheet_part: rename.sheet_part.clone(),
+                old_name: rename.old_name.clone(),
+                new_name: rename.new_name.clone(),
             })
             .collect(),
         structural_change: false,
@@ -2166,6 +2221,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_31
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_32
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_33
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_34
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2418,6 +2474,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/33 accepts one XLSX cell number format operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_34
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxSheetRename { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/34 accepts one XLSX worksheet rename operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2713,6 +2781,28 @@ fn validate_patch_identity(
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_xlsx_number_format(number_format)?;
+            }
+            PatchOperation::XlsxSheetRename { sheet_id, name } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_34
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.sheet.rename requires one XLSX operation with hcd-patch/34"
+                            .to_string(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX worksheet rename target".to_string(),
+                    ));
+                }
+                validate_xlsx_sheet_name(name)?;
             }
             PatchOperation::XlsxMerge {
                 node_id,
@@ -4348,6 +4438,155 @@ fn set_xlsx_row_height(html: &mut String, row: u32, height: f64) -> Result<(), H
         .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
     set_attribute_in_range(html, start, end, "data-hcd-height-edited", "true")?;
     Ok(())
+}
+
+fn validate_xlsx_sheet_name(name: &str) -> Result<(), HcdError> {
+    if name.is_empty()
+        || name.chars().count() > 31
+        || name.contains(['/', '\\', '?', '*', '[', ']', ':'])
+        || name.starts_with('\'')
+        || name.ends_with('\'')
+        || name.chars().any(|character| character.is_control())
+    {
+        return Err(HcdError::InvalidPatch(
+            "invalid XLSX worksheet name".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn collect_xlsx_sheet_rename(patch: &PatchBatch) -> Option<XlsxSheetRenameTarget> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxSheetRename { sheet_id, name } = operation else {
+            return None;
+        };
+        Some(XlsxSheetRenameTarget {
+            sheet_id: sheet_id.clone(),
+            old_name: String::new(),
+            new_name: name.clone(),
+            sheet_part: String::new(),
+        })
+    })
+}
+
+/// Resolve the tab name a worksheet carries now, its source worksheet part,
+/// and reject a name another worksheet already uses. Excel treats tab names as
+/// case-insensitive but allows a case-only rename of the same worksheet.
+fn resolve_xlsx_sheet_rename(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    rename: &XlsxSheetRenameTarget,
+) -> Result<XlsxSheetRenameTarget, HcdError> {
+    let mut resolved = rename.clone();
+    let mut part = None;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.sheet_id == rename.sheet_id {
+                if resolved.old_name.is_empty() {
+                    resolved.old_name = grid.sheet_name.clone();
+                } else if resolved.old_name != grid.sheet_name {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX worksheet chunks disagree on the sheet name".to_string(),
+                    ));
+                }
+                if part.is_none() && grid.kind == crate::GridChunkKind::Cells {
+                    part = bundle
+                        .read_map(&descriptor)?
+                        .entries
+                        .iter()
+                        .find(|entry| entry.source.node_kind == "cell")
+                        .map(|entry| entry.source.part.clone());
+                }
+                continue;
+            }
+            if grid.sheet_name.eq_ignore_ascii_case(&rename.new_name) {
+                return Err(HcdError::InvalidPatch(
+                    "XLSX worksheet names must be unique".to_string(),
+                ));
+            }
+        }
+    }
+    if resolved.old_name.is_empty() {
+        return Err(HcdError::Unsupported(
+            "XLSX worksheet is not in the HCD grid".to_string(),
+        ));
+    }
+    if resolved.old_name == rename.new_name {
+        return Err(HcdError::InvalidPatch(
+            "XLSX worksheet rename does not change the name".to_string(),
+        ));
+    }
+    resolved.sheet_part = part.ok_or_else(|| {
+        HcdError::Unsupported(
+            "XLSX worksheet rename requires a worksheet with a mapped cell".to_string(),
+        )
+    })?;
+    Ok(resolved)
+}
+
+/// Rewrite the worksheet tab name on the sheet sections stored in this chunk.
+fn rename_xlsx_sheet_sections(
+    html: &mut String,
+    old_name: &str,
+    new_name: &str,
+) -> Result<bool, HcdError> {
+    const MARKER: &str = "data-hcd-sheet=\"";
+    let previous = escape_attribute(old_name);
+    let next = escape_attribute(new_name);
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while let Some(offset) = html[cursor..].find(MARKER) {
+        let start = cursor + offset + MARKER.len();
+        let Some(value_end) = html[start..].find('"') else {
+            return Err(HcdError::InvalidBundle(
+                "XLSX sheet section name is not closed".to_string(),
+            ));
+        };
+        let end = start + value_end;
+        if html[start..end] == previous {
+            html.replace_range(start..end, &next);
+            changed = true;
+            cursor = start + next.len();
+        } else {
+            cursor = end;
+        }
+    }
+    Ok(changed)
+}
+
+/// Rewrite cross-worksheet references inside stored formula expressions so an
+/// edited cell keeps naming the worksheet it pointed at.
+fn rename_xlsx_formula_references(
+    html: &mut String,
+    old_name: &str,
+    new_name: &str,
+) -> Result<bool, HcdError> {
+    const MARKER: &str = "data-hcd-formula-expression=\"";
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while let Some(offset) = html[cursor..].find(MARKER) {
+        let start = cursor + offset + MARKER.len();
+        let Some(value_end) = html[start..].find('"') else {
+            return Err(HcdError::InvalidBundle(
+                "XLSX formula expression is not closed".to_string(),
+            ));
+        };
+        let end = start + value_end;
+        let expression = unescape_attribute(&html[start..end]);
+        let renamed = rename_formula_sheet_references(&expression, &[(old_name, new_name)]);
+        if renamed != expression {
+            let escaped = escape_attribute(&renamed);
+            html.replace_range(start..end, &escaped);
+            changed = true;
+            cursor = start + escaped.len();
+        } else {
+            cursor = end;
+        }
+    }
+    Ok(changed)
 }
 
 fn find_xlsx_sheet_part(
@@ -8359,6 +8598,7 @@ fn apply_annotations(
             | PatchOperation::XlsxRowRemoveLast { .. }
             | PatchOperation::XlsxColumnWidth { .. }
             | PatchOperation::XlsxRowHeight { .. }
+            | PatchOperation::XlsxSheetRename { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}

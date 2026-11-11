@@ -532,6 +532,10 @@ pub enum PatchOperation {
         row: u32,
         height_points: f64,
     },
+    /// Rename a worksheet tab. Cell coordinates, values, and styles are
+    /// untouched; formulas that reference the sheet follow the new name.
+    #[serde(rename = "xlsx.sheet.rename", rename_all = "camelCase")]
+    XlsxSheetRename { sheet_id: String, name: String },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -599,7 +603,8 @@ impl PatchOperation {
             | Self::XlsxMergeBlank { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. }
-            | Self::XlsxRowHeight { .. } => None,
+            | Self::XlsxRowHeight { .. }
+            | Self::XlsxSheetRename { .. } => None,
         }
     }
 
@@ -635,6 +640,7 @@ impl PatchOperation {
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
                 | Self::XlsxRowHeight { .. }
+                | Self::XlsxSheetRename { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -800,6 +806,9 @@ pub struct RevisionRecord {
     pub grid_column_insertions: Vec<GridColumnInsertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_column_deletions: Vec<GridColumnDeletion>,
+    /// Sequential worksheet tab renames in worksheet-part coordinates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheet_renames: Vec<SheetRename>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
 }
@@ -809,6 +818,16 @@ pub struct RevisionRecord {
 pub struct GridRowInsertion {
     pub sheet_part: String,
     pub before_row: u32,
+}
+
+/// Worksheet tab rename recorded at one revision. Source-backed export replays
+/// these in revision order, so a chain of renames lands on the final name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SheetRename {
+    pub sheet_part: String,
+    pub old_name: String,
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

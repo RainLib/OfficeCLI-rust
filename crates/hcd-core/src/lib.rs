@@ -41,7 +41,8 @@ pub use structure::{
 pub use types::*;
 pub use validate::validate_bundle;
 pub use xlsx_formula::{
-    delete_formula_references, insert_formula_references, FormulaDeletion, FormulaInsertion,
+    delete_formula_references, insert_formula_references, rename_formula_sheet_references,
+    FormulaDeletion, FormulaInsertion,
 };
 
 pub const HCD_SCHEMA_VERSION: &str = "hcd/2";
@@ -79,6 +80,7 @@ pub const HCD_PATCH_SCHEMA_VERSION_30: &str = "hcd-patch/30";
 pub const HCD_PATCH_SCHEMA_VERSION_31: &str = "hcd-patch/31";
 pub const HCD_PATCH_SCHEMA_VERSION_32: &str = "hcd-patch/32";
 pub const HCD_PATCH_SCHEMA_VERSION_33: &str = "hcd-patch/33";
+pub const HCD_PATCH_SCHEMA_VERSION_34: &str = "hcd-patch/34";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
 pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
@@ -114,6 +116,7 @@ pub const HCD_PATCH_SCHEMA_V30_JSON: &str = include_str!("../schemas/hcd-patch-3
 pub const HCD_PATCH_SCHEMA_V31_JSON: &str = include_str!("../schemas/hcd-patch-31.schema.json");
 pub const HCD_PATCH_SCHEMA_V32_JSON: &str = include_str!("../schemas/hcd-patch-32.schema.json");
 pub const HCD_PATCH_SCHEMA_V33_JSON: &str = include_str!("../schemas/hcd-patch-33.schema.json");
+pub const HCD_PATCH_SCHEMA_V34_JSON: &str = include_str!("../schemas/hcd-patch-34.schema.json");
 pub const DEFAULT_CHUNK_SOFT_BYTES: usize = 512 * 1024;
 pub const DEFAULT_CHUNK_BLOCKS: usize = 256;
 pub const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -192,6 +195,8 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V32_JSON).unwrap();
         let patch_v33: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V33_JSON).unwrap();
+        let patch_v34: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V34_JSON).unwrap();
         assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
@@ -226,6 +231,7 @@ mod schema_tests {
         assert_eq!(patch_v31["$id"], "urn:officecli:hcd-patch:31");
         assert_eq!(patch_v32["$id"], "urn:officecli:hcd-patch:32");
         assert_eq!(patch_v33["$id"], "urn:officecli:hcd-patch:33");
+        assert_eq!(patch_v34["$id"], "urn:officecli:hcd-patch:34");
     }
 
     #[test]

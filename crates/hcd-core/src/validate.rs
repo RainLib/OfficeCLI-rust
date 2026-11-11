@@ -914,7 +914,11 @@ fn validate_patch_revision(
         .patch_id
         .as_deref()
         .is_some_and(|id| id.starts_with("restore-"));
-    let content_changed = !record.dirty_node_ids.is_empty() || !record.dirty_grid_parts.is_empty();
+    // A worksheet rename rewrites index chunks and the workbook sheet list, not a
+    // cell and not the worksheet part itself, so it is content without dirty sets.
+    let content_changed = !record.dirty_node_ids.is_empty()
+        || !record.dirty_grid_parts.is_empty()
+        || !record.sheet_renames.is_empty();
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
             || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())

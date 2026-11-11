@@ -4,10 +4,10 @@ use crate::common::{
     write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
 };
 use hcd_core::{
-    hash_bytes, node_bloom_might_contain, stable_node_id, Bundle, BundleWriter, ChunkSourceMap,
-    FidelityLevel, FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError,
-    HcdManifest, ImportEvent, NodeMapEntry, SourceAnchor, XlsxCellFormatPatch, XlsxCellLayoutPatch,
-    HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    hash_bytes, node_bloom_might_contain, rename_formula_sheet_references, stable_node_id, Bundle,
+    BundleWriter, ChunkSourceMap, FidelityLevel, FidelityReport, FidelityWarning, GridChunkAddress,
+    GridChunkKind, HcdError, HcdManifest, ImportEvent, NodeMapEntry, SheetRename, SourceAnchor,
+    XlsxCellFormatPatch, XlsxCellLayoutPatch, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -4747,6 +4747,7 @@ pub(crate) fn export_xlsx(
     let mut converted_formula_cells: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
     let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
+    let mut sheet_renames: Vec<SheetRename> = Vec::new();
     for &revision in &revisions {
         let record = bundle.revision(revision)?;
         formula_converted_to_value |= !record.converted_formula_node_ids.is_empty();
@@ -4778,6 +4779,7 @@ pub(crate) fn export_xlsx(
         for part in record.dirty_grid_parts {
             replacements.entry(part).or_default();
         }
+        sheet_renames.extend(record.sheet_renames);
     }
     for node in nodes {
         if node.source.node_kind != "cell" {
@@ -5008,6 +5010,49 @@ pub(crate) fn export_xlsx(
         rewrite_workbook_recalculation(&source_workbook, File::create(&path)?)?;
         replacement_paths.insert("xl/workbook.xml".to_string(), path);
     }
+    if !sheet_renames.is_empty() {
+        let names: Vec<String> = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        if let Some(blocked) = names
+            .iter()
+            .find(|name| xlsx_worksheet_rename_blocked(name))
+        {
+            return Err(HcdError::Unsupported(format!(
+                "XLSX worksheet rename cannot rewrite the worksheet name in {blocked}; remove that feature or export without --source"
+            )));
+        }
+        let pairs: Vec<(&str, &str)> = sheet_renames
+            .iter()
+            .map(|rename| (rename.old_name.as_str(), rename.new_name.as_str()))
+            .collect();
+        for part in names
+            .iter()
+            .filter(|name| xlsx_part_can_name_a_worksheet(name))
+        {
+            let previous = replacement_paths.remove(part);
+            let path = scratch
+                .path()
+                .join(safe_temp_name(&format!("sheet-rename-{part}")));
+            let output = File::create(&path)?;
+            let renamed = match previous {
+                Some(existing) => {
+                    rename_xlsx_sheet_references(File::open(&existing)?, output, &pairs)?
+                }
+                None => archive
+                    .with_part(part, |input| {
+                        rename_xlsx_sheet_references(input, output, &pairs)
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    })
+                    .map_err(package_error)?,
+            };
+            if renamed {
+                replacement_paths.insert(part.clone(), path);
+            }
+        }
+    }
     let changed =
         StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "xl/workbook.xml")
             .map_err(package_error)?;
@@ -5069,6 +5114,14 @@ pub(crate) fn export_xlsx(
                     message: "Formula cells were replaced with literal values; dependent formula and chart caches may remain stale until the workbook is recalculated".to_string(),
                     node_id: None,
                     source_part: Some("xl/workbook.xml".to_string()),
+                });
+            }
+            for rename in &sheet_renames {
+                warnings.push(FidelityWarning {
+                    code: "XLSX_SHEET_RENAME".to_string(),
+                    message: format!("worksheet tab {} was renamed to {}; formulas, defined names, chart references, and internal hyperlinks that named the old tab were rewritten", rename.old_name, rename.new_name),
+                    node_id: None,
+                    source_part: Some(rename.sheet_part.clone()),
                 });
             }
             if edited_cells.iter().any(|cell| direct_format(&cell.format)) {
@@ -7578,6 +7631,203 @@ fn rewrite_grid_formula(
     Ok(result)
 }
 
+/// Package entries that hold a worksheet tab name in their XML.
+fn xlsx_part_can_name_a_worksheet(name: &str) -> bool {
+    if !name.ends_with(".xml") && !name.ends_with(".rels") {
+        return false;
+    }
+    name == "xl/workbook.xml"
+        || name.starts_with("xl/worksheets/")
+        || name.starts_with("xl/charts/")
+        || name.starts_with("xl/chartsheets/")
+        || (name.starts_with("xl/") && name.contains("/_rels/"))
+}
+
+/// Entries whose sheet-name references this rewrite cannot reach. A rename is
+/// refused rather than exported half-applied, the same posture the formula
+/// shifter takes for reference syntax it cannot parse.
+fn xlsx_worksheet_rename_blocked(name: &str) -> bool {
+    const BLOCKED: &[&str] = &[
+        "xl/pivotTables/",
+        "xl/pivotCache/",
+        "xl/externalLinks/",
+        "xl/slicerCaches/",
+        "xl/timelineCaches/",
+        "xl/queryTables/",
+        "xl/model/",
+        "xl/connections.xml",
+    ];
+    BLOCKED.iter().any(|prefix| name.starts_with(prefix))
+}
+
+fn xlsx_tab_name_attribute(name: &[u8]) -> Option<&'static str> {
+    match local_name(name) {
+        "sheet" => Some("name"),
+        "hyperlink" => Some("location"),
+        "Relationship" => Some("Target"),
+        _ => None,
+    }
+}
+
+fn is_xlsx_formula_element(name: &str) -> bool {
+    matches!(
+        name,
+        "f" | "formula" | "formula1" | "formula2" | "definedName"
+    )
+}
+
+/// Replace one worksheet-tab attribute of an element, or return `None` when the
+/// element carries no such attribute so the caller copies it unchanged.
+fn rename_xlsx_tab_attribute(
+    element: &BytesStart<'_>,
+    wanted: &'static str,
+    renames: &[(&str, &str)],
+) -> Result<Option<(BytesStart<'static>, bool)>, HcdError> {
+    let mut replacement: Option<String> = None;
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX tab attribute: {error}"))
+        })?;
+        if local_name(attribute.key.as_ref()) != wanted {
+            continue;
+        }
+        let decoded = attribute.unescape_value().map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX tab attribute value: {error}"))
+        })?;
+        let value = decoded.as_ref();
+        let renamed = match wanted {
+            "name" => {
+                let mut name = value.to_string();
+                for (previous, next) in renames {
+                    if name.eq_ignore_ascii_case(previous) {
+                        name = next.to_string();
+                    }
+                }
+                name
+            }
+            "Target" => match value.strip_prefix('#') {
+                Some(inner) => {
+                    format!("#{}", rename_formula_sheet_references(inner, renames))
+                }
+                None => value.to_string(),
+            },
+            _ => rename_formula_sheet_references(value, renames),
+        };
+        replacement = Some(renamed);
+    }
+    let Some(replacement) = replacement else {
+        return Ok(None);
+    };
+    let mut updated =
+        BytesStart::new(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+    let mut changed = false;
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX tab attribute: {error}"))
+        })?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        if local_name(attribute.key.as_ref()) != wanted {
+            let value = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+            updated.push_attribute((key.as_str(), value.as_str()));
+            continue;
+        }
+        let decoded = attribute.unescape_value().map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX tab attribute value: {error}"))
+        })?;
+        changed |= decoded.as_ref() != replacement.as_str();
+        let escaped = escape_attribute(&replacement);
+        updated.push_attribute((key.as_str(), escaped.as_str()));
+    }
+    Ok(Some((updated, changed)))
+}
+
+/// Rewrite worksheet tab names inside one package entry: the workbook sheet
+/// list, defined names, formula text, worksheet hyperlink targets, and internal
+/// relationship targets. Returns whether the entry changed, so entries that
+/// never named the renamed sheet keep their original compressed bytes.
+fn rename_xlsx_sheet_references(
+    source: impl Read,
+    output: impl Write,
+    renames: &[(&str, &str)],
+) -> Result<bool, HcdError> {
+    let mut reader = Reader::from_reader(BufReader::new(source));
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(output);
+    let mut buffer = Vec::new();
+    let mut changed = false;
+    let mut formula: Option<(String, Vec<Event<'static>>)> = None;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX XML: {error}")))?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if xlsx_tab_name_attribute(element.name().as_ref()).is_some() =>
+            {
+                let wanted = xlsx_tab_name_attribute(element.name().as_ref()).expect("checked");
+                let empty = matches!(event, Event::Empty(_));
+                let rebuilt = rename_xlsx_tab_attribute(element, wanted, renames)?;
+                match rebuilt {
+                    Some((updated, updated_changed)) => {
+                        changed |= updated_changed;
+                        writer.write_event(if empty {
+                            Event::Empty(updated)
+                        } else {
+                            Event::Start(updated)
+                        })?;
+                    }
+                    None => writer.write_event(event.into_owned())?,
+                }
+            }
+            Event::Start(ref element)
+                if is_xlsx_formula_element(local_name(element.name().as_ref())) =>
+            {
+                if formula.is_some() {
+                    return Err(HcdError::Unsupported(
+                        "XLSX formula text is nested; worksheet rename refused".to_string(),
+                    ));
+                }
+                formula = Some((String::new(), Vec::new()));
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Text(ref text) if formula.is_some() => {
+                let decoded = text.unescape().map_err(|error| {
+                    HcdError::InvalidBundle(format!("invalid XLSX formula text: {error}"))
+                })?;
+                let owned = text.clone().into_owned();
+                let slot = formula.as_mut().expect("pending formula text");
+                slot.0.push_str(&decoded);
+                slot.1.push(Event::Text(owned));
+            }
+            Event::End(ref element)
+                if is_xlsx_formula_element(local_name(element.name().as_ref()))
+                    && formula.is_some() =>
+            {
+                let (decoded, originals) = formula.take().expect("pending formula text");
+                let renamed = rename_formula_sheet_references(&decoded, renames);
+                if renamed == decoded {
+                    for original in originals {
+                        writer.write_event(original)?;
+                    }
+                } else {
+                    changed = true;
+                    writer.write_event(Event::Text(BytesText::new(&escape_text(&renamed))))?;
+                }
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Eof => break,
+            _ => writer.write_event(event.into_owned())?,
+        }
+        buffer.clear();
+    }
+    if formula.is_some() {
+        return Err(HcdError::InvalidBundle(
+            "XLSX formula element is not closed".to_string(),
+        ));
+    }
+    Ok(changed)
+}
+
 fn rewrite_xlsx_drawing_anchors(
     source: impl Read,
     output: impl Write,
@@ -8627,7 +8877,7 @@ mod tests {
         extract_text_page, validate_bundle, NodePrecondition, PatchBatch, PatchOperation,
         XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch,
         HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_31, HCD_PATCH_SCHEMA_VERSION_32,
-        HCD_PATCH_SCHEMA_VERSION_33, HCD_PATCH_SCHEMA_VERSION_6,
+        HCD_PATCH_SCHEMA_VERSION_33, HCD_PATCH_SCHEMA_VERSION_34, HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -13678,6 +13928,157 @@ mod tests {
         );
     }
 
+    #[test]
+    fn renames_worksheet_tab_and_follows_references_on_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("rename.xlsx");
+        create_sheet_rename_fixture(&source);
+        let bundle_path = temp.path().join("rename.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let historical = temp.path().join("historical.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sheet-rename"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunks = bundle.read_index_page(&manifest, 0).unwrap().chunks;
+        let cells_chunk = |name: &str| {
+            chunks
+                .iter()
+                .find(|chunk| {
+                    chunk.grid.as_ref().is_some_and(|grid| {
+                        grid.kind == GridChunkKind::Cells && grid.sheet_name == name
+                    })
+                })
+                .expect("worksheet chunk")
+                .clone()
+        };
+        let plain = cells_chunk("Plain");
+        let other = cells_chunk("Formula");
+        let sheet_id = plain.grid.as_ref().unwrap().sheet_id.clone();
+        assert!(bundle
+            .read_chunk(&other)
+            .unwrap()
+            .contains("data-hcd-formula-expression=\"=Plain!A1+1\""));
+        let rename = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_34.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "rename-plain".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetRename {
+                sheet_id: sheet_id.clone(),
+                name: "Simple".into(),
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &rename, 0).unwrap().revision,
+            1
+        );
+        let checked = validate_bundle(&bundle).unwrap();
+        assert!(checked.valid, "{:?}", checked.issues);
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(record.sheet_renames.len(), 1);
+        assert_eq!(record.sheet_renames[0].old_name, "Plain");
+        assert_eq!(record.sheet_renames[0].new_name, "Simple");
+        assert_eq!(
+            record.sheet_renames[0].sheet_part,
+            "xl/worksheets/sheet1.xml"
+        );
+        let head = bundle.manifest().unwrap();
+        let head_chunks = bundle.read_index_page(&head, 0).unwrap().chunks;
+        for chunk in &head_chunks {
+            let Some(grid) = chunk.grid.as_ref() else {
+                continue;
+            };
+            let expected = if grid.sheet_id == sheet_id {
+                "Simple"
+            } else {
+                "Formula"
+            };
+            assert_eq!(grid.sheet_name, expected, "{}", chunk.chunk_id);
+        }
+        let cell_chunk = |wanted: bool| {
+            head_chunks
+                .iter()
+                .find(|chunk| {
+                    chunk.grid.as_ref().is_some_and(|grid| {
+                        grid.kind == GridChunkKind::Cells && (grid.sheet_id == sheet_id) == wanted
+                    })
+                })
+                .expect("worksheet chunk at head")
+        };
+        let html = bundle.read_chunk(cell_chunk(true)).unwrap();
+        assert!(html.contains("data-hcd-sheet=\"Simple\""));
+        assert!(!html.contains("data-hcd-sheet=\"Plain\""));
+        let html = bundle.read_chunk(cell_chunk(false)).unwrap();
+        assert!(html.contains("data-hcd-formula-expression=\"=Simple!A1+1\""));
+        assert!(!html.contains("Plain!"));
+        for (patch_id, name, message) in [
+            ("rename-same", "Simple", "does not change the name"),
+            ("rename-duplicate", "Formula", "must be unique"),
+            ("rename-illegal", "Bad[Name]", "invalid XLSX worksheet name"),
+        ] {
+            let rejected = PatchBatch {
+                patch_id: patch_id.into(),
+                base_revision: 1,
+                operations: vec![PatchOperation::XlsxSheetRename {
+                    sheet_id: sheet_id.clone(),
+                    name: name.into(),
+                }],
+                ..rename.clone()
+            };
+            let error = hcd_core::apply_patch(&bundle, &rejected, 1)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
+        }
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_SHEET_RENAME"));
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(
+            workbook.contains("<sheet name=\"Simple\" sheetId=\"1\""),
+            "{workbook}"
+        );
+        assert!(!workbook.contains("name=\"Plain\""));
+        assert!(
+            workbook.contains(">Simple!$A$1</definedName>"),
+            "{workbook}"
+        );
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet2.xml");
+        assert!(sheet.contains("<f>Simple!A1+1</f>"), "{sheet}");
+        assert!(sheet.contains("location=\"Simple!A1\""), "{sheet}");
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+        );
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "xl/workbook.xml"),
+            read_zip_entry(&source, "xl/workbook.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&historical, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml")
+        );
+    }
+
     fn create_shared_string_fixture(path: &Path) {
         let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -13786,6 +14187,47 @@ mod tests {
             (
                 "xl/worksheets/sheet2.xml",
                 r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>A1+1</f><v>3</v></c></row></sheetData></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Two worksheets where the second names the first in a formula, a defined
+    /// name, and an internal hyperlink, so a rename has three reference kinds to
+    /// follow and one part that must stay byte-identical.
+    fn create_sheet_rename_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Formula" sheetId="2" r:id="rId2"/></sheets><definedNames><definedName name="Report">Plain!$A$1</definedName></definedNames></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Left</t></is></c><c r="B1" t="inlineStr"><is><t>Right</t></is></c></row><row r="2"><c r="A2"><v>7</v></c><c r="B2"><v>9</v></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>Plain!A1+1</f><v>3</v></c></row></sheetData><hyperlinks><hyperlink ref="B1" location="Plain!A1" display="Jump"/></hyperlinks></worksheet>"#,
             ),
         ];
         for (name, contents) in parts {

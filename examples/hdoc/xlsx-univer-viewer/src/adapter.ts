@@ -374,6 +374,18 @@ export class HcdUniverAdapter {
     }
   }
 
+  /**
+   * Mirror a worksheet rename HCD already recorded into the Univer tab. The
+   * rename is not a cell edit, so it must not be read back as a pending patch.
+   */
+  renameSheet(sheetId: string, name: string): void {
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    if (!sheet) throw new Error(`工作表不存在: ${sheetId}`);
+    this.withApplying(() => {
+      sheet.setName(name);
+    });
+  }
+
   /** Reload the visible HCD windows after another editor commits a revision. */
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;
