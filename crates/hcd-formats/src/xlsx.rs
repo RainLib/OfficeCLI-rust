@@ -655,6 +655,7 @@ where
                 column_end: self.last_column,
                 default_column_width_emu: Some(default_column_width_emu(self.default_column_width)),
                 default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
+                sheet_part: Some(self.part.to_string()),
             },
         )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
@@ -724,6 +725,7 @@ where
                 column_end: None,
                 default_column_width_emu: Some(default_column_width_emu(self.default_column_width)),
                 default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
+                sheet_part: Some(self.part.to_string()),
             },
         )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
@@ -3960,6 +3962,7 @@ fn drawing_grid_address(
         column_end: anchor.to_col.map(|value| value + 1),
         default_column_width_emu: None,
         default_row_height_emu: None,
+        sheet_part: Some(sheet.part.clone()),
     }
 }
 
@@ -7294,6 +7297,45 @@ fn rewrite_worksheet(
                 )?;
                 active_row = None;
                 writer.write_event(event.into_owned())?;
+            }
+            Event::Empty(ref empty) if local_name(empty.name().as_ref()) == "sheetData" => {
+                // A worksheet the source stores without any row element closes
+                // sheetData straight away. Open it instead of refusing the
+                // rebuild, so the first cell typed into an empty tab lands in
+                // the package and the rows HCD describes go inside it.
+                sheet_data_seen = true;
+                let qualified = String::from_utf8_lossy(empty.name().as_ref()).into_owned();
+                if !column_group_seen && !column_widths.is_empty() {
+                    let cols_name = qualified_child_name(empty.name().as_ref(), "cols");
+                    let col_name = qualified_child_name(empty.name().as_ref(), "col");
+                    writer.write_event(Event::Start(BytesStart::new(cols_name.as_str())))?;
+                    write_new_worksheet_columns(&mut writer, &col_name, &mut pending_widths)?;
+                    writer.write_event(Event::End(BytesEnd::new(cols_name.as_str())))?;
+                    column_group_seen = true;
+                }
+                writer.write_event(Event::Start(BytesStart::new(qualified.as_str())))?;
+                write_missing_xlsx_rows(
+                    &mut writer,
+                    canonical_rows,
+                    &mut replacement_rows,
+                    last_row,
+                    1_048_577,
+                    &row_name,
+                    &row_cell_name,
+                    row_heights,
+                    &mut seen_created,
+                    cell_styles,
+                )?;
+                writer.write_event(Event::End(BytesEnd::new(qualified.as_str())))?;
+                if !merge_written {
+                    let prefix = qualified.split_once(':').map(|(prefix, _)| prefix);
+                    let merge_name = prefix.map_or_else(
+                        || "mergeCells".to_string(),
+                        |prefix| format!("{prefix}:mergeCells"),
+                    );
+                    write_merge_cells(&mut writer, merge_name.as_bytes(), merges)?;
+                    merge_written = true;
+                }
             }
             Event::End(ref end) if local_name(end.name().as_ref()) == "sheetData" => {
                 sheet_data_seen = true;
@@ -14079,6 +14121,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn writes_the_first_cell_of_an_empty_worksheet_and_exports_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("empty-sheet.xlsx");
+        create_empty_sheet_fixture(&source);
+        let bundle_path = temp.path().join("empty-sheet.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let historical = temp.path().join("historical.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("empty-sheet"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let blank = |chunks: &[hcd_core::ChunkDescriptor]| {
+            chunks
+                .iter()
+                .find(|chunk| {
+                    chunk
+                        .grid
+                        .as_ref()
+                        .is_some_and(|grid| grid.sheet_name == "Blank")
+                })
+                .expect("empty worksheet chunk")
+                .clone()
+        };
+        let before = blank(&bundle.read_index_page(&manifest, 0).unwrap().chunks);
+        let grid = before.grid.as_ref().unwrap();
+        assert_eq!((grid.row_start, grid.row_end), (None, None));
+        assert_eq!(
+            grid.sheet_part.as_deref(),
+            Some("xl/worksheets/sheet2.xml"),
+            "a worksheet with no cells still has to name its source part"
+        );
+        let sheet_id = grid.sheet_id.clone();
+        assert!(bundle
+            .read_chunk(&before)
+            .unwrap()
+            .contains("<tbody></tbody>"));
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_7.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "first-cell".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id: sheet_id.clone(),
+                row: 1,
+                column: 1,
+                text: "First".to_string(),
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        let checked = validate_bundle(&bundle).unwrap();
+        assert!(checked.valid, "{:?}", checked.issues);
+        let record = bundle.revision(1).unwrap();
+        assert!(
+            record
+                .dirty_grid_parts
+                .contains(&"xl/worksheets/sheet2.xml".to_string()),
+            "{:?}",
+            record.dirty_grid_parts
+        );
+        let head = bundle.manifest().unwrap();
+        let after = blank(&bundle.read_index_page(&head, 0).unwrap().chunks);
+        let grid = after.grid.as_ref().unwrap();
+        assert_eq!((grid.row_start, grid.row_end), (Some(1), Some(1)));
+        // An empty window is already one block, so its first row opens that
+        // block instead of adding another one.
+        assert_eq!(after.block_count, before.block_count);
+        let html = bundle.read_chunk(&after).unwrap();
+        assert!(
+            html.contains(
+                " data-hcd-sheet-state=\"visible\" data-hcd-row-start=\"1\" data-hcd-row-end=\"1\""
+            ),
+            "the first row has to open the window where an import would put it: {html}"
+        );
+        assert!(html.contains("<tr data-hcd-row=\"1\">"), "{html}");
+        let entries = bundle.read_map(&after).unwrap().entries;
+        assert_eq!(entries.len(), 1);
+        assert!(html.contains("First"), "{html}");
+        assert_eq!(entries[0].source.paragraph_id.as_deref(), Some("A1"));
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet2.xml");
+        assert!(worksheet.contains("<c r=\"A1\""), "{worksheet}");
+        assert!(worksheet.contains("First"), "{worksheet}");
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml"),
+            "an untouched worksheet must stay byte-identical"
+        );
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml"),
+            "revision zero keeps the worksheet empty"
+        );
+    }
+
     fn create_shared_string_fixture(path: &Path) {
         let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -14228,6 +14384,46 @@ mod tests {
             (
                 "xl/worksheets/sheet2.xml",
                 r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>Plain!A1+1</f><v>3</v></c></row></sheetData><hyperlinks><hyperlink ref="B1" location="Plain!A1" display="Jump"/></hyperlinks></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Two worksheets where the second one has no row element at all, the shape
+    /// every new blank tab a workbook keeps has.
+    fn create_empty_sheet_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Blank" sheetId="2" r:id="rId2"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData><row r="1"><c r="A1"><v>7</v></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData/></worksheet>"#,
             ),
         ];
         for (name, contents) in parts {

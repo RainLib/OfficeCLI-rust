@@ -585,12 +585,17 @@ pub fn apply_patch(
                 .as_ref()
                 .filter(|grid| grid.kind == crate::GridChunkKind::Cells)
                 .and_then(|grid| {
+                    let extension = cell_row_extension.unwrap_or(0);
+                    let end = grid.row_end.unwrap_or(0).max(u64::from(extension));
+                    // A window without row bounds is an empty worksheet. It only
+                    // takes part in a patch when that patch creates its first row.
+                    if end == 0 {
+                        return None;
+                    }
                     Some((
                         grid.sheet_id.clone(),
-                        u32::try_from(grid.row_start?).ok()?,
-                        u32::try_from(grid.row_end?)
-                            .ok()?
-                            .max(cell_row_extension.unwrap_or(0)),
+                        u32::try_from(grid.row_start.unwrap_or(1)).ok()?,
+                        u32::try_from(end).ok()?,
                     ))
                 })
                 .map(|(sheet_id, start, end)| {
@@ -1184,24 +1189,20 @@ pub fn apply_patch(
             if !cell_insertions.is_empty() {
                 if let Some(new_row) = cell_row_extension {
                     let old_row = new_row - 1;
-                    let part = source_map
-                        .entries
-                        .iter()
-                        .find(|entry| entry.source.node_kind == "cell")
-                        .map(|entry| entry.source.part.clone())
-                        .ok_or_else(|| {
-                            HcdError::Unsupported(
-                                "XLSX new row requires a mapped cell in the last window"
-                                    .to_string(),
-                            )
-                        })?;
+                    let part = xlsx_chunk_sheet_part(descriptor, &source_map)?;
                     append_xlsx_row(&mut html, old_row)?;
-                    descriptor
-                        .grid
-                        .as_mut()
-                        .expect("validated cell window")
-                        .row_end = Some(u64::from(new_row));
-                    descriptor.block_count += 1;
+                    let first_row = {
+                        let grid = descriptor.grid.as_mut().expect("validated cell window");
+                        let first_row = grid.row_start.is_none();
+                        grid.row_start = Some(grid.row_start.unwrap_or(u64::from(new_row)));
+                        grid.row_end = Some(u64::from(new_row));
+                        first_row
+                    };
+                    // An empty window is already one block: its first row opens
+                    // it instead of adding another.
+                    if !first_row {
+                        descriptor.block_count += 1;
+                    }
                     dirty_grid_parts.insert(part);
                 }
                 for insertion in cell_insertions {
@@ -1217,6 +1218,10 @@ pub fn apply_patch(
                     let (node_id, part) = insert_xlsx_cell(
                         &mut html,
                         &mut source_map,
+                        descriptor
+                            .grid
+                            .as_ref()
+                            .and_then(|grid| grid.sheet_part.as_deref()),
                         &manifest.document_id,
                         insertion,
                         shifted_grid.then_some(manifest.revision),
@@ -1262,6 +1267,10 @@ pub fn apply_patch(
                 let (node_id, part) = insert_xlsx_cell(
                     &mut html,
                     &mut source_map,
+                    descriptor
+                        .grid
+                        .as_ref()
+                        .and_then(|grid| grid.sheet_part.as_deref()),
                     &manifest.document_id,
                     &insertion,
                     shifted_grid.then_some(manifest.revision),
@@ -1301,20 +1310,18 @@ pub fn apply_patch(
                 let append = xlsx_row_append
                     .as_ref()
                     .expect("target requires row append");
-                let part = source_map
-                    .entries
-                    .iter()
-                    .find(|entry| entry.source.node_kind == "cell")
-                    .map(|entry| entry.source.part.clone())
-                    .ok_or_else(|| {
-                        HcdError::Unsupported(
-                            "XLSX row append requires a mapped cell in the last window".to_string(),
-                        )
-                    })?;
+                let part = xlsx_chunk_sheet_part(descriptor, &source_map)?;
                 append_xlsx_row(&mut html, append.after_row)?;
-                let grid = descriptor.grid.as_mut().expect("validated row target");
-                grid.row_end = Some(u64::from(append.after_row) + 1);
-                descriptor.block_count += 1;
+                let first_row = {
+                    let grid = descriptor.grid.as_mut().expect("validated row target");
+                    let first_row = grid.row_start.is_none();
+                    grid.row_start = Some(grid.row_start.unwrap_or(1));
+                    grid.row_end = Some(u64::from(append.after_row) + 1);
+                    first_row
+                };
+                if !first_row {
+                    descriptor.block_count += 1;
+                }
                 dirty_grid_parts.insert(part);
                 appended_xlsx_row = true;
                 chunk_changed = true;
@@ -4589,6 +4596,33 @@ fn rename_xlsx_formula_references(
     Ok(changed)
 }
 
+/// Source part backing one worksheet window. The descriptor carries it, and an
+/// older bundle that predates that field falls back to its first mapped cell.
+/// An empty worksheet has no mapped cells at all, so only the descriptor can
+/// name the part a first row has to be written into.
+fn xlsx_chunk_sheet_part(
+    descriptor: &crate::ChunkDescriptor,
+    source_map: &crate::ChunkSourceMap,
+) -> Result<String, HcdError> {
+    if let Some(part) = descriptor
+        .grid
+        .as_ref()
+        .and_then(|grid| grid.sheet_part.as_ref())
+    {
+        return Ok(part.clone());
+    }
+    source_map
+        .entries
+        .iter()
+        .find(|entry| entry.source.node_kind == "cell")
+        .map(|entry| entry.source.part.clone())
+        .ok_or_else(|| {
+            HcdError::Unsupported(
+                "XLSX row operations require a worksheet with a known source part".to_string(),
+            )
+        })
+}
+
 fn find_xlsx_sheet_part(
     bundle: &Bundle,
     manifest: &crate::HcdManifest,
@@ -4604,6 +4638,9 @@ fn find_xlsx_sheet_part(
                 continue;
             }
             found_sheet = true;
+            if let Some(part) = grid.sheet_part.clone() {
+                return Ok(part);
+            }
             if let Some(part) = bundle
                 .read_map(&descriptor)?
                 .entries
@@ -5050,6 +5087,10 @@ fn last_xlsx_row(
 ) -> Result<(u64, String), HcdError> {
     let mut tail = None;
     let mut last_row = 0u64;
+    // A worksheet the source stores without any row element keeps one cell
+    // window with no row bounds. It is the tail of a sheet whose last row is
+    // zero, so its first row can be created by a cell write or a row append.
+    let mut empty_tail: Option<String> = None;
     for page_number in 0..manifest.index_page_count {
         for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
             let Some(grid) = descriptor.grid.as_ref() else {
@@ -5058,7 +5099,14 @@ fn last_xlsx_row(
             if grid.kind != crate::GridChunkKind::Cells || grid.sheet_id != sheet_id {
                 continue;
             }
-            let Some(end) = grid.row_end else { continue };
+            let Some(end) = grid.row_end else {
+                if empty_tail.replace(descriptor.chunk_id).is_some() {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX empty worksheet appears in multiple cell windows".to_string(),
+                    ));
+                }
+                continue;
+            };
             if end > last_row {
                 last_row = end;
                 tail = Some(descriptor.chunk_id);
@@ -5069,6 +5117,9 @@ fn last_xlsx_row(
             }
         }
     }
+    if tail.is_none() {
+        tail = empty_tail;
+    }
     tail.map(|tail| (last_row, tail)).ok_or_else(|| {
         HcdError::Unsupported(
             "XLSX row operation requires an existing nonempty worksheet".to_string(),
@@ -5077,10 +5128,44 @@ fn last_xlsx_row(
 }
 
 fn append_xlsx_row(html: &mut String, after_row: u32) -> Result<(), HcdError> {
-    let old_end = format!(" data-hcd-row-end=\"{after_row}\"");
     let section_end = html
         .find('>')
         .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet section is not closed".to_string()))?;
+    if after_row == 0 {
+        // The first row of a worksheet the source stored with no rows at all:
+        // its section carries neither row bound and its table body is empty.
+        // Row bounds go right after the sheet state, the same order an imported
+        // worksheet window uses, so a re-import hashes to the same chunk.
+        if html[..section_end].contains(" data-hcd-row-start=") {
+            return Err(HcdError::InvalidBundle(
+                "XLSX worksheet already has a row window".to_string(),
+            ));
+        }
+        let body_start = html
+            .find("<tbody>")
+            .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet has no table body".to_string()))?;
+        if !html[body_start..].starts_with("<tbody></tbody>") {
+            return Err(HcdError::InvalidBundle(
+                "XLSX empty worksheet already has rows".to_string(),
+            ));
+        }
+        let state = html[..section_end]
+            .find(" data-hcd-sheet-state=\"")
+            .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet state is missing".to_string()))?
+            + " data-hcd-sheet-state=\"".len();
+        let insert_at = state
+            + html[state..section_end].find('"').ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX sheet state is unclosed".to_string())
+            })?
+            + 1;
+        html.insert_str(body_start + "<tbody>".len(), "<tr data-hcd-row=\"1\"></tr>");
+        html.insert_str(
+            insert_at,
+            " data-hcd-row-start=\"1\" data-hcd-row-end=\"1\"",
+        );
+        return Ok(());
+    }
+    let old_end = format!(" data-hcd-row-end=\"{after_row}\"");
     let marker = html[..section_end].find(&old_end).ok_or_else(|| {
         HcdError::InvalidBundle("XLSX sheet row end disagrees with its descriptor".to_string())
     })?;
@@ -6369,6 +6454,7 @@ fn xlsx_cells(html: &str) -> Result<Vec<XlsxCellSpan>, HcdError> {
 fn insert_xlsx_cell(
     html: &mut String,
     source_map: &mut crate::ChunkSourceMap,
+    sheet_part: Option<&str>,
     document_id: &str,
     insertion: &XlsxCellInsertion,
     grid_generation: Option<u64>,
@@ -6408,13 +6494,17 @@ fn insert_xlsx_cell(
             "XLSX cell {reference} is already mapped"
         )));
     }
-    let part = source_map
-        .entries
-        .first()
-        .map(|entry| entry.source.part.clone())
+    let part = sheet_part
+        .map(str::to_string)
+        .or_else(|| {
+            source_map
+                .entries
+                .first()
+                .map(|entry| entry.source.part.clone())
+        })
         .ok_or_else(|| {
             HcdError::Unsupported(
-                "XLSX blank cell creation requires a window with mapped cells".to_string(),
+                "XLSX cell creation requires a worksheet with a known source part".to_string(),
             )
         })?;
     let node_id = if let Some(generation) = grid_generation {

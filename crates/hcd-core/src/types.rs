@@ -112,6 +112,12 @@ pub struct GridChunkAddress {
     pub default_column_width_emu: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_row_height_emu: Option<u32>,
+    /// OOXML worksheet part backing this sheet. Cell-window descriptors carry
+    /// it so a sheet-scoped edit can still find its source part when the
+    /// worksheet has no mapped cells at all, which is the case for an empty
+    /// worksheet and for a worksheet a patch just created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_part: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
