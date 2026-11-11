@@ -386,6 +386,39 @@ export class HcdUniverAdapter {
     });
   }
 
+  /**
+   * Mirror a worksheet HCD already created into a Univer tab. The tab has to
+   * carry the sheet id HCD minted for it, because every later cell edit
+   * addresses the worksheet through that id and a locally generated one would
+   * point at a worksheet the bundle never had.
+   */
+  async addSheet(name: string, sheetId: string): Promise<void> {
+    if (this.workbook.getSheetBySheetId(sheetId)) {
+      throw new Error(`工作表已存在: ${sheetId}`);
+    }
+    const address = this.client.sheets().find((sheet) => sheet.sheetId === sheetId);
+    if (!address || address.sheetName !== name) {
+      throw new Error(`HCD 索引里没有工作表 ${name}`);
+    }
+    const defaults = this.client.sheetDefaults(sheetId);
+    this.dimensions.set(sheetId, {
+      defaultColumnWidth: defaults.columnWidth,
+      defaultRowHeight: defaults.rowHeight,
+      columns: new Map(),
+      rows: new Map(),
+    });
+    // Univer inserts the tab and makes it active in one command pair. The
+    // sheet has to be created while `applying` so the read-only guard cannot
+    // cancel the mutation on a viewer that is also allowed to add tabs.
+    this.withApplying(() => {
+      this.workbook.insertSheet(name, { index: address.sheetIndex, sheet: { id: sheetId } });
+    });
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    if (!sheet) throw new Error(`工作表已创建但不在 Univer 工作簿里: ${name}`);
+    sheet.onScroll(() => this.scheduleVisible(sheet));
+    await this.ensureVisible(sheet);
+  }
+
   /** Reload the visible HCD windows after another editor commits a revision. */
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;
@@ -1081,6 +1114,14 @@ export class HcdUniverAdapter {
   private canEditBlankCell(sheetId: string, row: number, column: number): boolean {
     if (this.blankCells.has(cellKey(sheetId, row, column))
       || column < (this.loadedRowCeilings.get(`${sheetId}:${row}`) ?? 0)) return true;
+    // A worksheet HCD just created, like a source tab that has no rows at all,
+    // has one window that covers no range. Its first row is where the first
+    // cell opens that window, so it is editable the way the row past an
+    // imported grid is; later rows follow once the window has a range.
+    if (row === 0 && column < 256 && this.client.descriptors.some(({ chunkId, grid }) =>
+      grid?.sheetId === sheetId && grid.kind === 'cells'
+      && grid.rowStart === undefined && grid.rowEnd === undefined
+      && this.loaded.has(chunkId))) return true;
     // The first row after the imported grid has no HCD row markup yet. The
     // server extends the final cell window when its first cell is created.
     const tail = this.client.descriptors

@@ -542,6 +542,11 @@ pub enum PatchOperation {
     /// untouched; formulas that reference the sheet follow the new name.
     #[serde(rename = "xlsx.sheet.rename", rename_all = "camelCase")]
     XlsxSheetRename { sheet_id: String, name: String },
+    /// Add a worksheet tab after the last one. HCD mints the tab's grid
+    /// identity, its worksheet part name, and one empty window for it, so the
+    /// tab is editable straight away.
+    #[serde(rename = "xlsx.sheet.add", rename_all = "camelCase")]
+    XlsxSheetAdd { name: String },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -610,7 +615,8 @@ impl PatchOperation {
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. }
             | Self::XlsxRowHeight { .. }
-            | Self::XlsxSheetRename { .. } => None,
+            | Self::XlsxSheetRename { .. }
+            | Self::XlsxSheetAdd { .. } => None,
         }
     }
 
@@ -647,6 +653,7 @@ impl PatchOperation {
                 | Self::XlsxColumnWidth { .. }
                 | Self::XlsxRowHeight { .. }
                 | Self::XlsxSheetRename { .. }
+                | Self::XlsxSheetAdd { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -815,6 +822,10 @@ pub struct RevisionRecord {
     /// Sequential worksheet tab renames in worksheet-part coordinates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheet_renames: Vec<SheetRename>,
+    /// Worksheets this revision created. Their part is not in the source
+    /// workbook, so a source-backed export has to add it rather than rewrite it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheet_additions: Vec<SheetAddition>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
 }
@@ -834,6 +845,16 @@ pub struct SheetRename {
     pub sheet_part: String,
     pub old_name: String,
     pub new_name: String,
+}
+
+/// Worksheet created at one revision, addressed by the part it needs in the
+/// package and by the tab position it took. The display name lives on the
+/// worksheet chunks, so a later rename is not copied into this record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SheetAddition {
+    pub sheet_part: String,
+    pub sheet_index: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

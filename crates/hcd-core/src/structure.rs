@@ -280,6 +280,7 @@ fn revision_record(
         grid_column_insertions: Vec::new(),
         grid_column_deletions: Vec::new(),
         sheet_renames: Vec::new(),
+        sheet_additions: Vec::new(),
         structural_change,
     })
 }

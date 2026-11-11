@@ -7,8 +7,8 @@ use hcd_core::{
     hash_bytes, node_bloom_might_contain, rename_formula_sheet_references, sheet_grid_id,
     sheet_window_chunk_id, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError, HcdManifest,
-    ImportEvent, NodeMapEntry, SheetRename, SourceAnchor, XlsxCellFormatPatch, XlsxCellLayoutPatch,
-    XlsxSheetSection, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    ImportEvent, NodeMapEntry, SheetAddition, SheetRename, SourceAnchor, XlsxCellFormatPatch,
+    XlsxCellLayoutPatch, XlsxSheetSection, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -22,6 +22,19 @@ use std::path::{Component, Path, PathBuf};
 use time::{Date, Duration, Month};
 
 const MAX_CONTROL_BYTES: u64 = 16 * 1024 * 1024;
+/// Worksheet a source-backed export writes for a tab HCD created. It matches
+/// the blank worksheet `officecli` adds to a workbook, and its `<sheetData/>`
+/// is the anchor `rewrite_worksheet` opens when a cell lands on the new tab.
+const BLANK_XLSX_WORKSHEET_XML: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+    "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" ",
+    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">",
+    "<sheetData/></worksheet>",
+);
+const XLSX_WORKSHEET_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
+const XLSX_WORKSHEET_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
 const ROWS_PER_WINDOW: usize = 128;
 const MAX_MERGED_RANGES: usize = 1_000_000;
 const MAX_FORMAT_CODE_BYTES: usize = 1_024;
@@ -2169,12 +2182,18 @@ fn expand_shared_formula_replacements(
     archive: &mut StreamingOxmlArchive,
     replacements: &mut HashMap<String, BTreeMap<String, String>>,
     converted_cells: &HashMap<String, BTreeSet<String>>,
+    added_parts: &BTreeSet<String>,
 ) -> Result<usize, HcdError> {
     let mut expanded_groups = 0usize;
     for part in converted_cells.keys() {
         replacements.entry(part.clone()).or_default();
     }
     for (part, formulas) in replacements {
+        // A worksheet HCD created has no source rows to carry a shared formula
+        // group, so there is nothing to scan and nothing to expand.
+        if added_parts.contains(part) {
+            continue;
+        }
         let converted = converted_cells.get(part);
         let scan = archive
             .with_part(part, |source| {
@@ -4721,6 +4740,7 @@ pub(crate) fn export_xlsx(
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
     let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
     let mut sheet_renames: Vec<SheetRename> = Vec::new();
+    let mut sheet_additions: Vec<SheetAddition> = Vec::new();
     for &revision in &revisions {
         let record = bundle.revision(revision)?;
         formula_converted_to_value |= !record.converted_formula_node_ids.is_empty();
@@ -4753,6 +4773,7 @@ pub(crate) fn export_xlsx(
             replacements.entry(part).or_default();
         }
         sheet_renames.extend(record.sheet_renames);
+        sheet_additions.extend(record.sheet_additions);
     }
     for node in nodes {
         if node.source.node_kind != "cell" {
@@ -4827,7 +4848,33 @@ pub(crate) fn export_xlsx(
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
-    let workbook = workbook_info(&mut archive)?;
+    let mut workbook = workbook_info(&mut archive)?;
+    // A tab HCD created has no entry in the source workbook, so the sheet list
+    // is grown from the revision records: every collector that turns an HCD
+    // window back into a worksheet part addresses sheets by that position, and
+    // a cell written onto the new tab has to resolve to its part.
+    let added_parts: BTreeSet<String> = sheet_additions
+        .iter()
+        .map(|addition| addition.sheet_part.clone())
+        .collect();
+    if !sheet_additions.is_empty() {
+        let added_names = xlsx_added_sheet_names(bundle, &manifest, &sheet_additions)?;
+        for addition in &sheet_additions {
+            let position = addition.sheet_index.min(workbook.sheets.len());
+            workbook.sheets.insert(
+                position,
+                SheetPart {
+                    name: added_names[&addition.sheet_part].clone(),
+                    part: addition.sheet_part.clone(),
+                    index: position,
+                    state: "visible",
+                },
+            );
+        }
+        for (position, sheet) in workbook.sheets.iter_mut().enumerate() {
+            sheet.index = position;
+        }
+    }
     let drawing_shifts = collect_structural_drawings(
         bundle,
         &manifest,
@@ -4850,6 +4897,7 @@ pub(crate) fn export_xlsx(
         &mut archive,
         &mut formula_replacements,
         &converted_formula_cells,
+        &added_parts,
     )?;
     for (part, formulas) in &mut formula_replacements {
         let rows = row_insertions.get(part).map(Vec::as_slice).unwrap_or(&[]);
@@ -4875,6 +4923,7 @@ pub(crate) fn export_xlsx(
             &row_insertions,
             &column_shifts,
             &drawing_shifts,
+            &added_parts,
         )?;
     }
     let edited_cells = collect_edited_xlsx_cells(bundle, &manifest)?;
@@ -4911,6 +4960,23 @@ pub(crate) fn export_xlsx(
         &column_shifts,
     )?;
     let row_heights = collect_canonical_row_heights(bundle, &manifest, &workbook, &replacements)?;
+    // A worksheet HCD created has no entry in the source package, so it is
+    // rebuilt over the blank one the export writes: as the rebuilt file when a
+    // cell landed on the new tab, and as the blank file itself otherwise.
+    let mut blank_templates: HashMap<String, PathBuf> = HashMap::new();
+    let mut addition_paths: HashMap<String, PathBuf> = HashMap::new();
+    for part in &added_parts {
+        if archive.contains(part) {
+            return Err(HcdError::InvalidBundle(format!(
+                "XLSX worksheet addition {part} is already in the source workbook"
+            )));
+        }
+        let path = scratch
+            .path()
+            .join(safe_temp_name(&format!("blank-{part}")));
+        std::fs::write(&path, BLANK_XLSX_WORKSHEET_XML)?;
+        blank_templates.insert(part.clone(), path);
+    }
     for (part, values) in &replacements {
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
@@ -4936,30 +5002,48 @@ pub(crate) fn export_xlsx(
         let shifts = row_insertions.get(part).cloned().unwrap_or_default();
         let column_shifts = column_shifts.get(part).cloned().unwrap_or_default();
         let last_column = canonical_last_columns.get(part).copied().unwrap_or(0);
-        archive
-            .with_part(part, |input| {
-                rewrite_worksheet(
-                    input,
-                    BufWriter::new(output),
-                    values,
-                    &numeric_original,
-                    &formulas,
-                    &inserted,
-                    &numeric_new,
-                    &inserted_formulas,
-                    merges,
-                    rows,
-                    widths,
-                    heights,
-                    &shifts,
-                    &column_shifts,
-                    last_column,
-                    cell_style_indexes.get(part).unwrap_or(&empty_cell_styles),
-                )
-                .map_err(|error| PackageError::ReadPartError(error.to_string()))
-            })
-            .map_err(package_error)?;
-        replacement_paths.insert(part.clone(), path);
+        let styles = cell_style_indexes.get(part).unwrap_or(&empty_cell_styles);
+        let rebuild = |input: &mut dyn Read, output: File| {
+            rewrite_worksheet(
+                input,
+                BufWriter::new(output),
+                values,
+                &numeric_original,
+                &formulas,
+                &inserted,
+                &numeric_new,
+                &inserted_formulas,
+                merges,
+                rows,
+                widths,
+                heights,
+                &shifts,
+                &column_shifts,
+                last_column,
+                styles,
+            )
+        };
+        match blank_templates.get(part) {
+            Some(template) => {
+                let mut input = File::open(template)?;
+                rebuild(&mut input, output)?;
+                addition_paths.insert(part.clone(), path);
+            }
+            None => {
+                archive
+                    .with_part(part, |input| {
+                        rebuild(input, output)
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    })
+                    .map_err(package_error)?;
+                replacement_paths.insert(part.clone(), path);
+            }
+        }
+    }
+    for (part, template) in &blank_templates {
+        addition_paths
+            .entry(part.clone())
+            .or_insert_with(|| template.clone());
     }
     for (part, (_, rows, columns)) in &drawing_shifts {
         let path = scratch.path().join(safe_temp_name(part));
@@ -5026,9 +5110,109 @@ pub(crate) fn export_xlsx(
             }
         }
     }
-    let changed =
-        StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "xl/workbook.xml")
-            .map_err(package_error)?;
+    // The package also has to know the worksheet exists: its content type, the
+    // workbook relationship that points at it, and its tab. Each control part is
+    // rewritten over whatever the export already replaced, so a recalculation
+    // flag or a rename is not lost.
+    if !sheet_additions.is_empty() {
+        let mut ordered: Vec<&SheetAddition> = sheet_additions.iter().collect();
+        ordered.sort_by_key(|addition| addition.sheet_index);
+        let content_types =
+            current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
+        let relationships = current_control_part(
+            &mut archive,
+            &replacement_paths,
+            "xl/_rels/workbook.xml.rels",
+        )?;
+        let workbook_xml =
+            current_control_part(&mut archive, &replacement_paths, "xl/workbook.xml")?;
+        let first_relationship_id = highest_control_id(&relationships, "Relationship", "Id")? + 1;
+        let first_sheet_id = highest_control_id(&workbook_xml, "sheet", "sheetId")? + 1;
+        let mut type_children = Vec::new();
+        let mut relationship_children = Vec::new();
+        let mut sheet_children = Vec::new();
+        for (addition, (relationship_number, sheet_number)) in ordered
+            .iter()
+            .zip((first_relationship_id..).zip(first_sheet_id..))
+        {
+            let target = addition.sheet_part.strip_prefix("xl/").ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "XLSX worksheet addition {} is not a workbook part",
+                    addition.sheet_part
+                ))
+            })?;
+            let name = workbook
+                .sheets
+                .iter()
+                .find(|sheet| sheet.part == addition.sheet_part)
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle(format!(
+                        "XLSX worksheet addition {} is not on the sheet list",
+                        addition.sheet_part
+                    ))
+                })?;
+            let relationship_id = format!("rId{relationship_number}");
+            type_children.push(AddedElement {
+                name: "Override",
+                attributes: vec![
+                    ("PartName".to_string(), format!("/{}", addition.sheet_part)),
+                    (
+                        "ContentType".to_string(),
+                        XLSX_WORKSHEET_CONTENT_TYPE.to_string(),
+                    ),
+                ],
+            });
+            relationship_children.push(AddedElement {
+                name: "Relationship",
+                attributes: vec![
+                    ("Id".to_string(), relationship_id.clone()),
+                    (
+                        "Type".to_string(),
+                        XLSX_WORKSHEET_RELATIONSHIP_TYPE.to_string(),
+                    ),
+                    ("Target".to_string(), target.to_string()),
+                ],
+            });
+            sheet_children.push(AddedElement {
+                name: "sheet",
+                attributes: vec![
+                    ("name".to_string(), name.name.clone()),
+                    ("sheetId".to_string(), sheet_number.to_string()),
+                    ("r:id".to_string(), relationship_id),
+                ],
+            });
+        }
+        for (part, parent, source_bytes, children) in [
+            (
+                "[Content_Types].xml",
+                "Types",
+                &content_types,
+                &type_children,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                "Relationships",
+                &relationships,
+                &relationship_children,
+            ),
+            ("xl/workbook.xml", "sheets", &workbook_xml, &sheet_children),
+        ] {
+            let rewritten = append_control_children(source_bytes, parent, children, part)?;
+            let path = scratch
+                .path()
+                .join(safe_temp_name(&format!("added-{part}")));
+            std::fs::write(&path, rewritten)?;
+            replacement_paths.insert(part.to_string(), path);
+        }
+    }
+    let changed = StreamingOxmlRewriter::rewrite_with_additions(
+        source,
+        target,
+        &replacement_paths,
+        &addition_paths,
+        "xl/workbook.xml",
+    )
+    .map_err(package_error)?;
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if changed.is_empty() {
@@ -5097,6 +5281,20 @@ pub(crate) fn export_xlsx(
                     source_part: Some(rename.sheet_part.clone()),
                 });
             }
+            for addition in &sheet_additions {
+                let name = workbook
+                    .sheets
+                    .iter()
+                    .find(|sheet| sheet.part == addition.sheet_part)
+                    .map(|sheet| sheet.name.as_str())
+                    .unwrap_or("unnamed");
+                warnings.push(FidelityWarning {
+                    code: "XLSX_SHEET_ADD".to_string(),
+                    message: format!("worksheet {name} was created in HCD; the export wrote a blank worksheet part at {}, registered its content type and workbook relationship, and placed its tab at position {}", addition.sheet_part, addition.sheet_index),
+                    node_id: None,
+                    source_part: Some(addition.sheet_part.clone()),
+                });
+            }
             if edited_cells.iter().any(|cell| direct_format(&cell.format)) {
                 warnings.push(FidelityWarning {
                     code: "XLSX_DIRECT_CELL_FORMAT".to_string(),
@@ -5134,6 +5332,274 @@ pub(crate) fn export_xlsx(
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
+}
+
+/// One empty child element to append inside a control part's container.
+struct AddedElement {
+    name: &'static str,
+    attributes: Vec<(String, String)>,
+}
+
+/// The bytes a control part will carry in the export: the file the export has
+/// already rewritten for it, or the source entry when nothing else touched it.
+/// A worksheet addition and a rename both edit `xl/workbook.xml`, so the second
+/// rewrite has to start from the first one's result.
+fn current_control_part(
+    archive: &mut StreamingOxmlArchive,
+    replacement_paths: &HashMap<String, PathBuf>,
+    name: &str,
+) -> Result<Vec<u8>, HcdError> {
+    match replacement_paths.get(name) {
+        Some(path) => Ok(std::fs::read(path)?),
+        None => archive
+            .read_control_part(name, MAX_CONTROL_BYTES)
+            .map_err(package_error),
+    }
+}
+
+/// Highest number an identity attribute carries in a control part, so a new
+/// entry never reuses one the workbook already knows. A value such as `rId12`
+/// counts by its trailing digits; a value without digits is ignored.
+fn highest_control_id(source: &[u8], element: &str, wanted: &str) -> Result<u64, HcdError> {
+    let mut reader = Reader::from_reader(source);
+    let mut buffer = Vec::new();
+    let mut highest = 0u64;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX control part XML: {error}")))?;
+        match event {
+            Event::Start(ref start) | Event::Empty(ref start)
+                if local_name(start.name().as_ref()) == element =>
+            {
+                if let Some(value) = attribute(start, wanted) {
+                    let digits =
+                        value.trim_start_matches(|character: char| !character.is_ascii_digit());
+                    if let Ok(number) = digits.parse::<u64>() {
+                        highest = highest.max(number);
+                    }
+                }
+            }
+            Event::Eof => {
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(highest)
+}
+
+/// Appends empty child elements just before the end tag of `parent`, keeping
+/// every other byte of the control part exactly as it was read.
+///
+/// An appended child is written the way the elements it joins are written. A
+/// workbook may bind spreadsheetml to a prefix (`<x:sheets><x:sheet …/>`)
+/// instead of to the default namespace, and an unprefixed `<sheet>` inside that
+/// list is not a worksheet at all: Excel hides the tab it cannot read.
+fn append_control_children(
+    source: &[u8],
+    parent: &str,
+    children: &[AddedElement],
+    part: &str,
+) -> Result<Vec<u8>, HcdError> {
+    let mut reader = Reader::from_reader(source);
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut appended = false;
+    let mut parent_scope: Option<ControlScope> = None;
+    let mut sibling_scope: Option<ControlScope> = None;
+    let mut root_declarations: Option<Vec<(String, String)>> = None;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("{part} XML: {error}")))?;
+        // The first element of the part is its root, and what the root declares
+        // is already in scope for everything written below it.
+        if root_declarations.is_none() {
+            if let Event::Start(ref start) | Event::Empty(ref start) = event {
+                root_declarations = Some(element_scope(start).1);
+            }
+        }
+        match event {
+            Event::End(ref end) if !appended && local_name(end.name().as_ref()) == parent => {
+                appended = true;
+                let scope = child_scope(
+                    &parent_scope,
+                    &sibling_scope,
+                    root_declarations.as_deref().unwrap_or_default(),
+                );
+                write_control_children(&mut writer, children, &scope)?;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Start(ref start)
+                if !appended
+                    && parent_scope.is_none()
+                    && local_name(start.name().as_ref()) == parent =>
+            {
+                parent_scope = Some(element_scope(start));
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Empty(ref element)
+                if !appended
+                    && parent_scope.is_none()
+                    && local_name(element.name().as_ref()) == parent =>
+            {
+                // A list that closes itself still has to gain its children, so
+                // it is opened, filled, and closed again in place. Its own
+                // declarations already cover what is written inside it.
+                appended = true;
+                let prefix = element_scope(element).0;
+                writer.write_event(Event::Start(element.clone()))?;
+                write_control_children(&mut writer, children, &(prefix, Vec::new()))?;
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                writer.write_event(Event::End(BytesEnd::new(name)))?;
+            }
+            Event::Start(ref start)
+                if !appended && parent_scope.is_some() && sibling_scope.is_none() =>
+            {
+                sibling_scope = Some(element_scope(start));
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Empty(ref element)
+                if !appended && parent_scope.is_some() && sibling_scope.is_none() =>
+            {
+                sibling_scope = Some(element_scope(element));
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Eof => {
+                break;
+            }
+            other => writer.write_event(other.into_owned())?,
+        }
+        buffer.clear();
+    }
+    if !appended {
+        return Err(HcdError::InvalidBundle(format!(
+            "{part} is missing its {parent} list"
+        )));
+    }
+    Ok(writer.into_inner())
+}
+
+/// The prefix an element is written with and the namespace declarations it
+/// carries, which is everything a child appended inside it needs to resolve.
+type ControlScope = (Option<String>, Vec<(String, String)>);
+
+fn element_scope(element: &BytesStart<'_>) -> ControlScope {
+    let prefix = name_prefix(element.name().as_ref()).map(str::to_string);
+    let declarations = element
+        .attributes()
+        .with_checks(false)
+        .flatten()
+        .filter(|attribute| {
+            let key = attribute.key.as_ref();
+            key == b"xmlns" || key.starts_with(b"xmlns:")
+        })
+        .filter_map(|attribute| {
+            let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+            attribute
+                .unescape_value()
+                .ok()
+                .map(|value| (key, value.into_owned()))
+        })
+        .collect();
+    (prefix, declarations)
+}
+
+fn name_prefix(name: &[u8]) -> Option<&str> {
+    let (prefix, _) = std::str::from_utf8(name).ok()?.split_once(':')?;
+    (!prefix.is_empty()).then_some(prefix)
+}
+
+/// How an appended child has to be written: like the first element already in
+/// the list, keeping only the declarations the list and the document root do not
+/// already make for it.
+fn child_scope(
+    parent: &Option<ControlScope>,
+    sibling: &Option<ControlScope>,
+    root: &[(String, String)],
+) -> ControlScope {
+    match sibling {
+        Some((prefix, declarations)) => (
+            prefix.clone(),
+            declarations
+                .iter()
+                .filter(|(key, _)| {
+                    !root.iter().any(|(name, _)| name == key)
+                        && !parent.as_ref().is_some_and(|(_, declared)| {
+                            declared.iter().any(|(name, _)| name == key)
+                        })
+                })
+                .cloned()
+                .collect(),
+        ),
+        None => (
+            parent.as_ref().and_then(|(prefix, _)| prefix.clone()),
+            Vec::new(),
+        ),
+    }
+}
+
+fn write_control_children(
+    writer: &mut Writer<Vec<u8>>,
+    children: &[AddedElement],
+    scope: &ControlScope,
+) -> Result<(), HcdError> {
+    for child in children {
+        let name = match scope.0.as_deref() {
+            Some(prefix) => format!("{prefix}:{}", child.name),
+            None => child.name.to_string(),
+        };
+        let mut element = BytesStart::new(name);
+        for (key, value) in &scope.1 {
+            element.push_attribute((key.as_str(), value.as_str()));
+        }
+        for (key, value) in &child.attributes {
+            element.push_attribute((key.as_str(), value.as_str()));
+        }
+        writer.write_event(Event::Empty(element))?;
+    }
+    Ok(())
+}
+
+/// The name each HCD-created worksheet tab carries now, read back from the
+/// window it was given. A rename after the addition lands on those descriptors,
+/// so the export writes the live name and not the one the patch asked for.
+fn xlsx_added_sheet_names(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    additions: &[SheetAddition],
+) -> Result<HashMap<String, String>, HcdError> {
+    let mut names: HashMap<String, String> = additions
+        .iter()
+        .map(|addition| (addition.sheet_part.clone(), String::new()))
+        .collect();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let Some(part) = grid.sheet_part.as_deref() else {
+                continue;
+            };
+            if let Some(slot) = names.get_mut(part) {
+                *slot = grid.sheet_name.clone();
+            }
+        }
+    }
+    for (part, name) in &names {
+        if name.is_empty() {
+            return Err(HcdError::InvalidBundle(format!(
+                "XLSX added worksheet {part} has no window carrying its name"
+            )));
+        }
+    }
+    Ok(names)
 }
 
 fn collect_canonical_column_widths(
@@ -7913,6 +8379,7 @@ fn verify_grid_shift_source(
     row_insertions: &HashMap<String, Vec<RowShift>>,
     column_shifts: &HashMap<String, Vec<ColumnShift>>,
     drawing_shifts: &DrawingShifts,
+    added_parts: &BTreeSet<String>,
 ) -> Result<(), HcdError> {
     for entry in archive.entries() {
         let name = entry.name.as_str();
@@ -7973,6 +8440,11 @@ fn verify_grid_shift_source(
     for sheet in &workbook.sheets {
         let target =
             row_insertions.contains_key(&sheet.part) || column_shifts.contains_key(&sheet.part);
+        if added_parts.contains(&sheet.part) {
+            // A worksheet HCD created has no source content to hold a
+            // cross-sheet formula or a merged range the shift cannot follow.
+            continue;
+        }
         archive
             .with_part(&sheet.part, |source| {
                 let mut reader = Reader::from_reader(BufReader::new(source));
@@ -8889,7 +9361,8 @@ mod tests {
         extract_text_page, validate_bundle, NodePrecondition, PatchBatch, PatchOperation,
         XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch,
         HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_31, HCD_PATCH_SCHEMA_VERSION_32,
-        HCD_PATCH_SCHEMA_VERSION_33, HCD_PATCH_SCHEMA_VERSION_34, HCD_PATCH_SCHEMA_VERSION_6,
+        HCD_PATCH_SCHEMA_VERSION_33, HCD_PATCH_SCHEMA_VERSION_34, HCD_PATCH_SCHEMA_VERSION_35,
+        HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -14092,6 +14565,453 @@ mod tests {
     }
 
     #[test]
+    fn creates_a_worksheet_tab_and_exports_it_as_a_new_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("sheet-add.xlsx");
+        create_sheet_rename_fixture(&source);
+        let bundle_path = temp.path().join("sheet-add.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let historical = temp.path().join("historical.xlsx");
+        let reopened_path = temp.path().join("reopened.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sheet-add"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let add = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_35.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-notes".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetAdd {
+                name: "Notes".into(),
+            }],
+        };
+        assert_eq!(hcd_core::apply_patch(&bundle, &add, 0).unwrap().revision, 1);
+        let checked = validate_bundle(&bundle).unwrap();
+        assert!(checked.valid, "{:?}", checked.issues);
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(record.sheet_additions.len(), 1);
+        assert_eq!(
+            record.sheet_additions[0].sheet_part,
+            "xl/worksheets/sheet3.xml"
+        );
+        assert_eq!(record.sheet_additions[0].sheet_index, 2);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count + 1);
+        let notes_window = |chunks: &[hcd_core::ChunkDescriptor]| {
+            chunks
+                .iter()
+                .find(|chunk| {
+                    chunk.grid.as_ref().is_some_and(|grid| {
+                        grid.kind == GridChunkKind::Cells && grid.sheet_name == "Notes"
+                    })
+                })
+                .expect("added worksheet window")
+                .clone()
+        };
+        let added = notes_window(&bundle.read_index_page(&head, 0).unwrap().chunks);
+        assert_eq!(added.sequence, manifest.chunk_count);
+        assert_eq!(added.node_count, 0);
+        let grid = added.grid.as_ref().unwrap();
+        assert_eq!((grid.row_start, grid.row_end), (None, None));
+        assert_eq!(grid.sheet_index, 2);
+        assert_eq!(grid.sheet_state, "visible");
+        assert_eq!(grid.sheet_part.as_deref(), Some("xl/worksheets/sheet3.xml"));
+        let html = bundle.read_chunk(&added).unwrap();
+        assert!(
+            html.contains("data-hcd-sheet=\"Notes\" data-hcd-sheet-index=\"2\" data-hcd-sheet-state=\"visible\"><table"),
+            "a created tab has to read like an imported empty one: {html}"
+        );
+        assert!(bundle.read_map(&added).unwrap().entries.is_empty());
+        for (patch_id, name, message) in [
+            ("add-existing", "Plain", "must be unique"),
+            ("add-other-case", "FORMULA", "must be unique"),
+            ("add-illegal", "Bad[Name]", "invalid XLSX worksheet name"),
+            (
+                "add-too-long",
+                "12345678901234567890123456789012",
+                "invalid XLSX worksheet name",
+            ),
+        ] {
+            let rejected = PatchBatch {
+                patch_id: patch_id.into(),
+                base_revision: 1,
+                operations: vec![PatchOperation::XlsxSheetAdd { name: name.into() }],
+                ..add.clone()
+            };
+            let error = hcd_core::apply_patch(&bundle, &rejected, 1)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
+        }
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_SHEET_ADD"));
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(
+            workbook.contains(r#"<sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Formula" sheetId="2" r:id="rId2"/><sheet name="Notes" sheetId="3" r:id="rId3"/></sheets>"#),
+            "{workbook}"
+        );
+        let relationships = read_zip_entry(&exported, "xl/_rels/workbook.xml.rels");
+        assert!(
+            relationships.contains(r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>"#),
+            "{relationships}"
+        );
+        let content_types = read_zip_entry(&exported, "[Content_Types].xml");
+        assert!(
+            content_types.contains(r#"<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#),
+            "{content_types}"
+        );
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/sheet3.xml"),
+            BLANK_XLSX_WORKSHEET_XML,
+            "a tab nobody typed into exports as the blank worksheet"
+        );
+        for part in [
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "[Content_Types].xml",
+        ] {
+            assert_ne!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part} has to register the new worksheet"
+            );
+        }
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml"),
+            "an untouched worksheet must stay byte-identical"
+        );
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml"),
+            "an untouched worksheet must stay byte-identical"
+        );
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "xl/workbook.xml"),
+            read_zip_entry(&source, "xl/workbook.xml")
+        );
+        let file = File::open(&historical).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        assert!(
+            archive
+                .file_names()
+                .all(|name| name != "xl/worksheets/sheet3.xml"),
+            "revision 0 has no new tab"
+        );
+        let reopened = import_xlsx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("sheet-add"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        let reimported = notes_window(
+            &reopened_bundle
+                .read_index_page(&reopened, 0)
+                .unwrap()
+                .chunks,
+        );
+        assert_eq!(
+            reimported.grid.as_ref().unwrap().sheet_id,
+            grid.sheet_id,
+            "re-importing the exported workbook has to recover the same worksheet identity"
+        );
+    }
+
+    #[test]
+    fn appends_a_created_tab_in_the_workbooks_own_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("prefixed.xlsx");
+        create_prefixed_sheet_fixture(&source);
+        let bundle_path = temp.path().join("prefixed.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let reopened_path = temp.path().join("reopened.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("prefixed-add"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let add = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_35.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-prefixed".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetAdd {
+                name: "Notes".into(),
+            }],
+        };
+        assert_eq!(hcd_core::apply_patch(&bundle, &add, 0).unwrap().revision, 1);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(
+            workbook.contains(r#"<x:sheet name="Notes" sheetId="3" r:id="rId3"/>"#),
+            "the created tab has to be written in the prefix the workbook uses: {workbook}"
+        );
+        assert!(
+            !workbook.contains("<sheet "),
+            "an unprefixed sheet element is not a worksheet: {workbook}"
+        );
+        let relationships = read_zip_entry(&exported, "xl/_rels/workbook.xml.rels");
+        assert!(
+            relationships.contains(r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>"#),
+            "{relationships}"
+        );
+        let reopened = import_xlsx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("prefixed-reopen"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        let head = reopened_bundle.manifest().unwrap();
+        let names: Vec<String> = reopened_bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .iter()
+            .filter_map(|chunk| chunk.grid.as_ref().map(|grid| grid.sheet_name.clone()))
+            .collect();
+        assert_eq!(
+            names.iter().collect::<HashSet<_>>(),
+            [
+                "Plain".to_string(),
+                "Blank".to_string(),
+                "Notes".to_string()
+            ]
+            .iter()
+            .collect::<HashSet<_>>(),
+            "all three tabs survive the export, revision {}",
+            reopened.revision
+        );
+    }
+
+    #[test]
+    fn an_appended_child_repeats_only_the_namespace_its_siblings_need() {
+        let relationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let parent = Some((Some("x".to_string()), Vec::new()));
+        let sibling = Some((
+            Some("x".to_string()),
+            vec![("xmlns:r".to_string(), relationships.to_string())],
+        ));
+        // A workbook whose root already binds `r` must not repeat the
+        // declaration on the tab it appends, so the tab reads like the rest.
+        let bound = child_scope(
+            &parent,
+            &sibling,
+            &[("xmlns:r".to_string(), relationships.to_string())],
+        );
+        assert_eq!(bound.0.as_deref(), Some("x"));
+        assert!(bound.1.is_empty(), "{bound:?}");
+        // A workbook that binds `r` only on its sheets has to hand that binding
+        // to the appended tab, or the tab's relationship id resolves to nothing.
+        let copied = child_scope(&parent, &sibling, &[]);
+        assert_eq!(
+            copied,
+            (
+                Some("x".to_string()),
+                vec![("xmlns:r".to_string(), relationships.to_string())]
+            )
+        );
+    }
+
+    #[test]
+    fn writes_a_cell_onto_a_worksheet_created_in_hcd() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("added-cell.xlsx");
+        create_sheet_rename_fixture(&source);
+        let bundle_path = temp.path().join("added-cell.hcd");
+        let at_add = temp.path().join("at-add.xlsx");
+        let exported = temp.path().join("exported.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("added-cell"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let add = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_35.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-notes".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetAdd {
+                name: "Notes".into(),
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &add, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        let added = bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_name == "Notes")
+            })
+            .expect("added worksheet window");
+        let sheet_id = added.grid.as_ref().unwrap().sheet_id.clone();
+        let cell = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_7.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "first-cell-on-notes".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id,
+                row: 1,
+                column: 1,
+                text: "First".to_string(),
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &cell, 1).unwrap().revision,
+            2
+        );
+        let checked = validate_bundle(&bundle).unwrap();
+        assert!(checked.valid, "{:?}", checked.issues);
+        let record = bundle.revision(2).unwrap();
+        assert!(
+            record
+                .dirty_grid_parts
+                .contains(&"xl/worksheets/sheet3.xml".to_string()),
+            "{:?}",
+            record.dirty_grid_parts
+        );
+        export_xlsx(
+            &bundle,
+            &source,
+            &at_add,
+            &ExportOptions {
+                revision: Some(1),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&at_add, "xl/worksheets/sheet3.xml"),
+            BLANK_XLSX_WORKSHEET_XML
+        );
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet3.xml");
+        assert!(worksheet.contains("<row r=\"1\">"), "{worksheet}");
+        assert!(
+            worksheet.contains("<c r=\"A1\" t=\"inlineStr\"><is><t>First</t></is></c>"),
+            "{worksheet}"
+        );
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(
+            workbook.contains("<sheet name=\"Notes\" sheetId=\"3\" r:id=\"rId3\"/>"),
+            "{workbook}"
+        );
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml"),
+            "an untouched worksheet must stay byte-identical"
+        );
+    }
+
+    #[test]
+    fn adds_a_worksheet_window_to_a_new_index_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("index-growth.xlsx");
+        create_plain_rows_fixture(&source, hcd_core::INDEX_PAGE_SIZE as u32);
+        let bundle_path = temp.path().join("index-growth.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions {
+                // One row per window fills the first index page with exactly
+                // one page of descriptors, the point where an addition has to
+                // open a second page instead of joining the last one.
+                chunk_blocks: 1,
+                ..ImportOptions::new("index-growth")
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(manifest.chunk_count, hcd_core::INDEX_PAGE_SIZE);
+        assert_eq!(manifest.index_page_count, 1);
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let add = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_35.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-notes".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetAdd {
+                name: "Notes".into(),
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &add, 0).unwrap();
+        let checked = validate_bundle(&bundle).unwrap();
+        assert!(checked.valid, "{:?}", checked.issues);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, hcd_core::INDEX_PAGE_SIZE + 1);
+        assert_eq!(head.index_page_count, 2);
+        assert_eq!(
+            bundle.read_index_page(&head, 0).unwrap().chunks.len(),
+            hcd_core::INDEX_PAGE_SIZE,
+            "the page the import filled keeps every descriptor it had"
+        );
+        let second = bundle.read_index_page(&head, 1).unwrap();
+        assert_eq!(second.page, 1);
+        assert_eq!(second.chunks.len(), 1);
+        assert_eq!(second.chunks[0].sequence, hcd_core::INDEX_PAGE_SIZE);
+        assert_eq!(
+            second.chunks[0]
+                .grid
+                .as_ref()
+                .expect("added window descriptor")
+                .sheet_name,
+            "Notes"
+        );
+        // The export reads every page to find the tab it has to name, so a
+        // window on the grown page still reaches the workbook.
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(
+            workbook.contains("<sheet name=\"Notes\" sheetId=\"2\" r:id=\"rId2\"/>"),
+            "{workbook}"
+        );
+    }
+
+    #[test]
     fn writes_the_first_cell_of_an_empty_worksheet_and_exports_it() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("empty-sheet.xlsx");
@@ -14354,6 +15274,47 @@ mod tests {
             (
                 "xl/worksheets/sheet2.xml",
                 r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>Plain!A1+1</f><v>3</v></c></row></sheetData><hyperlinks><hyperlink ref="B1" location="Plain!A1" display="Jump"/></hyperlinks></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// The same two worksheets as the rename fixture, written the way
+    /// LibreOffice writes them: spreadsheetml bound to the `x` prefix instead of
+    /// to the default namespace, so every element it appends has to keep it.
+    fn create_prefixed_sheet_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><x:workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheets><x:sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Plain" sheetId="1" r:id="rId1"/><x:sheet name="Blank" sheetId="2" r:id="rId2"/></x:sheets><x:calcPr fullCalcOnLoad="1"/></x:workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Left</t></is></c><c r="B1" t="inlineStr"><is><t>Right</t></is></c></row><row r="2"><c r="A2"><v>7</v></c><c r="B2"><v>9</v></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><v>3</v></c></row></sheetData></worksheet>"#,
             ),
         ];
         for (name, contents) in parts {

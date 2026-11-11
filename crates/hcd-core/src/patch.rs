@@ -4,6 +4,7 @@ use crate::bundle::{
 use crate::hash::{hash_bytes, node_bloom, node_bloom_might_contain, stable_node_id};
 use crate::html::{escape_attribute, escape_text};
 use crate::rename_formula_sheet_references;
+use crate::xlsx_grid::{sheet_grid_id, sheet_window_chunk_id, XlsxSheetSection};
 #[cfg(test)]
 use crate::HCD_SCHEMA_VERSION;
 use crate::{
@@ -12,9 +13,9 @@ use crate::{
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
-    RevisionRecord, SheetRename, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
-    XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch, XlsxGridAction,
-    XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
+    RevisionRecord, SheetAddition, SheetRename, SourceAnchor, TextExtractEntry, TextExtractPage,
+    TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch,
+    XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
     HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
     HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
     HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19,
@@ -183,6 +184,17 @@ struct XlsxRowHeight {
     height_points: f64,
 }
 
+/// Worksheet a patch creates. HCD owns the tab's grid identity, the worksheet
+/// part name the package will carry, and the tab position after every worksheet
+/// the bundle already knows.
+#[derive(Clone)]
+struct XlsxSheetAddTarget {
+    name: String,
+    sheet_id: String,
+    sheet_part: String,
+    sheet_index: usize,
+}
+
 #[derive(Clone)]
 struct XlsxSheetRenameTarget {
     sheet_id: String,
@@ -246,6 +258,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxColumnWidth { .. }
                         | PatchOperation::XlsxRowHeight { .. }
                         | PatchOperation::XlsxSheetRename { .. }
+                        | PatchOperation::XlsxSheetAdd { .. }
                         | PatchOperation::XlsxRowInsert { .. }
                         | PatchOperation::XlsxRowDelete { .. }
                         | PatchOperation::XlsxColumnInsert { .. }
@@ -371,6 +384,10 @@ pub fn apply_patch(
         .as_ref()
         .map(|rename| resolve_xlsx_sheet_rename(bundle, &manifest, rename))
         .transpose()?;
+    let xlsx_sheet_add = collect_xlsx_sheet_add(patch)
+        .as_ref()
+        .map(|name| resolve_xlsx_sheet_add(bundle, &manifest, name))
+        .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -427,7 +444,8 @@ pub fn apply_patch(
         || xlsx_row_removal.is_some()
         || xlsx_column_width.is_some()
         || xlsx_row_height.is_some()
-        || xlsx_sheet_rename.is_some();
+        || xlsx_sheet_rename.is_some()
+        || xlsx_sheet_add.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -452,6 +470,12 @@ pub fn apply_patch(
     let mut changed_xlsx_column = false;
     let mut changed_xlsx_row_height = false;
     let mut renamed_xlsx_sheet = false;
+    let mut added_sheet_chunk = xlsx_sheet_add
+        .as_ref()
+        .map(|addition| mint_xlsx_sheet_chunk(bundle, &manifest, addition))
+        .transpose()?;
+    let mut added_xlsx_sheet = false;
+    let mut appended_index_page: Option<crate::ChunkIndexPage> = None;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -1599,6 +1623,33 @@ pub fn apply_patch(
             hash_descriptor(&mut root_hasher, descriptor);
         }
 
+        if page_number + 1 == manifest.index_page_count {
+            if let Some(new_chunk) = added_sheet_chunk.take() {
+                dirty_chunks.insert(new_chunk.chunk_id.clone());
+                added_xlsx_sheet = true;
+                if page.chunks.len() < INDEX_PAGE_SIZE {
+                    page.chunks.push(new_chunk);
+                    hash_descriptor(
+                        &mut root_hasher,
+                        page.chunks.last().expect("appended worksheet chunk"),
+                    );
+                    page_changed = true;
+                } else {
+                    // The last page is already full, so the new window starts a
+                    // page of its own once this one has been rewritten. It is
+                    // still a descriptor of the document, so the root digest
+                    // covers it exactly where the page loop left off.
+                    hash_descriptor(&mut root_hasher, &new_chunk);
+                    appended_index_page = Some(crate::ChunkIndexPage {
+                        schema_version: manifest.schema_version.clone(),
+                        revision: new_revision,
+                        page: page_number + 1,
+                        chunks: vec![new_chunk],
+                    });
+                }
+            }
+        }
+
         if content_changed && (index_root_href.is_none() || page_changed) {
             page.revision = new_revision;
             if let Some(root) = &index_root_href {
@@ -1715,6 +1766,29 @@ pub fn apply_patch(
             "XLSX row height target disappeared".to_string(),
         ));
     }
+    if xlsx_sheet_add.is_some() && !added_xlsx_sheet {
+        return Err(HcdError::InvalidBundle(
+            "XLSX worksheet addition had nowhere to write its window".to_string(),
+        ));
+    }
+    if let Some(appended) = appended_index_page.as_ref() {
+        let page_number = appended.page;
+        if let Some(root) = index_root_href.as_ref() {
+            index_root_href = Some(bundle.append_index_page(root, page_number, appended)?);
+        } else {
+            crate::bundle::atomic_write_json_encoded(
+                &new_index_root.join(format!(
+                    "{page_number:06}.json{}",
+                    manifest.storage_codec.suffix()
+                )),
+                appended,
+            )?;
+        }
+        manifest.index_page_count += 1;
+    }
+    if added_xlsx_sheet {
+        manifest.chunk_count += 1;
+    }
     if xlsx_sheet_rename.is_some() && !renamed_xlsx_sheet {
         return Err(HcdError::InvalidBundle(
             "XLSX worksheet rename target disappeared".to_string(),
@@ -1807,6 +1881,12 @@ pub fn apply_patch(
                 message: "cell layout clones the source style and writes horizontal alignment, vertical alignment, wrap, and a thin or cleared border; number formats stay on the source style".to_string(),
                 node_id: Some(node_id.clone()),
                 source_part: None,
+            }))
+            .chain(xlsx_sheet_add.iter().map(|addition| FidelityWarning {
+                code: "XLSX_WORKSHEET_ADDED".to_string(),
+                message: "new worksheet tab is blank in HCD; source-backed export writes it as a worksheet part the source workbook never had".to_string(),
+                node_id: None,
+                source_part: Some(addition.sheet_part.clone()),
             }))
             .chain(xlsx_number_formats.keys().map(|node_id| FidelityWarning {
                 code: "XLSX_DIRECT_CELL_NUMBER_FORMAT".to_string(),
@@ -1924,6 +2004,14 @@ pub fn apply_patch(
                 sheet_part: rename.sheet_part.clone(),
                 old_name: rename.old_name.clone(),
                 new_name: rename.new_name.clone(),
+            })
+            .collect(),
+        sheet_additions: xlsx_sheet_add
+            .as_ref()
+            .into_iter()
+            .map(|addition| SheetAddition {
+                sheet_part: addition.sheet_part.clone(),
+                sheet_index: addition.sheet_index,
             })
             .collect(),
         structural_change: false,
@@ -2230,6 +2318,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_32
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_33
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_34
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_35
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2494,6 +2583,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/34 accepts one XLSX worksheet rename operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_35
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxSheetAdd { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/35 accepts one XLSX worksheet addition operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2808,6 +2909,17 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "invalid XLSX worksheet rename target".to_string(),
+                    ));
+                }
+                validate_xlsx_sheet_name(name)?;
+            }
+            PatchOperation::XlsxSheetAdd { name } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_35
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.sheet.add requires one XLSX operation with hcd-patch/35".to_string(),
                     ));
                 }
                 validate_xlsx_sheet_name(name)?;
@@ -4536,6 +4648,152 @@ fn resolve_xlsx_sheet_rename(
 }
 
 /// Rewrite the worksheet tab name on the sheet sections stored in this chunk.
+/// The name a patch wants for a worksheet that does not exist yet.
+fn collect_xlsx_sheet_add(patch: &PatchBatch) -> Option<String> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxSheetAdd { name } = operation else {
+            return None;
+        };
+        Some(name.clone())
+    })
+}
+
+/// Trailing number of a worksheet part such as `xl/worksheets/sheet12.xml`.
+fn worksheet_part_number(part: &str) -> Option<usize> {
+    let stem = part.rsplit('/').next()?.strip_suffix(".xml")?;
+    stem.strip_prefix("sheet")?.parse().ok()
+}
+
+/// Work out where a new tab lands: the worksheet part it will need in the
+/// package, the tab position after every worksheet the bundle knows, and the
+/// grid identity the importer derives for that part, so re-importing an export
+/// of this workbook keeps the same `sheetId`.
+///
+/// A part name is only free for as long as the bundle can see. A bundle
+/// imported before worksheets carried their part and holding nothing but empty
+/// tabs hides one, and the package rewrite then refuses to shadow the part it
+/// collides with instead of overwriting it.
+fn resolve_xlsx_sheet_add(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    name: &str,
+) -> Result<XlsxSheetAddTarget, HcdError> {
+    let mut known_parts: HashSet<String> = HashSet::new();
+    let mut highest_index: Option<usize> = None;
+    let mut highest_number: usize = 0;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind == crate::GridChunkKind::Cells {
+                let mut part = grid.sheet_part.clone();
+                if part.is_none() {
+                    // Older windows name their part through a mapped cell.
+                    part = bundle
+                        .read_map(&descriptor)?
+                        .entries
+                        .iter()
+                        .find(|entry| entry.source.node_kind == "cell")
+                        .map(|entry| entry.source.part.clone());
+                }
+                if let Some(part) = part {
+                    if known_parts.insert(part.clone()) {
+                        highest_index = Some(
+                            highest_index
+                                .map_or(grid.sheet_index, |seen| seen.max(grid.sheet_index)),
+                        );
+                        highest_number =
+                            highest_number.max(worksheet_part_number(&part).unwrap_or_default());
+                    }
+                }
+            }
+            if grid.sheet_name.eq_ignore_ascii_case(name) {
+                return Err(HcdError::InvalidPatch(
+                    "XLSX worksheet names must be unique".to_string(),
+                ));
+            }
+        }
+    }
+    let sheet_index = highest_index.map_or(0, |seen| seen + 1);
+    // Number the new part past the highest one already in the workbook so a tab
+    // an earlier export deleted, or one the source numbered irregularly, cannot
+    // be stepped on.
+    let sheet_part = format!(
+        "xl/worksheets/sheet{}.xml",
+        highest_number.max(known_parts.len()) + 1
+    );
+    Ok(XlsxSheetAddTarget {
+        name: name.to_string(),
+        sheet_id: sheet_grid_id(&manifest.document_id, &sheet_part),
+        sheet_part,
+        sheet_index,
+    })
+}
+
+/// Write the new tab's first window and describe it exactly like the importer
+/// describes a worksheet that has no rows yet, so the tab renders and takes
+/// cells straight away.
+fn mint_xlsx_sheet_chunk(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    addition: &XlsxSheetAddTarget,
+) -> Result<crate::ChunkDescriptor, HcdError> {
+    let html = XlsxSheetSection {
+        sheet_name: &addition.name,
+        sheet_index: addition.sheet_index,
+        sheet_state: "visible",
+        row_start: None,
+        row_end: None,
+        default_column_width: None,
+        default_row_height_points: None,
+        view_attributes: "",
+        column_markup: "",
+    }
+    .html("");
+    let chunk_id = sheet_window_chunk_id(&manifest.document_id, &addition.sheet_part, 0);
+    let source_map = crate::ChunkSourceMap {
+        schema_version: manifest.schema_version.clone(),
+        chunk_id: chunk_id.clone(),
+        entries: Vec::new(),
+    };
+    let (html_href, html_hash) = bundle.write_chunk_object(&html)?;
+    let (map_href, map_hash) = bundle.write_json_object("maps", &source_map)?;
+    Ok(crate::ChunkDescriptor {
+        sequence: manifest.chunk_count,
+        chunk_id,
+        region: "sheet".to_string(),
+        html_href,
+        html_hash,
+        map_href,
+        map_hash,
+        byte_length: html.len() as u64,
+        // An empty window is still one block, so the first row a cell edit
+        // materialises opens it instead of adding a second block.
+        block_count: 1,
+        node_count: 0,
+        text_chars: 0,
+        node_bloom: node_bloom(std::iter::empty::<&str>()),
+        first_node_id: None,
+        last_node_id: None,
+        continuation: false,
+        grid: Some(crate::GridChunkAddress {
+            sheet_id: addition.sheet_id.clone(),
+            sheet_name: addition.name.clone(),
+            sheet_index: addition.sheet_index,
+            sheet_state: "visible".to_string(),
+            kind: crate::GridChunkKind::Cells,
+            row_start: None,
+            row_end: None,
+            column_start: None,
+            column_end: None,
+            default_column_width_emu: None,
+            default_row_height_emu: None,
+            sheet_part: Some(addition.sheet_part.clone()),
+        }),
+    })
+}
+
 fn rename_xlsx_sheet_sections(
     html: &mut String,
     old_name: &str,
@@ -8690,6 +8948,7 @@ fn apply_annotations(
             | PatchOperation::XlsxColumnWidth { .. }
             | PatchOperation::XlsxRowHeight { .. }
             | PatchOperation::XlsxSheetRename { .. }
+            | PatchOperation::XlsxSheetAdd { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}
