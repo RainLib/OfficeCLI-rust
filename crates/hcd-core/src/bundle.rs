@@ -212,6 +212,100 @@ impl Bundle {
         write_index_object(&self.root, codec, "nodes", &node)
     }
 
+    /// Append a page after the last page the tree already reaches.
+    ///
+    /// `replace_index_page` rewrites a page in place. A patch that mints a new
+    /// chunk fills the last page first, and only then needs one more page, so
+    /// this walks to the node owning the tail of the tree, opens a slot for
+    /// `page_number`, and returns the new root href. Every object is content
+    /// addressed, so the root the previous revision pointed at stays reachable
+    /// from its own revision record.
+    pub fn append_index_page(
+        &self,
+        root: &str,
+        page_number: usize,
+        page: &ChunkIndexPage,
+    ) -> Result<String, HcdError> {
+        if page.page != page_number {
+            return Err(HcdError::InvalidBundle(
+                "index page number mismatch".to_string(),
+            ));
+        }
+        let codec = self.manifest()?.storage_codec;
+        let page_href = write_index_object(&self.root, codec, "pages", page)?;
+        self.append_index_path(root, page_number, &page_href, codec, 0)
+    }
+
+    fn append_index_path(
+        &self,
+        href: &str,
+        page: usize,
+        page_href: &str,
+        codec: StorageCodec,
+        depth: usize,
+    ) -> Result<String, HcdError> {
+        if depth >= 12 {
+            return Err(HcdError::ResourceLimit(
+                "index tree exceeds depth 12".to_string(),
+            ));
+        }
+        let mut node: IndexTreeNode = self.read_index_object(href)?;
+        if node.child_span == 0 || node.children.len() > INDEX_TREE_FANOUT || page < node.first_page
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "invalid index tree node {href}"
+            )));
+        }
+        let end = node
+            .children
+            .len()
+            .checked_mul(node.child_span)
+            .and_then(|cover| node.first_page.checked_add(cover))
+            .ok_or_else(|| HcdError::ResourceLimit("index tree page range overflow".to_string()))?;
+        if page < end {
+            // A child already claims this page. Leaf nodes hold pages directly,
+            // so reaching one means the page exists and cannot be appended.
+            let child = (page - node.first_page) / node.child_span;
+            if node.child_span == 1 {
+                return Err(HcdError::InvalidBundle(format!(
+                    "index tree already has page {page}"
+                )));
+            }
+            let old =
+                node.children.get(child).cloned().ok_or_else(|| {
+                    HcdError::InvalidBundle(format!("index tree has no page {page}"))
+                })?;
+            node.children[child] =
+                self.append_index_path(&old, page, page_href, codec, depth + 1)?;
+        } else if page == end {
+            if node.children.len() == INDEX_TREE_FANOUT {
+                return Err(HcdError::ResourceLimit(
+                    "index tree is full; growing a level is not supported".to_string(),
+                ));
+            }
+            node.children.push(if node.child_span == 1 {
+                page_href.to_string()
+            } else {
+                // The new page starts a run of leaf children under this node.
+                write_index_object(
+                    &self.root,
+                    codec,
+                    "nodes",
+                    &IndexTreeNode {
+                        first_page: page,
+                        child_span: 1,
+                        children: vec![page_href.to_string()],
+                    },
+                )?
+            });
+        } else {
+            return Err(HcdError::InvalidBundle(format!(
+                "index tree ends before page {page}"
+            )));
+        }
+        write_index_object(&self.root, codec, "nodes", &node)
+    }
+
     pub fn read_map(&self, descriptor: &ChunkDescriptor) -> Result<ChunkSourceMap, HcdError> {
         read_json_bounded(
             &self.resolve_href(&descriptor.map_href)?,
@@ -1257,5 +1351,194 @@ mod tests {
         let bundle = Bundle::open(temp.path()).unwrap();
         let error = bundle.revision(crate::MAX_REVISION + 1).unwrap_err();
         assert!(matches!(error, HcdError::ResourceLimit(_)));
+    }
+
+    fn written_page(number: usize, chunks: Vec<ChunkDescriptor>) -> ChunkIndexPage {
+        ChunkIndexPage {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            revision: 1,
+            page: number,
+            chunks,
+        }
+    }
+
+    #[test]
+    fn append_index_page_opens_the_page_after_a_full_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("wide.hcd");
+        let mut writer = BundleWriter::create(&root).unwrap();
+        writer.write_styles("").unwrap();
+        for index in 0..crate::INDEX_PAGE_SIZE {
+            let node_id = format!("n_{index:032x}");
+            let chunk_id = format!("c_{index:032x}");
+            let text = format!("value-{index}");
+            let node_hash = hash_bytes(text.as_bytes());
+            writer
+                .write_chunk(
+                    chunk_id.clone(),
+                    "body".to_string(),
+                    format!(
+                        "<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{text}</span></p>"
+                    ),
+                    ChunkSourceMap {
+                        schema_version: HCD_SCHEMA_VERSION.to_string(),
+                        chunk_id,
+                        entries: vec![crate::NodeMapEntry {
+                            node_id,
+                            node_hash,
+                            source: crate::SourceAnchor {
+                                source_cell_ref: None,
+                                created_in_hcd: false,
+                                part: "text/document".to_string(),
+                                text_ordinal: index as u64 + 1,
+                                paragraph_id: None,
+                                text_id: None,
+                                node_kind: "line".to_string(),
+                                editable: true,
+                            },
+                        }],
+                    },
+                    1,
+                    false,
+                )
+                .unwrap();
+        }
+        let manifest = writer.finish(test_manifest()).unwrap();
+        assert_eq!(manifest.chunk_count, crate::INDEX_PAGE_SIZE);
+        assert_eq!(manifest.index_page_count, 1);
+        let bundle = Bundle::open(&root).unwrap();
+        let tree = manifest.index_root_href.clone().unwrap();
+
+        let html = "<p>appended</p>";
+        let chunk_id = format!("c_{:032x}", crate::INDEX_PAGE_SIZE);
+        let (html_href, html_hash) = bundle.write_chunk_object(html).unwrap();
+        let (map_href, map_hash) = bundle
+            .write_json_object(
+                "maps",
+                &ChunkSourceMap {
+                    schema_version: HCD_SCHEMA_VERSION.to_string(),
+                    chunk_id: chunk_id.clone(),
+                    entries: Vec::new(),
+                },
+            )
+            .unwrap();
+        let descriptor = ChunkDescriptor {
+            sequence: crate::INDEX_PAGE_SIZE,
+            chunk_id,
+            region: "body".to_string(),
+            html_href,
+            html_hash,
+            map_href,
+            map_hash,
+            byte_length: html.len() as u64,
+            block_count: 1,
+            node_count: 0,
+            text_chars: html.chars().count(),
+            node_bloom: node_bloom(std::iter::empty::<&str>()),
+            first_node_id: None,
+            last_node_id: None,
+            continuation: false,
+            grid: None,
+        };
+        let page = written_page(1, vec![descriptor.clone()]);
+        let grown = bundle.append_index_page(&tree, 1, &page).unwrap();
+
+        let mut view = manifest.clone();
+        view.revision = 1;
+        view.chunk_count = crate::INDEX_PAGE_SIZE + 1;
+        view.index_page_count = 2;
+        view.index_root_href = Some(grown.clone());
+        assert_eq!(
+            bundle.read_index_page(&view, 0).unwrap().chunks.len(),
+            crate::INDEX_PAGE_SIZE
+        );
+        let appended = bundle.read_index_page(&view, 1).unwrap();
+        assert_eq!(appended.page, 1);
+        assert_eq!(appended.chunks[0].chunk_id, descriptor.chunk_id);
+        assert_eq!(appended.chunks[0].sequence, descriptor.sequence);
+        assert_eq!(appended.chunks[0].html_href, descriptor.html_href);
+
+        // Both pages sit under one new root, and the root the previous revision
+        // used still resolves only its own page.
+        let objects = bundle.index_tree_objects(&grown).unwrap();
+        assert_eq!(objects.len(), 3);
+        assert!(objects.contains(&grown));
+        assert_eq!(
+            bundle.index_page_href(&grown, 0).unwrap(),
+            bundle.index_page_href(&tree, 0).unwrap()
+        );
+        assert!(bundle.index_page_href(&tree, 1).is_err());
+
+        // An append cannot rewrite a page the tree already reaches, and it
+        // cannot leave a hole behind.
+        assert!(bundle
+            .append_index_page(&grown, 0, &written_page(0, Vec::new()))
+            .unwrap_err()
+            .to_string()
+            .contains("already has page 0"));
+        assert!(bundle
+            .append_index_page(&grown, 40, &written_page(40, Vec::new()))
+            .unwrap_err()
+            .to_string()
+            .contains("ends before page 40"));
+    }
+
+    #[test]
+    fn append_index_page_starts_a_new_leaf_under_a_taller_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("deep.hcd");
+        let writer = BundleWriter::create(&root).unwrap();
+        writer.write_styles("").unwrap();
+        let manifest = writer.finish(test_manifest()).unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let page_href = |number: usize| {
+            write_index_object(
+                &root,
+                manifest.storage_codec,
+                "pages",
+                &written_page(number, Vec::new()),
+            )
+            .unwrap()
+        };
+        let leaf = write_index_object(
+            &root,
+            manifest.storage_codec,
+            "nodes",
+            &IndexTreeNode {
+                first_page: 0,
+                child_span: 1,
+                children: vec![page_href(0), page_href(1)],
+            },
+        )
+        .unwrap();
+        let tree = write_index_object(
+            &root,
+            manifest.storage_codec,
+            "nodes",
+            &IndexTreeNode {
+                first_page: 0,
+                child_span: 2,
+                children: vec![leaf],
+            },
+        )
+        .unwrap();
+
+        // Page 2 is past the pages this root reaches, so the append opens a
+        // second leaf instead of pretending the page belongs to the first.
+        let expected = page_href(2);
+        let grown = bundle
+            .append_index_page(&tree, 2, &written_page(2, Vec::new()))
+            .unwrap();
+        assert_eq!(bundle.index_page_href(&grown, 0).unwrap(), page_href(0));
+        assert_eq!(bundle.index_page_href(&grown, 2).unwrap(), expected);
+        let second = bundle
+            .append_index_page(&grown, 3, &written_page(3, Vec::new()))
+            .unwrap();
+        assert_eq!(bundle.index_page_href(&second, 3).unwrap(), page_href(3));
+        assert_eq!(bundle.index_page_href(&second, 2).unwrap(), expected);
+        assert!(matches!(
+            bundle.append_index_page(&second, 5, &written_page(5, Vec::new())),
+            Err(HcdError::InvalidBundle(_))
+        ));
     }
 }
