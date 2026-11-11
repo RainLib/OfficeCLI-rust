@@ -194,6 +194,11 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             "/v1/catalog/themes",
             get(catalog_themes).post(catalog_put_theme),
         )
+        .route("/v1/catalog/themes/retired", get(catalog_retired_themes))
+        .route(
+            "/v1/catalog/themes/{theme_revision_id}/retire",
+            post(catalog_retire_theme).delete(catalog_unretire_theme),
+        )
         .route("/v1/documents/{id}/export/{format}", get(export_document))
         .route(
             "/v1/documents/{id}/downloads/{format}",
@@ -1580,6 +1585,14 @@ fn valid_font_id(id: &str) -> bool {
         && !id.ends_with('-')
 }
 
+/// A content-addressed catalog id is a 64-character lowercase hex digest.
+fn valid_digest_hex(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn parse_font_format(value: &str) -> Result<FontFileFormat, ApiError> {
     match value {
         "woff2" => Ok(FontFileFormat::Woff2),
@@ -1660,11 +1673,7 @@ async fn catalog_delete_font_revision(
             "fontId must be 1-64 lowercase letters, digits, or hyphens",
         ));
     }
-    if revision.len() != 64
-        || !revision
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if !valid_digest_hex(&revision) {
         return Err(bad("fontRevisionId must be a lowercase SHA-256 digest"));
     }
     let report = state
@@ -1818,6 +1827,54 @@ async fn catalog_put_theme(
         .get_theme(&theme_revision_id)
         .map_err(hcd_error)?;
     Ok(Json(stored))
+}
+
+async fn catalog_retired_themes(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    Ok(Json(
+        state.catalog.list_retired_theme_ids().map_err(hcd_error)?,
+    ))
+}
+
+async fn catalog_retire_theme(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    state
+        .catalog
+        .retire_theme(&theme_revision_id)
+        .map_err(hcd_error)?;
+    Ok(Json(json!({
+        "themeRevisionId": theme_revision_id,
+        "retired": true,
+    })))
+}
+
+async fn catalog_unretire_theme(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    state
+        .catalog
+        .unretire_theme(&theme_revision_id)
+        .map_err(hcd_error)?;
+    Ok(Json(json!({
+        "themeRevisionId": theme_revision_id,
+        "retired": false,
+    })))
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -2491,6 +2548,133 @@ mod tests {
         // A non-admin token cannot delete.
         let reader = bearer(secret, "doc", "read");
         let error = catalog_delete_font(State(state), Path("demo-serif".to_string()), reader)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn catalog_retire_lists_and_lifts_theme_retirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .font_revision_id;
+        let theme_id = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: revision,
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .theme_revision_id;
+
+        assert!(catalog_retired_themes(State(state.clone()), admin.clone())
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+
+        let retired =
+            catalog_retire_theme(State(state.clone()), Path(theme_id.clone()), admin.clone())
+                .await
+                .unwrap();
+        assert_eq!(retired.0["retired"], serde_json::json!(true));
+        assert_eq!(
+            catalog_retired_themes(State(state.clone()), admin.clone())
+                .await
+                .unwrap()
+                .0,
+            vec![theme_id.clone()]
+        );
+
+        // Re-retiring is idempotent; un-retiring clears it.
+        let _ = catalog_retire_theme(State(state.clone()), Path(theme_id.clone()), admin.clone())
+            .await
+            .unwrap();
+        let cleared =
+            catalog_unretire_theme(State(state.clone()), Path(theme_id.clone()), admin.clone())
+                .await
+                .unwrap();
+        assert_eq!(cleared.0["retired"], serde_json::json!(false));
+        assert!(catalog_retired_themes(State(state.clone()), admin.clone())
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+        // Un-retiring a live theme is a harmless no-op.
+        let _ = catalog_unretire_theme(State(state), Path(theme_id), admin)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_retire_validates_id_and_requires_admin() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let error = catalog_retire_theme(
+            State(state.clone()),
+            Path("nope".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        let error =
+            catalog_retire_theme(State(state.clone()), Path("ab".repeat(32)), admin.clone())
+                .await
+                .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let reader = bearer(secret, "doc", "read");
+        let error = catalog_retire_theme(State(state), Path("ab".repeat(32)), reader)
             .await
             .unwrap_err();
         assert_eq!(error.0, StatusCode::FORBIDDEN);

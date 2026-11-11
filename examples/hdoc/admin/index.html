@@ -317,9 +317,10 @@ async function refresh() {
     }
     const themesResponse = await api("/v1/catalog/themes");
     const themes = await themesResponse.json();
+    const retiredIds = new Set(await (await api("/v1/catalog/themes/retired")).json());
     themeIds = themes.map((theme) => theme.themeRevisionId);
     $("themeList").innerHTML = themes.length
-      ? "<table><tr><th>themeRevisionId</th><th>名称</th><th>槽位</th><th>回退</th></tr>" +
+      ? "<table><tr><th>themeRevisionId</th><th>名称</th><th>槽位</th><th>回退</th><th>操作</th></tr>" +
         themes.map((theme) => {
           const slots = [];
           for (const group of [["major", theme.major], ["minor", theme.minor]]) {
@@ -328,8 +329,14 @@ async function refresh() {
               if (ref) slots.push(`${group[0]}.${key}=<span class="pill">${esc(ref.fontId)}</span>`);
             }
           }
+          const retired = retiredIds.has(theme.themeRevisionId);
+          const toggle = retired
+            ? `<button data-action="unretire" data-theme="${esc(theme.themeRevisionId)}">取消退役</button>`
+            : `<button class="danger" data-action="retire" data-theme="${esc(theme.themeRevisionId)}">退役</button>`;
           return `<tr><td><code title="${esc(theme.themeRevisionId)}">${esc(theme.themeRevisionId.slice(0, 12))}…</code></td>` +
-            `<td>${esc(theme.name)}</td><td>${slots.join(" ")}</td><td>${esc((theme.fallbackFamilies || []).join(", "))}</td></tr>`;
+            `<td>${esc(theme.name)}${retired ? ' <span class="warn">已退役</span>' : ""}</td>` +
+            `<td>${slots.join(" ")}</td><td>${esc((theme.fallbackFamilies || []).join(", "))}</td>` +
+            `<td>${toggle}</td></tr>`;
         }).join("") + "</table>"
       : '<span class="sub">暂无主题。</span>';
 
@@ -406,6 +413,22 @@ $("fontList").addEventListener("click", async (event) => {
       refresh();
     } catch (error) { setStatus(String(error.message || error), "err"); }
   }
+});
+
+$("themeList").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const action = button.dataset.action;
+  if (action !== "retire" && action !== "unretire") return;
+  const id = button.dataset.theme;
+  const verb = action === "retire" ? "退役" : "取消退役";
+  if (!confirm(`确认${verb}主题 ${id.slice(0, 12)}…？退役后不能新钉到文档，但已钉文档仍可解析。`)) return;
+  try {
+    await api(`/v1/catalog/themes/${encodeURIComponent(id)}/retire`,
+      { method: action === "retire" ? "POST" : "DELETE" });
+    setStatus(`已${verb}主题。`, "ok");
+    refresh();
+  } catch (error) { setStatus(String(error.message || error), "err"); }
 });
 
 const saved = sessionStorage.getItem("hcdAdminToken");

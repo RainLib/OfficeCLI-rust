@@ -610,6 +610,56 @@ impl DiskCatalog {
         Ok(removed)
     }
 
+    /// Mark a theme revision retired. Retirement blocks *new* pins to the theme
+    /// while leaving already-pinned documents able to resolve it, so it needs no
+    /// scan of the document store. The state lives in a sidecar marker so the
+    /// content-hashed `themeRevisionId` is untouched.
+    pub fn retire_theme(&self, theme_revision_id: &str) -> Result<(), HcdError> {
+        let _ = self.theme(theme_revision_id)?;
+        atomic_write(&self.retirement_marker_path(theme_revision_id)?, b"retired")?;
+        Ok(())
+    }
+
+    /// Lift a retirement. A no-op when the theme is not retired.
+    pub fn unretire_theme(&self, theme_revision_id: &str) -> Result<(), HcdError> {
+        require_sha256(theme_revision_id)?;
+        match fs::remove_file(self.retirement_marker_path(theme_revision_id)?) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(HcdError::Io(error)),
+        }
+    }
+
+    pub fn is_theme_retired(&self, theme_revision_id: &str) -> Result<bool, HcdError> {
+        require_sha256(theme_revision_id)?;
+        Ok(self.retirement_marker_path(theme_revision_id)?.exists())
+    }
+
+    /// Every theme revision currently retired, by id.
+    pub fn list_retired_theme_ids(&self) -> Result<Vec<String>, HcdError> {
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(self.root.join("themes"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("retired") {
+                if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+                    if require_sha256(stem).is_ok() {
+                        ids.push(stem.to_string());
+                    }
+                }
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    fn retirement_marker_path(&self, theme_revision_id: &str) -> Result<PathBuf, HcdError> {
+        require_sha256(theme_revision_id)?;
+        Ok(self
+            .root
+            .join("themes")
+            .join(format!("{theme_revision_id}.retired")))
+    }
+
     fn read_blob(&self, sha256: &str, format: FontFileFormat) -> Result<Vec<u8>, HcdError> {
         require_sha256(sha256)?;
         let path = self.blob_path(sha256, format)?;
@@ -1056,6 +1106,14 @@ pub fn pin_document_theme(
     if manifest.theme_revision_id.as_deref() == Some(theme_revision_id) && new_styles == base_styles
     {
         return Ok(manifest);
+    }
+    // A retired theme stays resolvable for documents that already pin it, but
+    // cannot be newly pinned. The idempotent no-op above already covers
+    // re-asserting the current pin, so only a real change reaches this guard.
+    if catalog.is_theme_retired(theme_revision_id)? {
+        return Err(HcdError::Unsupported(format!(
+            "theme {theme_revision_id} is retired and cannot be newly pinned"
+        )));
     }
     if manifest.revision >= crate::MAX_REVISION {
         return Err(HcdError::ResourceLimit(
@@ -1928,6 +1986,45 @@ mod tests {
         assert_eq!(rev0.styles_href, "styles.css");
         let report = crate::validate_bundle(&bundle).unwrap();
         assert!(report.valid, "{:?}", report.issues);
+    }
+
+    #[test]
+    fn retired_theme_blocks_new_pins_but_still_resolves_and_reasserts() {
+        let (_temp, catalog, _font_revision_id, theme_id) = install();
+        let bundle_dir = tempfile::tempdir().unwrap();
+        let bundle = complete_bundle(&bundle_dir, "p { color: #111111; }");
+
+        // Retiring before any pin blocks a new pin, but the theme still
+        // resolves so operators can inspect or preview it.
+        catalog.retire_theme(&theme_id).unwrap();
+        assert!(catalog.is_theme_retired(&theme_id).unwrap());
+        assert_eq!(
+            catalog.list_retired_theme_ids().unwrap(),
+            vec![theme_id.clone()]
+        );
+        assert!(matches!(
+            pin_document_theme(&catalog, &bundle, &theme_id),
+            Err(HcdError::Unsupported(_))
+        ));
+        catalog
+            .resolve(&theme_id, |_, _, _| "/f".to_string())
+            .unwrap();
+
+        // Unretiring lifts the block; the document pins cleanly.
+        catalog.unretire_theme(&theme_id).unwrap();
+        assert!(!catalog.is_theme_retired(&theme_id).unwrap());
+        assert!(catalog.list_retired_theme_ids().unwrap().is_empty());
+        let manifest = pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        assert_eq!(
+            manifest.theme_revision_id.as_deref(),
+            Some(theme_id.as_str())
+        );
+
+        // Once pinned, re-asserting the same (now retired) theme is an
+        // idempotent no-op, not a new pin, so it is still allowed.
+        catalog.retire_theme(&theme_id).unwrap();
+        let again = pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        assert_eq!(again.revision, manifest.revision);
     }
 
     fn store_font_without_theme(catalog: &DiskCatalog) -> FontRevision {
