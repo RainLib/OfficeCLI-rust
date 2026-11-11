@@ -593,6 +593,114 @@ fn ensure_font_in_resources(
     Ok(())
 }
 
+/// Embed a complete TrueType or OpenType face and register it on every page.
+///
+/// The font bytes stay in the PDF. Existing text operators keep their original
+/// fonts. A face that is not a parseable font returns an error and leaves the
+/// file untouched.
+pub fn embed_font_file(path: &Path, resource_name: &str, bytes: &[u8]) -> Result<(), HandlerError> {
+    let face = Face::parse(bytes, 0).map_err(|error| {
+        HandlerError::OperationFailed(format!(
+            "theme font is not a TrueType or OpenType font: {error:?}"
+        ))
+    })?;
+    if resource_name.is_empty()
+        || !resource_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(HandlerError::OperationFailed(
+            "PDF font resource name must be ASCII alphanumeric".to_string(),
+        ));
+    }
+    let mut document = LopdfDocument::load(path).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to open PDF for font embedding: {error}"))
+    })?;
+    let font_id = add_complete_font(&mut document, resource_name, bytes, &face)?;
+    for page_id in document.get_pages().values().copied() {
+        register_font_on_page(&mut document, page_id, resource_name, font_id)?;
+    }
+    document.save(path).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to save PDF after font embedding: {error}"))
+    })?;
+    Ok(())
+}
+
+fn add_complete_font(
+    doc: &mut LopdfDocument,
+    resource_name: &str,
+    bytes: &[u8],
+    face: &Face<'_>,
+) -> Result<ObjectId, HandlerError> {
+    let length1 = bytes.len() as i64;
+    let glyf = face
+        .raw_face()
+        .table(ttf_parser::Tag::from_bytes(b"glyf"))
+        .is_some();
+    let mut fontfile_stream = if glyf {
+        Stream::new(
+            dictionary! { "Length1" => Object::Integer(length1) },
+            bytes.to_vec(),
+        )
+    } else {
+        Stream::new(
+            dictionary! {
+                "Subtype" => Object::Name(b"OpenType".to_vec()),
+                "Length1" => Object::Integer(length1)
+            },
+            bytes.to_vec(),
+        )
+    };
+    let _ = fontfile_stream.compress();
+    let fontfile_id = doc.add_object(Object::Stream(fontfile_stream));
+    let units_per_em = face.units_per_em() as f32;
+    let scale = if units_per_em > 0.0 {
+        1000.0 / units_per_em
+    } else {
+        1.0
+    };
+    let bbox = face.global_bounding_box();
+    let file_key = if glyf { "FontFile2" } else { "FontFile3" };
+    let mut descriptor = dictionary! {
+        "Type" => Object::Name(b"FontDescriptor".to_vec()),
+        "FontName" => Object::Name(resource_name.as_bytes().to_vec()),
+        "Flags" => Object::Integer(32),
+        "FontBBox" => Object::Array(vec![
+            Object::Integer((bbox.x_min as f32 * scale) as i64),
+            Object::Integer((bbox.y_min as f32 * scale) as i64),
+            Object::Integer((bbox.x_max as f32 * scale) as i64),
+            Object::Integer((bbox.y_max as f32 * scale) as i64),
+        ]),
+        "ItalicAngle" => Object::Real(face.italic_angle().unwrap_or(0.0)),
+        "Ascent" => Object::Integer((face.ascender() as f32 * scale).round() as i64),
+        "Descent" => Object::Integer((face.descender() as f32 * scale).round() as i64),
+        "CapHeight" => Object::Integer((face.ascender() as f32 * scale).round() as i64),
+        "StemV" => Object::Integer(80),
+    };
+    descriptor.set(file_key, Object::Reference(fontfile_id));
+    let descriptor_id = doc.add_object(descriptor);
+    let cidfont_id = doc.add_object(dictionary! {
+        "Type" => Object::Name(b"Font".to_vec()),
+        "Subtype" => Object::Name(if glyf { b"CIDFontType2".to_vec() } else { b"CIDFontType0".to_vec() }),
+        "BaseFont" => Object::Name(resource_name.as_bytes().to_vec()),
+        "CIDSystemInfo" => Object::Dictionary(dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => Object::Integer(0),
+        }),
+        "FontDescriptor" => Object::Reference(descriptor_id),
+        "CIDToGIDMap" => Object::Name(b"Identity".to_vec()),
+        "W" => Object::Array(vec![Object::Integer(0), Object::Array(vec![Object::Integer(1000)])]),
+    });
+    Ok(doc.add_object(dictionary! {
+        "Type" => Object::Name(b"Font".to_vec()),
+        "Subtype" => Object::Name(b"Type0".to_vec()),
+        "BaseFont" => Object::Name(resource_name.as_bytes().to_vec()),
+        "Encoding" => Object::Name(b"Identity-H".to_vec()),
+        "DescendantFonts" => Object::Array(vec![Object::Reference(cidfont_id)]),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +749,39 @@ mod tests {
         assert!(!face.is_variable());
         assert_eq!(face.weight().to_number(), 400);
         assert!(face.glyph_index('😀').is_some());
+    }
+
+    #[test]
+    fn complete_font_bytes_are_registered_on_the_page() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(lopdf::dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => Dictionary::new(),
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(lopdf::dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        let catalog = document.add_object(lopdf::dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.pdf");
+        document.save(&path).unwrap();
+        embed_font_file(&path, "HcdEmoji", BUNDLED_NOTO_EMOJI).unwrap();
+        let saved = LopdfDocument::load(&path).unwrap();
+        let page = saved.get_pages()[&1];
+        let (resources, _) = saved.get_page_resources(page).unwrap();
+        let fonts = resources.unwrap().get(b"Font").unwrap().as_dict().unwrap();
+        assert!(fonts.get(b"HcdEmoji").is_ok());
     }
 }

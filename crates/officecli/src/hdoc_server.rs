@@ -1743,7 +1743,9 @@ async fn export_document_inner(
             .arg("--output")
             .arg(&output)
             .arg("--revision")
-            .arg(requested.to_string());
+            .arg(requested.to_string())
+            .arg("--catalog")
+            .arg(state.catalog.root());
         if query.source.unwrap_or(false) {
             let source = state
                 .root

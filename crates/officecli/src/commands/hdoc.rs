@@ -1,11 +1,11 @@
 use clap::{Args, Subcommand, ValueEnum};
 use handler_common::{HandlerError, OutputFormat};
 use hcd_core::{
-    hash_file, manifest_at_revision, render_standalone_html_with_transform, Bundle, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions, PatchBatch,
-    StorageCodec, HCD_SCHEMA_VERSION,
+    hash_file, manifest_at_revision, render_standalone_html_with_transform, theme_font_plan,
+    Bundle, DiskCatalog, FidelityLevel, FidelityReport, FidelityWarning, HcdError, HcdManifest,
+    HtmlPresentationOptions, PatchBatch, StorageCodec, ThemeEmbedKind, HCD_SCHEMA_VERSION,
 };
-use hcd_formats::{ExportOptions, ImportOptions, PdfRasterMode};
+use hcd_formats::{apply_theme_fonts, ExportOptions, ImportOptions, PdfRasterMode};
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -381,6 +381,9 @@ pub struct HdocExportCommand {
     pub revision: Option<u64>,
     #[arg(long)]
     pub fidelity_report: Option<PathBuf>,
+    /// Font catalog used to embed or register the document's pinned theme.
+    #[arg(long)]
+    pub catalog: Option<PathBuf>,
 }
 
 pub fn handle_hdoc(
@@ -1245,7 +1248,7 @@ fn export(
         revision: command.revision,
         fidelity_report: command.fidelity_report.clone(),
     };
-    let report = match command.source.as_deref() {
+    let mut report = match command.source.as_deref() {
         Some(source) if target == source_format => {
             hcd_formats::export_document(&command.bundle, source, &command.output, &options)
                 .map_err(handler_error)?
@@ -1259,6 +1262,17 @@ fn export(
             command.fidelity_report.as_deref(),
         )?,
     };
+    attach_theme_fonts(
+        &bundle,
+        command.revision,
+        command.catalog.as_deref(),
+        Path::new(&command.output),
+        &target,
+        &mut report,
+    )?;
+    if let Some(path) = command.fidelity_report.as_deref() {
+        write_semantic_fidelity_report(path, &report)?;
+    }
     render(
         &report,
         format,
@@ -1267,6 +1281,43 @@ fn export(
             command.output, report.level
         ),
     )
+}
+
+fn attach_theme_fonts(
+    bundle: &Bundle,
+    revision: Option<u64>,
+    catalog: Option<&Path>,
+    output: &Path,
+    target: &str,
+    report: &mut FidelityReport,
+) -> Result<(), HandlerError> {
+    let Some(catalog) = catalog else {
+        return Ok(());
+    };
+    let Some(kind) = (match target {
+        "docx" | "pptx" => Some(ThemeEmbedKind::Ooxml),
+        "pdf" => Some(ThemeEmbedKind::Pdf),
+        "xlsx" => Some(ThemeEmbedKind::Spreadsheet),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    let catalog = DiskCatalog::open(catalog).map_err(handler_error)?;
+    let plan = theme_font_plan(&catalog, bundle, revision, kind).map_err(handler_error)?;
+    if plan.is_empty() {
+        return Ok(());
+    }
+    let applied = apply_theme_fonts(output, target, &plan).map_err(handler_error)?;
+    report.preserved.extend(applied.preserved);
+    report
+        .warnings
+        .extend(applied.warnings.into_iter().map(|message| FidelityWarning {
+            code: "HCD_THEME_FONT".to_string(),
+            message,
+            node_id: None,
+            source_part: None,
+        }));
+    Ok(())
 }
 
 fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, HandlerError> {
