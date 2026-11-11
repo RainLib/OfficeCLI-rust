@@ -2092,7 +2092,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_37
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2332,9 +2332,9 @@ fn validate_patch_identity(
                 font,
                 precondition,
             } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30 {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_37 {
                     return Err(HcdError::InvalidPatch(
-                        "text.font requires schemaVersion hcd-patch/30".to_string(),
+                        "text.font requires schemaVersion hcd-patch/37".to_string(),
                     ));
                 }
                 validate_node_id(node_id)?;
@@ -7786,7 +7786,7 @@ mod tests {
         let result = apply_patch(
             &bundle,
             &crate::PatchBatch {
-                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
                 document_id: "font-doc".to_string(),
                 patch_id: "font-1".to_string(),
                 base_revision: 0,
@@ -7832,8 +7832,8 @@ mod tests {
     }
 
     #[test]
-    fn text_font_requires_v30_and_rejects_empty_or_unsafe_families() {
-        // rejected on a non-v30 schema version
+    fn text_font_requires_v37_and_rejects_empty_or_unsafe_families() {
+        // rejected on a non-v37 schema version
         let temp = tempfile::tempdir().unwrap();
         let bundle_path = single_node_bundle(&temp);
         let bundle = crate::Bundle::open(&bundle_path).unwrap();

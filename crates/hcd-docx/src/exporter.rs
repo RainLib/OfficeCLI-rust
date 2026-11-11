@@ -523,7 +523,7 @@ mod tests {
         hcd_core::apply_patch(
             &bundle,
             &hcd_core::PatchBatch {
-                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
                 document_id: "test-document".to_string(),
                 patch_id: "font-1".to_string(),
                 base_revision: 0,

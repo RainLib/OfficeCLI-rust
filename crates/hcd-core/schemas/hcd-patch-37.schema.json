@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:officecli:hcd-patch:30",
+  "$id": "urn:officecli:hcd-patch:37",
   "title": "HTML Canonical Document patch batch with per-node selection font",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
   "properties": {
-    "schemaVersion": { "const": "hcd-patch/30" },
+    "schemaVersion": { "const": "hcd-patch/37" },
     "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
