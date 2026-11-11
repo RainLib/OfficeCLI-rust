@@ -1667,9 +1667,13 @@ async fn export_document_inner(
             .collect();
         let pattern = Regex::new(r"asset://sha256/([0-9a-f]{64})").map_err(internal)?;
         let mut cache = HashMap::<String, String>::new();
+        let theme_stylesheet =
+            hcd_core::theme_presentation_css(&state.catalog, &bundle, Some(requested))
+                .map_err(hcd_error)?;
         let options = hcd_core::HtmlPresentationOptions {
             revision: Some(requested),
             max_output_bytes: 256 * 1024 * 1024,
+            theme_stylesheet,
             ..Default::default()
         };
         hcd_core::render_standalone_html_with_transform(&bundle, &options, &mut output, |html| {
