@@ -4,10 +4,11 @@ use crate::common::{
     write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
 };
 use hcd_core::{
-    hash_bytes, node_bloom_might_contain, rename_formula_sheet_references, stable_node_id, Bundle,
-    BundleWriter, ChunkSourceMap, FidelityLevel, FidelityReport, FidelityWarning, GridChunkAddress,
-    GridChunkKind, HcdError, HcdManifest, ImportEvent, NodeMapEntry, SheetRename, SourceAnchor,
-    XlsxCellFormatPatch, XlsxCellLayoutPatch, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    hash_bytes, node_bloom_might_contain, rename_formula_sheet_references, sheet_grid_id,
+    sheet_window_chunk_id, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
+    FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError, HcdManifest,
+    ImportEvent, NodeMapEntry, SheetRename, SourceAnchor, XlsxCellFormatPatch, XlsxCellLayoutPatch,
+    XlsxSheetSection, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -604,34 +605,19 @@ where
         }
         let first = self.first_row.unwrap_or(0);
         let last = self.last_row.unwrap_or(first);
-        let chunk_id = stable_node_id(&[
-            self.document_id,
-            self.part,
-            "sheet-window",
-            &self.ordinal.to_string(),
-        ])
-        .replacen("n_", "c_", 1);
-        let default_width = self
-            .default_column_width
-            .map(|width| format!(" data-hcd-default-column-width=\"{width:.2}\""))
-            .unwrap_or_default();
-        let default_height = self
-            .default_row_height
-            .map(|height| format!(" data-hcd-default-row-height-points=\"{height:.2}\""))
-            .unwrap_or_default();
-        let html = format!(
-            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\" data-hcd-row-start=\"{}\" data-hcd-row-end=\"{}\"{}{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody>{}</tbody></table></section>",
-            escape_attribute(self.sheet_name),
-            self.sheet_index,
-            self.sheet_state,
-            first,
-            last,
-            default_width,
-            default_height,
-            self.view_attributes,
-            self.column_markup,
-            self.html
-        );
+        let chunk_id = sheet_window_chunk_id(self.document_id, self.part, self.ordinal);
+        let html = XlsxSheetSection {
+            sheet_name: self.sheet_name,
+            sheet_index: self.sheet_index,
+            sheet_state: self.sheet_state,
+            row_start: Some(first),
+            row_end: Some(last),
+            default_column_width: self.default_column_width,
+            default_row_height_points: self.default_row_height,
+            view_attributes: &self.view_attributes,
+            column_markup: &self.column_markup,
+        }
+        .html(&self.html);
         let map = ChunkSourceMap {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             chunk_id: chunk_id.clone(),
@@ -677,31 +663,19 @@ where
         if self.ordinal > 0 {
             return Ok(());
         }
-        let chunk_id = stable_node_id(&[
-            self.document_id,
-            self.part,
-            "sheet-window",
-            &self.ordinal.to_string(),
-        ])
-        .replacen("n_", "c_", 1);
-        let default_width = self
-            .default_column_width
-            .map(|width| format!(" data-hcd-default-column-width=\"{width:.2}\""))
-            .unwrap_or_default();
-        let default_height = self
-            .default_row_height
-            .map(|height| format!(" data-hcd-default-row-height-points=\"{height:.2}\""))
-            .unwrap_or_default();
-        let html = format!(
-            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\"{}{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody></tbody></table></section>",
-            escape_attribute(self.sheet_name),
-            self.sheet_index,
-            self.sheet_state,
-            default_width,
-            default_height,
-            self.view_attributes,
-            self.column_markup
-        );
+        let chunk_id = sheet_window_chunk_id(self.document_id, self.part, self.ordinal);
+        let html = XlsxSheetSection {
+            sheet_name: self.sheet_name,
+            sheet_index: self.sheet_index,
+            sheet_state: self.sheet_state,
+            row_start: None,
+            row_end: None,
+            default_column_width: self.default_column_width,
+            default_row_height_points: self.default_row_height,
+            view_attributes: &self.view_attributes,
+            column_markup: &self.column_markup,
+        }
+        .html("");
         let map = ChunkSourceMap {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             chunk_id: chunk_id.clone(),
@@ -3938,10 +3912,6 @@ fn column_name(mut column: u32) -> String {
         column /= 26;
     }
     output.iter().rev().collect()
-}
-
-fn sheet_grid_id(document_id: &str, sheet_part: &str) -> String {
-    stable_node_id(&[document_id, sheet_part, "worksheet"]).replacen("n_", "s_", 1)
 }
 
 fn drawing_grid_address(

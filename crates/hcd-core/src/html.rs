@@ -514,6 +514,20 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
     Ok(())
 }
 
+/// Escapes text for an HTML or XML text run.
+pub(crate) fn escape_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Escapes text for a quoted attribute value.
+pub(crate) fn escape_attribute(text: &str) -> String {
+    escape_text(text)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

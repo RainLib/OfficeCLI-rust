@@ -2,6 +2,7 @@ use crate::bundle::{
     finalize_root_hash, hash_descriptor, now_epoch_ms, read_json_bounded, Bundle, INDEX_PAGE_SIZE,
 };
 use crate::hash::{hash_bytes, node_bloom, node_bloom_might_contain, stable_node_id};
+use crate::html::{escape_attribute, escape_text};
 use crate::rename_formula_sheet_references;
 #[cfg(test)]
 use crate::HCD_SCHEMA_VERSION;
@@ -8774,18 +8775,6 @@ fn parse_cursor(cursor: Option<&str>) -> Result<(usize, usize), HcdError> {
             .parse()
             .map_err(|_| HcdError::InvalidPatch("invalid cursor offset".to_string()))?,
     ))
-}
-
-fn escape_text(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn escape_attribute(text: &str) -> String {
-    escape_text(text)
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 fn is_forbidden_xml_character(ch: char) -> bool {
