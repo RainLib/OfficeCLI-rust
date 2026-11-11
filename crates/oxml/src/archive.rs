@@ -126,6 +126,29 @@ impl StreamingOxmlRewriter {
         replacements: &HashMap<String, PathBuf>,
         required_main_part: &str,
     ) -> Result<Vec<String>, PackageError> {
+        Self::rewrite_with_additions(
+            source,
+            target,
+            replacements,
+            &HashMap::new(),
+            required_main_part,
+        )
+    }
+
+    /// Copy every source entry, swap in the bytes of `replacements`, and append
+    /// the parts listed in `additions`. An addition is a part the source does
+    /// not carry yet, such as a worksheet created in HCD. Additions are written
+    /// in name order and stamped with the main part's modification time, so the
+    /// same inputs always produce the same package. They are validated by the
+    /// same structure pass as replacements: an addition the package cannot
+    /// address, or that is not well-formed XML, fails before the target exists.
+    pub fn rewrite_with_additions(
+        source: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+        replacements: &HashMap<String, PathBuf>,
+        additions: &HashMap<String, PathBuf>,
+        required_main_part: &str,
+    ) -> Result<Vec<String>, PackageError> {
         let source = source.as_ref();
         let target = target.as_ref();
         if target.exists() {
@@ -141,6 +164,28 @@ impl StreamingOxmlRewriter {
         for replacement in replacements.keys() {
             if !names.contains(replacement.as_str()) {
                 return Err(PackageError::PartNotFound(replacement.clone()));
+            }
+        }
+        for addition in additions.keys() {
+            validate_entry_name(addition)?;
+            if names.contains(addition.as_str()) || replacements.contains_key(addition) {
+                return Err(PackageError::SaveError(format!(
+                    "added part is not a new package entry: {addition}"
+                )));
+            }
+        }
+        let mut added: Vec<&String> = additions.keys().collect();
+        added.sort();
+        let mut stamp_time = zip::DateTime::default();
+        if let Some(index) = entries
+            .iter()
+            .position(|entry| entry.name == required_main_part)
+            .or_else(|| entries.iter().position(|entry| !entry.is_dir))
+        {
+            if let Ok(original) = archive.by_index(index) {
+                if let Some(stamp) = original.last_modified() {
+                    stamp_time = stamp;
+                }
             }
         }
 
@@ -174,6 +219,16 @@ impl StreamingOxmlRewriter {
                 let original = archive.by_index_raw(index)?;
                 writer.raw_copy_file(original)?;
             }
+        }
+        for name in added {
+            let options = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .last_modified_time(stamp_time)
+                .unix_permissions(0o644);
+            writer.start_file(name.as_str(), options)?;
+            let mut input = File::open(&additions[name])?;
+            std::io::copy(&mut input, &mut writer)?;
+            changed.push(name.clone());
         }
         writer.finish()?.sync_all()?;
         let mut candidate = StreamingOxmlArchive::open(temp.path())?;
@@ -394,6 +449,82 @@ mod tests {
             raw_entry(&source, "word/document.xml"),
             raw_entry(&target, "word/document.xml")
         );
+    }
+
+    #[test]
+    fn rewrite_with_additions_appends_a_new_part_and_keeps_other_entries_raw() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let target = temp.path().join("target.docx");
+        let addition = temp.path().join("extra.xml");
+        write_test_package(
+            &source,
+            b"<w:document xmlns:w=\"urn:test\"><w:body/></w:document>",
+        );
+        std::fs::write(
+            &addition,
+            b"<w:document xmlns:w=\"urn:test\"><w:body><w:p/></w:body></w:document>",
+        )
+        .unwrap();
+        let additions = HashMap::from([("word/extra.xml".to_string(), addition)]);
+
+        let changed = StreamingOxmlRewriter::rewrite_with_additions(
+            &source,
+            &target,
+            &HashMap::new(),
+            &additions,
+            "word/document.xml",
+        )
+        .unwrap();
+
+        assert_eq!(changed, vec!["word/extra.xml".to_string()]);
+        for unchanged in ["[Content_Types].xml", "_rels/.rels", "word/document.xml"] {
+            assert_eq!(
+                raw_entry(&source, unchanged),
+                raw_entry(&target, unchanged),
+                "raw compressed payload changed for {unchanged}"
+            );
+        }
+        let mut archive = ZipArchive::new(File::open(&target).unwrap()).unwrap();
+        let index = archive
+            .file_names()
+            .position(|candidate| candidate == "word/extra.xml")
+            .expect("added part");
+        let mut entry = archive.by_index(index).unwrap();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        assert!(text.contains("<w:p/>"));
+    }
+
+    #[test]
+    fn rewrite_with_additions_refuses_to_shadow_an_existing_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let target = temp.path().join("target.docx");
+        let addition = temp.path().join("extra.xml");
+        write_test_package(
+            &source,
+            b"<w:document xmlns:w=\"urn:test\"><w:body/></w:document>",
+        );
+        std::fs::write(&addition, b"<w:document xmlns:w=\"urn:test\"/>").unwrap();
+
+        for name in ["word/document.xml", "../escape.xml"] {
+            let additions = HashMap::from([(name.to_string(), addition.clone())]);
+            let error = StreamingOxmlRewriter::rewrite_with_additions(
+                &source,
+                &target,
+                &HashMap::new(),
+                &additions,
+                "word/document.xml",
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("new package entry")
+                    || error.to_string().contains("unsafe ZIP entry path"),
+                "{error}"
+            );
+            assert!(!target.exists());
+        }
     }
 
     fn write_test_package(path: &Path, document: &[u8]) {
