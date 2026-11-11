@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import type { Editor } from '@tiptap/core'
 import { redo, redoDepth, undo, undoDepth } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
+import { loadThemeCss } from './themeCss.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
@@ -72,6 +73,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>(null)
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [viewRevision, setViewRevision] = useState<number | null>(null)
+  const [themeCss, setThemeCss] = useState('')
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchTarget, setSearchTarget] = useState<SearchHit | null>(null)
@@ -211,6 +213,13 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
   }, [session])
+  useEffect(() => {
+    let live = true
+    loadThemeCss(session, viewRevision)
+      .then(css => { if (live) setThemeCss(css) })
+      .catch(cause => { if (live) setError(String(cause)) })
+    return () => { live = false }
+  }, [session, viewRevision])
   useEffect(() => {
     let live = true
     api(session, '/revisions').then(response => response.json())
@@ -454,7 +463,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     </nav>}
     <div className="layout editor-layout">
       {layout.showOutline && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</button>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
-      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
+      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={`${style}\n${themeCss}`} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示页面目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div>

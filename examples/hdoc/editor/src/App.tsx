@@ -10,6 +10,7 @@ import * as Y from 'yjs'
 import { clearPastedBlockIds, jsonToSnapshot, schemaExtensions, type Projection } from './schema.ts'
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { api, type Session } from './api.ts'
+import { loadThemeCss } from './themeCss.ts'
 import { FixedViewer } from './FixedViewer.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
@@ -156,9 +157,17 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [outline, setOutline] = useState<Array<{ pos: number; level: number; text: string }>>([])
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchVersion, setSearchVersion] = useState(0)
+  const [themeCss, setThemeCss] = useState('')
   const lastOutline = useRef('')
   const lastSemantic = useRef<string | null>(null)
   useEffect(() => { saveLayout(layout) }, [layout])
+  useEffect(() => {
+    let live = true
+    loadThemeCss(session, historical?.revision ?? null, true)
+      .then(css => { if (live) setThemeCss(css) })
+      .catch(cause => { if (live) setError(String(cause)) })
+    return () => { live = false }
+  }, [session, historical?.revision])
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
@@ -433,7 +442,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
           if (point && !selectedText) editor.commands.setTextSelection(point.pos)
         }
         setMenu({ x: event.clientX, y: event.clientY, selectedText })
-      }}><EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main></div>
+      }}>{themeCss && <style>{themeCss}</style>}<EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>{rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示文档目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><p><LocalText source={"结构编辑后导出 DOCX 将重建语义版式。"} /></p>
         <div className="history">{history.slice().reverse().map(item => <button key={item.revision} onClick={() => void showRevision(item.revision)} title={item.patchId}><span className="revision-avatar" title={item.authorName || (localizeSource(locale, item.revision === 0 ? '导入' : '作者未记录'))} style={item.authorId ? { background: presenceColor(item.authorId) } : undefined}>{item.authorName?.slice(0, 1) || (item.revision === 0 ? localizeSource(locale, '导入').slice(0, 1) : '?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs ? new Date(item.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</small></strong><small>{item.authorName || (localizeSource(locale, item.revision === 0 ? '初始导入' : '作者未记录'))} · {localizeSource(locale, item.revision === 0 ? '导入' : item.patchId?.startsWith('restore-') ? '恢复版本' : item.patchId === 'editor-projection' ? '编辑投影' : '内容更新')}</small><span><LocalText source={"查看版本"} /></span></span></button>)}

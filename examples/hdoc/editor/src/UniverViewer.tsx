@@ -13,6 +13,7 @@ import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSea
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { api, type Session } from './api.ts'
+import { loadThemeCss } from './themeCss.ts'
 import { ErrorToast } from './ErrorToast.tsx'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
@@ -68,6 +69,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [historyBusy, setHistoryBusy] = useState(false)
   const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
   const [error, setError] = useState('')
+  const [themeCss, setThemeCss] = useState('')
   const [editing, setEditing] = useState(session.scope === 'write')
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout('xlsx'))
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
@@ -171,6 +173,13 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   })
   useEffect(() => () => { deletionResolver.current?.(false); deletionResolver.current = null }, [])
   useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
+  useEffect(() => {
+    let live = true
+    loadThemeCss(session, null)
+      .then(css => { if (live) setThemeCss(css) })
+      .catch(cause => { if (live) setError(String(cause)) })
+    return () => { live = false }
+  }, [session])
   function confirmDeletion(message: string): Promise<boolean> {
     return new Promise(resolve => {
       if (deletionResolver.current) { resolve(false); return }
@@ -891,6 +900,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
 
   const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
+    {themeCss && <style>{themeCss}</style>}
     {deletionPrompt && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) answerDeletion(false) }}>
       <div className="hcd-dialog" role="dialog" aria-modal="true" aria-label={localizeSource(locale, "确认删除")} onKeyDown={event => { if (event.key === 'Escape') answerDeletion(false) }}>
         <h2><LocalText source={"确认删除"} /></h2><p>{localizeDynamic(locale, deletionPrompt)}</p>
