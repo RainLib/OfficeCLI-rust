@@ -6,10 +6,11 @@ use crate::common::{
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    PptxShapeGeometry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    PptxRunFormat, PptxShapeGeometry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION,
+    MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
-use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -3023,17 +3024,46 @@ pub(crate) fn export_pptx(
     let (manifest, dirty_parts, dirty_node_ids, _) =
         checked_export_state_with_restores(bundle, source, options)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    let edited_formats = collect_edited_run_formats(bundle, &manifest, &dirty_parts)?;
     let mut replacements: HashMap<String, BTreeMap<u64, String>> = HashMap::new();
     let mut insertions: HashMap<String, Vec<InsertedPptxShape>> = HashMap::new();
-    for node in nodes {
+    let mut source_formats: HashMap<String, BTreeMap<u64, PptxRunFormat>> = HashMap::new();
+    for node in &nodes {
         if node.source.created_in_hcd {
-            let shape = InsertedPptxShape::from_node(&node)?;
-            insertions.entry(node.source.part).or_default().push(shape);
+            let mut shape = InsertedPptxShape::from_node(node)?;
+            if let Some(format) = edited_formats.get(&node.node_id) {
+                if let Some(size) = format.font_size_pt {
+                    let hundredths = (size * 100.0).round() as u32;
+                    if !(100..=25_600).contains(&hundredths) {
+                        return Err(HcdError::InvalidBundle(
+                            "PPTX edited font size is out of bounds".to_string(),
+                        ));
+                    }
+                    shape.font_size_hundredths = hundredths;
+                }
+                shape.format = format.clone();
+            }
+            insertions
+                .entry(node.source.part.clone())
+                .or_default()
+                .push(shape);
         } else {
             replacements
-                .entry(node.source.part)
+                .entry(node.source.part.clone())
                 .or_default()
-                .insert(node.source.text_ordinal, node.text);
+                .insert(node.source.text_ordinal, node.text.clone());
+            if let Some(format) = edited_formats.get(&node.node_id) {
+                if source_formats
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(node.source.text_ordinal, format.clone())
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX run format ordinal is duplicated".to_string(),
+                    ));
+                }
+            }
         }
     }
     for shapes in insertions.values_mut() {
@@ -3047,17 +3077,26 @@ pub(crate) fn export_pptx(
         .keys()
         .chain(insertions.keys())
         .chain(native_geometry.keys())
+        .chain(source_formats.keys())
         .collect::<BTreeSet<_>>()
     {
         let values = replacements.get(part).cloned().unwrap_or_default();
         let shapes = insertions.get(part).cloned().unwrap_or_default();
         let geometry = native_geometry.get(part).cloned().unwrap_or_default();
+        let formats = source_formats.get(part).cloned().unwrap_or_default();
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
         archive
             .with_part(part, |input| {
-                rewrite_text_part(input, BufWriter::new(output), &values, &shapes, &geometry)
-                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                rewrite_text_part(
+                    input,
+                    BufWriter::new(output),
+                    &values,
+                    &shapes,
+                    &geometry,
+                    &formats,
+                )
+                .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
@@ -3093,6 +3132,7 @@ struct InsertedPptxShape {
     height_emu: u64,
     font_size_hundredths: u32,
     text: String,
+    format: PptxRunFormat,
 }
 
 impl InsertedPptxShape {
@@ -3136,6 +3176,7 @@ impl InsertedPptxShape {
             height_emu: values[3],
             font_size_hundredths: values[4] as u32,
             text: node.text.clone(),
+            format: PptxRunFormat::default(),
         })
     }
 }
@@ -3258,6 +3299,7 @@ fn rewrite_text_part(
     replacements: &BTreeMap<u64, String>,
     insertions: &[InsertedPptxShape],
     native_geometry: &BTreeMap<u32, PptxShapeGeometry>,
+    formats: &BTreeMap<u64, PptxRunFormat>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -3276,6 +3318,9 @@ fn rewrite_text_part(
     let mut properties_depth = None;
     let mut transform_depth = None;
     let mut geometry_seen: HashMap<u32, (bool, bool)> = HashMap::new();
+    let mut run_events: Vec<Event<'static>> = Vec::new();
+    let mut run_depth: Option<usize> = None;
+    let mut applied_formats = BTreeSet::new();
     loop {
         let event = reader
             .read_event_into(&mut buffer)
@@ -3287,6 +3332,42 @@ fn rewrite_text_part(
         } else {
             None
         };
+        let event_name = match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                Some(local_name(start.name().as_ref()).to_string())
+            }
+            Event::End(end) => Some(local_name(end.name().as_ref()).to_string()),
+            _ => None,
+        };
+        let entering_run = run_depth.is_none() && opens && event_name.as_deref() == Some("r");
+        if entering_run || run_depth.is_some() {
+            if entering_run {
+                run_depth = Some(depth + 1);
+            }
+            let closing_run =
+                closes && event_name.as_deref() == Some("r") && run_depth == Some(depth);
+            run_events.push(event.into_owned());
+            if closing_run {
+                flush_pptx_run(
+                    &mut writer,
+                    &run_events,
+                    replacements,
+                    formats,
+                    &mut ordinal,
+                    &mut seen,
+                    &mut applied_formats,
+                )?;
+                run_events.clear();
+                run_depth = None;
+            }
+            if opens {
+                depth += 1;
+            } else if closes {
+                depth = depth.saturating_sub(1);
+            }
+            buffer.clear();
+            continue;
+        }
         if let Event::Start(ref start) = event {
             match local_name(start.name().as_ref()) {
                 "spTree" => {
@@ -3420,6 +3501,11 @@ fn rewrite_text_part(
             "slide source map contains missing text ordinals".to_string(),
         ));
     }
+    if applied_formats.len() != formats.len() {
+        return Err(HcdError::InvalidBundle(
+            "PPTX run format does not match a slide text run".to_string(),
+        ));
+    }
     if !insertions.is_empty() && !inserted {
         return Err(HcdError::InvalidBundle(
             "PPTX slide shape tree is missing".to_string(),
@@ -3433,6 +3519,454 @@ fn rewrite_text_part(
         }
     }
     Ok(())
+}
+
+fn collect_edited_run_formats(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_parts: &HashSet<String>,
+) -> Result<HashMap<String, PptxRunFormat>, HcdError> {
+    let mut result = HashMap::new();
+    if dirty_parts.is_empty() {
+        return Ok(result);
+    }
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            if !source_map
+                .entries
+                .iter()
+                .any(|entry| dirty_parts.contains(&entry.source.part))
+            {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut cursor = 0usize;
+            while let Some(relative) = html[cursor..].find("data-hcd-run-edited=\"true\"") {
+                let at = cursor + relative;
+                let start = html[..at].rfind('<').ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX formatted run tag is missing".to_string())
+                })?;
+                let end = html[at..]
+                    .find('>')
+                    .map(|offset| at + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX formatted run tag is not closed".to_string())
+                    })?;
+                let tag = &html[start..=end];
+                cursor = end + 1;
+                let Some(node_id) = html_attribute(tag, "data-hcd-id") else {
+                    continue;
+                };
+                if result
+                    .insert(node_id.to_string(), html_run_format(tag)?)
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX formatted text node is duplicated".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn html_run_format(tag: &str) -> Result<PptxRunFormat, HcdError> {
+    let flag = |name: &str| -> Result<Option<bool>, HcdError> {
+        match html_attribute(tag, name) {
+            Some("1") => Ok(Some(true)),
+            Some("0") => Ok(Some(false)),
+            Some(_) => Err(HcdError::InvalidBundle(format!("PPTX {name} is invalid"))),
+            None => Ok(None),
+        }
+    };
+    let font_size_pt = match html_attribute(tag, "data-hcd-font-size-pt") {
+        Some(value) => Some(value.parse::<f32>().map_err(|_| {
+            HcdError::InvalidBundle("PPTX stored font size is invalid".to_string())
+        })?),
+        None => None,
+    };
+    Ok(PptxRunFormat {
+        bold: flag("data-hcd-bold")?,
+        italic: flag("data-hcd-italic")?,
+        underline: flag("data-hcd-underline")?,
+        font_size_pt,
+        color: html_attribute(tag, "data-hcd-color").map(|value| format!("#{value}")),
+    })
+}
+
+fn flush_pptx_run<W: Write>(
+    writer: &mut Writer<W>,
+    events: &[Event<'static>],
+    replacements: &BTreeMap<u64, String>,
+    formats: &BTreeMap<u64, PptxRunFormat>,
+    ordinal: &mut u64,
+    seen: &mut BTreeSet<u64>,
+    applied_formats: &mut BTreeSet<u64>,
+) -> Result<(), HcdError> {
+    let text_count = events.iter().filter(|event| event_is_text(event)).count();
+    let first_ordinal = ordinal.saturating_add(1);
+    for offset in 1..text_count {
+        if formats.contains_key(&(first_ordinal + offset as u64)) {
+            return Err(HcdError::Unsupported(
+                "PPTX run format applies to the first text node of a run".to_string(),
+            ));
+        }
+    }
+    let format = formats.get(&first_ordinal);
+    let mut saw_text = false;
+    let mut wrote_properties = false;
+    let mut index = 0usize;
+    while index < events.len() {
+        let event = &events[index];
+        if !saw_text {
+            if let Some((element, is_empty)) = event_start_or_empty(event) {
+                if local_name(element.name().as_ref()) == "rPr" {
+                    if let Some(format) = format {
+                        let consumed = write_formatted_run_properties(
+                            writer,
+                            element,
+                            format,
+                            is_empty,
+                            &events[index + 1..],
+                        )?;
+                        wrote_properties = true;
+                        index += consumed;
+                        continue;
+                    }
+                }
+            }
+        }
+        if event_is_text(event) {
+            *ordinal += 1;
+            if let Some(text_format) = formats.get(ordinal) {
+                if !wrote_properties {
+                    let prefix = events
+                        .first()
+                        .and_then(event_start_or_empty)
+                        .map_or("a:".to_string(), |(element, _)| {
+                            element_prefix(element.name().as_ref())
+                        });
+                    write_synthetic_run_properties(writer, &prefix, text_format)?;
+                    wrote_properties = true;
+                }
+                applied_formats.insert(*ordinal);
+            }
+            saw_text = true;
+            index += write_replaced_text(writer, events, index, replacements, *ordinal, seen)?;
+            continue;
+        }
+        writer.write_event(event.clone())?;
+        index += 1;
+    }
+    Ok(())
+}
+
+fn write_formatted_run_properties<W: Write>(
+    writer: &mut Writer<W>,
+    start: &BytesStart<'static>,
+    format: &PptxRunFormat,
+    is_empty: bool,
+    rest: &[Event<'static>],
+) -> Result<usize, HcdError> {
+    let rewritten = rewrite_run_property_attributes(start, format)?;
+    let prefix = element_prefix(start.name().as_ref());
+    let end_name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+    if is_empty {
+        if let Some(color) = format.color.as_deref() {
+            writer.write_event(Event::Start(rewritten))?;
+            write_solid_color(writer, &prefix, color)?;
+            writer.write_event(Event::End(BytesEnd::new(end_name)))?;
+        } else {
+            writer.write_event(Event::Empty(rewritten))?;
+        }
+        return Ok(1);
+    }
+    writer.write_event(Event::Start(rewritten))?;
+    let mut depth = 1usize;
+    let mut cursor = 0usize;
+    let mut wrote_color = false;
+    while cursor < rest.len() {
+        let event = &rest[cursor];
+        let name = event_local_name(event);
+        let opens = matches!(event, Event::Start(_));
+        let closes = matches!(event, Event::End(_));
+        if depth == 1
+            && format.color.is_some()
+            && matches!(name.as_deref(), Some("srgbClr" | "schemeClr"))
+        {
+            if !wrote_color {
+                if let Some(value) = format.color.as_deref() {
+                    let color_name = format!("{prefix}srgbClr");
+                    let mut color = BytesStart::new(color_name);
+                    let hex = value.trim_start_matches('#').to_ascii_uppercase();
+                    color.push_attribute(("val", hex.as_str()));
+                    writer.write_event(Event::Empty(color))?;
+                    wrote_color = true;
+                }
+            }
+            cursor += skip_element(rest, cursor)?;
+            continue;
+        }
+        if closes && name.as_deref() == Some("rPr") && depth == 1 {
+            if let Some(color) = format.color.as_deref() {
+                if !wrote_color {
+                    write_solid_color(writer, &prefix, color)?;
+                }
+            }
+            writer.write_event(Event::End(BytesEnd::new(end_name)))?;
+            return Ok(cursor + 2);
+        }
+        writer.write_event(event.clone())?;
+        if opens {
+            depth += 1;
+        } else if closes {
+            depth = depth.saturating_sub(1);
+        }
+        cursor += 1;
+    }
+    Err(HcdError::InvalidBundle(
+        "PPTX run properties are not closed".to_string(),
+    ))
+}
+
+fn skip_element(events: &[Event<'static>], index: usize) -> Result<usize, HcdError> {
+    let event = events
+        .get(index)
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX color element is missing".to_string()))?;
+    if matches!(event, Event::Empty(_)) {
+        return Ok(1);
+    }
+    let name = event_local_name(event);
+    let mut depth = 1usize;
+    let mut cursor = index + 1;
+    while cursor < events.len() {
+        let current = event_local_name(&events[cursor]);
+        if matches!(events[cursor], Event::Start(_)) && current == name {
+            depth += 1;
+        } else if matches!(events[cursor], Event::End(_)) && current == name {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(cursor - index + 1);
+            }
+        }
+        cursor += 1;
+    }
+    Err(HcdError::InvalidBundle(
+        "PPTX color element is not closed".to_string(),
+    ))
+}
+
+fn write_synthetic_run_properties<W: Write>(
+    writer: &mut Writer<W>,
+    prefix: &str,
+    format: &PptxRunFormat,
+) -> Result<(), HcdError> {
+    let mut element = BytesStart::new(format!("{prefix}rPr"));
+    push_run_attributes(&mut element, format, false)?;
+    let end_name = format!("{prefix}rPr");
+    if let Some(color) = format.color.as_deref() {
+        writer.write_event(Event::Start(element))?;
+        write_solid_color(writer, prefix, color)?;
+        writer.write_event(Event::End(BytesEnd::new(end_name)))?;
+    } else {
+        writer.write_event(Event::Empty(element))?;
+    }
+    Ok(())
+}
+
+fn write_solid_color<W: Write>(
+    writer: &mut Writer<W>,
+    prefix: &str,
+    color: &str,
+) -> Result<(), HcdError> {
+    writer.write_event(Event::Start(BytesStart::new(format!("{prefix}solidFill"))))?;
+    let mut color_element = BytesStart::new(format!("{prefix}srgbClr"));
+    let hex = color.trim_start_matches('#').to_ascii_uppercase();
+    color_element.push_attribute(("val", hex.as_str()));
+    writer.write_event(Event::Empty(color_element))?;
+    writer.write_event(Event::End(BytesEnd::new(format!("{prefix}solidFill"))))?;
+    Ok(())
+}
+
+fn rewrite_run_property_attributes(
+    element: &BytesStart<'_>,
+    format: &PptxRunFormat,
+) -> Result<BytesStart<'static>, HcdError> {
+    let mut rewritten = element.to_owned();
+    rewritten.clear_attributes();
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("PPTX run property attribute: {error}"))
+        })?;
+        let name = local_name(attribute.key.as_ref());
+        let replacement = match name {
+            "sz" => match format.font_size_pt {
+                Some(size) => Some(font_size_hundredths(size)?.to_string()),
+                None => None,
+            },
+            "b" => format.bold.map(|bold| {
+                if bold {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                }
+            }),
+            "i" => format.italic.map(|italic| {
+                if italic {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                }
+            }),
+            "u" => format.underline.map(|underline| {
+                if underline {
+                    "sng".to_string()
+                } else {
+                    "none".to_string()
+                }
+            }),
+            _ => None,
+        };
+        if let Some(value) = replacement {
+            rewritten.push_attribute((attribute.key.as_ref(), value.as_bytes()));
+        } else {
+            rewritten.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+        }
+    }
+    push_run_attributes(&mut rewritten, format, true)?;
+    Ok(rewritten)
+}
+
+fn push_run_attributes(
+    element: &mut BytesStart<'_>,
+    format: &PptxRunFormat,
+    only_missing: bool,
+) -> Result<(), HcdError> {
+    let existing = element
+        .attributes()
+        .with_checks(false)
+        .flatten()
+        .map(|attribute| local_name(attribute.key.as_ref()).to_string())
+        .collect::<Vec<_>>();
+    let missing = |name: &str| !only_missing || !existing.iter().any(|value| value == name);
+    if let Some(size) = format.font_size_pt {
+        if missing("sz") {
+            let size = font_size_hundredths(size)?.to_string();
+            element.push_attribute(("sz", size.as_str()));
+        }
+    }
+    if let Some(bold) = format.bold {
+        if missing("b") {
+            element.push_attribute(("b", if bold { "1" } else { "0" }));
+        }
+    }
+    if let Some(italic) = format.italic {
+        if missing("i") {
+            element.push_attribute(("i", if italic { "1" } else { "0" }));
+        }
+    }
+    if let Some(underline) = format.underline {
+        if missing("u") {
+            element.push_attribute(("u", if underline { "sng" } else { "none" }));
+        }
+    }
+    Ok(())
+}
+
+fn font_size_hundredths(size: f32) -> Result<u32, HcdError> {
+    if !size.is_finite() || !(1.0..=256.0).contains(&size) {
+        return Err(HcdError::InvalidBundle(
+            "PPTX edited font size is out of bounds".to_string(),
+        ));
+    }
+    Ok((size * 100.0).round() as u32)
+}
+
+fn write_replaced_text<W: Write>(
+    writer: &mut Writer<W>,
+    events: &[Event<'static>],
+    index: usize,
+    replacements: &BTreeMap<u64, String>,
+    ordinal: u64,
+    seen: &mut BTreeSet<u64>,
+) -> Result<usize, HcdError> {
+    let event = &events[index];
+    let Some(text) = replacements.get(&ordinal) else {
+        writer.write_event(event.clone())?;
+        return Ok(1);
+    };
+    match event {
+        Event::Start(start) => {
+            writer.write_event(Event::Start(start.to_owned()))?;
+            if !text.is_empty() {
+                writer.write_event(Event::Text(BytesText::new(text)))?;
+            }
+            let mut cursor = index + 1;
+            while cursor < events.len() {
+                match &events[cursor] {
+                    Event::Text(_) | Event::CData(_) => cursor += 1,
+                    Event::End(end) if local_name(end.name().as_ref()) == "t" => {
+                        writer.write_event(Event::End(end.to_owned()))?;
+                        seen.insert(ordinal);
+                        return Ok(cursor - index + 1);
+                    }
+                    _ => {
+                        return Err(HcdError::InvalidBundle(
+                            "PPTX text element is not closed".to_string(),
+                        ))
+                    }
+                }
+            }
+            Err(HcdError::InvalidBundle(
+                "PPTX text element is not closed".to_string(),
+            ))
+        }
+        Event::Empty(empty) => {
+            writer.write_event(Event::Start(empty.to_owned()))?;
+            if !text.is_empty() {
+                writer.write_event(Event::Text(BytesText::new(text)))?;
+            }
+            writer.write_event(Event::End(BytesEnd::new(
+                String::from_utf8_lossy(empty.name().as_ref()).into_owned(),
+            )))?;
+            seen.insert(ordinal);
+            Ok(1)
+        }
+        _ => Err(HcdError::InvalidBundle(
+            "PPTX text event is not an element".to_string(),
+        )),
+    }
+}
+
+fn event_is_text(event: &Event<'static>) -> bool {
+    event_start_or_empty(event)
+        .is_some_and(|(element, _)| local_name(element.name().as_ref()) == "t")
+}
+
+fn event_start_or_empty<'a>(event: &'a Event<'static>) -> Option<(&'a BytesStart<'static>, bool)> {
+    match event {
+        Event::Start(element) => Some((element, false)),
+        Event::Empty(element) => Some((element, true)),
+        _ => None,
+    }
+}
+
+fn event_local_name(event: &Event<'static>) -> Option<String> {
+    event_start_or_empty(event)
+        .map(|(element, _)| local_name(element.name().as_ref()).to_string())
+        .or_else(|| match event {
+            Event::End(end) => Some(local_name(end.name().as_ref()).to_string()),
+            _ => None,
+        })
+}
+
+fn element_prefix(name: &[u8]) -> String {
+    match name.iter().rposition(|byte| *byte == b':') {
+        Some(index) => String::from_utf8_lossy(&name[..=index]).into_owned(),
+        None => String::new(),
+    }
 }
 
 fn rewrite_shape_transform(
@@ -3490,10 +4024,40 @@ fn write_inserted_shape<W: Write>(
     shape_id: u32,
     shape: &InsertedPptxShape,
 ) -> Result<(), HcdError> {
+    let mut properties = format!("lang=\"en-US\" sz=\"{}\"", shape.font_size_hundredths);
+    if let Some(bold) = shape.format.bold {
+        properties.push_str(if bold { " b=\"1\"" } else { " b=\"0\"" });
+    }
+    if let Some(italic) = shape.format.italic {
+        properties.push_str(if italic { " i=\"1\"" } else { " i=\"0\"" });
+    }
+    if let Some(underline) = shape.format.underline {
+        properties.push_str(if underline {
+            " u=\"sng\""
+        } else {
+            " u=\"none\""
+        });
+    }
+    let color = shape
+        .format
+        .color
+        .as_deref()
+        .map(|color| {
+            format!(
+                "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+                color.trim_start_matches('#').to_ascii_uppercase()
+            )
+        })
+        .unwrap_or_default();
+    let run_properties = if color.is_empty() {
+        format!("<a:rPr {properties}/>")
+    } else {
+        format!("<a:rPr {properties}>{color}</a:rPr>")
+    };
     let xml = format!(
-        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"{}\"/><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
+        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/><a:p><a:r>{run_properties}<a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
         shape.x_emu, shape.y_emu, shape.width_emu, shape.height_emu,
-        shape.font_size_hundredths, escape_text(&shape.text),
+        escape_text(&shape.text),
     );
     writer.get_mut().write_all(xml.as_bytes())?;
     Ok(())
@@ -3602,8 +4166,9 @@ mod tests {
     use super::*;
     use hcd_core::{
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
-        PatchOperation, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
+        PatchOperation, PptxRunFormat, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
         HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
+        HCD_PATCH_SCHEMA_VERSION_30,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -4012,6 +4577,119 @@ mod tests {
     }
 
     #[test]
+    fn formats_native_slide_runs_and_preserves_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("formatted.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("format-native-run"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let styled = entries
+            .iter()
+            .find(|entry| entry.text == "样式 😀")
+            .unwrap();
+        let plain = entries.iter().find(|entry| entry.text == "第二页").unwrap();
+        let styled_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "native-format-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxRunFormat {
+                node_id: styled.node_id.clone(),
+                format: PptxRunFormat {
+                    bold: Some(false),
+                    italic: None,
+                    underline: None,
+                    font_size_pt: Some(32.0),
+                    color: Some("#00aa00".to_string()),
+                },
+                precondition: NodePrecondition {
+                    node_hash: styled.node_hash.clone(),
+                },
+            }],
+        };
+        let result = apply_patch(&bundle, &styled_patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_DIRECT_RUN_FORMAT"));
+        let head = bundle.manifest().unwrap();
+        let html = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(html.contains("data-hcd-run-edited=\"true\""));
+        assert!(html.contains("data-hcd-bold=\"0\""));
+        assert!(html.contains("data-hcd-font-size-pt=\"32.00\""));
+        assert!(html.contains("data-hcd-color=\"00AA00\""));
+        assert!(html.contains("font-size:32.00pt"));
+        assert!(html.contains("color:#00aa00"));
+        assert!(!html.contains("font-weight:700"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let plain_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+            document_id: manifest.document_id,
+            patch_id: "plain-format-r2".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxRunFormat {
+                node_id: plain.node_id.clone(),
+                format: PptxRunFormat {
+                    bold: Some(true),
+                    italic: Some(true),
+                    underline: Some(true),
+                    font_size_pt: None,
+                    color: None,
+                },
+                precondition: NodePrecondition {
+                    node_hash: plain.node_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &plain_patch, 1).unwrap().revision, 2);
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let styled_slide = read_zip_entry(&exported, &styled.source.part);
+        assert!(styled_slide.contains("b=\"0\""));
+        assert!(styled_slide.contains("sz=\"3200\""));
+        assert!(styled_slide.contains("i=\"1\""));
+        assert!(styled_slide.contains("u=\"sng\""));
+        assert!(styled_slide.contains("val=\"00AA00\""));
+        assert!(styled_slide.contains("样式 😀"));
+        let plain_slide = read_zip_entry(&exported, &plain.source.part);
+        assert!(plain_slide.contains("b=\"1\""));
+        assert!(plain_slide.contains("i=\"1\""));
+        assert!(plain_slide.contains("u=\"sng\""));
+        assert!(plain_slide.contains(">第二页<"));
+        let original = temp.path().join("original.pptx");
+        let report = export_pptx(
+            &bundle,
+            &source,
+            &original,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert_eq!(
+            read_zip_entry(&original, &styled.source.part),
+            read_zip_entry(&source, &styled.source.part)
+        );
+    }
+
+    #[test]
     fn inserts_slide_shape_before_extension_list() {
         let source = b"<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld><p:spTree><p:cNvPr id=\"4\"/><p:extLst/></p:spTree></p:cSld></p:sld>";
         let shape = InsertedPptxShape {
@@ -4022,6 +4700,7 @@ mod tests {
             height_emu: 457_200,
             font_size_hundredths: 1_200,
             text: "new".to_string(),
+            format: PptxRunFormat::default(),
         };
         let mut output = Vec::new();
         rewrite_text_part(
@@ -4029,6 +4708,7 @@ mod tests {
             &mut output,
             &BTreeMap::new(),
             &[shape],
+            &BTreeMap::new(),
             &BTreeMap::new(),
         )
         .unwrap();

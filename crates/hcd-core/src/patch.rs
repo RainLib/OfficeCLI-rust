@@ -9,15 +9,16 @@ use crate::{
     ApplyResult, AssetDescriptor, FidelityWarning, GridColumnDeletion, GridColumnInsertion,
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
-    NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxShapeGeometry, RevisionRecord,
-    SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup, XlsxGridAction, XlsxGridAxis,
-    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11,
-    HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14,
-    HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17,
-    HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2,
-    HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
-    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
-    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
+    RevisionRecord, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
+    XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
+    HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
+    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
+    HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19,
+    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3,
+    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
+    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
+    MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -219,6 +220,7 @@ pub fn apply_patch(
                         | PatchOperation::PptxTextInsert { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::PptxTextDelete { .. }
+                        | PatchOperation::PptxRunFormat { .. }
                         | PatchOperation::XlsxCellSet { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaToValue { .. }
@@ -273,6 +275,7 @@ pub fn apply_patch(
     let pptx_insertions = collect_pptx_insertions(patch);
     let pptx_geometry = collect_pptx_geometry(patch);
     let pptx_deletions = collect_pptx_deletions(patch);
+    let pptx_formats = collect_pptx_formats(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_blank_merge = collect_xlsx_blank_merge(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
@@ -364,6 +367,7 @@ pub fn apply_patch(
         .chain(xlsx_formula.keys().cloned())
         .chain(pptx_geometry.keys().cloned())
         .chain(pptx_deletions.keys().cloned())
+        .chain(pptx_formats.keys().cloned())
         .chain(pdf_geometry.keys().cloned())
         .chain(pdf_deletions.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
@@ -381,6 +385,7 @@ pub fn apply_patch(
         || !pptx_insertions.is_empty()
         || !pptx_geometry.is_empty()
         || !pptx_deletions.is_empty()
+        || !pptx_formats.is_empty()
         || !xlsx_merges.is_empty()
         || xlsx_blank_merge.is_some()
         || !xlsx_unmerges.is_empty()
@@ -806,6 +811,27 @@ pub fn apply_patch(
                         )));
                     }
                     update_pptx_shape_geometry(&mut html, entry, change)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = pptx_formats.get(&entry.node_id) {
+                    if !matches!(
+                        entry.source.node_kind.as_str(),
+                        "slide-text" | "table-cell-text"
+                    ) || !entry.source.editable
+                    {
+                        return Err(HcdError::Unsupported(
+                            "PPTX run formatting requires editable slide or table text".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PPTX text node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_pptx_run_format(&mut html, entry, &change.format)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1645,6 +1671,12 @@ pub fn apply_patch(
                 node_id: Some(insertion.node_id.clone()),
                 source_part: Some(insertion.slide_part.clone()),
             }))
+            .chain(pptx_formats.keys().map(|node_id| FidelityWarning {
+                code: "PPTX_DIRECT_RUN_FORMAT".to_string(),
+                message: "slide run formatting writes direct bold, italic, underline, size, and sRGB color; theme colors, fonts, and spacing stay on the source run".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .collect(),
         idempotent_replay: false,
     };
@@ -2047,6 +2079,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2251,6 +2284,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/27 accepts one PPTX text-box deletion only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_30
+        && (manifest.source.format != "pptx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PptxRunFormat { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/30 accepts one PPTX run format operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2475,6 +2520,23 @@ fn validate_patch_identity(
                 }
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
+            }
+            PatchOperation::PptxRunFormat {
+                node_id,
+                format,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30
+                    || manifest.source.format != "pptx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.run.format requires one PPTX operation with hcd-patch/30".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                validate_pptx_run_format(format)?;
             }
             PatchOperation::XlsxMerge {
                 node_id,
@@ -3430,6 +3492,60 @@ fn collect_pdf_deletions(patch: &PatchBatch) -> HashMap<String, String> {
             Some((node_id.clone(), precondition.node_hash.clone()))
         })
         .collect()
+}
+
+#[derive(Clone)]
+struct PptxFormatChange {
+    format: PptxRunFormat,
+    node_hash: String,
+}
+
+fn collect_pptx_formats(patch: &PatchBatch) -> HashMap<String, PptxFormatChange> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::PptxRunFormat {
+                node_id,
+                format,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                PptxFormatChange {
+                    format: format.clone(),
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn validate_pptx_run_format(format: &PptxRunFormat) -> Result<(), HcdError> {
+    if format.bold.is_none()
+        && format.italic.is_none()
+        && format.underline.is_none()
+        && format.font_size_pt.is_none()
+        && format.color.is_none()
+    {
+        return Err(HcdError::InvalidPatch(
+            "PPTX run format must set bold, italic, underline, font size, or color".to_string(),
+        ));
+    }
+    if let Some(size) = format.font_size_pt {
+        if !size.is_finite() || !(1.0..=256.0).contains(&size) {
+            return Err(HcdError::InvalidPatch(
+                "PPTX font size must be from 1 to 256 points".to_string(),
+            ));
+        }
+    }
+    if let Some(color) = &format.color {
+        validate_hex_color("color", color)?;
+    }
+    Ok(())
 }
 
 fn collect_pptx_deletions(patch: &PatchBatch) -> HashMap<String, String> {
@@ -6466,6 +6582,294 @@ fn insert_pptx_text(
     Ok(())
 }
 
+fn update_pptx_run_format(
+    html: &mut String,
+    entry: &mut NodeMapEntry,
+    format: &PptxRunFormat,
+) -> Result<(), HcdError> {
+    let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
+    let marker_at = html.find(&marker).ok_or_else(|| {
+        HcdError::InvalidBundle(format!("PPTX text node {} is missing", entry.node_id))
+    })?;
+    let inner_start = html[..marker_at]
+        .rfind('<')
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX text node tag is missing".to_string()))?;
+    let inner_end = html[marker_at..]
+        .find('>')
+        .map(|offset| marker_at + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX text node tag is not closed".to_string()))?;
+    let parent_start = html[..inner_start].rfind('<').ok_or_else(|| {
+        HcdError::Unsupported("PPTX text is not inside a formatted run".to_string())
+    })?;
+    let parent_end = html[parent_start..]
+        .find('>')
+        .map(|offset| parent_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX run tag is not closed".to_string()))?;
+    let parent = &html[parent_start..=parent_end];
+    let parent_name = if parent.contains("class=\"hcd-ppt-run\"") {
+        "span"
+    } else if parent.contains("class=\"hcd-slide-text\"") {
+        "p"
+    } else {
+        return Err(HcdError::Unsupported(
+            "PPTX text is not inside a formatted run".to_string(),
+        ));
+    };
+    let parent_close = matching_html_close(html, parent_end, parent_name)?;
+    let interior = &html[parent_end + 1..parent_close];
+    if interior.matches("data-hcd-id=").count() != 1 {
+        return Err(HcdError::Unsupported(
+            "PPTX run formatting applies to one text node in a run".to_string(),
+        ));
+    }
+    let mut inner = html[inner_start..=inner_end].to_string();
+    let existing = pptx_format_from_tag(&inner)?;
+    let color = format
+        .color
+        .as_ref()
+        .map(|color| format!("#{}", color.trim_start_matches('#').to_ascii_uppercase()));
+    let merged = PptxRunFormat {
+        bold: format.bold.or(existing.bold),
+        italic: format.italic.or(existing.italic),
+        underline: format.underline.or(existing.underline),
+        font_size_pt: format.font_size_pt.or(existing.font_size_pt),
+        color: color.or_else(|| existing.color.clone()),
+    };
+    if merged == existing {
+        return Err(HcdError::InvalidPatch(
+            "PPTX run format is unchanged".to_string(),
+        ));
+    }
+    set_tag_attribute(&mut inner, "data-hcd-run-edited", "true");
+    write_format_attributes(&mut inner, &merged);
+    html.replace_range(inner_start..=inner_end, &inner);
+    let parent_end = html[parent_start..]
+        .find('>')
+        .map(|offset| parent_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX run tag is not closed".to_string()))?;
+    let mut parent = html[parent_start..=parent_end].to_string();
+    apply_run_css(&mut parent, &merged)?;
+    html.replace_range(parent_start..=parent_end, &parent);
+    if entry.source.created_in_hcd {
+        if let Some(size) = merged.font_size_pt {
+            update_created_pptx_font(entry, size)?;
+        }
+    }
+    Ok(())
+}
+
+fn pptx_format_from_tag(tag: &str) -> Result<PptxRunFormat, HcdError> {
+    if xlsx_attribute(tag, "data-hcd-run-edited") != Some("true") {
+        return Ok(PptxRunFormat::default());
+    }
+    let flag = |name: &str| -> Result<Option<bool>, HcdError> {
+        match xlsx_attribute(tag, name) {
+            Some("1") => Ok(Some(true)),
+            Some("0") => Ok(Some(false)),
+            Some(_) => Err(HcdError::InvalidBundle(format!("PPTX {name} is invalid"))),
+            None => Ok(None),
+        }
+    };
+    let font_size_pt = match xlsx_attribute(tag, "data-hcd-font-size-pt") {
+        Some(value) => Some(value.parse::<f32>().map_err(|_| {
+            HcdError::InvalidBundle("PPTX stored font size is invalid".to_string())
+        })?),
+        None => None,
+    };
+    let color = xlsx_attribute(tag, "data-hcd-color").map(|value| format!("#{value}"));
+    Ok(PptxRunFormat {
+        bold: flag("data-hcd-bold")?,
+        italic: flag("data-hcd-italic")?,
+        underline: flag("data-hcd-underline")?,
+        font_size_pt,
+        color,
+    })
+}
+
+fn write_format_attributes(tag: &mut String, format: &PptxRunFormat) {
+    if let Some(bold) = format.bold {
+        set_tag_attribute(tag, "data-hcd-bold", if bold { "1" } else { "0" });
+    }
+    if let Some(italic) = format.italic {
+        set_tag_attribute(tag, "data-hcd-italic", if italic { "1" } else { "0" });
+    }
+    if let Some(underline) = format.underline {
+        set_tag_attribute(tag, "data-hcd-underline", if underline { "1" } else { "0" });
+    }
+    if let Some(size) = format.font_size_pt {
+        let size = format!("{size:.2}");
+        set_tag_attribute(tag, "data-hcd-font-size-pt", &size);
+    }
+    if let Some(color) = &format.color {
+        let hex = color.trim_start_matches('#').to_ascii_uppercase();
+        set_tag_attribute(tag, "data-hcd-color", &hex);
+    }
+}
+
+fn set_tag_attribute(tag: &mut String, name: &str, value: &str) {
+    let marker = format!(" {name}=\"");
+    let escaped = escape_attribute(value);
+    if let Some(start) = tag.find(&marker) {
+        let value_start = start + marker.len();
+        if let Some(end) = tag[value_start..].find('"') {
+            tag.replace_range(value_start..value_start + end, &escaped);
+            return;
+        }
+    }
+    let insertion = tag.len().saturating_sub(1);
+    tag.insert_str(insertion, &format!(" {name}=\"{escaped}\""));
+}
+
+fn apply_run_css(tag: &mut String, format: &PptxRunFormat) -> Result<(), HcdError> {
+    let style_marker = " style=\"";
+    let mut declarations = BTreeMap::new();
+    let style_range = tag.find(style_marker).map(|start| {
+        let value_start = start + style_marker.len();
+        let value_end = tag[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .unwrap_or(value_start);
+        (value_start, value_end)
+    });
+    if let Some((value_start, value_end)) = style_range {
+        for declaration in tag[value_start..value_end].split(';') {
+            let Some((property, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            declarations.insert(
+                property.trim().to_ascii_lowercase(),
+                value.trim().to_string(),
+            );
+        }
+    }
+    if let Some(bold) = format.bold {
+        if bold {
+            declarations.insert("font-weight".to_string(), "700".to_string());
+        } else {
+            declarations.remove("font-weight");
+        }
+    }
+    if let Some(italic) = format.italic {
+        if italic {
+            declarations.insert("font-style".to_string(), "italic".to_string());
+        } else {
+            declarations.remove("font-style");
+        }
+    }
+    if let Some(underline) = format.underline {
+        let mut tokens = declarations
+            .get("text-decoration")
+            .map(|value| {
+                value
+                    .split_whitespace()
+                    .filter(|token| *token != "underline")
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if underline {
+            tokens.push("underline".to_string());
+        }
+        if tokens.is_empty() {
+            declarations.remove("text-decoration");
+        } else {
+            declarations.insert("text-decoration".to_string(), tokens.join(" "));
+        }
+    }
+    if let Some(size) = format.font_size_pt {
+        declarations.insert("font-size".to_string(), format!("{size:.2}pt"));
+    }
+    if let Some(color) = &format.color {
+        declarations.insert(
+            "color".to_string(),
+            format!("#{}", color.trim_start_matches('#').to_ascii_lowercase()),
+        );
+    }
+    let style_value = declarations
+        .iter()
+        .map(|(property, value)| format!("{property}:{value}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    if !style_value.is_empty() {
+        crate::html::validate_inline_style(&style_value)?;
+    }
+    if let Some((value_start, value_end)) = style_range {
+        if style_value.is_empty() {
+            let style_start = tag[..value_start].rfind(" style=\"").unwrap_or(value_start);
+            tag.replace_range(style_start..value_end + 1, "");
+        } else {
+            tag.replace_range(value_start..value_end, &style_value);
+        }
+    } else if !style_value.is_empty() {
+        tag.insert_str(tag.len() - 1, &format!(" style=\"{style_value}\""));
+    }
+    Ok(())
+}
+
+fn matching_html_close(html: &str, open_end: usize, name: &str) -> Result<usize, HcdError> {
+    let open_token = format!("<{name}");
+    let close_token = format!("</{name}>");
+    let mut depth = 1usize;
+    let mut cursor = open_end + 1;
+    while cursor < html.len() {
+        let next_open = html[cursor..]
+            .find(&open_token)
+            .map(|offset| cursor + offset);
+        let next_close = html[cursor..]
+            .find(&close_token)
+            .map(|offset| cursor + offset);
+        match (next_open, next_close) {
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                cursor = open + open_token.len();
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(close);
+                }
+                cursor = close + close_token.len();
+            }
+            _ => break,
+        }
+    }
+    Err(HcdError::InvalidBundle(
+        "PPTX run element is not closed".to_string(),
+    ))
+}
+
+fn update_created_pptx_font(entry: &mut NodeMapEntry, font_size_pt: f32) -> Result<(), HcdError> {
+    let locator = entry.source.text_id.as_deref().ok_or_else(|| {
+        HcdError::InvalidBundle("created PPTX text box locator is missing".to_string())
+    })?;
+    let values = locator
+        .strip_prefix("hcd-pptx-box:")
+        .and_then(|values| {
+            values
+                .split(',')
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX text box locator is invalid".to_string()))?;
+    if values.len() != 5 {
+        return Err(HcdError::InvalidBundle(
+            "PPTX text box locator is invalid".to_string(),
+        ));
+    }
+    let hundredths = (font_size_pt * 100.0).round() as u64;
+    if !(100..=25_600).contains(&hundredths) {
+        return Err(HcdError::InvalidPatch(
+            "PPTX font size must be from 1 to 256 points".to_string(),
+        ));
+    }
+    entry.source.text_id = Some(format!(
+        "hcd-pptx-box:{},{},{},{},{hundredths}",
+        values[0], values[1], values[2], values[3]
+    ));
+    Ok(())
+}
+
 fn update_pptx_shape_geometry(
     html: &mut String,
     entry: &mut NodeMapEntry,
@@ -7182,6 +7586,7 @@ fn apply_annotations(
             | PatchOperation::PptxTextInsert { .. }
             | PatchOperation::PptxShapeGeometry { .. }
             | PatchOperation::PptxTextDelete { .. }
+            | PatchOperation::PptxRunFormat { .. }
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
             | PatchOperation::XlsxMerge { .. }

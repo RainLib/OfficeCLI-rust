@@ -16,9 +16,38 @@ type Manifest = { chunkCount: number; indexPageCount: number; revision: number; 
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
 type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
 type PdfGeometry = { xPt: number; yPt: number; widthPt: number; heightPt: number }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
+type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; runBold?: boolean; runItalic?: boolean; runUnderline?: boolean; runFontSizePt?: number; runColor?: string }
+type PptxRunFormat = { bold?: boolean; italic?: boolean; underline?: boolean; fontSizePt?: number; color?: string }
 type ShapeDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PptxGeometry; current: PptxGeometry; shape: HTMLElement }
 type PdfDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PdfGeometry; current: PdfGeometry; shape: HTMLElement; pointsPerPixel: number }
+function cssDeclaration(style: string, property: string): string | undefined {
+  for (const part of style.split(';')) {
+    const splitAt = part.indexOf(':')
+    if (splitAt < 0) continue
+    if (part.slice(0, splitAt).trim().toLowerCase() === property) return part.slice(splitAt + 1).trim()
+  }
+  return undefined
+}
+function pptxRunStyle(element: Element | undefined): Pick<TextNode, 'runBold' | 'runItalic' | 'runUnderline' | 'runFontSizePt' | 'runColor'> {
+  const run = element?.closest('.hcd-ppt-run, .hcd-slide-text')
+  const style = run?.getAttribute('style') || ''
+  const flag = (name: string, fallback: boolean) => {
+    const value = element?.getAttribute(name)
+    return value === '1' ? true : value === '0' ? false : fallback
+  }
+  const sizeText = element?.getAttribute('data-hcd-font-size-pt') || cssDeclaration(style, 'font-size')?.replace(/pt$/, '')
+  const size = Number(sizeText)
+  const storedColor = element?.getAttribute('data-hcd-color')
+  const cssColor = cssDeclaration(style, 'color')
+  const color = storedColor ? `#${storedColor}` : cssColor?.startsWith('#') ? cssColor : undefined
+  return {
+    runBold: flag('data-hcd-bold', ['700', 'bold'].includes(cssDeclaration(style, 'font-weight') || '')),
+    runItalic: flag('data-hcd-italic', cssDeclaration(style, 'font-style') === 'italic'),
+    runUnderline: flag('data-hcd-underline', (cssDeclaration(style, 'text-decoration') || '').includes('underline')),
+    runFontSizePt: Number.isFinite(size) && size >= 1 && size <= 256 ? size : undefined,
+    runColor: color,
+  }
+}
 function pptxGeometry(element: Element | null): PptxGeometry | undefined {
   if (!element?.classList.contains('hcd-slide-shape')) return undefined
   const values = ['data-hcd-x-emu', 'data-hcd-y-emu', 'data-hcd-width-emu', 'data-hcd-height-emu'].map(name => Number(element.getAttribute(name)))
@@ -43,6 +72,27 @@ type EditHistory = { head: number | null; past: EditStep[]; future: EditStep[] }
 function mergeDescriptors(previous: Descriptor[], incoming: Descriptor[]): Descriptor[] {
   return Array.from(new Map([...previous, ...incoming].map(item => [item.sequence, item])).values())
     .sort((left, right) => left.sequence - right.sequence)
+}
+
+function PptxRunFormatBar({ node, disabled, onApply }: { node: TextNode; disabled: boolean; onApply: (format: PptxRunFormat) => void }) {
+  const { locale } = useI18n()
+  const [size, setSize] = useState(node.runFontSizePt ? String(node.runFontSizePt) : '18')
+  const [color, setColor] = useState(node.runColor || '#112233')
+  useEffect(() => {
+    setSize(node.runFontSizePt ? String(node.runFontSizePt) : '18')
+    setColor(node.runColor || '#112233')
+  }, [node.nodeId, node.nodeHash, node.runFontSizePt, node.runColor])
+  const parsedSize = Number(size)
+  const sizeValid = Number.isFinite(parsedSize) && parsedSize >= 1 && parsedSize <= 256
+  return <div className="tool-group" aria-label={localizeSource(locale, "文字格式")}>
+    <button className={node.runBold ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runBold} onClick={() => onApply({ bold: !node.runBold })}><LocalText source={"加粗"} /></button>
+    <button className={node.runItalic ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runItalic} onClick={() => onApply({ italic: !node.runItalic })}><LocalText source={"斜体"} /></button>
+    <button className={node.runUnderline ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runUnderline} onClick={() => onApply({ underline: !node.runUnderline })}><LocalText source={"下划线"} /></button>
+    <label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="256" step="0.5" value={size} disabled={disabled || !node.editable} onChange={event => setSize(event.target.value)} style={{ width: 68 }} /></label>
+    <button disabled={disabled || !node.editable || !sizeValid || parsedSize === node.runFontSizePt} onClick={() => onApply({ fontSizePt: parsedSize })}><LocalText source={"应用字号"} /></button>
+    <label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={color} disabled={disabled || !node.editable} onChange={event => setColor(event.target.value)} /></label>
+    <button disabled={disabled || !node.editable || color.toLowerCase() === (node.runColor || '').toLowerCase()} onClick={() => onApply({ color })}><LocalText source={"应用颜色"} /></button>
+  </div>
 }
 
 export function FixedViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
@@ -317,6 +367,29 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(`${String(cause)}。请重新选择文字框后重试。`); return null }
     finally { setSaving(false) }
   }
+  async function saveRunFormat(node: TextNode, format: PptxRunFormat): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || !node.editable || draft !== node.text) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/30', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.run.format', nodeId: node.nodeId, format,
+            precondition: { nodeHash: node.nodeHash } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '设置文字格式')
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setSelected(null)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字后重试。`); return null }
+    finally { setSaving(false) }
+  }
   async function savePdfGeometry(node: TextNode, geometry: PdfGeometry): Promise<number | null> {
     if (session.format !== 'pdf' || readOnly || historical || saving || historyBusy || !node.pdfGeometry || draft !== node.text) return null
     setSaving(true)
@@ -443,7 +516,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => setRightPanel('settings')}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={displayedRevision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div><span className="ribbon-note">{localizeDynamic(locale, session.format === 'pptx' ? '点击文字原位编辑 · 选中后拖动顶部把手移动、右下角调整尺寸' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消')}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div>{session.format === 'pptx' && selected && <PptxRunFormatBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={format => void saveRunFormat(selected.node, format)} />}<span className="ribbon-note">{localizeDynamic(locale, session.format === 'pptx' ? '点击文字原位编辑 · 选中后可设置加粗、斜体、下划线、字号和颜色，并拖动调整位置' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消')}</span></>}
       {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示页面目录"} /></label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><button disabled={historyLocked || !canUndoSaved} onClick={() => travel('undo')}><LocalText source={"撤销 "} />{editHistory.past.length} <LocalText source={" 步"} /></button><button disabled={historyLocked || !canRedoSaved} onClick={() => travel('redo')}><LocalText source={"重做 "} />{editHistory.future.length} <LocalText source={" 步"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{manifest?.revision ?? '…'} · {editHistory.past.length ? `下一步可撤销：${editHistory.past.at(-1)?.label}` : '当前会话无已保存的可撤销步骤'}</span></>}
@@ -599,6 +672,7 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           pdfGeometry: session.format === 'pdf' ? pdfGeometry(anchor) : undefined,
           fontSize: position?.fontSize, fontFamily: position?.fontFamily, fontWeight: position?.fontWeight,
           fontStyle: position?.fontStyle, color: position?.color, lineHeight: position?.lineHeight,
+          ...(session.format === 'pptx' ? pptxRunStyle(element) : {}),
         }
       })
       const hashes = Array.from(new Set(Array.from(chunk.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1])))
