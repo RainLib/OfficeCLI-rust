@@ -269,6 +269,7 @@ fn revision_record(
         index_page_count: Some(manifest.index_page_count),
         chunk_count: Some(manifest.chunk_count),
         asset_index_href: bundle.asset_index_href_for_revision(revision - 1)?,
+        styles_href: manifest.styles_href.clone(),
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: Vec::new(),
         removed_node_ids: Vec::new(),
@@ -763,7 +764,7 @@ pub fn apply_structure_patch(
         hash_descriptor(&mut hasher, descriptor);
     }
     let asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
-    let root_hash = finalize_root_hash(bundle, hasher, &asset_index_href)?;
+    let root_hash = finalize_root_hash(bundle, hasher, &asset_index_href, &manifest.styles_href)?;
     let (annotation_href, annotation_root_hash) =
         filter_annotations(bundle, &manifest, &remaining_ids)?;
     manifest.revision = revision;

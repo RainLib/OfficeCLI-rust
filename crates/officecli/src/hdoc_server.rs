@@ -1452,7 +1452,7 @@ async fn pin_theme(
             theme_font_href(&body.theme_revision_id, font_id, revision, sha)
         })
         .map_err(hcd_error)?;
-    pin_document_theme(&bundle, &body.theme_revision_id).map_err(hcd_error)?;
+    pin_document_theme(&state.catalog, &bundle, &body.theme_revision_id).map_err(hcd_error)?;
     let resolved =
         resolve_document_theme(&state.catalog, &bundle, None, |font_id, revision, sha| {
             document_font_href(&id, font_id, revision, sha)
@@ -2397,5 +2397,137 @@ mod tests {
         assert!(html.contains("/v1/catalog/fonts"));
         assert!(html.contains("/v1/catalog/themes"));
         assert!(html.contains("--scope admin"));
+    }
+
+    #[tokio::test]
+    async fn pin_theme_route_records_a_content_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        // Seed a theme through the same admin write surface the console uses.
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin,
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        let theme_revision_id = theme.0.theme_revision_id.clone();
+
+        // Create a document bundle the server can open by id.
+        let id = "doc-a";
+        let writer = hcd_core::BundleWriter::create(temp.path().join(format!("{id}.hcd"))).unwrap();
+        writer.write_styles("article { color: #123456; }").unwrap();
+        writer
+            .finish(hcd_core::HcdManifest {
+                schema_version: String::new(),
+                storage_codec: hcd_core::StorageCodec::None,
+                document_id: id.to_string(),
+                profile: "semantic-flow".to_string(),
+                revision: 0,
+                source: hcd_core::SourceDescriptor {
+                    format: "docx".to_string(),
+                    sha256: "ab".repeat(32),
+                    size_bytes: 1,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                theme_revision_id: None,
+                capabilities: hcd_core::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+
+        // A read token cannot pin.
+        let error = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "read"),
+            Json(PinThemeBody {
+                theme_revision_id: theme_revision_id.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        // A write token pins the theme and advances the head revision.
+        let resolution = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody {
+                theme_revision_id: theme_revision_id.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolution.0.revision, 1);
+        assert_eq!(resolution.0.theme_revision_id, theme_revision_id);
+
+        let bundle = open(&state, id).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.revision, 1);
+        assert!(manifest.styles_href.starts_with("styles/rev-"));
+        let served = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(served.contains("article { color: #123456; }"));
+        assert!(served.contains("--hcd-major-latin:'Demo Serif',serif"));
+
+        // Re-pinning the same theme is idempotent and does not add a revision.
+        let again = pin_theme(
+            State(state),
+            Path(id.to_string()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody { theme_revision_id }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.0.revision, 1);
     }
 }

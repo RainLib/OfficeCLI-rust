@@ -17,11 +17,11 @@ mod xlsx_formula;
 pub use archive::{inspect_archive, pack_archive, unpack_archive, ArchiveReport};
 pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
 pub use catalog::{
-    detect_font_format, pin_document_theme, resolve_document_theme, theme_font_plan,
-    theme_presentation_css, DiskCatalog, DocumentThemeResolution, FontFace, FontFileFormat,
-    FontLicense, FontRef, FontRevision, FontScript, FontStretch, FontStyle, ResolvedFace,
-    ResolvedTheme, ThemeEmbedKind, ThemeFontAction, ThemeFontDecision, ThemeFontSlots,
-    ThemeRevision, FONT_CATALOG_SCHEMA, MAX_FONT_BYTES, THEME_SCHEMA,
+    detect_font_format, pin_document_theme, resolve_document_theme, theme_document_css,
+    theme_font_plan, theme_presentation_css, DiskCatalog, DocumentThemeResolution, FontFace,
+    FontFileFormat, FontLicense, FontRef, FontRevision, FontScript, FontStretch, FontStyle,
+    ResolvedFace, ResolvedTheme, ThemeEmbedKind, ThemeFontAction, ThemeFontDecision,
+    ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA, MAX_FONT_BYTES, THEME_SCHEMA,
 };
 pub use error::HcdError;
 pub use hash::{

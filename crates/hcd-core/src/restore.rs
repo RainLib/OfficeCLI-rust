@@ -50,7 +50,8 @@ pub fn restore_revision(
         index_root_href: target_record.index_root_href.clone(),
         index_page_count: Some(historical.index_page_count),
         chunk_count: Some(historical.chunk_count),
-        asset_index_href: target_record.asset_index_href,
+        asset_index_href: target_record.asset_index_href.clone(),
+        styles_href: target_record.styles_href.clone(),
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: Vec::new(),
         removed_node_ids: Vec::new(),
@@ -67,6 +68,7 @@ pub fn restore_revision(
     head.theme_revision_id = historical.theme_revision_id.clone();
     head.revision = revision;
     head.root_hash = record.root_hash.clone();
+    head.styles_href = record.styles_href.clone();
     head.annotation_root_hash = record.annotation_root_hash.clone();
     head.annotation_href = historical.annotation_href;
     head.index_prefix = record.index_prefix.clone();

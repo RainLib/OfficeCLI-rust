@@ -182,6 +182,7 @@ pub fn manifest_at_revision(
     manifest.index_page_count = record.index_page_count.unwrap_or(manifest.index_page_count);
     manifest.chunk_count = record.chunk_count.unwrap_or(manifest.chunk_count);
     manifest.theme_revision_id = record.theme_revision_id;
+    manifest.styles_href = record.styles_href;
     Ok((manifest, revision))
 }
 
@@ -222,8 +223,12 @@ pub fn render_standalone_html_with_transform(
             }
         }
         let asset_index_href = bundle.asset_index_href_for_revision(revision)?;
-        let actual_root =
-            crate::bundle::finalize_root_hash(bundle, descriptors, &asset_index_href)?;
+        let actual_root = crate::bundle::finalize_root_hash(
+            bundle,
+            descriptors,
+            &asset_index_href,
+            &manifest.styles_href,
+        )?;
         if actual_root != manifest.root_hash {
             return Err(HcdError::InvalidBundle(format!(
                 "revision {revision} root hash does not match its index, stylesheet and asset index"

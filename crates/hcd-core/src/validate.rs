@@ -555,7 +555,12 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             "maps/sha256",
         ));
     }
-    match finalize_root_hash(bundle, root_hasher, &asset_index_href) {
+    match finalize_root_hash(
+        bundle,
+        root_hasher,
+        &asset_index_href,
+        &manifest.styles_href,
+    ) {
         Ok(actual_root) if actual_root != manifest.root_hash => issues.push(issue(
             "ROOT_HASH_MISMATCH",
             format!("expected {}, actual {actual_root}", manifest.root_hash),
@@ -635,11 +640,11 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
             ));
         }
     }
-    if manifest.styles_href != "styles.css" {
+    if !valid_styles_href(&manifest.styles_href) {
         issues.push(issue(
             "STYLES_HREF_INVALID",
             format!(
-                "stylesHref must be styles.css, found {}",
+                "stylesHref must be styles.css or a managed styles/ part, found {}",
                 manifest.styles_href
             ),
             "manifest.json",
@@ -826,7 +831,8 @@ fn validate_revision_chain(
             && (record.root_hash != manifest.root_hash
                 || record.annotation_root_hash != manifest.annotation_root_hash
                 || record.index_prefix != manifest.index_prefix
-                || record.index_root_href != manifest.index_root_href)
+                || record.index_root_href != manifest.index_root_href
+                || record.styles_href != manifest.styles_href)
         {
             issues.push(issue(
                 "REVISION_HEAD_MISMATCH",
@@ -995,7 +1001,12 @@ fn validate_patch_revision(
                 ));
             }
         }
-        if !content_changed && record.root_hash != previous.root_hash {
+        // A theme pin re-commits the body root through the revision's
+        // stylesheet without touching any node, so it is neither a content nor
+        // an annotation revision. A stylesheet transition is the only change
+        // allowed to move the body root while every dirty set stays empty.
+        let styles_changed = record.styles_href != previous.styles_href;
+        if !content_changed && !styles_changed && record.root_hash != previous.root_hash {
             issues.push(issue(
                 "ANNOTATION_REVISION_CHANGED_BODY_ROOT",
                 "annotation-only revision changed the body root hash".to_string(),
@@ -1384,6 +1395,26 @@ fn valid_index_prefix(value: &str) -> bool {
     value.strip_prefix("indexes/rev-").is_some_and(|revision| {
         revision.len() == 20 && revision.bytes().all(|byte| byte.is_ascii_digit())
     })
+}
+
+/// The global `styles.css` or a managed stylesheet part `styles/<name>.css`.
+/// A managed part lives in exactly one directory with a dot-less-safe stem, so
+/// it can never traverse outside the bundle.
+fn valid_styles_href(value: &str) -> bool {
+    if value == "styles.css" {
+        return true;
+    }
+    let Some(stem) = value
+        .strip_prefix("styles/")
+        .and_then(|rest| rest.strip_suffix(".css"))
+    else {
+        return false;
+    };
+    !stem.is_empty()
+        && !stem.contains('/')
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn valid_source_part(value: &str) -> bool {
@@ -2226,6 +2257,20 @@ fn issue(code: &str, message: String, path: &str) -> ValidationIssue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn styles_href_accepts_global_and_managed_parts_only() {
+        assert!(valid_styles_href("styles.css"));
+        assert!(valid_styles_href("styles/rev-00000000000000000001.css"));
+        assert!(valid_styles_href("styles/theme-a.css"));
+        assert!(!valid_styles_href(""));
+        assert!(!valid_styles_href("styles/"));
+        assert!(!valid_styles_href("styles/.css"));
+        assert!(!valid_styles_href("styles/nested/rev.css"));
+        assert!(!valid_styles_href("styles/../escape.css"));
+        assert!(!valid_styles_href("chunks/sha256/a.css"));
+        assert!(!valid_styles_href("styles/rev.css.bak"));
+    }
 
     #[test]
     fn dangerous_html_elements_attributes_and_urls_are_rejected() {

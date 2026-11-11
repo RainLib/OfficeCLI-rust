@@ -2,9 +2,12 @@
 //! The catalog directory holds immutable font revisions, theme revisions, and
 //! content-addressed font blobs. There is no tenant field in this schema.
 
-use crate::bundle::{atomic_write, read_bytes_bounded, read_json_bounded};
+use crate::bundle::{
+    atomic_write, finalize_root_hash, hash_descriptor, read_bytes_bounded, read_json_bounded,
+};
 use crate::{hash_bytes, manifest_at_revision, Bundle, HcdError};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -661,6 +664,71 @@ pub fn theme_presentation_css(
     Ok(Some(css))
 }
 
+const THEME_REGION_BEGIN: &str = "/* hcd-theme-begin */";
+const THEME_REGION_END: &str = "/* hcd-theme-end */";
+const THEME_SEMANTIC_FLOW_RULE: &str = "body[data-hcd-profile=\"semantic-flow\"]{font-family:var(--hcd-minor-latin,var(--hcd-major-latin))}body[data-hcd-profile=\"semantic-flow\"] :is(h1,h2){font-family:var(--hcd-major-latin,var(--hcd-minor-latin))}";
+
+/// Build the stylesheet block a pinned theme contributes to the document's own
+/// `styles.css`. It carries only the resolved `--hcd-*` font variables and the
+/// semantic-flow rules; font bytes stay in the catalog and are resolved as
+/// `@font-face` data URLs at preview and export time, not stored here.
+pub fn theme_document_css(
+    catalog: &DiskCatalog,
+    theme_revision_id: &str,
+) -> Result<String, HcdError> {
+    // An empty href makes `resolve` skip every `@font-face` src line, leaving
+    // only the `:root { --hcd-* }` variable lines that belong in the document.
+    let resolved = catalog.resolve(theme_revision_id, |_, _, _| String::new())?;
+    let mut block = String::new();
+    for line in resolved.css.lines() {
+        block.push_str(line);
+        block.push('\n');
+    }
+    block.push_str(THEME_SEMANTIC_FLOW_RULE);
+    block.push('\n');
+    if block.contains('<') || block.to_ascii_lowercase().contains("@import") {
+        return Err(HcdError::InvalidBundle(
+            "theme document CSS is unsafe".to_string(),
+        ));
+    }
+    Ok(block)
+}
+
+/// Return `styles` with the managed theme region replaced by `block`. The
+/// region is delimited so repeated pins update one place instead of stacking,
+/// and every document rule outside the region is preserved verbatim.
+fn with_theme_region(styles: &str, block: &str) -> String {
+    let mut kept = String::new();
+    let mut inside = false;
+    for line in styles.lines() {
+        if line.trim() == THEME_REGION_BEGIN {
+            inside = true;
+            continue;
+        }
+        if line.trim() == THEME_REGION_END {
+            inside = false;
+            continue;
+        }
+        if !inside {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    let trimmed = kept.trim_end();
+    let mut merged = String::from(trimmed);
+    if !merged.is_empty() && !block.is_empty() {
+        merged.push('\n');
+    }
+    if !block.is_empty() {
+        merged.push_str(THEME_REGION_BEGIN);
+        merged.push('\n');
+        merged.push_str(block);
+        merged.push_str(THEME_REGION_END);
+        merged.push('\n');
+    }
+    merged
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeEmbedKind {
     /// Word and PowerPoint may embed TrueType or OpenType bytes.
@@ -821,9 +889,16 @@ fn license_block_reason(font: &FontRevision, kind: ThemeEmbedKind) -> Option<Str
     None
 }
 
-/// Record `themeRevisionId` on the current head and its revision record.
-/// Older revision records are left unchanged.
+/// Pin a catalog theme to the document as a real content revision.
+///
+/// The theme's font families and `--hcd-*` variables are written into a managed
+/// region of the document's stylesheet, committed under a new `stylesHref`, and
+/// the head revision is advanced with a recomputed body root. Font bytes are not
+/// stored here; they stay in the catalog and are resolved at preview/export time.
+/// Re-pinning a theme the head already carries with an identical block is an
+/// idempotent no-op that does not add a revision.
 pub fn pin_document_theme(
+    catalog: &DiskCatalog,
     bundle: &Bundle,
     theme_revision_id: &str,
 ) -> Result<crate::HcdManifest, HcdError> {
@@ -835,14 +910,81 @@ pub fn pin_document_theme(
             "only a complete document can pin a theme".to_string(),
         ));
     }
-    let mut record = bundle.revision(manifest.revision)?;
-    if record.document_id != manifest.document_id || record.revision != manifest.revision {
+    let head_record = bundle.revision(manifest.revision)?;
+    if head_record.document_id != manifest.document_id || head_record.revision != manifest.revision
+    {
         return Err(HcdError::InvalidBundle(
             "head revision record does not match the manifest".to_string(),
         ));
     }
+    let block = theme_document_css(catalog, theme_revision_id)?;
+    let base_styles = bundle.read_styles_part(&manifest.styles_href)?;
+    let new_styles = with_theme_region(&base_styles, &block);
+    if manifest.theme_revision_id.as_deref() == Some(theme_revision_id) && new_styles == base_styles
+    {
+        return Ok(manifest);
+    }
+    if manifest.revision >= crate::MAX_REVISION {
+        return Err(HcdError::ResourceLimit(
+            "revision limit reached".to_string(),
+        ));
+    }
+
+    let new_revision = manifest.revision + 1;
+    let new_styles_href = format!("styles/rev-{new_revision:020}.css");
+    bundle.write_styles_part(&new_styles_href, &new_styles)?;
+
+    // The node tree is unchanged, so rebuild the descriptor digest from the
+    // current index pages; only the stylesheet component of the root moves.
+    let mut root_hasher = Sha256::new();
+    let view = manifest.clone();
+    for page_number in 0..view.index_page_count {
+        let page = bundle.read_index_page(&view, page_number)?;
+        for descriptor in page.chunks {
+            hash_descriptor(&mut root_hasher, &descriptor);
+        }
+    }
+    let asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
+    let root_hash = finalize_root_hash(bundle, root_hasher, &asset_index_href, &new_styles_href)?;
+
+    let record = crate::RevisionRecord {
+        schema_version: manifest.schema_version.clone(),
+        document_id: manifest.document_id.clone(),
+        revision: new_revision,
+        parent_revision: Some(manifest.revision),
+        patch_id: Some(format!("theme-{new_revision}")),
+        patch_hash: Some(hash_bytes(
+            format!("theme:{theme_revision_id}:{new_revision}").as_bytes(),
+        )),
+        patch_base_revision: Some(manifest.revision),
+        author_id: None,
+        author_name: None,
+        theme_revision_id: Some(theme_revision_id.to_string()),
+        root_hash: root_hash.clone(),
+        annotation_root_hash: manifest.annotation_root_hash.clone(),
+        index_prefix: manifest.index_prefix.clone(),
+        index_root_href: manifest.index_root_href.clone(),
+        index_page_count: Some(manifest.index_page_count),
+        chunk_count: Some(manifest.chunk_count),
+        asset_index_href,
+        styles_href: new_styles_href.clone(),
+        created_at_epoch_ms: crate::bundle::now_epoch_ms(),
+        dirty_node_ids: Vec::new(),
+        removed_node_ids: Vec::new(),
+        dirty_chunk_ids: Vec::new(),
+        dirty_source_parts: Vec::new(),
+        dirty_grid_parts: Vec::new(),
+        converted_formula_node_ids: Vec::new(),
+        grid_row_insertions: Vec::new(),
+        grid_row_deletions: Vec::new(),
+        grid_column_insertions: Vec::new(),
+        grid_column_deletions: Vec::new(),
+        structural_change: false,
+    };
+    manifest.revision = new_revision;
+    manifest.root_hash = root_hash;
+    manifest.styles_href = new_styles_href;
     manifest.theme_revision_id = Some(theme_revision_id.to_string());
-    record.theme_revision_id = Some(theme_revision_id.to_string());
     bundle.write_revision(&record)?;
     bundle.write_manifest(&manifest)?;
     Ok(manifest)
@@ -1422,7 +1564,7 @@ mod tests {
         assert!(theme_presentation_css(&catalog, &bundle, None)
             .unwrap()
             .is_none());
-        pin_document_theme(&bundle, &theme_id).unwrap();
+        pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
         let css = theme_presentation_css(&catalog, &bundle, None)
             .unwrap()
             .unwrap();
@@ -1529,7 +1671,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        pin_document_theme(&bundle, &theme_id).unwrap();
+        pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
         let plan = theme_font_plan(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).unwrap();
         assert!(plan.iter().any(|decision| {
             matches!(&decision.action, ThemeFontAction::Embed { bytes, .. } if bytes == b"fake-otf-bold")
@@ -1544,12 +1686,10 @@ mod tests {
             .all(|decision| matches!(decision.action, ThemeFontAction::RegisterOnly { .. })));
     }
 
-    #[test]
-    fn document_pin_stays_on_its_revision_when_the_head_changes() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("demo.hcd");
+    fn complete_bundle(root_dir: &tempfile::TempDir, styles: &str) -> Bundle {
+        let root = root_dir.path().join("demo.hcd");
         let writer = BundleWriter::create(&root).unwrap();
-        writer.write_styles("").unwrap();
+        writer.write_styles(styles).unwrap();
         writer
             .finish(HcdManifest {
                 schema_version: String::new(),
@@ -1577,29 +1717,83 @@ mod tests {
                 warnings: Vec::new(),
             })
             .unwrap();
-        let bundle = Bundle::open(&root).unwrap();
-        let pinned = "cd".repeat(32);
-        pin_document_theme(&bundle, &pinned).unwrap();
+        Bundle::open(&root).unwrap()
+    }
+
+    #[test]
+    fn pin_bumps_revision_and_stays_on_the_revision_it_pinned() {
+        let (_temp, catalog, font_revision_id, theme_id) = install();
+        let bundle_dir = tempfile::tempdir().unwrap();
+        let bundle = complete_bundle(&bundle_dir, "article { color: #123456; }");
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+
+        let manifest = pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        assert_eq!(manifest.revision, 1);
         assert_eq!(
-            bundle.manifest().unwrap().theme_revision_id.as_deref(),
-            Some(pinned.as_str())
+            manifest.theme_revision_id.as_deref(),
+            Some(theme_id.as_str())
         );
+        assert!(manifest.styles_href.starts_with("styles/rev-"));
+
+        let pinned_css = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(pinned_css.contains("article { color: #123456; }"));
+        assert!(pinned_css.contains("/* hcd-theme-begin */"));
+        assert!(pinned_css.contains("--hcd-major-latin:'Source Han Sans',sans-serif"));
+
+        // Revision 0 predates the pin; revision 1 carries it.
+        assert!(bundle.revision(0).unwrap().theme_revision_id.is_none());
         assert_eq!(
-            bundle.revision(0).unwrap().theme_revision_id.as_deref(),
-            Some(pinned.as_str())
+            bundle.revision(1).unwrap().theme_revision_id.as_deref(),
+            Some(theme_id.as_str())
         );
-        let mut head = bundle.manifest().unwrap();
-        head.revision = 1;
-        head.theme_revision_id = Some("ef".repeat(32));
-        let (historical, _) = manifest_at_revision(&bundle, &head, Some(0)).unwrap();
-        assert_eq!(
-            historical.theme_revision_id.as_deref(),
-            Some(pinned.as_str())
+        // The body root moved because the committed stylesheet changed.
+        assert_ne!(
+            bundle.revision(0).unwrap().root_hash,
+            bundle.revision(1).unwrap().root_hash
         );
-        let (current, _) = manifest_at_revision(&bundle, &head, None).unwrap();
-        assert_eq!(
-            current.theme_revision_id.as_deref(),
-            Some("ef".repeat(32).as_str())
-        );
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+
+        // Re-pinning the same theme is idempotent: no extra revision.
+        let again = pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        assert_eq!(again.revision, 1);
+
+        // A different theme advances the head; older revisions keep their own pin.
+        let second = catalog
+            .put_theme(&ThemeRevision {
+                schema_version: THEME_SCHEMA.to_string(),
+                theme_revision_id: String::new(),
+                name: "Serif default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "source-han-sans".to_string(),
+                        font_revision_id: font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "source-han-sans".to_string(),
+                        font_revision_id,
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["serif".to_string()],
+            })
+            .unwrap();
+        let head = pin_document_theme(&catalog, &bundle, &second).unwrap();
+        assert_eq!(head.revision, 2);
+        assert_ne!(head.styles_href, manifest.styles_href);
+
+        let (rev1, _) = manifest_at_revision(&bundle, &head, Some(1)).unwrap();
+        assert_eq!(rev1.theme_revision_id.as_deref(), Some(theme_id.as_str()));
+        assert_eq!(rev1.styles_href, manifest.styles_href);
+        let (rev0, _) = manifest_at_revision(&bundle, &head, Some(0)).unwrap();
+        assert!(rev0.theme_revision_id.is_none());
+        assert_eq!(rev0.styles_href, "styles.css");
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
     }
 }

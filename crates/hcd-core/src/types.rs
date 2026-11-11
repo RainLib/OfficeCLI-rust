@@ -690,6 +690,11 @@ pub struct RevisionRecord {
     /// field and resolve to the original `assets/index.json`.
     #[serde(default = "default_asset_index_href")]
     pub asset_index_href: String,
+    /// Stylesheet committed into this revision's body root. Documents written
+    /// before theme pinning and content-only revisions keep `styles.css`; a
+    /// theme pin records a pinned stylesheet here so history stays verifiable.
+    #[serde(default = "default_styles_href")]
+    pub styles_href: String,
     pub created_at_epoch_ms: u128,
     #[serde(default)]
     pub dirty_node_ids: Vec<String>,
@@ -756,6 +761,10 @@ fn is_false(value: &bool) -> bool {
 
 fn default_asset_index_href() -> String {
     "assets/index.json".to_string()
+}
+
+fn default_styles_href() -> String {
+    "styles.css".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -68,7 +68,10 @@
       "minimum": 0
     },
     "stylesHref": {
-      "const": "styles.css"
+      "anyOf": [
+        { "const": "styles.css" },
+        { "type": "string", "pattern": "^styles/[A-Za-z0-9._-]+\\.css$" }
+      ]
     },
     "themeRevisionId": {
       "$ref": "#/$defs/sha256"

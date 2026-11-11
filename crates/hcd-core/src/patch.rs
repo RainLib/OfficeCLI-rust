@@ -1580,7 +1580,12 @@ pub fn apply_patch(
     let (annotation_href, annotation_root_hash) =
         apply_annotations(bundle, &manifest, patch, &removed_nodes)?;
     let root_hash = if content_changed {
-        finalize_root_hash(bundle, root_hasher, &asset_index_href)?
+        finalize_root_hash(
+            bundle,
+            root_hasher,
+            &asset_index_href,
+            &manifest.styles_href,
+        )?
     } else {
         manifest.root_hash.clone()
     };
@@ -1666,6 +1671,7 @@ pub fn apply_patch(
         index_page_count: Some(manifest.index_page_count),
         chunk_count: Some(manifest.chunk_count),
         asset_index_href,
+        styles_href: manifest.styles_href.clone(),
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: result.dirty_node_ids.clone(),
         removed_node_ids: removed_nodes.into_iter().collect(),
