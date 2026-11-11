@@ -25,6 +25,10 @@ export interface NodeLink {
   fontSizePt?: number;
   color?: string;
   fill?: string;
+  horizontal?: 'left' | 'center' | 'right';
+  vertical?: 'top' | 'center' | 'bottom';
+  wrap?: boolean;
+  border?: 'none' | 'thin';
   sheetId: string;
   row: number;
   column: number;
@@ -149,6 +153,43 @@ function explicitCellStyle(cell: HTMLElement): IStyleData {
   return style;
 }
 
+function explicitLayoutStyle(cell: HTMLElement): IStyleData {
+  const style: IStyleData = {};
+  const horizontal = cell.dataset.hcdAlign;
+  if (horizontal && HORIZONTAL[horizontal]) style.ht = HORIZONTAL[horizontal];
+  const vertical = cell.dataset.hcdValign === 'center' ? 'middle' : cell.dataset.hcdValign;
+  if (vertical && VERTICAL[vertical]) style.vt = VERTICAL[vertical];
+  const wrap = flagNumber(cell.dataset.hcdWrap);
+  if (wrap === true) style.tb = WrapStrategy.WRAP;
+  if (wrap === false) style.tb = WrapStrategy.CLIP;
+  if (cell.dataset.hcdBorder === 'thin') {
+    const side = { s: BorderStyleTypes.THIN, cl: { rgb: '#000000' } };
+    style.bd = { l: side, r: side, t: side, b: side };
+  } else if (cell.dataset.hcdBorder === 'none') {
+    style.bd = {};
+  }
+  return style;
+}
+
+function alignName(value: HorizontalAlign | undefined): NodeLink['horizontal'] {
+  if (value === HorizontalAlign.LEFT) return 'left';
+  if (value === HorizontalAlign.CENTER) return 'center';
+  if (value === HorizontalAlign.RIGHT) return 'right';
+  return undefined;
+}
+
+function valignName(value: VerticalAlign | undefined): NodeLink['vertical'] {
+  if (value === VerticalAlign.TOP) return 'top';
+  if (value === VerticalAlign.MIDDLE) return 'center';
+  if (value === VerticalAlign.BOTTOM) return 'bottom';
+  return undefined;
+}
+
+function borderName(value: string | undefined): NodeLink['border'] {
+  if (value === 'thin' || value === 'none') return value;
+  return undefined;
+}
+
 function toUniverStyle(declarations: Map<string, string>): IStyleData {
   const style: IStyleData = {};
   const fontFamily = declarations.get('font-family');
@@ -241,7 +282,10 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
     const styleKey = styleIndex ? `hcd-xs-${styleIndex}` : undefined;
     const pattern = cell.dataset.hcdNumFmtPattern;
     const catalogStyle = styleKey ? { ...(styles[styleKey] ?? {}) } : {};
-    const explicit = cell.dataset.hcdFormatEdited === 'true' ? explicitCellStyle(cell) : {};
+    const explicit = {
+      ...(cell.dataset.hcdFormatEdited === 'true' ? explicitCellStyle(cell) : {}),
+      ...(cell.dataset.hcdLayoutEdited === 'true' ? explicitLayoutStyle(cell) : {}),
+    };
     const resolved = { ...catalogStyle, ...explicit };
     const style = Object.keys(explicit).length
       ? { ...resolved, ...(pattern ? { n: { pattern } } : {}) }
@@ -262,6 +306,10 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       fontSizePt: resolved.fs ?? undefined,
       color: resolved.cl?.rgb ?? undefined,
       fill: resolved.bg?.rgb ?? undefined,
+      horizontal: alignName(resolved.ht ?? undefined),
+      vertical: valignName(resolved.vt ?? undefined),
+      wrap: resolved.tb === WrapStrategy.WRAP,
+      border: borderName(cell.dataset.hcdBorder),
       sheetId: chunk.descriptor.grid.sheetId,
       row: position.row,
       column: position.column,

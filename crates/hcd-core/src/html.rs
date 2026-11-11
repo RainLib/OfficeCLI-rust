@@ -357,6 +357,7 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "unicode-bidi"
                 | "display"
                 | "text-align"
+                | "white-space"
                 | "margin-left"
                 | "margin-right"
                 | "margin-top"

@@ -6,8 +6,8 @@ use crate::common::{
 use hcd_core::{
     hash_bytes, node_bloom_might_contain, stable_node_id, Bundle, BundleWriter, ChunkSourceMap,
     FidelityLevel, FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError,
-    HcdManifest, ImportEvent, NodeMapEntry, SourceAnchor, XlsxCellFormatPatch, HCD_SCHEMA_VERSION,
-    MAX_CHUNK_BYTES,
+    HcdManifest, ImportEvent, NodeMapEntry, SourceAnchor, XlsxCellFormatPatch, XlsxCellLayoutPatch,
+    HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -5079,6 +5079,14 @@ pub(crate) fn export_xlsx(
                     source_part: Some("xl/styles.xml".to_string()),
                 });
             }
+            if edited_cells.iter().any(|cell| direct_layout(&cell.layout)) {
+                warnings.push(FidelityWarning {
+                    code: "XLSX_DIRECT_CELL_LAYOUT".to_string(),
+                    message: "cell layout clones the source style and writes horizontal alignment, vertical alignment, wrap, and a thin or cleared border; number formats stay on the source style".to_string(),
+                    node_id: None,
+                    source_part: Some("xl/styles.xml".to_string()),
+                });
+            }
             if chart_caches_may_be_stale {
                 warnings.push(FidelityWarning {
                     code: "XLSX_CHART_CACHE_RECALC_REQUIRED".to_string(),
@@ -5480,6 +5488,7 @@ struct EditedXlsxCell {
     reference: String,
     base_style: usize,
     format: XlsxCellFormatPatch,
+    layout: XlsxCellLayoutPatch,
 }
 
 fn collect_edited_xlsx_cells(
@@ -5515,7 +5524,8 @@ fn collect_edited_xlsx_cells(
                 };
                 let tag = &html[cell_start..cell_start + relative_end + 1];
                 let format_edited = html_attribute(tag, "data-hcd-format-edited") == Some("true");
-                if !format_edited {
+                let layout_edited = html_attribute(tag, "data-hcd-layout-edited") == Some("true");
+                if !format_edited && !layout_edited {
                     continue;
                 }
                 let reference = entry
@@ -5551,6 +5561,11 @@ fn collect_edited_xlsx_cells(
                         xlsx_patch_from_tag(tag)?
                     } else {
                         XlsxCellFormatPatch::default()
+                    },
+                    layout: if layout_edited {
+                        xlsx_layout_from_tag(tag)?
+                    } else {
+                        XlsxCellLayoutPatch::default()
                     },
                 });
             }
@@ -5591,6 +5606,34 @@ fn xlsx_patch_from_tag(tag: &str) -> Result<XlsxCellFormatPatch, HcdError> {
     })
 }
 
+fn xlsx_layout_from_tag(tag: &str) -> Result<XlsxCellLayoutPatch, HcdError> {
+    let choice = |name: &str, allowed: &[&str]| -> Result<Option<String>, HcdError> {
+        match html_attribute(tag, name) {
+            Some(value) if allowed.contains(&value) => Ok(Some(value.to_string())),
+            Some(value) => Err(HcdError::InvalidBundle(format!(
+                "XLSX {name} {value} is invalid"
+            ))),
+            None => Ok(None),
+        }
+    };
+    let wrap = match html_attribute(tag, "data-hcd-wrap") {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        Some(_) => {
+            return Err(HcdError::InvalidBundle(
+                "XLSX data-hcd-wrap is invalid".to_string(),
+            ))
+        }
+        None => None,
+    };
+    Ok(XlsxCellLayoutPatch {
+        horizontal: choice("data-hcd-align", &["left", "center", "right"])?,
+        vertical: choice("data-hcd-valign", &["top", "center", "bottom"])?,
+        wrap,
+        border: choice("data-hcd-border", &["none", "thin"])?,
+    })
+}
+
 fn direct_format(format: &XlsxCellFormatPatch) -> bool {
     format.bold.is_some()
         || format.italic.is_some()
@@ -5598,6 +5641,13 @@ fn direct_format(format: &XlsxCellFormatPatch) -> bool {
         || format.font_size_pt.is_some()
         || format.color.is_some()
         || format.fill.is_some()
+}
+
+fn direct_layout(layout: &XlsxCellLayoutPatch) -> bool {
+    layout.horizontal.is_some()
+        || layout.vertical.is_some()
+        || layout.wrap.is_some()
+        || layout.border.is_some()
 }
 
 type CellStyleIndexes = HashMap<String, BTreeMap<String, u32>>;
@@ -5626,6 +5676,12 @@ fn assign_xlsx_cell_styles(
         .collect::<HashMap<_, _>>();
     let mut xf_index = library
         .xfs
+        .iter()
+        .enumerate()
+        .map(|(index, xml)| (xml.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut border_index = library
+        .borders
         .iter()
         .enumerate()
         .map(|(index, xml)| (xml.clone(), index))
@@ -5668,7 +5724,36 @@ fn assign_xlsx_cell_styles(
         } else {
             fill_id
         };
-        let xf_xml = rewrite_xf_xml(&base, new_font_id, new_fill_id, edit.format.fill.is_some())?;
+        let border_id = if let Some(kind) = edit.layout.border.as_deref() {
+            if !library.has_borders {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX styles.xml has no borders section".to_string(),
+                ));
+            }
+            let prefix = element_prefix_from_xml(
+                library
+                    .borders
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("<border>"),
+            );
+            let border_xml = xlsx_border_xml(&prefix, kind)?;
+            Some(intern_style(
+                &mut library.borders,
+                &mut border_index,
+                border_xml,
+            ))
+        } else {
+            None
+        };
+        let xf_xml = rewrite_xf_xml(
+            &base,
+            new_font_id,
+            new_fill_id,
+            edit.format.fill.is_some(),
+            border_id,
+            &edit.layout,
+        )?;
         let style_id = intern_style(&mut library.xfs, &mut xf_index, xf_xml);
         let slot = assigned.entry(edit.part.clone()).or_default();
         if slot
@@ -5697,7 +5782,9 @@ fn intern_style(items: &mut Vec<String>, index: &mut HashMap<String, usize>, xml
 struct StyleLibrary {
     fonts: Vec<String>,
     fills: Vec<String>,
+    borders: Vec<String>,
     xfs: Vec<String>,
+    has_borders: bool,
 }
 
 fn capture_style_library(xml: &[u8]) -> Result<StyleLibrary, HcdError> {
@@ -5709,7 +5796,9 @@ fn capture_style_library(xml: &[u8]) -> Result<StyleLibrary, HcdError> {
     let mut library = StyleLibrary {
         fonts: Vec::new(),
         fills: Vec::new(),
+        borders: Vec::new(),
         xfs: Vec::new(),
+        has_borders: false,
     };
     loop {
         let event = reader
@@ -5719,10 +5808,15 @@ fn capture_style_library(xml: &[u8]) -> Result<StyleLibrary, HcdError> {
             Event::Start(ref start) => {
                 depth += 1;
                 let name = local_name(start.name().as_ref()).to_string();
-                if depth == 2 && matches!(name.as_str(), "fonts" | "fills" | "cellXfs") {
+                if depth == 2 && matches!(name.as_str(), "fonts" | "fills" | "borders" | "cellXfs")
+                {
+                    if name == "borders" {
+                        library.has_borders = true;
+                    }
                     section = Some(match name.as_str() {
                         "fonts" => "fonts",
                         "fills" => "fills",
+                        "borders" => "borders",
                         _ => "cellXfs",
                     });
                 } else if depth == 3 && section == Some("fonts") && name == "font" {
@@ -5735,6 +5829,11 @@ fn capture_style_library(xml: &[u8]) -> Result<StyleLibrary, HcdError> {
                         .fills
                         .push(capture_element_xml(&mut reader, start, false)?);
                     depth -= 1;
+                } else if depth == 3 && section == Some("borders") && name == "border" {
+                    library
+                        .borders
+                        .push(capture_element_xml(&mut reader, start, false)?);
+                    depth -= 1;
                 } else if depth == 3 && section == Some("cellXfs") && name == "xf" {
                     library
                         .xfs
@@ -5744,7 +5843,14 @@ fn capture_style_library(xml: &[u8]) -> Result<StyleLibrary, HcdError> {
             }
             Event::Empty(ref start) => {
                 let name = local_name(start.name().as_ref()).to_string();
-                if depth == 2 && matches!(name.as_str(), "fonts" | "fills" | "cellXfs") {
+                if depth == 1 && name == "borders" {
+                    library.has_borders = true;
+                }
+                if depth == 2 && matches!(name.as_str(), "fonts" | "fills" | "borders" | "cellXfs")
+                {
+                    if name == "borders" {
+                        library.has_borders = true;
+                    }
                     continue;
                 }
                 if depth == 2 && section == Some("fonts") && name == "font" {
@@ -5754,6 +5860,10 @@ fn capture_style_library(xml: &[u8]) -> Result<StyleLibrary, HcdError> {
                 } else if depth == 2 && section == Some("fills") && name == "fill" {
                     library
                         .fills
+                        .push(capture_element_xml(&mut reader, start, true)?);
+                } else if depth == 2 && section == Some("borders") && name == "border" {
+                    library
+                        .borders
                         .push(capture_element_xml(&mut reader, start, true)?);
                 } else if depth == 2 && section == Some("cellXfs") && name == "xf" {
                     library
@@ -5886,6 +5996,7 @@ fn style_section_items<'a>(name: &str, library: &'a StyleLibrary) -> Option<&'a 
     match name {
         "fonts" => Some(&library.fonts),
         "fills" => Some(&library.fills),
+        "borders" if library.has_borders => Some(&library.borders),
         "cellXfs" => Some(&library.xfs),
         _ => None,
     }
@@ -6082,7 +6193,14 @@ fn rewrite_xf_xml(
     font_id: usize,
     fill_id: usize,
     fill_changed: bool,
+    border_id: Option<usize>,
+    layout: &XlsxCellLayoutPatch,
 ) -> Result<String, HcdError> {
+    let alignment_changed =
+        layout.horizontal.is_some() || layout.vertical.is_some() || layout.wrap.is_some();
+    if alignment_changed {
+        return rewrite_xf_with_alignment(xml, font_id, fill_id, fill_changed, border_id, layout);
+    }
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut buffer = Vec::new();
@@ -6098,6 +6216,8 @@ fn rewrite_xf_xml(
                     font_id,
                     fill_id,
                     fill_changed,
+                    border_id,
+                    false,
                 )?))?;
                 rewritten_root = true;
             }
@@ -6107,6 +6227,8 @@ fn rewrite_xf_xml(
                     font_id,
                     fill_id,
                     fill_changed,
+                    border_id,
+                    false,
                 )?))?;
                 break;
             }
@@ -6119,20 +6241,81 @@ fn rewrite_xf_xml(
         .map_err(|error| HcdError::InvalidBundle(format!("XLSX cell style UTF-8: {error}")))
 }
 
+fn rewrite_xf_with_alignment(
+    xml: &str,
+    font_id: usize,
+    fill_id: usize,
+    fill_changed: bool,
+    border_id: Option<usize>,
+    layout: &XlsxCellLayoutPatch,
+) -> Result<String, HcdError> {
+    let (qualified, children) = element_children(xml)?;
+    let existing_alignment = children
+        .iter()
+        .find(|(local, _)| local == "alignment")
+        .map(|(_, child)| child.clone());
+    let kept = children
+        .into_iter()
+        .filter(|(local, _)| local != "alignment")
+        .map(|(_, child)| child)
+        .collect::<Vec<_>>();
+    let alignment = alignment_xml(&qualified, existing_alignment.as_deref(), layout);
+    let mut reader = Reader::from_str(xml);
+    let mut buffer = Vec::new();
+    let start = loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX cell style XML: {error}")))?;
+        match event {
+            Event::Start(start) | Event::Empty(start) => break start.into_owned(),
+            Event::Eof => {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX cell style is empty".to_string(),
+                ))
+            }
+            _ => {}
+        }
+        buffer.clear();
+    };
+    let root = rewrite_xf_attributes(&start, font_id, fill_id, fill_changed, border_id, true)?;
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let end_name = String::from_utf8_lossy(root.name().as_ref()).into_owned();
+    writer.write_event(Event::Start(root))?;
+    for child in &kept {
+        writer
+            .get_mut()
+            .write_all(child.as_bytes())
+            .map_err(|error| HcdError::InvalidBundle(format!("XLSX cell style write: {error}")))?;
+    }
+    writer
+        .get_mut()
+        .write_all(alignment.as_bytes())
+        .map_err(|error| HcdError::InvalidBundle(format!("XLSX cell style write: {error}")))?;
+    writer.write_event(Event::End(BytesEnd::new(end_name.as_str())))?;
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|error| HcdError::InvalidBundle(format!("XLSX cell style UTF-8: {error}")))
+}
+
 fn rewrite_xf_attributes(
     start: &BytesStart<'_>,
     font_id: usize,
     fill_id: usize,
     fill_changed: bool,
+    border_id: Option<usize>,
+    alignment_changed: bool,
 ) -> Result<BytesStart<'static>, HcdError> {
     let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
     let mut element = BytesStart::new(name);
     let font = font_id.to_string();
     let fill = fill_id.to_string();
+    let border = border_id.map(|id| id.to_string());
     let mut saw_font = false;
     let mut saw_fill = false;
+    let mut saw_border = false;
     let mut saw_apply_font = false;
     let mut saw_apply_fill = false;
+    let mut saw_apply_border = false;
+    let mut saw_apply_alignment = false;
     for attribute in start.attributes().with_checks(false) {
         let attribute = attribute.map_err(|error| {
             HcdError::InvalidBundle(format!("XLSX cell style attribute: {error}"))
@@ -6148,6 +6331,15 @@ fn rewrite_xf_attributes(
                 element.push_attribute((key.as_str(), fill.as_str()));
                 saw_fill = true;
             }
+            "borderId" => {
+                if let Some(id) = border.as_deref() {
+                    element.push_attribute((key.as_str(), id));
+                } else {
+                    let value = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+                    element.push_attribute((key.as_str(), value.as_str()));
+                }
+                saw_border = true;
+            }
             "applyFont" => {
                 element.push_attribute((key.as_str(), "1"));
                 saw_apply_font = true;
@@ -6155,6 +6347,14 @@ fn rewrite_xf_attributes(
             "applyFill" if fill_changed => {
                 element.push_attribute((key.as_str(), "1"));
                 saw_apply_fill = true;
+            }
+            "applyBorder" if border.is_some() => {
+                element.push_attribute((key.as_str(), "1"));
+                saw_apply_border = true;
+            }
+            "applyAlignment" if alignment_changed => {
+                element.push_attribute((key.as_str(), "1"));
+                saw_apply_alignment = true;
             }
             _ => {
                 let value = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
@@ -6168,13 +6368,72 @@ fn rewrite_xf_attributes(
     if !saw_fill {
         element.push_attribute(("fillId", fill.as_str()));
     }
+    if let Some(id) = border.as_deref() {
+        if !saw_border {
+            element.push_attribute(("borderId", id));
+        }
+    }
     if !saw_apply_font {
         element.push_attribute(("applyFont", "1"));
     }
     if fill_changed && !saw_apply_fill {
         element.push_attribute(("applyFill", "1"));
     }
+    if border.is_some() && !saw_apply_border {
+        element.push_attribute(("applyBorder", "1"));
+    }
+    if alignment_changed && !saw_apply_alignment {
+        element.push_attribute(("applyAlignment", "1"));
+    }
     Ok(element)
+}
+
+fn alignment_xml(xf_name: &str, existing: Option<&str>, layout: &XlsxCellLayoutPatch) -> String {
+    let prefix = match xf_name.rsplit_once(':') {
+        Some((prefix, _)) => format!("{prefix}:"),
+        None => String::new(),
+    };
+    let mut horizontal = existing.and_then(|xml| first_attribute(xml, "horizontal"));
+    let mut vertical = existing.and_then(|xml| first_attribute(xml, "vertical"));
+    let mut wrap = existing
+        .and_then(|xml| first_attribute(xml, "wrapText"))
+        .is_some_and(|value| value != "0" && value != "false");
+    if let Some(value) = &layout.horizontal {
+        horizontal = Some(value.clone());
+    }
+    if let Some(value) = &layout.vertical {
+        vertical = Some(value.clone());
+    }
+    if let Some(value) = layout.wrap {
+        wrap = value;
+    }
+    let mut attrs = Vec::new();
+    if let Some(value) = horizontal {
+        attrs.push(format!("horizontal=\"{value}\""));
+    }
+    if let Some(value) = vertical {
+        attrs.push(format!("vertical=\"{value}\""));
+    }
+    if wrap || layout.wrap.is_some() {
+        attrs.push(format!("wrapText=\"{}\"", if wrap { "1" } else { "0" }));
+    }
+    if attrs.is_empty() {
+        format!("<{prefix}alignment/>")
+    } else {
+        format!("<{prefix}alignment {}/>", attrs.join(" "))
+    }
+}
+
+fn xlsx_border_xml(prefix: &str, kind: &str) -> Result<String, HcdError> {
+    match kind {
+        "none" => Ok(format!("<{prefix}border/>")),
+        "thin" => Ok(format!(
+            "<{prefix}border><{prefix}left style=\"thin\"><{prefix}color rgb=\"FF000000\"/></{prefix}left><{prefix}right style=\"thin\"><{prefix}color rgb=\"FF000000\"/></{prefix}right><{prefix}top style=\"thin\"><{prefix}color rgb=\"FF000000\"/></{prefix}top><{prefix}bottom style=\"thin\"><{prefix}color rgb=\"FF000000\"/></{prefix}bottom></{prefix}border>"
+        )),
+        other => Err(HcdError::InvalidBundle(format!(
+            "XLSX border {other} is invalid"
+        ))),
+    }
 }
 
 fn first_attribute(xml: &str, name: &str) -> Option<String> {
@@ -8188,8 +8447,8 @@ mod tests {
     use super::*;
     use hcd_core::{
         extract_text_page, validate_bundle, NodePrecondition, PatchBatch, PatchOperation,
-        XlsxCellFormatPatch, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_31,
-        HCD_PATCH_SCHEMA_VERSION_6,
+        XlsxCellFormatPatch, XlsxCellLayoutPatch, HCD_PATCH_SCHEMA_VERSION,
+        HCD_PATCH_SCHEMA_VERSION_31, HCD_PATCH_SCHEMA_VERSION_32, HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -12916,6 +13175,162 @@ mod tests {
         assert!(styles.contains("rgb=\"FF00CC66\""));
         assert!(styles.contains(
             "<font><name val=\"Arial\"/><i/><u/><sz val=\"18\"/><color rgb=\"FF00AA00\"/></font>"
+        ));
+        let shared = read_zip_entry(&exported, "xl/sharedStrings.xml");
+        assert!(shared.contains("Value"));
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "xl/styles.xml"),
+            read_zip_entry(&source, "xl/styles.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&historical, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+        );
+    }
+
+    #[test]
+    fn aligns_and_borders_native_cell_without_dropping_font_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("styled.xlsx");
+        create_shared_string_fixture(&source);
+        let bundle_path = temp.path().join("styled.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let historical = temp.path().join("historical.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("cell-layout"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = bundle
+            .read_index_page(&manifest, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.kind == GridChunkKind::Cells)
+            })
+            .unwrap();
+        let entry = bundle
+            .read_map(&descriptor)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        let node_hash = entry.node_hash.clone();
+        let format = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_31.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "format-a1-color".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxCellFormat {
+                node_id: entry.node_id.clone(),
+                format: XlsxCellFormatPatch {
+                    bold: None,
+                    italic: None,
+                    underline: None,
+                    font_size_pt: None,
+                    color: Some("#00AA00".into()),
+                    fill: None,
+                },
+                precondition: NodePrecondition {
+                    node_hash: node_hash.clone(),
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &format, 0).unwrap();
+        let layout = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_32.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "layout-a1".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxCellLayout {
+                node_id: entry.node_id,
+                layout: XlsxCellLayoutPatch {
+                    horizontal: Some("left".into()),
+                    vertical: Some("top".into()),
+                    wrap: Some(false),
+                    border: Some("thin".into()),
+                },
+                precondition: NodePrecondition { node_hash },
+            }],
+        };
+        let applied = hcd_core::apply_patch(&bundle, &layout, 1).unwrap();
+        assert!(applied
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_DIRECT_CELL_LAYOUT"));
+        let head = bundle.manifest().unwrap();
+        let descriptor = bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.kind == GridChunkKind::Cells)
+            })
+            .unwrap();
+        let html = bundle.read_chunk(&descriptor).unwrap();
+        assert!(html.contains("data-hcd-format-edited=\"true\""));
+        assert!(html.contains("data-hcd-color=\"00AA00\""));
+        assert!(html.contains("data-hcd-layout-edited=\"true\""));
+        assert!(html.contains("data-hcd-align=\"left\""));
+        assert!(html.contains("data-hcd-valign=\"top\""));
+        assert!(html.contains("data-hcd-wrap=\"0\""));
+        assert!(html.contains("data-hcd-border=\"thin\""));
+        assert!(html.contains("text-align:left"));
+        assert!(html.contains("vertical-align:top"));
+        assert!(html.contains("white-space:nowrap"));
+        assert!(html.contains("border-left:1px solid #000000"));
+        let unchanged = PatchBatch {
+            patch_id: "layout-a1-again".into(),
+            base_revision: 2,
+            ..layout
+        };
+        assert!(hcd_core::apply_patch(&bundle, &unchanged, 2).is_err());
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_DIRECT_CELL_FORMAT"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_DIRECT_CELL_LAYOUT"));
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A1\" t=\"s\" s=\"6\"><v>0</v></c>"));
+        let styles = read_zip_entry(&exported, "xl/styles.xml");
+        assert!(styles.contains("<cellXfs count=\"7\">"));
+        assert!(styles.contains("<borders count=\"3\">"));
+        assert!(styles.contains("fontId=\"2\""));
+        assert!(styles.contains("borderId=\"2\""));
+        assert!(styles.contains("rgb=\"FF00AA00\""));
+        assert!(styles.contains("<alignment horizontal=\"left\" vertical=\"top\" wrapText=\"0\"/>"));
+        assert!(styles.contains(
+            "<border><left style=\"thin\"><color rgb=\"FF000000\"/></left><right style=\"thin\"><color rgb=\"FF000000\"/></right><top style=\"thin\"><color rgb=\"FF000000\"/></top><bottom style=\"thin\"><color rgb=\"FF000000\"/></bottom></border>"
         ));
         let shared = read_zip_entry(&exported, "xl/sharedStrings.xml");
         assert!(shared.contains("Value"));
