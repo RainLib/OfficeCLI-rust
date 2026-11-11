@@ -46,6 +46,12 @@ struct StyleChange {
     node_hash: String,
 }
 
+#[derive(Clone)]
+struct FontChange {
+    font: crate::FontPatch,
+    node_hash: String,
+}
+
 #[derive(Clone, Default)]
 struct ImageChange {
     asset_hash: Option<String>,
@@ -266,6 +272,7 @@ pub fn apply_patch(
 
     let splices = collect_splices(patch)?;
     let styles = collect_styles(patch)?;
+    let fonts = collect_fonts(patch)?;
     let images = collect_image_changes(patch)?;
     let pdf_insertions = collect_pdf_insertions(patch);
     let pdf_geometry = collect_pdf_geometry(patch);
@@ -358,6 +365,7 @@ pub fn apply_patch(
         .keys()
         .cloned()
         .chain(styles.keys().cloned())
+        .chain(fonts.keys().cloned())
         .chain(images.keys().cloned())
         .chain(xlsx_merges.keys().cloned())
         .chain(xlsx_unmerges.keys().cloned())
@@ -374,6 +382,7 @@ pub fn apply_patch(
     let new_index_root = bundle.root().join(&new_index_prefix);
     let content_changed = !splices.is_empty()
         || !styles.is_empty()
+        || !fonts.is_empty()
         || !images.is_empty()
         || !pdf_insertions.is_empty()
         || !pdf_geometry.is_empty()
@@ -611,7 +620,9 @@ pub fn apply_patch(
                 }
                 found_nodes.insert(entry.node_id.clone(), current_text.chars().count());
                 if entry.source.node_kind == "image"
-                    && (styles.contains_key(&entry.node_id) || splices.contains_key(&entry.node_id))
+                    && (styles.contains_key(&entry.node_id)
+                        || fonts.contains_key(&entry.node_id)
+                        || splices.contains_key(&entry.node_id))
                 {
                     return Err(HcdError::Unsupported(format!(
                         "image node {} accepts image.replace/image.geometry, not text or node.style operations",
@@ -673,6 +684,21 @@ pub fn apply_patch(
                 }
                 let style_change = styles.get(&entry.node_id);
                 if let Some(change) = style_change {
+                    if !entry.source.editable {
+                        return Err(HcdError::Unsupported(format!(
+                            "node {} is read-only",
+                            entry.node_id
+                        )));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                }
+                let font_change = fonts.get(&entry.node_id);
+                if let Some(change) = font_change {
                     if !entry.source.editable {
                         return Err(HcdError::Unsupported(format!(
                             "node {} is read-only",
@@ -789,6 +815,12 @@ pub fn apply_patch(
                 }
                 if let Some(change) = style_change {
                     apply_node_style(&mut html, &entry.node_id, &change.style)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = font_change {
+                    apply_node_font(&mut html, &entry.node_id, &change.font)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1620,6 +1652,12 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             })
+            .chain(fonts.keys().map(|node_id| FidelityWarning {
+                code: "HCD_FONT_PATCH_SEMANTIC_EXPORT".to_string(),
+                message: "text.font is canonical in HCD HTML and applied by the pure-Rust semantic export and preview; source-backed Office/PDF export rejects revisions carrying it instead of silently dropping the face".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .chain(images.keys().map(|node_id| FidelityWarning {
                 code: "HCD_IMAGE_PATCH_SEMANTIC_EXPORT".to_string(),
                 message: "image changes are canonical in HCD and pure-Rust semantic exports; source-backed Office/PDF export rejects them before writing until format-specific media rewrites are implemented".to_string(),
@@ -2054,6 +2092,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2287,6 +2326,20 @@ fn validate_patch_identity(
                 inserted = inserted.checked_add(insert_text.len()).ok_or_else(|| {
                     HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
                 })?;
+            }
+            PatchOperation::TextFont {
+                node_id,
+                font,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30 {
+                    return Err(HcdError::InvalidPatch(
+                        "text.font requires schemaVersion hcd-patch/30".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                validate_font_patch(font)?;
             }
             PatchOperation::PdfTextInsert {
                 page,
@@ -6670,6 +6723,121 @@ fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, H
     Ok(styles)
 }
 
+fn collect_fonts(patch: &PatchBatch) -> Result<BTreeMap<String, FontChange>, HcdError> {
+    let mut fonts = BTreeMap::new();
+    for operation in &patch.operations {
+        if let PatchOperation::TextFont {
+            node_id,
+            font,
+            precondition,
+        } = operation
+        {
+            if fonts
+                .insert(
+                    node_id.clone(),
+                    FontChange {
+                        font: font.clone(),
+                        node_hash: precondition.node_hash.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(HcdError::InvalidPatch(format!(
+                    "patch contains more than one text.font for {node_id}"
+                )));
+            }
+        }
+    }
+    Ok(fonts)
+}
+
+/// A font family token written into an inline style or a `data-hcd-font*`
+/// attribute. It must be non-empty, bounded, and free of the characters that
+/// would break the surrounding HTML attribute or CSS declaration (quotes,
+/// semicolons, colons, angle brackets, ampersands, and control characters), so a
+/// malicious family name cannot inject markup or extra CSS.
+fn safe_font_family(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+    if trimmed.contains(['<', '>', '"', '\'', ';', ':', '&'])
+        || trimmed.chars().any(|character| character.is_control())
+    {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn validate_font_patch(font: &crate::FontPatch) -> Result<(), HcdError> {
+    let mut provided = 0;
+    for (slot, value) in [
+        ("latin", font.latin.as_deref()),
+        ("eastAsia", font.east_asia.as_deref()),
+        ("bidi", font.bidi.as_deref()),
+    ] {
+        let Some(value) = value else { continue };
+        provided += 1;
+        if safe_font_family(value).is_none() {
+            return Err(HcdError::InvalidPatch(format!(
+                "text.font {slot} family is empty, too long, or contains a forbidden character"
+            )));
+        }
+    }
+    if provided == 0 {
+        return Err(HcdError::InvalidPatch(
+            "text.font must set at least one of latin, eastAsia, or bidi".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_node_font(
+    html: &mut String,
+    node_id: &str,
+    font: &crate::FontPatch,
+) -> Result<(), HcdError> {
+    let canonical_marker = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
+    // latin (falling back to eastAsia then bidi) is the primary face for the
+    // node's inline style; every provided slot is also recorded in its
+    // data-hcd-font* attribute so source and semantic round-trips can recover
+    // script-specific faces.
+    let primary = [
+        font.latin.as_deref(),
+        font.east_asia.as_deref(),
+        font.bidi.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(safe_font_family);
+    let Some(primary) = primary else {
+        return Err(HcdError::InvalidPatch(
+            "text.font has no usable family".to_string(),
+        ));
+    };
+
+    let mut css_properties = BTreeMap::new();
+    css_properties.insert("font-family".to_string(), format!("'{primary}'"));
+    // mark_patched is false so a font change is distinguishable from a
+    // node.style presentation change (which sets data-hcd-style-patched).
+    update_start_tag_style(html, &canonical_marker, &css_properties, false)?;
+
+    // set_element_attribute escapes internally and inserts the attribute when it
+    // is absent, so re-applying the same font is idempotent.
+    set_element_attribute(html, node_id, "data-hcd-font", primary)?;
+    if let Some(latin) = font.latin.as_deref().and_then(safe_font_family) {
+        set_element_attribute(html, node_id, "data-hcd-font-latin", latin)?;
+    }
+    if let Some(east_asia) = font.east_asia.as_deref().and_then(safe_font_family) {
+        set_element_attribute(html, node_id, "data-hcd-font-east-asia", east_asia)?;
+    }
+    if let Some(bidi) = font.bidi.as_deref().and_then(safe_font_family) {
+        set_element_attribute(html, node_id, "data-hcd-font-bidi", bidi)?;
+    }
+    set_element_attribute(html, node_id, "data-hcd-font-patched", "true")?;
+    Ok(())
+}
+
 fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageChange>, HcdError> {
     let mut images: BTreeMap<String, ImageChange> = BTreeMap::new();
     for operation in &patch.operations {
@@ -7185,6 +7353,7 @@ fn apply_annotations(
                     .retain(|annotation| annotation.annotation_id != *annotation_id);
             }
             PatchOperation::TextSplice { .. }
+            | PatchOperation::TextFont { .. }
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::PptxTextInsert { .. }
             | PatchOperation::PptxShapeGeometry { .. }
@@ -7537,6 +7706,177 @@ mod tests {
             border: None,
         };
         assert!(validate_node_style(&unsafe_color).is_err());
+    }
+
+    fn single_node_bundle(temp: &tempfile::TempDir) -> std::path::PathBuf {
+        let bundle_path = temp.path().join("bundle");
+        let mut writer = crate::BundleWriter::create(&bundle_path).unwrap();
+        writer.write_styles("").unwrap();
+        let node_id = "n_00000000000000000000000000000000".to_string();
+        let chunk_id = "c_00000000000000000000000000000000".to_string();
+        let text = "hello world".to_string();
+        let node_hash = hash_bytes(text.as_bytes());
+        let html = format!(
+            "<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{text}</span></p>"
+        );
+        writer
+            .write_chunk(
+                chunk_id.clone(),
+                "body".to_string(),
+                html,
+                crate::ChunkSourceMap {
+                    schema_version: HCD_SCHEMA_VERSION.to_string(),
+                    chunk_id,
+                    entries: vec![crate::NodeMapEntry {
+                        node_id,
+                        node_hash,
+                        source: crate::SourceAnchor {
+                            source_cell_ref: None,
+                            created_in_hcd: false,
+                            part: "text/document".to_string(),
+                            text_ordinal: 1,
+                            paragraph_id: None,
+                            text_id: Some("bytes:0:11".to_string()),
+                            node_kind: "line".to_string(),
+                            editable: true,
+                        },
+                    }],
+                },
+                1,
+                false,
+            )
+            .unwrap();
+        writer
+            .finish(crate::HcdManifest {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                storage_codec: crate::StorageCodec::None,
+                document_id: "font-doc".to_string(),
+                profile: "semantic-flow".to_string(),
+                revision: 0,
+                source: crate::SourceDescriptor {
+                    format: "docx".to_string(),
+                    sha256: "0".repeat(64),
+                    size_bytes: 10,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                theme_revision_id: None,
+                capabilities: crate::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        bundle_path
+    }
+
+    #[test]
+    fn text_font_applies_inline_style_and_data_attributes_and_bumps_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let before = bundle.manifest().unwrap();
+        let node = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        let result = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-1".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFont {
+                    node_id: node.node.node_id.clone(),
+                    font: crate::FontPatch {
+                        latin: Some("Demo Serif".to_string()),
+                        east_asia: Some("Demo Sans".to_string()),
+                        bidi: None,
+                    },
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        let manifest = bundle.manifest().unwrap();
+        assert_ne!(manifest.root_hash, before.root_hash);
+
+        // the pinned HTML carries the inline face, the round-trip attributes, and
+        // the font-patched marker, but not the node.style presentation marker.
+        let descriptor = bundle.read_index_page(&manifest, 0).unwrap().chunks[0].clone();
+        let html = bundle.read_chunk(&descriptor).unwrap();
+        assert!(html.contains("font-family:'Demo Serif'"), "{html}");
+        assert!(html.contains("data-hcd-font=\"Demo Serif\""), "{html}");
+        assert!(
+            html.contains("data-hcd-font-east-asia=\"Demo Sans\""),
+            "{html}"
+        );
+        assert!(html.contains("data-hcd-font-patched=\"true\""), "{html}");
+        assert!(!html.contains("data-hcd-style-patched"), "{html}");
+
+        // the extracted text and its hash are untouched, so the precondition hash
+        // still matches the node's text.
+        let after = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        assert_eq!(after.node.text, "hello world");
+        assert_eq!(after.node.node_hash, hash_bytes(b"hello world"));
+    }
+
+    #[test]
+    fn text_font_requires_v30_and_rejects_empty_or_unsafe_families() {
+        // rejected on a non-v30 schema version
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        let wrong_version = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-bad".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFont {
+                    node_id: node.node.node_id.clone(),
+                    font: crate::FontPatch {
+                        latin: Some("Demo Serif".to_string()),
+                        east_asia: None,
+                        bidi: None,
+                    },
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        );
+        assert!(wrong_version.is_err());
+
+        // no slot provided
+        assert!(validate_font_patch(&crate::FontPatch {
+            latin: None,
+            east_asia: None,
+            bidi: None,
+        })
+        .is_err());
+        // injection-laden family
+        assert!(validate_font_patch(&crate::FontPatch {
+            latin: Some("X';color:red;url(evil)".to_string()),
+            east_asia: None,
+            bidi: None,
+        })
+        .is_err());
     }
 
     #[test]

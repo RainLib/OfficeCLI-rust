@@ -49,6 +49,7 @@ pub fn export_docx(
     let revision_manifest = manifest_at_revision(&bundle, &head, revision)?;
     let (dirty_parts, dirty_node_ids) = dirty_state_through(&bundle, revision)?;
     reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
+    reject_font_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
     let text_by_part =
         collect_text_by_part(&bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
 
@@ -119,6 +120,37 @@ fn reject_image_source_export(
                     "revision changes image node {}; source-backed DOCX image rewrite is not implemented and export was stopped before writing output; omit --source to use the pure-Rust semantic rebuild",
                     entry.node_id
                 )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_font_source_export(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_node_ids: &HashSet<String>,
+) -> Result<(), HcdError> {
+    if dirty_node_ids.is_empty() {
+        return Ok(());
+    }
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in page.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            if !source_map
+                .entries
+                .iter()
+                .any(|entry| dirty_node_ids.contains(&entry.node_id))
+            {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            if html.contains("data-hcd-font-patched=\"true\"") {
+                return Err(HcdError::Unsupported(
+                    "this revision contains text.font selection-font changes; source-backed DOCX rewrite does not update run fonts and was stopped before writing output; omit --source to use the pure-Rust semantic export, which applies the face"
+                        .to_string(),
+                ));
             }
         }
     }
@@ -453,6 +485,76 @@ mod tests {
         assert_eq!(replacements[part].len(), 1);
         assert_eq!(replacements[part][&2], "changed");
         assert!(!replacements[part].contains_key(&1));
+    }
+
+    #[test]
+    fn source_export_rejects_a_font_patched_dirty_node() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("bundle");
+        let mut writer = BundleWriter::create(&bundle_path).unwrap();
+        writer.write_styles("").unwrap();
+        let node_id = "n_00000000000000000000000000000001";
+        let node_hash = hash_bytes(b"hello");
+        let html = format!(
+            "<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">hello</span></p>"
+        );
+        let map = ChunkSourceMap {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            chunk_id: "c_00000000000000000000000000000001".to_string(),
+            entries: vec![NodeMapEntry {
+                node_id: node_id.to_string(),
+                node_hash: node_hash.clone(),
+                source: test_anchor("word/document.xml", 1),
+            }],
+        };
+        writer
+            .write_chunk(
+                map.chunk_id.clone(),
+                "body".to_string(),
+                html,
+                map,
+                1,
+                false,
+            )
+            .unwrap();
+        writer.finish(test_manifest()).unwrap();
+
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        hcd_core::apply_patch(
+            &bundle,
+            &hcd_core::PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+                document_id: "test-document".to_string(),
+                patch_id: "font-1".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![hcd_core::PatchOperation::TextFont {
+                    node_id: node_id.to_string(),
+                    font: hcd_core::FontPatch {
+                        latin: Some("Demo Serif".to_string()),
+                        east_asia: None,
+                        bidi: None,
+                    },
+                    precondition: hcd_core::NodePrecondition { node_hash },
+                }],
+            },
+            0,
+        )
+        .unwrap();
+
+        let manifest = bundle.manifest().unwrap();
+        let dirty = HashSet::from([node_id.to_string()]);
+        let error = reject_font_source_export(&bundle, &manifest, &dirty)
+            .expect_err("a font-patched dirty node must be rejected by source-backed export");
+        assert!(
+            error
+                .to_string()
+                .contains("text.font selection-font changes"),
+            "{error}"
+        );
+        // an empty dirty set never trips the guard
+        reject_font_source_export(&bundle, &manifest, &HashSet::new()).unwrap();
     }
 
     fn test_anchor(part: &str, ordinal: u64) -> SourceAnchor {

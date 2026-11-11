@@ -533,6 +533,12 @@ fn reject_presentation_style_source_export(
                         .to_string(),
                 ));
             }
+            if html.contains("data-hcd-font-patched=\"true\"") {
+                return Err(HcdError::Unsupported(
+                    "this revision contains text.font selection-font changes; source-backed export does not rewrite run fonts and was stopped before writing output; omit --source to use the pure-Rust semantic export, which applies the face"
+                        .to_string(),
+                ));
+            }
         }
     }
     Ok(())

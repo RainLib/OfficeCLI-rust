@@ -278,6 +278,19 @@ pub enum PatchOperation {
         insert_text: String,
         precondition: NodePrecondition,
     },
+    /// Assign a font family to the whole editable text node (paragraph/run block),
+    /// by script slot. This writes the canonical `data-hcd-font*` attributes and an
+    /// inline `font-family` style onto the node so HCD preview and pure-Rust semantic
+    /// export use the chosen face; it does not change the node's extracted text, so
+    /// the precondition node hash is the unchanged text hash. Source-backed
+    /// (`--source`) Office/PDF export rejects a revision that carries this change
+    /// rather than silently dropping the font, mirroring the `node.style` contract.
+    #[serde(rename = "text.font", rename_all = "camelCase")]
+    TextFont {
+        node_id: String,
+        font: FontPatch,
+        precondition: NodePrecondition,
+    },
     /// Add a positioned editable text box to a raster-backed PDF page.
     /// The stable node ID is assigned from the patch ID and operation index.
     #[serde(rename = "pdf.text.insert", rename_all = "camelCase")]
@@ -488,6 +501,7 @@ impl PatchOperation {
     pub fn node_id(&self) -> Option<&str> {
         match self {
             Self::TextSplice { node_id, .. }
+            | Self::TextFont { node_id, .. }
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
@@ -524,6 +538,7 @@ impl PatchOperation {
         matches!(
             self,
             Self::TextSplice { .. }
+                | Self::TextFont { .. }
                 | Self::PdfTextInsert { .. }
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
@@ -590,6 +605,21 @@ pub struct ImageGeometry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VisualPrecondition {
     pub visual_hash: String,
+}
+
+/// Font family slots requested by a `text.font` operation. At least one slot
+/// must be present. Values are validated to a plain, safe CSS font-family token
+/// (no quotes, semicolons, `<`, `>`, or control characters) before they reach the
+/// node's inline style. `latin` is the primary face written to `font-family`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FontPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asia: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bidi: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
