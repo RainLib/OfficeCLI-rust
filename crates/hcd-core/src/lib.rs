@@ -42,8 +42,8 @@ pub use structure::{
 pub use types::*;
 pub use validate::validate_bundle;
 pub use xlsx_formula::{
-    delete_formula_references, insert_formula_references, rename_formula_sheet_references,
-    FormulaDeletion, FormulaInsertion,
+    delete_formula_references, drop_formula_sheet_references, insert_formula_references,
+    rename_formula_sheet_references, FormulaDeletion, FormulaInsertion,
 };
 pub use xlsx_grid::{sheet_grid_id, sheet_window_chunk_id, XlsxSheetSection};
 

@@ -345,6 +345,128 @@ pub fn rename_formula_sheet_references(formula: &str, renames: &[(&str, &str)]) 
     current
 }
 
+/// Replace references to a deleted worksheet with the error Excel leaves behind.
+///
+/// Excel does not keep half of a broken reference: `Sheet2!A1`,
+/// `'My Sheet'!$A$1:$B$2`, `Sheet2!A:A` and a `Sheet1:Sheet3!A1` range with a
+/// deleted endpoint each collapse to one `#REF!`, the worksheet qualifier and
+/// the address it qualified going together. The scan is the one a rename
+/// already uses, so a string literal is copied verbatim, a quoted name matches
+/// as a whole name or a range endpoint, and a bare name matches only as the
+/// full run before `!`.
+pub fn drop_formula_sheet_references(formula: &str, deleted: &str) -> String {
+    if deleted.is_empty() {
+        return formula.to_string();
+    }
+    let bytes = formula.as_bytes();
+    let mut result = String::with_capacity(formula.len());
+    let mut cursor = 0usize;
+    while cursor < formula.len() {
+        if bytes[cursor] == b'"' {
+            let end = string_literal_end(formula, cursor);
+            result.push_str(&formula[cursor..end]);
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'\'' {
+            if let Some((name, end)) = quoted_reference(formula, cursor) {
+                if sheet_name_matches(&name, deleted) {
+                    result.push_str("#REF!");
+                    cursor = reference_run_end(formula, end);
+                    continue;
+                }
+                // Re-emit the literal quote run; the closing quote and the
+                // `!` are copied here because the reference is untouched.
+                result.push('\'');
+                result.push_str(&escape_quoted_name(&name));
+                result.push('\'');
+                result.push('!');
+                cursor = end;
+                continue;
+            }
+        }
+        let run_end = name_run_end(formula, cursor);
+        if run_end > cursor {
+            let token = &formula[cursor..run_end];
+            // `Sheet1:Sheet3!A1` names two worksheets, so deleting either
+            // endpoint breaks the whole range, not just the half that matched.
+            let range_end = if bytes.get(run_end) == Some(&b':') {
+                let start = run_end + 1;
+                let end = name_run_end(formula, start);
+                (end > start && bytes.get(end) == Some(&b'!')).then_some((start, end))
+            } else {
+                None
+            };
+            let (matched, address_start) = match range_end {
+                Some((start, end)) => (
+                    token.eq_ignore_ascii_case(deleted)
+                        || formula[start..end].eq_ignore_ascii_case(deleted),
+                    end + 1,
+                ),
+                None => (
+                    bytes.get(run_end) == Some(&b'!') && token.eq_ignore_ascii_case(deleted),
+                    run_end + 1,
+                ),
+            };
+            if matched {
+                result.push_str("#REF!");
+                cursor = reference_run_end(formula, address_start);
+                continue;
+            }
+            result.push_str(token);
+            cursor = run_end;
+            continue;
+        }
+        let character = formula[cursor..].chars().next().unwrap_or('\0');
+        if character == '\0' {
+            break;
+        }
+        result.push(character);
+        cursor += character.len_utf8();
+    }
+    result
+}
+
+/// End of the address behind a worksheet qualifier.
+///
+/// A broken reference takes the address with it, and the address is one run of
+/// address characters with at most one range colon: `A1`, `$A$1:$B$2`, the full
+/// column `A:A`, the full row `1:7`. Anything else ends the run, so an
+/// operator, a separator or the end of the formula is never swallowed.
+///
+/// `Sales!A1:Other!B2` is two qualifiers rather than one address, so a colon
+/// that leads to another `name!` ends the run and the next reference is scanned
+/// on its own. Both halves break when either worksheet goes away, and each
+/// becomes its own `#REF!`.
+fn reference_run_end(formula: &str, start: usize) -> usize {
+    let bytes = formula.as_bytes();
+    let mut cursor = start;
+    loop {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| *byte == b'$' || byte.is_ascii_alphanumeric())
+        {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b':') {
+            break;
+        }
+        let next = cursor + 1;
+        if !bytes
+            .get(next)
+            .is_some_and(|byte| *byte == b'$' || byte.is_ascii_alphanumeric())
+        {
+            break;
+        }
+        let name_end = name_run_end(formula, next);
+        if name_end > next && bytes.get(name_end) == Some(&b'!') {
+            break;
+        }
+        cursor = next;
+    }
+    cursor
+}
+
 fn rename_one_sheet_reference(formula: &str, previous: &str, next: &str) -> String {
     if previous.is_empty() || next.is_empty() {
         return formula.to_string();
@@ -703,6 +825,71 @@ mod tests {
         assert_eq!(
             rename_formula_sheet_references("=SUM(A1:B2)", &[("Sales", "Revenue")]),
             "=SUM(A1:B2)"
+        );
+    }
+
+    #[test]
+    fn deleting_a_worksheet_collapses_the_references_to_it() {
+        assert_eq!(
+            drop_formula_sheet_references("=Sales!A1+1", "Sales"),
+            "=#REF!+1"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=SUM(Sales!$A$1:$B$2)", "Sales"),
+            "=SUM(#REF!)"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=SUM(Sales!A:A,Sales!1:7)", "Sales"),
+            "=SUM(#REF!,#REF!)"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=sales!A1", "Sales"),
+            "=#REF!"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("='My Sheet'!B2", "My Sheet"),
+            "=#REF!"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=SUM(Start:End!A1)", "Start"),
+            "=SUM(#REF!)"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=SUM(Start:End!A1)", "End"),
+            "=SUM(#REF!)"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("='Start:End'!A1", "End"),
+            "=#REF!"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=SUM(销售!A1:B2)", "销售"),
+            "=SUM(#REF!)"
+        );
+    }
+
+    #[test]
+    fn deleting_a_worksheet_only_breaks_references_to_it() {
+        assert_eq!(
+            drop_formula_sheet_references(
+                "=IF(\"Sales!A1\">0,Sales!B1,0)+TotalSales!C1+Sales2!D1",
+                "Sales"
+            ),
+            "=IF(\"Sales!A1\">0,#REF!,0)+TotalSales!C1+Sales2!D1"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=SUM(A1:B2)+Sales", "Sales"),
+            "=SUM(A1:B2)+Sales"
+        );
+        // Two qualifiers, so each broken half becomes its own error rather
+        // than leaving an orphan `!` behind.
+        assert_eq!(
+            drop_formula_sheet_references("=SUM(Sales!A1:Other!B2)", "Sales"),
+            "=SUM(#REF!:Other!B2)"
+        );
+        assert_eq!(
+            drop_formula_sheet_references("=Sales!A1:Other!B2+Sales!C3", "Sales"),
+            "=#REF!:Other!B2+#REF!"
         );
     }
 }
