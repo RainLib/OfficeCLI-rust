@@ -288,6 +288,13 @@ pub struct XlsxCellLayoutPatch {
     pub border: Option<String>,
 }
 
+/// Direct spreadsheet number format. The format code is an Excel format string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct XlsxCellNumberFormatPatch {
+    pub format_code: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfTextGeometry {
@@ -391,6 +398,13 @@ pub enum PatchOperation {
     XlsxCellLayout {
         node_id: String,
         layout: XlsxCellLayoutPatch,
+        precondition: NodePrecondition,
+    },
+    /// Set the Excel number format code on one worksheet cell.
+    #[serde(rename = "xlsx.cell.numberFormat", rename_all = "camelCase")]
+    XlsxCellNumberFormat {
+        node_id: String,
+        number_format: XlsxCellNumberFormatPatch,
         precondition: NodePrecondition,
     },
     /// Merge a rectangle of existing XLSX cells. Covered cells must be empty.
@@ -561,6 +575,7 @@ impl PatchOperation {
             | Self::PptxRunFormat { node_id, .. }
             | Self::XlsxCellFormat { node_id, .. }
             | Self::XlsxCellLayout { node_id, .. }
+            | Self::XlsxCellNumberFormat { node_id, .. }
             | Self::PdfTextGeometry { node_id, .. }
             | Self::PdfTextDelete { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
@@ -599,6 +614,7 @@ impl PatchOperation {
                 | Self::PptxRunFormat { .. }
                 | Self::XlsxCellFormat { .. }
                 | Self::XlsxCellLayout { .. }
+                | Self::XlsxCellNumberFormat { .. }
                 | Self::PdfTextGeometry { .. }
                 | Self::PdfTextDelete { .. }
                 | Self::XlsxMerge { .. }

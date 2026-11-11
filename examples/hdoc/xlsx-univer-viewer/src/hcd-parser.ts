@@ -29,6 +29,7 @@ export interface NodeLink {
   vertical?: 'top' | 'center' | 'bottom';
   wrap?: boolean;
   border?: 'none' | 'thin';
+  numberFormat?: string;
   sheetId: string;
   row: number;
   column: number;
@@ -310,6 +311,7 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       vertical: valignName(resolved.vt ?? undefined),
       wrap: resolved.tb === WrapStrategy.WRAP,
       border: borderName(cell.dataset.hcdBorder),
+      numberFormat: cell.dataset.hcdNumFmtCode ?? cell.dataset.hcdNumFmtPattern,
       sheetId: chunk.descriptor.grid.sheetId,
       row: position.row,
       column: position.column,

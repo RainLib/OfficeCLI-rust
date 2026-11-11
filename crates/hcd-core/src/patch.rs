@@ -11,14 +11,15 @@ use crate::{
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
     RevisionRecord, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
-    XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxGridAction, XlsxGridAxis,
-    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11,
-    HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14,
-    HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17,
-    HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2,
-    HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
-    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
-    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch, XlsxGridAction,
+    XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
+    HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
+    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
+    HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19,
+    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3,
+    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
+    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
+    MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -223,6 +224,7 @@ pub fn apply_patch(
                         | PatchOperation::PptxRunFormat { .. }
                         | PatchOperation::XlsxCellFormat { .. }
                         | PatchOperation::XlsxCellLayout { .. }
+                        | PatchOperation::XlsxCellNumberFormat { .. }
                         | PatchOperation::XlsxCellSet { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaToValue { .. }
@@ -280,6 +282,7 @@ pub fn apply_patch(
     let pptx_formats = collect_pptx_formats(patch);
     let xlsx_formats = collect_xlsx_formats(patch);
     let xlsx_layouts = collect_xlsx_layouts(patch);
+    let xlsx_number_formats = collect_xlsx_number_formats(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_blank_merge = collect_xlsx_blank_merge(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
@@ -374,6 +377,7 @@ pub fn apply_patch(
         .chain(pptx_formats.keys().cloned())
         .chain(xlsx_formats.keys().cloned())
         .chain(xlsx_layouts.keys().cloned())
+        .chain(xlsx_number_formats.keys().cloned())
         .chain(pdf_geometry.keys().cloned())
         .chain(pdf_deletions.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
@@ -394,6 +398,7 @@ pub fn apply_patch(
         || !pptx_formats.is_empty()
         || !xlsx_formats.is_empty()
         || !xlsx_layouts.is_empty()
+        || !xlsx_number_formats.is_empty()
         || !xlsx_merges.is_empty()
         || xlsx_blank_merge.is_some()
         || !xlsx_unmerges.is_empty()
@@ -873,6 +878,26 @@ pub fn apply_patch(
                         )));
                     }
                     update_xlsx_cell_layout(&mut html, &entry.node_id, &change.layout)?;
+                    dirty_grid_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = xlsx_number_formats.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell" {
+                        return Err(HcdError::Unsupported(
+                            "XLSX number format requires a worksheet cell".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "XLSX cell {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_xlsx_cell_number_format(
+                        &mut html,
+                        &entry.node_id,
+                        &change.number_format,
+                    )?;
                     dirty_grid_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
@@ -1729,6 +1754,12 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             }))
+            .chain(xlsx_number_formats.keys().map(|node_id| FidelityWarning {
+                code: "XLSX_DIRECT_CELL_NUMBER_FORMAT".to_string(),
+                message: "cell number format clones the source style and writes a built-in or custom Excel format code".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .collect(),
         idempotent_replay: false,
     };
@@ -2134,6 +2165,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_30
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_31
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_32
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_33
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2374,6 +2406,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/32 accepts one XLSX cell layout operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_33
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxCellNumberFormat { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/33 accepts one XLSX cell number format operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2651,6 +2695,24 @@ fn validate_patch_identity(
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_xlsx_cell_layout(layout)?;
+            }
+            PatchOperation::XlsxCellNumberFormat {
+                node_id,
+                number_format,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_33
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.cell.numberFormat requires one XLSX operation with hcd-patch/33"
+                            .to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                validate_xlsx_number_format(number_format)?;
             }
             PatchOperation::XlsxMerge {
                 node_id,
@@ -3757,6 +3819,47 @@ fn validate_xlsx_cell_layout(layout: &XlsxCellLayoutPatch) -> Result<(), HcdErro
                 "XLSX border must be none or thin".to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct XlsxNumberFormatChange {
+    number_format: XlsxCellNumberFormatPatch,
+    node_hash: String,
+}
+
+fn collect_xlsx_number_formats(patch: &PatchBatch) -> HashMap<String, XlsxNumberFormatChange> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::XlsxCellNumberFormat {
+                node_id,
+                number_format,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                XlsxNumberFormatChange {
+                    number_format: number_format.clone(),
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn validate_xlsx_number_format(format: &XlsxCellNumberFormatPatch) -> Result<(), HcdError> {
+    let code = &format.format_code;
+    if code.is_empty() || code.len() > 1024 || code.chars().any(is_forbidden_xml_character) {
+        return Err(HcdError::InvalidPatch(
+            "XLSX number format must be 1 to 1024 characters without control characters"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -7176,6 +7279,58 @@ fn apply_xlsx_layout_css(tag: &mut String, layout: &XlsxCellLayoutPatch) -> Resu
     Ok(())
 }
 
+fn update_xlsx_cell_number_format(
+    html: &mut String,
+    node_id: &str,
+    format: &XlsxCellNumberFormatPatch,
+) -> Result<(), HcdError> {
+    let marker = format!("data-hcd-id=\"{node_id}\"");
+    let marker_at = html
+        .find(&marker)
+        .ok_or_else(|| HcdError::InvalidBundle(format!("XLSX cell node {node_id} is missing")))?;
+    let cell_start = html[..marker_at].rfind("<td ").ok_or_else(|| {
+        HcdError::InvalidBundle("XLSX cell node has no containing cell".to_string())
+    })?;
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX cell tag is not closed".to_string()))?;
+    let mut cell = html[cell_start..=cell_end].to_string();
+    if !cell.contains("class=\"hcd-cell") {
+        return Err(HcdError::Unsupported(
+            "XLSX number format requires a worksheet cell".to_string(),
+        ));
+    }
+    if xlsx_number_format_from_tag(&cell)?.as_deref() == Some(format.format_code.as_str()) {
+        return Err(HcdError::InvalidPatch(
+            "XLSX cell number format is unchanged".to_string(),
+        ));
+    }
+    set_tag_attribute(&mut cell, "data-hcd-num-fmt-edited", "true");
+    set_tag_attribute(&mut cell, "data-hcd-num-fmt-code", &format.format_code);
+    set_tag_attribute(&mut cell, "data-hcd-num-fmt-pattern", &format.format_code);
+    html.replace_range(cell_start..=cell_end, &cell);
+    Ok(())
+}
+
+fn xlsx_number_format_from_tag(tag: &str) -> Result<Option<String>, HcdError> {
+    let raw = if xlsx_attribute(tag, "data-hcd-num-fmt-edited") == Some("true") {
+        xlsx_attribute(tag, "data-hcd-num-fmt-code")
+    } else {
+        xlsx_attribute(tag, "data-hcd-num-fmt-pattern")
+    };
+    Ok(raw.map(unescape_attribute))
+}
+
+fn unescape_attribute(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 fn update_pptx_run_format(
     html: &mut String,
     entry: &mut NodeMapEntry,
@@ -8183,6 +8338,7 @@ fn apply_annotations(
             | PatchOperation::PptxRunFormat { .. }
             | PatchOperation::XlsxCellFormat { .. }
             | PatchOperation::XlsxCellLayout { .. }
+            | PatchOperation::XlsxCellNumberFormat { .. }
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
             | PatchOperation::XlsxMerge { .. }
