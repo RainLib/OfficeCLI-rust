@@ -306,6 +306,38 @@ impl Bundle {
         write_index_object(&self.root, codec, "nodes", &node)
     }
 
+    /// Rewrite the pages the tree `root` reaches, page for page, and return the
+    /// new root.
+    ///
+    /// A removal takes chunks out of the middle of the index, and every page
+    /// after the hole changes with it: their descriptors are renumbered and
+    /// re-split, so the page that lost a chunk takes one from the head of the
+    /// next. Only pages whose chunk list actually differs are written, so a
+    /// rewrite that begins halfway through the index keeps the objects in front
+    /// of it and costs one node per page behind the change.
+    ///
+    /// The tree keeps the shape it has, which means the page count cannot fall:
+    /// a removal that empties the last page leaves that page in place with
+    /// nothing on it, and it is reclaimed once the index can shrink. Every
+    /// object is content addressed, so the root an earlier revision pointed at
+    /// still resolves the pages that revision described.
+    pub fn replace_index_pages(
+        &self,
+        root: &str,
+        pages: &[ChunkIndexPage],
+    ) -> Result<String, HcdError> {
+        let mut current = root.to_string();
+        for page in pages {
+            let href = self.index_page_href(&current, page.page)?;
+            let existing: ChunkIndexPage = self.read_index_object(&href)?;
+            if existing.chunks == page.chunks {
+                continue;
+            }
+            current = self.replace_index_page(&current, page.page, page)?;
+        }
+        Ok(current)
+    }
+
     pub fn read_map(&self, descriptor: &ChunkDescriptor) -> Result<ChunkSourceMap, HcdError> {
         read_json_bounded(
             &self.resolve_href(&descriptor.map_href)?,
@@ -1482,6 +1514,135 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("ends before page 40"));
+    }
+
+    #[test]
+    fn replace_index_pages_renumbers_the_pages_after_a_hole() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("wide.hcd");
+        let mut writer = BundleWriter::create(&root).unwrap();
+        writer.write_styles("").unwrap();
+        for index in 0..crate::INDEX_PAGE_SIZE + 2 {
+            let chunk_id = format!("c_{index:032x}");
+            writer
+                .write_chunk(
+                    chunk_id.clone(),
+                    "body".to_string(),
+                    format!("<p>value-{index}</p>"),
+                    ChunkSourceMap {
+                        schema_version: HCD_SCHEMA_VERSION.to_string(),
+                        chunk_id,
+                        entries: Vec::new(),
+                    },
+                    1,
+                    false,
+                )
+                .unwrap();
+        }
+        let manifest = writer.finish(test_manifest()).unwrap();
+        assert_eq!(manifest.index_page_count, 2);
+        let bundle = Bundle::open(&root).unwrap();
+        let tree = manifest.index_root_href.clone().unwrap();
+        let first = bundle.read_index_page(&manifest, 0).unwrap();
+        let tail = bundle.read_index_page(&manifest, 1).unwrap();
+
+        // Dropping the head of the tail page renumbers nothing in front of it,
+        // so page 0 keeps the object the previous revision wrote.
+        let mut kept = first.chunks.clone();
+        kept.extend(tail.chunks[1..].iter().cloned());
+        for (sequence, descriptor) in kept.iter_mut().enumerate() {
+            descriptor.sequence = sequence;
+        }
+        let mut pages = vec![
+            written_page(0, kept[..crate::INDEX_PAGE_SIZE].to_vec()),
+            written_page(1, kept[crate::INDEX_PAGE_SIZE..].to_vec()),
+        ];
+        for page in &mut pages {
+            page.revision = 2;
+        }
+        let rewritten = bundle.replace_index_pages(&tree, &pages).unwrap();
+        assert_eq!(
+            bundle.index_page_href(&rewritten, 0).unwrap(),
+            bundle.index_page_href(&tree, 0).unwrap(),
+            "a page in front of the hole was rewritten"
+        );
+        let mut view = manifest.clone();
+        view.revision = 2;
+        view.chunk_count = crate::INDEX_PAGE_SIZE + 1;
+        view.index_root_href = Some(rewritten.clone());
+        let moved = bundle.read_index_page(&view, 1).unwrap();
+        assert_eq!(moved.chunks.len(), 1);
+        assert_eq!(moved.chunks[0].sequence, crate::INDEX_PAGE_SIZE);
+        assert_eq!(moved.chunks[0].chunk_id, tail.chunks[1].chunk_id);
+
+        // Removing the head of the first page instead shifts a chunk across the
+        // boundary, so both pages change and the tail page empties without
+        // leaving the tree.
+        let mut shifted = first.chunks[1..].to_vec();
+        shifted.extend(tail.chunks.iter().cloned());
+        for (sequence, descriptor) in shifted.iter_mut().enumerate() {
+            descriptor.sequence = sequence;
+        }
+        let mut pages = vec![
+            written_page(0, shifted[..crate::INDEX_PAGE_SIZE].to_vec()),
+            written_page(1, shifted[crate::INDEX_PAGE_SIZE..].to_vec()),
+        ];
+        for page in &mut pages {
+            page.revision = 3;
+        }
+        let shifted_root = bundle.replace_index_pages(&rewritten, &pages).unwrap();
+        assert_ne!(
+            bundle.index_page_href(&shifted_root, 0).unwrap(),
+            bundle.index_page_href(&rewritten, 0).unwrap()
+        );
+        view.revision = 3;
+        view.chunk_count = crate::INDEX_PAGE_SIZE + 1;
+        view.index_root_href = Some(shifted_root.clone());
+        let after = bundle.read_index_page(&view, 0).unwrap();
+        assert_eq!(after.chunks.len(), crate::INDEX_PAGE_SIZE);
+        assert_eq!(after.chunks[0].chunk_id, first.chunks[1].chunk_id);
+        assert_eq!(
+            after.chunks[crate::INDEX_PAGE_SIZE - 1].chunk_id,
+            tail.chunks[0].chunk_id,
+            "the chunk that crossed the page boundary is not the tail's first one"
+        );
+        assert_eq!(after.chunks[crate::INDEX_PAGE_SIZE - 1].sequence, 127);
+        let after_tail = bundle.read_index_page(&view, 1).unwrap();
+        assert_eq!(after_tail.chunks.len(), 1);
+        assert_eq!(after_tail.chunks[0].chunk_id, tail.chunks[1].chunk_id);
+
+        // Removing the last two chunks leaves nothing for the tail page. The
+        // page stays in the tree, because the index cannot shrink yet.
+        let mut last = after.chunks[..crate::INDEX_PAGE_SIZE - 1].to_vec();
+        for (sequence, descriptor) in last.iter_mut().enumerate() {
+            descriptor.sequence = sequence;
+        }
+        let mut pages = vec![written_page(0, last), written_page(1, Vec::new())];
+        for page in &mut pages {
+            page.revision = 4;
+        }
+        let empty_root = bundle.replace_index_pages(&shifted_root, &pages).unwrap();
+        view.revision = 4;
+        view.chunk_count = crate::INDEX_PAGE_SIZE - 1;
+        view.index_root_href = Some(empty_root);
+        let last = bundle.read_index_page(&view, 0).unwrap();
+        assert_eq!(last.chunks.len(), crate::INDEX_PAGE_SIZE - 1);
+        assert_eq!(last.chunks[0].sequence, 0);
+        assert_eq!(last.chunks[last.chunks.len() - 1].sequence, 126);
+        assert!(bundle.read_index_page(&view, 1).unwrap().chunks.is_empty());
+
+        // The pages the earlier revisions described stay reachable under their
+        // own roots, and a rewrite cannot invent a page the tree does not reach.
+        assert_eq!(tail.chunks.len(), 2);
+        assert_eq!(
+            bundle.read_index_page(&manifest, 1).unwrap().chunks.len(),
+            2
+        );
+        assert!(bundle
+            .replace_index_pages(&shifted_root, &[written_page(9, Vec::new())])
+            .unwrap_err()
+            .to_string()
+            .contains("no page 9"));
     }
 
     #[test]
