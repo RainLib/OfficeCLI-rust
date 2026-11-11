@@ -13,11 +13,12 @@ import {requestCoordinatedSave} from './semanticSaveClient.ts'
 import {businessDraftProblem} from './businessDrafts.ts'
 import {wordRegionalProtocol,wordLayoutProtocol} from './collaborationProtocol.ts'
 import {WordTopologyPause} from './wordTopologyPause.ts'
+import {installRestoreHandoff,waitRestoreSync,restoreHandoffReady,followCommittedRestore} from './restoreClient.ts'
 import {requireWordBrowserProtocol,wordBrowserModelMatches,type WordBrowserProtocol} from './wordBrowserProtocol.ts'
 export type WordClientReceipt={type:'hcd-save-status';wordRegionVersion:1|2;wordLayoutVersion?:1;nodeEditVersion:7;stateId:string;stateSequence:number;revision:number;digest:string;imageDigest:string;pending:boolean;status:'editing'|'saving'|'saved'|'failed'|'conflict';uploads?:{active:number;interrupted:number;running:number};problem?:string}
 type Provider={isSynced:boolean;hasUnsyncedChanges:boolean;on:(event:string,handler:(value:any)=>void)=>unknown;off:(event:string,handler:(value:any)=>void)=>unknown;sendStateless:(value:string)=>void}
 export type WordBrowserDisconnect={reason:string;topologyRequestId?:string}
-type Options={protocol?:WordBrowserProtocol;document:Y.Doc;provider:Provider;scope:'read'|'write';projection:(revision:number,signal:AbortSignal)=>Promise<WordRegionProjection>;cache?:WordDeviceDraft;onDisconnect?:(event:Readonly<WordBrowserDisconnect>)=>void;largeRecovery?:(update:Uint8Array,baseline:Uint8Array,signal:AbortSignal)=>Promise<void>}
+type Options={protocol?:WordBrowserProtocol;document:Y.Doc;provider:Provider;scope:'read'|'write';projection:(revision:number,signal:AbortSignal)=>Promise<WordRegionProjection>;cache?:WordDeviceDraft;onDisconnect?:(event:Readonly<WordBrowserDisconnect>)=>void;largeRecovery?:(update:Uint8Array,baseline:Uint8Array,signal:AbortSignal)=>Promise<void>;onEpochChange?:(epoch:number)=>void}
 const hex=(value:unknown)=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value)
 export async function wordBrowserDigest(model:WordRegionStore){return[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(model.contents())))].map(n=>n.toString(16).padStart(2,'0')).join('')}
 export class WordBrowserState{
@@ -54,7 +55,44 @@ export class WordBrowserState{
  private fenced=false
  private authorityLost=false
  private detachCache:(()=>void)|undefined
- constructor(readonly options:Options){this.protocol=requireWordBrowserProtocol(options.protocol??wordRegionalProtocol);if(options.cache&&options.cache.protocol!==this.protocol)throw new Error('word-device-protocol');this.topology=new WordTopologyPause({send:value=>options.provider.sendStateless(JSON.stringify(value)),ready:()=>{const state=this.state();return state.ready&&!state.problem&&!this.saving&&!this.localUploads&&!this.localResources&&!this.receipt?.uploads?.active&&options.cache?.snapshot()!=='failed'},pause:()=>{if(options.scope==='read')return()=>{};if(!this.pauseInput)throw Error('word-topology-input-unavailable');return this.pauseInput()},flush:()=>this.flush(),synced:()=>this.connected&&!this.fenced&&!this.authorityLost&&options.provider.isSynced&&!options.provider.hasUnsyncedChanges,generation:()=>this.generation,changed:()=>this.emit()});this.detachCache=options.cache?.subscribe(()=>this.emit());options.document.on('update',this.updated);options.provider.on('stateless',this.stateless);options.provider.on('synced',this.synced);options.provider.on('status',this.connection);options.provider.on('close',this.closed);options.provider.on('disconnect',this.closed);options.provider.on('authenticationFailed',this.authenticationFailed);if(options.provider.isSynced)this.synced({state:true})}
+ private restorePaused=false
+ private restoreResume:(()=>void)|undefined
+ private restorePauseFailed=false
+ private followingRestore=false
+ private detachRestore:(()=>void)|undefined
+ constructor(readonly options:Options){this.protocol=requireWordBrowserProtocol(options.protocol??wordRegionalProtocol);if(options.cache&&options.cache.protocol!==this.protocol)throw new Error('word-device-protocol');this.topology=new WordTopologyPause({send:value=>options.provider.sendStateless(JSON.stringify(value)),ready:()=>{const state=this.state();return state.ready&&!state.problem&&!this.saving&&!this.localUploads&&!this.localResources&&!this.receipt?.uploads?.active&&options.cache?.snapshot()!=='failed'},pause:()=>{if(options.scope==='read')return()=>{};if(!this.pauseInput)throw Error('word-topology-input-unavailable');return this.pauseInput()},flush:()=>this.flush(),synced:()=>this.connected&&!this.fenced&&!this.authorityLost&&options.provider.isSynced&&!options.provider.hasUnsyncedChanges,generation:()=>this.generation,changed:()=>this.emit()});this.detachCache=options.cache?.subscribe(()=>this.emit());options.document.on('update',this.updated);options.provider.on('stateless',this.stateless);options.provider.on('synced',this.synced);options.provider.on('status',this.connection);options.provider.on('close',this.closed);options.provider.on('disconnect',this.closed);options.provider.on('authenticationFailed',this.authenticationFailed);if(options.provider.isSynced)this.synced({state:true});this.installRestoreDrain()}
+ setRestoreFence(active:boolean){if(this.restorePaused!==active){this.restorePaused=active;if(!active)this.restorePauseFailed=false;this.emit()}}
+ /** The submitting client follows the same path as a broadcast receipt, so a
+  * direct response and the room's hcd-restore-committed cannot double-rotate. */
+ notifyRestoreCommitted=(epoch:number)=>this.followEpoch(epoch)
+ private followEpoch(epoch:number){
+  if(this.followingRestore||this.controller.signal.aborted)return
+  this.followingRestore=true
+  const finish=(ok:boolean)=>{this.followingRestore=false;if(!ok)this.fence('word-restore-follow-changed')}
+  void followCommittedRestore({flush:()=>this.flush(),devicePending:()=>this.restoreDevicePending(),blocked:()=>this.restoreFollowBlocked(),alive:()=>!this.controller.signal.aborted,commit:()=>{const resume=this.restoreResume;this.restoreResume=undefined;this.setRestoreFence(false);resume?.();this.options.onEpochChange?.(epoch)}}).then(finish,()=>finish(false))
+ }
+ private installRestoreDrain(){
+  // Only the live view controller follows epochs; wire-only controllers stay
+  // silent so a restore during rebind fails closed on timeout instead of
+  // half-following with two hosts on one transport.
+  if(this.protocol!==wordLayoutProtocol||!this.options.onEpochChange)return
+  this.detachRestore=installRestoreHandoff(this.options.provider,{
+   freeze:()=>{if(this.options.scope==='write'&&!this.restoreResume){try{this.restoreResume=this.pauseInput?.()??undefined;if(!this.restoreResume)this.restorePauseFailed=true}catch{this.restorePauseFailed=true}}this.setRestoreFence(true)},
+   ready:()=>restoreHandoffReady({blocked:()=>this.restoreDrainBlocked(),devicePending:()=>this.restoreDevicePending(),drain:()=>this.flush(),sync:()=>waitRestoreSync(this.options.provider,this.controller.signal)}),
+   release:()=>{const resume=this.restoreResume;this.restoreResume=undefined;this.setRestoreFence(false);resume?.()},
+   committed:epoch=>this.followEpoch(epoch),
+  })
+ }
+ private restoreDevicePending=async()=>{try{return((await this.options.cache?.pendingUploads())?.length??0)>0}catch{return true}}
+ private restoreDrainBlocked(){return this.fenced||this.authorityLost||!this.connected||!!this.saving||this.topology.pending||this.localUploads||this.localResources||!!this.receipt?.uploads?.active||!!this.recovery||this.restorePauseFailed||this.options.cache?.snapshot()==='failed'}
+ private restoreFollowBlocked(){
+  // The sidecar closes every old-epoch connection right after the committed
+  // broadcast, so the expected reconnect fence must not veto the follow it
+  // just triggered; only a live save, device task, or topology round still
+  // blocks committing the rotated epoch (the rebind replaces this host).
+  const closedForRestore=this.fenced&&this.problem==='word-browser-reconnect-required'
+  return (!closedForRestore&&this.fenced)||this.authorityLost||!!this.saving||this.topology.pending||this.localUploads||this.localResources||!!this.recovery
+ }
  subscribe=(listener:()=>void)=>{this.listeners.add(listener);return()=>{this.listeners.delete(listener)}}
  snapshot=()=>this.version
  private emit(){if(this.controller.signal.aborted)return;this.version++;this.listeners.forEach(listener=>listener())}
@@ -145,7 +183,7 @@ export class WordBrowserState{
   }
   this.recovery=null;this.emit();void this.synchronize()
  }
- state(){let businessProblem:string|undefined;try{if(this.model)businessProblem=businessDraftProblem(this.options.document,this.model.structure.project())}catch{businessProblem='word-business-schema-invalid'}const metadataReady=!!this.model&&this.ready&&this.options.document.getMap(wordRegionStoreField).get('layoutHash')===this.model.layoutState().layoutHash,available=!this.fenced&&!this.authorityLost&&this.connected&&this.options.provider.isSynced&&metadataReady&&this.reviewed&&!this.recovery&&!this.problem&&this.receipt?.status!=='conflict',covered=!this.localUploads&&!this.localResources&&!businessProblem&&available&&!!this.receipt&&!this.receipt.pending&&this.receipt.status==='saved'&&this.receipt.digest===this.digest&&this.receipt.imageDigest===this.images&&!this.options.provider.hasUnsyncedChanges&&this.options.provider.isSynced&&this.connected;return{ready:available,topologyPending:this.topology.pending,readOnly:this.topology.pending||!available||this.options.scope!=='write'||this.options.cache?.snapshot()==='failed',saved:covered&&!this.topology.pending,revision:this.receipt?.revision??this.projection?.revision??null,connected:this.connected,problem:this.options.cache?.snapshot()==='failed'?'word-device-storage':this.problem??businessProblem??this.receipt?.problem,resourcePending:this.localResources,pending:!covered,uploadPending:this.localUploads||!!this.receipt?.uploads?.active,saving:!!this.saving}}
+ state(){let businessProblem:string|undefined;try{if(this.model)businessProblem=businessDraftProblem(this.options.document,this.model.structure.project())}catch{businessProblem='word-business-schema-invalid'}const metadataReady=!!this.model&&this.ready&&this.options.document.getMap(wordRegionStoreField).get('layoutHash')===this.model.layoutState().layoutHash,available=!this.fenced&&!this.authorityLost&&this.connected&&this.options.provider.isSynced&&metadataReady&&this.reviewed&&!this.recovery&&!this.problem&&this.receipt?.status!=='conflict',covered=!this.localUploads&&!this.localResources&&!businessProblem&&available&&!!this.receipt&&!this.receipt.pending&&this.receipt.status==='saved'&&this.receipt.digest===this.digest&&this.receipt.imageDigest===this.images&&!this.options.provider.hasUnsyncedChanges&&this.options.provider.isSynced&&this.connected;return{ready:available,topologyPending:this.topology.pending,readOnly:this.restorePaused||this.topology.pending||!available||this.options.scope!=='write'||this.options.cache?.snapshot()==='failed',saved:covered&&!this.topology.pending,revision:this.receipt?.revision??this.projection?.revision??null,connected:this.connected,problem:this.options.cache?.snapshot()==='failed'?'word-device-storage':this.problem??businessProblem??this.receipt?.problem,resourcePending:this.localResources,pending:!covered,uploadPending:this.localUploads||!!this.receipt?.uploads?.active,saving:!!this.saving}}
  async flush(){await this.cacheWork;await this.options.cache?.flush()}
  save(){if(this.saving)return this.saving;const work=this.performSave().finally(()=>{this.saving=undefined;this.emit()});this.saving=work;this.emit();return work}
  private waitForModel(revision:number){
@@ -154,6 +192,7 @@ export class WordBrowserState{
   return new Promise<void>((resolve,reject)=>{const finish=(error?:Error)=>{clearTimeout(timer);unsubscribe();this.controller.signal.removeEventListener('abort',abort);error?reject(error):resolve()},check=()=>{if(ready())finish()},abort=()=>finish(new Error('word-browser-closed')),unsubscribe=this.subscribe(check),timer=setTimeout(()=>finish(new Error('word-browser-receipt-timeout')),45000);this.controller.signal.addEventListener('abort',abort,{once:true});if(this.controller.signal.aborted)abort();else check()})
  }
  private async performSave(){
+  if(this.restorePaused)throw new Error('word-restore-paused')
   if(this.topology.pending)throw new Error('word-topology-paused')
   if(this.localUploads||this.receipt?.uploads?.active)throw new Error('word-upload-pending')
   if(this.localResources)throw new Error('node-resource-pending')
@@ -168,5 +207,5 @@ export class WordBrowserState{
   for(let attempt=0;attempt<4;attempt++){const finalGeneration=this.generation,[current,currentImages]=await Promise.all([wordBrowserDigest(this.model),imageDraftDigest(this.options.document)]);if(finalGeneration!==this.generation)continue;if(this.localUploads||this.localResources||businessDraftProblem(this.options.document,this.model.structure.project())||current!==digest||currentImages!==reply.imageDigest||this.options.provider.hasUnsyncedChanges||!this.connected||!this.options.provider.isSynced||this.receipt?.pending)throw new Error('word-browser-newer-changes');return reply.revision}
   throw new Error('word-browser-newer-changes')
  }
- dispose(){this.topology.dispose();this.controller.abort();this.detachCache?.();this.options.document.off('update',this.updated);this.options.provider.off('stateless',this.stateless);this.options.provider.off('synced',this.synced);this.options.provider.off('status',this.connection);this.options.provider.off('close',this.closed);this.options.provider.off('disconnect',this.closed);this.options.provider.off('authenticationFailed',this.authenticationFailed);this.listeners.clear()}
+ dispose(){this.detachRestore?.();this.detachRestore=undefined;this.topology.dispose();this.controller.abort();this.detachCache?.();this.options.document.off('update',this.updated);this.options.provider.off('stateless',this.stateless);this.options.provider.off('synced',this.synced);this.options.provider.off('status',this.connection);this.options.provider.off('close',this.closed);this.options.provider.off('disconnect',this.closed);this.options.provider.off('authenticationFailed',this.authenticationFailed);this.listeners.clear()}
 }

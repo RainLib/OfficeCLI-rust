@@ -33,6 +33,12 @@ import {FixedPortablePanel} from './FixedPortablePanel.tsx'
 import {FixedPresenceIndicator,useFixedPresence,type FixedPeer} from './FixedPresence.tsx'
 import {workbookPresence,workbookFollowCycle} from './workbookPresence.ts'
 import {restoreWorkbookSource} from './workbookSourceRestore.ts'
+import {EditorIcon} from './EditorIcon.tsx'
+import {RevisionReview} from './RevisionReview.tsx'
+import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
+import {loadWorkbookRevisionSelection} from './workbookRevisionReview.ts'
+import {DirectRestoreError,committedRestoreAdvance,directRestoreSupported,submitDirectRestore} from './directRestoreClient.ts'
+import type {RevisionSelection} from './revisionSelection.ts'
 import {workbookFormulaAudit} from './workbookFormulaAudit.ts'
 import {markWorkbookPeers} from './workbookPeerMarks.ts'
 import {WorkbookBlankPreparation} from './workbookBlankPreparation.ts'
@@ -48,6 +54,7 @@ import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
 
 type Props={session:Session;onClose:()=>void;embedded:boolean;allowClose?:boolean}
+type WorkbookRevisionItem={revision:number;patchId?:string;authorId?:string;authorName?:string;createdAtEpochMs?:number}
 const idle=()=> 'idle' as const,emptySubscribe=()=>()=>{},emptyVersion=()=>0
 export function WorkbookEditor(props:Props){
  return <FixedDraftBootstrap session={props.session} onClose={props.allowClose===false?undefined:props.onClose}>{binding=><WorkbookContent {...props} session={binding.session} binding={binding}/>}</FixedDraftBootstrap>
@@ -85,6 +92,17 @@ function WorkbookContent({session,onClose,embedded,allowClose=true,binding}:Prop
  const [auditing,setAuditing]=useState(false),[auditResult,setAuditResult]=useState<{key:MessageKey;revision:number;count?:number}|null>(null)
  const [restoringSource,setRestoringSource]=useState(false),[sourceNeeded,setSourceNeeded]=useState(false),sourceFile=useRef<HTMLInputElement>(null),sourceRestore=useRef<AbortController|null>(null)
  const [sourceGeneration,setSourceGeneration]=useState(0)
+ const [historyOpen,setHistoryOpen]=useState(false)
+ const [revisionList,setRevisionList]=useState<WorkbookRevisionItem[]>([])
+ const [revisionNextBefore,setRevisionNextBefore]=useState<number|null|undefined>(undefined)
+ const [revisionsLoading,setRevisionsLoading]=useState(false)
+ const [revisionSelection,setRevisionSelection]=useState<RevisionSelection|null>(null)
+ const [selectionLoading,setSelectionLoading]=useState(false)
+ const [restoreConfirmation,setRestoreConfirmation]=useState(false),[restoreUncertain,setRestoreUncertain]=useState(false)
+ const historyDialog=useRef<HTMLDialogElement|null>(null)
+ const selectionRequest=useRef<AbortController|null>(null)
+ useEffect(()=>()=>{selectionRequest.current?.abort()},[])
+ useEffect(()=>{const element=historyDialog.current;if(!element)return;if(historyOpen){if(!element.open)element.showModal()}else element.close()},[historyOpen])
  const sourceChannel=useRef<BroadcastChannel|null>(null)
  useEffect(()=>{
   if(typeof BroadcastChannel==='undefined')return
@@ -401,6 +419,85 @@ function WorkbookContent({session,onClose,embedded,allowClose=true,binding}:Prop
   if(!ready||batchPending()||inputStopping.current||preparing||accessState!=='write'||controller.busy||controller.pending||controller.history.busy)return
   try{const result=await controller.history.step(direction);if(mounted.current){revised(result.revision);adapter.current?.refreshDrafts();setError('')}}catch(cause){if(mounted.current)setError(saveProblem(cause))}
  }
+ // History review rides the same durable grid as the live view: the compare
+ // base is the current head, the CAS fence is re-read right before the POST,
+ // and a verified restore reboots the grid through the generation bump.
+ const canRestoreRevision=ready&&session.scope==='write'&&accessState==='write'&&revision!==null&&!workbookLeaveBlocked()&&!!journal&&!withoutBackup&&journal.state!=='failed'
+ const clearRevisionSelection=()=>{selectionRequest.current?.abort();selectionRequest.current=null;setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setSelectionLoading(false)}
+ // The list is a point-in-time snapshot: a restore (or a later save) moves
+ // the head, and reopening history must offer the new revision instead of a
+ // stale cached page, so every exit from the review drops the cached list.
+ const resetRevisionList=()=>{setRevisionList([]);setRevisionNextBefore(undefined)}
+ const closeRevisionHistory=()=>{clearRevisionSelection();resetRevisionList();setHistoryOpen(false)}
+ const loadRevisionPage=async(before:number|null)=>{
+  setRevisionsLoading(true)
+  try{
+   const result=await (await api(session,before===null?'/revisions':`/revisions?before=${before}`)).json() as {revisions:WorkbookRevisionItem[];nextBefore:number|null}
+   setRevisionList(previous=>Array.from(new Map([...previous,...result.revisions].map(item=>[item.revision,item])).values()).sort((a,b)=>a.revision-b.revision))
+   setRevisionNextBefore(previous=>before===null?(previous===undefined?result.nextBefore:previous):result.nextBefore)
+  }catch(cause){if(mounted.current)setError(String(cause))}
+  finally{setRevisionsLoading(false)}
+ }
+ const openRevisionHistory=()=>{setHistoryOpen(true);if(revisionNextBefore===undefined)void loadRevisionPage(null)}
+ const showRevision=async(number:number)=>{
+  if(revision===null)return
+  selectionRequest.current?.abort();const controller=new AbortController();selectionRequest.current=controller
+  setSelectionLoading(true);setRevisionSelection(null);setRestoreUncertain(false)
+  try{
+   const item=revisionList.find(entry=>entry.revision===number)
+   const selection=await loadWorkbookRevisionSelection(session,number,revision,{author:item?.authorName||(number===0?t('initialImport'):undefined),createdAt:item?.createdAtEpochMs},controller.signal)
+   if(controller.signal.aborted||selectionRequest.current!==controller)return
+   setRevisionSelection(selection)
+  }catch(cause){if(!controller.signal.aborted&&selectionRequest.current===controller&&mounted.current)setError(String(cause))}
+  finally{if(!controller.signal.aborted&&selectionRequest.current===controller)setSelectionLoading(false)}
+ }
+ const restoreRevision=async()=>{
+  if(!revisionSelection||revision===null||!canRestoreRevision)throw new Error(t('readOnlyMode'))
+  const controller=new AbortController();selectionRequest.current?.abort();selectionRequest.current=controller
+  let submitting=false
+  try{
+   const head=await workbookServerHead(session,binding.sourceHash,controller.signal)
+   if(head!==revisionSelection.comparedWith){
+    // After an outcome-unknown submit the first restore may in fact have
+    // committed. The direct endpoint has no idempotent replay, so the number
+    // alone (head exactly one past the fence) is not identity: a peer save
+    // can land on the same head and a coincidental adopt would hide a failed
+    // restore. Adopt only when the head revision carries this restore's
+    // deterministic `restore-{target}-{head}` patch id; anything else —
+    // including an unreadable record — stays a comparison change, which the
+    // dialog can now leave instead of stranding the user.
+    if(restoreUncertain&&head===revisionSelection.comparedWith+1&&await committedRestoreAdvance(session,revisionSelection.target,head,controller.signal)){
+     revised(head)
+     if(mounted.current){
+      setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setError('');resetRevisionList()
+      pendingViewport.current=workbookRef.current?captureWorkbookViewport(workbookRef.current):null
+      gridReady.current=false;setReady(false);setGeneration(value=>value+1)
+     }
+     return
+    }
+    throw new Error(t('restoreComparisonChanged'))
+   }
+   submitting=true
+   const result=await submitDirectRestore(session,revisionSelection.target,head,controller.signal)
+   revised(result.revision)
+   if(mounted.current){
+    setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setError('');resetRevisionList()
+    pendingViewport.current=workbookRef.current?captureWorkbookViewport(workbookRef.current):null
+    gridReady.current=false;setReady(false);setGeneration(value=>value+1)
+   }
+  }
+  catch(cause){
+   if(cause instanceof DirectRestoreError){
+    if(cause.kind==='outcome-unknown'){setRestoreUncertain(true);throw new Error(t('restoreOutcomeUnknown'))}
+    if(cause.kind==='conflict')throw new Error(t('restoreComparisonChanged'))
+    if(cause.kind==='coordinator')throw new Error(t('directRestoreUnsupported'))
+    throw new Error(String(cause))
+   }
+   if(controller.signal.aborted){if(submitting){setRestoreUncertain(true);throw new Error(t('restoreOutcomeUnknown'))}throw new Error(t('restoreCouldNotConfirm'))}
+   throw cause
+  }
+  finally{if(selectionRequest.current===controller)selectionRequest.current=null}
+ }
  function resolveCell(id:string,keepLocal:boolean){
   const draft=texts.get(id);if(!draft||controller.workbookBuffer?.base.nodeId===id||controller.pending||controller.busy||accessState!=='write')return
   if(draft.remote)texts.resolve(draft.remote,revisionRef.current??draft.revision,keepLocal)
@@ -443,6 +540,7 @@ function WorkbookContent({session,onClose,embedded,allowClose=true,binding}:Prop
    {auditResult?.key==='workbookAuditPassed'&&auditResult.revision===revision&&accessState==='write'&&<button onClick={()=>void enableSourceFreeProtection()} disabled={auditing}>{t('workbookProofEnable')}</button>}
    {accessState==='write'&&(auditResult?.key==='workbookAuditMissing'||auditResult?.key==='workbookSourceChanged'||auditResult?.key==='workbookSourceRestoreConflict'||auditResult?.key==='workbookSourceRestoreFailed'||sourceNeeded)&&<><button onClick={()=>sourceFile.current?.click()} disabled={restoringSource}>{t('workbookSourceRestore')}</button><input ref={sourceFile} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={event=>{const file=event.currentTarget.files?.[0];event.currentTarget.value='';if(file)void restoreSource(file)}}/></>}
    {restoringSource&&<button type="button" onClick={()=>sourceRestore.current?.abort(new Error('source-restore-wait-stopped'))}>{t('exportStopWaiting')}</button>}
+   <button type="button" aria-pressed={historyOpen} disabled={revision===null||!!bootProblem} onClick={()=>historyOpen?closeRevisionHistory():openRevisionHistory()}>{t('revisionHistory')}</button>
    <span>{t(accessState==='write'?'cellEdits':'readOnly')} · {t(updates==='connected'?'connected':'revisionConnectionUnavailable')}</span>
   </nav>
   {paletteOpen&&<CommandPalette registry={commands.registry} run={commands.run} onClose={()=>setPaletteOpen(false)}/>}
@@ -469,6 +567,10 @@ function WorkbookContent({session,onClose,embedded,allowClose=true,binding}:Prop
   {protectedSave&&texts.size>0&&<section className="workbook-conflicts" aria-label={t('workbookProtectedDraftTitle')}><h3>{t('workbookProtectedDraftTitle')}</h3><p>{t('workbookProtectedDraftHint')}</p>{texts.entries().map(([id,draft])=><div key={id}><strong>{adapter.current?.cellLabel(id)??id}</strong><p>{draft.text}</p><button disabled={controller.pending||controller.busy||accessState!=='write'||controller.workbookBuffer?.base.nodeId===id} onClick={()=>setDiscardProtectedDraft({id,draft})}>{t('discardDraftText')}</button>{discardProtectedDraft?.id===id&&discardProtectedDraft.draft===draft&&<div><p>{t('workbookProtectedDraftDiscardConfirm')}</p><button disabled={controller.pending||controller.busy||accessState!=='write'} onClick={()=>{if(texts.get(id)===draft){texts.discard(id);if(!texts.size){protectedPaintBlocked.current=false;setProtectedSave(false);adapter.current?.refreshDrafts()}setError('')}setDiscardProtectedDraft(null)}}>{t('fixedPortableDiscardConfirm')}</button> <button onClick={()=>setDiscardProtectedDraft(null)}>{t('cancel')}</button></div>}</div>)}</section>}
   {session.scope==='write'&&<><FixedImageTasksView tasks={imageTasks} reopen={()=>setTaskGeneration(value=>value+1)}/><FixedPortablePanel session={session} sourceHash={binding.sourceHash} save={controller} tasks={imageTasks}/><div className={withoutBackup||backup==='failed'||closeBackupFailed?'local-draft-warning':'local-draft-status'} role={backup==='failed'||closeBackupFailed?'alert':'status'}>{t(withoutBackup||backup==='failed'||closeBackupFailed?'localDraftUnavailable':backup==='writing'?'localDraftWriting':'localDraftStored')} <FixedDraftDownload download={rescue}/>{binding.importBackup&&<FixedDraftImport importBackup={binding.importBackup} />}{batch&&binding.importBackup&&<WorkbookCombinedBackup session={session} source={binding.sourceHash} batch={batch} fixed={()=>{if(workbookInputInProgress()||blankInput.active)throw Error('workbook-backup-input-active');return controller.state()}} importFixed={binding.importBackup}/>}{journal&&(backup==='failed'||closeBackupFailed)&&!withoutBackup&&<><button disabled={controller.busy||preparing} onClick={()=>void journal.write(controller.state()).then(()=>{if(mounted.current){setCloseBackupFailed(false);setError('')}}).catch(()=>{})}>{t('localDraftRetry')}</button><button disabled={controller.busy||preparing} onClick={()=>{controller.continueWithoutBackup();setWithoutBackup(true);setCloseBackupFailed(false)}}>{t('localDraftContinueWithout')}</button></>}{!!binding.copies.length&&<details><summary>{t('localDraftCopies')} ({binding.copies.length})</summary>{binding.copies.map(copy=><button key={copy.id} onClick={()=>downloadFixedDraft(session,copy.state,binding.sourceHash)}>{new Date(copy.updatedAt).toLocaleString(locale)} · {t('downloadDraft')}</button>)}</details>}</div></>}
   {accessState==='revoked'&&<p className="local-draft-warning" role="alert">{t('accessRevoked')}</p>}
+  {historyOpen&&<dialog ref={historyDialog} className="hcd-restore-dialog fixed-history-dialog" aria-label={t('revisionHistory')} onCancel={event=>{event.preventDefault();if(!selectionLoading)closeRevisionHistory()}}><div className="presentation-panel-heading"><strong>{t('revisionHistory')}</strong>{revisionSelection&&<button type="button" onClick={clearRevisionSelection}>← {t('revisionHistory')}</button>}<button className="presentation-icon-button" aria-label={t('close')} onClick={closeRevisionHistory}><EditorIcon name="close" /></button></div><div className="fixed-history-body">{selectionLoading&&<p role="status">{t('loadingRevision')}</p>}
+   {revisionSelection?<RevisionReview session={session} selection={revisionSelection} latest={revision} unsaved={!!texts.size||!!controller.workbookBuffer||!!controller.workbookBlankInput||!!controller.workbookBlankAttempt} canRestore={canRestoreRevision} onClose={closeRevisionHistory} onRefresh={()=>void showRevision(revisionSelection.target)} onRestore={()=>setRestoreConfirmation(true)}/>:revisionsLoading&&!revisionList.length?<p role="status">{t('loadingRevision')}</p>:<><div className="history">{revisionList.slice().reverse().map(item=><button key={item.revision} type="button" onClick={()=>void showRevision(item.revision)} aria-busy={selectionLoading} title={item.patchId}><span className="revision-avatar">{item.authorName?.slice(0,1)||(item.revision===0?'I':'?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs?new Date(item.createdAtEpochMs).toLocaleString(locale,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):''}</small></strong><small>{item.authorName||(item.revision===0?t('initialImport'):t('unknownAuthor'))} · {item.revision===0?t('imported'):item.patchId?.startsWith('restore-')?t('restoredRevision'):t('contentUpdated')}</small><span>{t('viewRevision')}</span></span></button>)}</div>{revisionNextBefore!==null&&revisionNextBefore!==undefined&&<button type="button" disabled={revisionsLoading} onClick={()=>void loadRevisionPage(revisionNextBefore)}>{t('loadOlder')}</button>}{!revisionList.length&&!revisionsLoading&&<p role="status">{t('loadingRevision')}</p>}</>}
+  </div></dialog>}
+  {restoreConfirmation&&revisionSelection&&<RestoreRevisionDialog selection={revisionSelection} latest={revision} uploading={binding.images.uploading||!!imageTasks&&imageTasks.pending} allowed={canRestoreRevision} supported={directRestoreSupported(session)} uncertain={restoreUncertain} onCancel={()=>setRestoreConfirmation(false)} onConfirm={restoreRevision}/>}
   {error&&<p className="local-draft-warning" role="alert">{error}</p>}
  </div>
 }

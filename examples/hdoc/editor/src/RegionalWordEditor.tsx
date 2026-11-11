@@ -81,9 +81,16 @@ import {DeletionReviewPanel,useDeletionReviews} from './DeletionReviewPanel.tsx'
 import {canConfirmDeletion} from './deletionReview.ts'
 import {resolveWordDeletionReview} from './wordDeletionReview.ts'
 import {regionalExportHead} from './regionalExportGuard.ts'
+import {EditorIcon} from './EditorIcon.tsx'
+import {RevisionReview} from './RevisionReview.tsx'
+import {readWordBrowserProjection,readWordStorySessionProjection} from './wordBrowserProjection.ts'
+import {semanticRevisionSelection} from './revisionDiff.ts'
+import type {RevisionSelection} from './revisionSelection.ts'
+import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
+import {submitRestore,RestoreClientError,prepareRestoreSubmission,type RestoreSubmission} from './restoreClient.ts'
 const noPageSubscribe=(_listener:()=>void)=>()=>{},noPageSnapshot=()=>0
 
-type Props={session:Session;onClose:()=>void;allowClose?:boolean;embedded?:boolean;openRecovery?:()=>void;onEditorPresence?:(value:boolean)=>void}
+type Props={session:Session;onClose:()=>void;allowClose?:boolean;embedded?:boolean;openRecovery?:()=>void;onEditorPresence?:(value:boolean)=>void;onEpochChange?:(epoch:number)=>void}
 type OwnHistory={images:CollaborativeImageDraftStore;history:SemanticHistory;manager:Y.UndoManager;dispose:()=>void}
 type WordViewState={section:number;variant:'first'|'default'|'even';stories:boolean;tab:string;panel:WordWorkspacePanel|null;navigation:boolean;zoom:number;scrollTop:number;paperIndex?:number}
 type Connection=WordLiveBinding&{owner:WordLiveSession;own:OwnHistory;workspace:{current?:WordViewState}}
@@ -100,7 +107,7 @@ function WordConnection(props:Props){
   void(async()=>{
    const userId=session.userId??[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(session.token)))].map(value=>value.toString(16).padStart(2,'0')).join(''),identity=await wordDeviceIdentity(session,userId,location.href),cache=await WordDeviceDraft.open(identity.name);opened=cache;if(!live){await cache.close();return}
    const document=new Y.Doc();release=retainDocument(document);const room=wordBrowserConnection(session)
-   owner=new WordLiveSession({session,document,cache,provider:wire=>new HocuspocusProvider({url:room.url,name:room.name,token:session.token,document:wire}),beforeApply:()=>{if(live)flushSync(()=>setSuspended(true))}})
+   owner=new WordLiveSession({session,document,cache,provider:wire=>new HocuspocusProvider({url:room.url,name:room.name,token:session.token,document:wire}),beforeApply:()=>{if(live)flushSync(()=>setSuspended(true))},onEpochChange:epoch=>{if(live)props.onEpochChange?.(epoch)}})
    const update=()=>{
     if(!live||!owner)return;setPhase(owner.phase);setSessionProblem(owner.problem??'');const binding=owner.connection
     if(binding?.controller.model&&binding.controller.projection){
@@ -149,6 +156,70 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
  const [section,setSection]=useState(()=>connection.workspace.current?.section??0),[variant,setVariant]=useState<'first'|'default'|'even'>(()=>connection.workspace.current?.variant??'first'),[stories,setStories]=useState(()=>connection.workspace.current?.stories??false),[active,setActive]=useState<Editor|null>(null),[tab,setTab]=useState(()=>connection.workspace.current?.tab??'home'),[panel,setPanel]=useState<WordWorkspacePanel|null>(()=>connection.workspace.current?.panel??null),[navigation,setNavigation]=useState(()=>connection.workspace.current?.navigation??false),[palette,setPalette]=useState(false),[deviceFileReview,setDeviceFileReview]=useState(false),[zoom,setZoom]=useState(()=>connection.workspace.current?.zoom??100),[error,setError]=useState(''),[image,setImage]=useState(''),[menu,setMenu]=useState<{x:number;y:number}|null>(null),[following,updateFollowing]=useState<number|null>(null),[peers,setPeers]=useState<Array<{client:number;id:string;name:string;color:string}>>([]),[,render]=useState(0)
  const [followIntent]=useState(()=>new ViewportFollowIntent()),setFollowing=useCallback((client:number|null)=>{followIntent.set(client);updateFollowing(client)},[followIntent])
  const [historyReview,setHistoryReview]=useState<{direction:'undo'|'redo';version:number}|null>(null)
+ // Reviewing an immutable revision produces rows straight from the region
+ // diff: the reviewed side reads immutable native history, the live side
+ // re-projects through the active room owner, and both fold with the same
+ // neutral engine as the semantic entry — no fixed-format descriptor detour.
+ // Restore goes through the sidecar's coordinated
+ // transaction (hcd-word-regions/2 only): every layout writer drains through
+ // the hcd-restore handshake, and each client follows the rotated epoch from
+ // its own receipt or the committed broadcast
+ // (docs/design/hcd-revision-review-alignment.zh.md §4, phase 3b).
+ const [historyOpen,setHistoryOpen]=useState(false),[revisionList,setRevisionList]=useState<Array<{revision:number;patchId?:string;authorName?:string;createdAtEpochMs?:number}>>([]),[revisionNextBefore,setRevisionNextBefore]=useState<number|null|undefined>(undefined),[revisionsLoading,setRevisionsLoading]=useState(false),[revisionSelection,setRevisionSelection]=useState<RevisionSelection|null>(null),[selectionLoading,setSelectionLoading]=useState(false),[historyProblem,setHistoryProblem]=useState('')
+ const [restoreAsk,setRestoreAsk]=useState(false),[restoreUncertain,setRestoreUncertain]=useState(false)
+ const historyDialog=useRef<HTMLDialogElement|null>(null),selectionRequest=useRef<AbortController|null>(null),pendingRestore=useRef<RestoreSubmission|null>(null),restoreRequest=useRef<AbortController|null>(null)
+ useEffect(()=>()=>{selectionRequest.current?.abort();restoreRequest.current?.abort()},[])
+ useEffect(()=>{const element=historyDialog.current;if(!element)return;if(historyOpen){if(!element.open)element.showModal()}else element.close()},[historyOpen])
+ const clearRevisionSelection=()=>{selectionRequest.current?.abort();selectionRequest.current=null;setRevisionSelection(null);setSelectionLoading(false);setHistoryProblem('');setRestoreAsk(false);setRestoreUncertain(false)}
+ const closeRevisionHistory=()=>{clearRevisionSelection();setHistoryOpen(false)}
+ const loadRevisionPage=async(before:number|null)=>{
+  setRevisionsLoading(true)
+  try{
+   const result=await (await api(session,before===null?'/revisions':`/revisions?before=${before}`)).json() as {revisions:Array<{revision:number;patchId?:string;authorName?:string;createdAtEpochMs?:number}>;nextBefore:number|null}
+   setRevisionList(previous=>Array.from(new Map([...previous,...result.revisions].map(item=>[item.revision,item])).values()).sort((a,b)=>a.revision-b.revision))
+   setRevisionNextBefore(previous=>before===null?(previous===undefined?result.nextBefore:previous):result.nextBefore)
+  }catch(cause){setHistoryProblem(String(cause))}
+  finally{setRevisionsLoading(false)}
+ }
+ const openRevisionHistory=()=>{setHistoryOpen(true);setHistoryProblem('');if(revisionNextBefore===undefined)void loadRevisionPage(null)}
+ const showRevision=async(number:number)=>{
+  const latest=state.revision
+  if(latest===null)return
+  selectionRequest.current?.abort();const controller=new AbortController();selectionRequest.current=controller
+  setSelectionLoading(true);setRevisionSelection(null);setHistoryProblem('');setRestoreUncertain(false)
+  try{
+   const item=revisionList.find(entry=>entry.revision===number)
+   // The reviewed side is immutable native history (older than the room's
+   // pinned baseline, so the owner route would 409 it); the live side stays
+   // pinned through the active room owner.
+   const [before,after]=await Promise.all([readWordStorySessionProjection(session,number,controller.signal),readWordBrowserProjection(session,latest,controller.signal)])
+   const selection=semanticRevisionSelection(before,after,{author:item?.authorName||(number===0?t('initialImport'):undefined),createdAt:item?.createdAtEpochMs})
+   if(controller.signal.aborted||selectionRequest.current!==controller)return
+   setRevisionSelection(selection)
+  }catch(cause){if(!controller.signal.aborted&&selectionRequest.current===controller)setHistoryProblem(String(cause))}
+  finally{if(!controller.signal.aborted&&selectionRequest.current===controller)setSelectionLoading(false)}
+ }
+ // A prepared request is replayed without saving: the room stays paused
+ // until release, so save() throws word-restore-paused inside that window.
+ // showRevision already stored the head it compared. A new selection saves
+ // and checks that head; a stale replay is rejected by the server's 409.
+ const confirmRestore=async()=>{
+  if(session.scope!=='write')throw new Error(t('readOnlyMode'))
+  const selection=revisionSelection
+  if(!selection)throw new Error(t('restoreCouldNotConfirm'))
+  const intent=await prepareRestoreSubmission(pendingRestore.current,selection.target,selection.comparedWith,()=>controller.save(),session.collaborationEpoch??0).catch(cause=>{if(cause instanceof Error&&cause.message==='restoreComparisonChanged')throw new Error(t('restoreComparisonChanged'));throw cause})
+  pendingRestore.current=intent
+  restoreRequest.current?.abort();const abort=new AbortController();restoreRequest.current=abort
+  try{
+   const receipt=await submitRestore({...session,collabUrl:session.collabUrl||import.meta.env.VITE_HCD_COLLAB_URL},intent,abort.signal)
+   pendingRestore.current=null;setRestoreAsk(false);setRestoreUncertain(false)
+   controller.notifyRestoreCommitted(receipt.collaborationEpoch)
+  }catch(cause){
+   if(cause instanceof RestoreClientError&&!cause.uncertain)pendingRestore.current=null
+   setRestoreUncertain(cause instanceof RestoreClientError&&cause.uncertain)
+   throw new Error(t(cause instanceof RestoreClientError&&cause.uncertain?'restoreOutcomeUnknown':cause instanceof RestoreClientError&&['restore-client-busy','restore-online-clients'].includes(cause.code)?'restoreOtherClientBusy':'restoreComparisonChanged'))
+  }
+ }
  const [paperOverview,setPaperOverview]=useState(false),[paperSetup,setPaperSetup]=useState(false),paperButton=useRef<HTMLButtonElement|null>(null)
  const pageTransaction=useWordPageTransaction(),storyTransaction=useWordStoryTransaction(),linkTransaction=useWordLinkTransaction()
  useEffect(()=>{if(state.ready&&linkTransaction?.phase==='pending'&&!linkTransaction.busy)void linkTransaction.check().catch(()=>{})},[linkTransaction,state.ready])
@@ -387,7 +458,7 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
  return <div className="workspace semantic-workspace regional-word-workspace" onKeyDownCapture={event=>{if(event.nativeEvent.isComposing)return;if(following!==null)setFollowing(null);if(!(event.target instanceof HTMLElement)||event.target.closest('.tiptap'))return;if(commands.registry.handleKey(event.nativeEvent,'input'))event.preventDefault()}}>
   <header className="word-titlebar"><span className="word-app-badge">W</span><div><strong>{session.documentId}</strong><small>{t(state.topologyPending?'wordTopologyPaused':state.saved?'saved':state.saving?'saving':state.connected?'editing':'connecting')} · r{state.revision??'—'}</small></div><button onClick={()=>commands.run('view.collaboration')}>{peers.length} {t('onlineCollaborators')}</button><LocaleSelect/>{allowClose&&<button aria-label={t('close')} onClick={()=>void close()}>×</button>}</header>
   <nav className="word-tabs">{(['home','insert','layout','view','export'] as const).map(value=><button key={value} aria-selected={tab===value} onClick={()=>setTab(value)}>{t(value==='home'?'home':value==='insert'?'insert':value==='layout'?'wordPageLayout':value==='view'?'view':'export')}</button>)}</nav>
-  <nav className="toolbar ribbon" aria-label={t('toolbar')}><CommandRibbon registry={commands.registry} run={commands.run} tab={tab}/>{tab==='home'&&<div className="word-tool-group word-font-size-tool"><FontSizeControl editor={activeTarget} readOnly={!state.ready||state.readOnly||history.busy} commands={commands.registry}/><span>{t('fontSize')}</span></div>}{tab==='insert'&&<div className="word-tool-group"><button onClick={()=>focusStory('header')}>{t('wordEditHeader')}</button><button onClick={()=>focusStory('footer')}>{t('wordEditFooter')}</button></div>}{stories&&<div className="word-story-context"><span role="status" title={t('wordEditingStory',{region:t(activeStoryKind==='header'?'headerRegion':activeStoryKind==='footer'?'footerRegion':'wordHeaderFooter')})}>{t(activeStoryKind==='header'?'headerRegion':activeStoryKind==='footer'?'footerRegion':'wordHeaderFooter')} · {t('wordSection',{count:section+1})} · {t(storyVariant==='first'?'wordFirstPageVariant':storyVariant==='even'?'wordEvenPageVariant':'wordDefaultPages')}{storyLinked?` · ${t('wordLinkedPrevious')}`:''}{sharedStory?` · ${t('wordSharedStoryNotice')}`:''}</span><button type="button" onClick={()=>setStories(false)}>{t('wordCloseStories')}</button></div>}{tab==='export'&&<ExportControl session={session} revision={state.revision} runExport={operation=>withRegionalFileLock(cache.name,operation)} beforeExport={beforeRegionalExport} beforeDownload={beforeRegionalDownload} hint="wordRegionExportHint"/>}</nav>
+  <nav className="toolbar ribbon" aria-label={t('toolbar')}><CommandRibbon registry={commands.registry} run={commands.run} tab={tab}/>{tab==='home'&&<div className="word-tool-group word-font-size-tool"><FontSizeControl editor={activeTarget} readOnly={!state.ready||state.readOnly||history.busy} commands={commands.registry}/><span>{t('fontSize')}</span></div>}{tab==='insert'&&<div className="word-tool-group"><button onClick={()=>focusStory('header')}>{t('wordEditHeader')}</button><button onClick={()=>focusStory('footer')}>{t('wordEditFooter')}</button></div>}{tab==='view'&&<div className="word-tool-group"><button type="button" aria-pressed={historyOpen} disabled={state.revision===null} onClick={()=>historyOpen?closeRevisionHistory():openRevisionHistory()}>{t('revisionHistory')}</button></div>}{stories&&<div className="word-story-context"><span role="status" title={t('wordEditingStory',{region:t(activeStoryKind==='header'?'headerRegion':activeStoryKind==='footer'?'footerRegion':'wordHeaderFooter')})}>{t(activeStoryKind==='header'?'headerRegion':activeStoryKind==='footer'?'footerRegion':'wordHeaderFooter')} · {t('wordSection',{count:section+1})} · {t(storyVariant==='first'?'wordFirstPageVariant':storyVariant==='even'?'wordEvenPageVariant':'wordDefaultPages')}{storyLinked?` · ${t('wordLinkedPrevious')}`:''}{sharedStory?` · ${t('wordSharedStoryNotice')}`:''}</span><button type="button" onClick={()=>setStories(false)}>{t('wordCloseStories')}</button></div>}{tab==='export'&&<ExportControl session={session} revision={state.revision} runExport={operation=>withRegionalFileLock(cache.name,operation)} beforeExport={beforeRegionalExport} beforeDownload={beforeRegionalDownload} hint="wordRegionExportHint"/>}</nav>
   {historyReview&&historyReview.version===history.snapshot()&&<section className="history-review" role="group" aria-label={t('editHistory')}><p role="alert">{error}</p><div className="history-review-actions"><button disabled={history.busy} onClick={()=>{setHistoryReview(null);setError('')}}>{t('cancel')}</button><button disabled={state.readOnly||history.busy} title={t('historySkipHint')} onClick={()=>{try{history.skip(historyReview.direction,historyReview.version);setHistoryReview(null);setError('')}catch{setError(t('historyChanged'))}}}>{t('historySkip')}</button></div></section>}{error&&!(historyReview&&historyReview.version===history.snapshot())&&<div className="word-region-error" role="alert">{t('saveFailed')} · {error}<button onClick={()=>setError('')}>×</button></div>}{state.problem&&<div className="word-region-error" role="status">{state.problem==='deletion-drafts-conflict'?t('deletionReviewHint'):<>{t(state.problem.startsWith('word-upload-')?'wordUploadPending':state.problem.startsWith('node-drafts-')?'nodeConflicts':'saveConflict')} · <code>{state.problem}</code></>}<button onClick={state.problem==='deletion-drafts-conflict'?()=>setPanel('deletions'):state.problem.startsWith('word-upload-')?()=>setPanel('images'):state.problem.startsWith('node-drafts-')?()=>setPanel('nodes'):retryConnection}>{t(state.problem==='deletion-drafts-conflict'?'deletionReviewTitle':state.problem.startsWith('word-upload-')?'wordUploadTasks':state.problem.startsWith('node-drafts-')?'nodeConflicts':'retry')}</button></div>}
   {outlineNotice&&<div className="word-region-error" role="status">{t('wordOutlineMissing')}<button type="button" aria-label={t('close')} onClick={()=>setOutlineNotice(false)}>×</button></div>}
   {missingStory&&missingStory.section===section&&missingStory.variant===variant&&<div className="word-region-error" role="status">{t(missingStory.kind==='header'?'wordMissingHeaderNotice':'wordMissingFooterNotice')}<button type="button" aria-label={t('close')} onClick={()=>setMissingStory(null)}>×</button></div>}
@@ -404,6 +475,10 @@ function ConnectedWord({session,onClose,allowClose=true,connection,runtime,retry
   {link!==null&&<div className="hcd-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)setLink(null)}}><div className="hcd-dialog" role="dialog" aria-modal="true" aria-label={t('setLink')}><h2>{t('setLink')}</h2><label>{t('linkAddress')}<input autoFocus type="url" value={link} onChange={event=>setLink(event.target.value)} onKeyDown={event=>{if(event.key==='Escape')setLink(null);if(event.key==='Enter'&&!event.nativeEvent.isComposing)commands.run('text.link.set',{href:link.trim()})}}/></label><div className="hcd-dialog-actions"><button onClick={()=>setLink(null)}>{t('cancel')}</button><button onClick={()=>commands.run('text.link.set',{href:link.trim()})}>{t('applyLink')}</button></div></div></div>}
   {active&&!active.isDestroyed&&ai.composer&&<AiComposer key={ai.composer.id} editor={active} entry={ai.composer} state={ai.state} actions={ai.configuration.actions} available={!!ai.controller} canReplace={ai.can('replace')} canInsert={ai.can('insert')} onStart={(action,instruction)=>commands.run('ai.request',{actionId:action,instruction})} onAccept={()=>commands.run('ai.accept',{requestId:ai.state.requestId})} onCancel={()=>commands.run('ai.cancel')} onDismiss={()=>commands.run('ai.dismiss')} onClose={ai.close}/>}
   {deviceFileReview&&<WordDeviceBackupReview session={session} model={model} cache={cache} controller={controller} onImported={retryConnection} onClose={()=>setDeviceFileReview(false)}/>}{palette&&<CommandPalette registry={commands.registry} run={commands.run} onClose={()=>setPalette(false)}/>}{menu&&<ContextMenu {...menu} onClose={()=>setMenu(null)} actions={commands.registry.list('context').map(item=>({id:item.id,label:item.label,disabled:!item.enabled,active:item.active,action:()=>commands.run(item.id)}))}/>}
+  {historyOpen&&<dialog ref={historyDialog} className="hcd-restore-dialog fixed-history-dialog" aria-label={t('revisionHistory')} onCancel={event=>{event.preventDefault();if(!selectionLoading)closeRevisionHistory()}}><div className="presentation-panel-heading"><strong>{t('revisionHistory')}</strong>{revisionSelection&&<button type="button" onClick={clearRevisionSelection}>← {t('revisionHistory')}</button>}<button className="presentation-icon-button" aria-label={t('close')} onClick={closeRevisionHistory}><EditorIcon name="close"/></button></div><div className="fixed-history-body">{selectionLoading&&<p role="status">{t('loadingRevision')}</p>}{historyProblem&&<p role="alert">{historyProblem}</p>}
+   {revisionSelection?<RevisionReview session={session} selection={revisionSelection} latest={state.revision} unsaved={state.saving||provider.hasUnsyncedChanges} canRestore={session.scope==='write'&&state.ready&&!state.readOnly&&!history.busy&&session.collaborationProtocol===wordLayoutProtocol} onClose={closeRevisionHistory} onRefresh={()=>void showRevision(revisionSelection.target)} onRestore={()=>setRestoreAsk(true)}/>:revisionsLoading&&!revisionList.length?<p role="status">{t('loadingRevision')}</p>:<><div className="history">{revisionList.slice().reverse().map(item=><button key={item.revision} type="button" onClick={()=>void showRevision(item.revision)} aria-busy={selectionLoading} title={item.patchId}><span className="revision-avatar">{item.authorName?.slice(0,1)||(item.revision===0?'I':'?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs?new Date(item.createdAtEpochMs).toLocaleString(locale,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):''}</small></strong><small>{item.authorName||(item.revision===0?t('initialImport'):t('unknownAuthor'))} · {item.revision===0?t('imported'):item.patchId?.startsWith('restore-')?t('restoredRevision'):t('contentUpdated')}</small><span>{t('viewRevision')}</span></span></button>)}</div>{revisionNextBefore!==null&&revisionNextBefore!==undefined&&<button type="button" disabled={revisionsLoading} onClick={()=>void loadRevisionPage(revisionNextBefore)}>{t('loadOlder')}</button>}{!revisionList.length&&!revisionsLoading&&<p role="status">{t('loadingRevision')}</p>}</>}
+  </div></dialog>}
+  {revisionSelection&&restoreAsk&&<RestoreRevisionDialog selection={revisionSelection} latest={state.revision} uploading={state.uploadPending} allowed={session.scope==='write'&&state.ready&&!history.busy} supported={session.collaborationProtocol===wordLayoutProtocol} uncertain={restoreUncertain} onCancel={()=>setRestoreAsk(false)} onConfirm={confirmRestore}/>}
  </div>
 }
 type ViewProps={cursorContext:()=>ReturnType<WordBookHandle['editingLocation']>|undefined;flow?:WordPageFlowBinding;regionId:string;kind:'body'|'header'|'footer';model:NonNullable<WordBrowserState['model']>;session:Session;connection:Connection;user:StructureUser;registry:ReturnType<typeof useNodeExtensions>;images:CollaborativeImageDraftStore;commands:ReturnType<typeof useCommands>;readOnly:boolean;aiBlocked:boolean;onMenus:(editor:Editor,blocked:boolean)=>void;onEditorKey:(editor:Editor,event:KeyboardEvent)=>boolean;attach:(id:string,editor:Editor|null)=>void;activate:(editor:Editor)=>void;setBlockTarget:(target:BlockTarget|null)=>void;setBlockMenu:(open:()=>void)=>void;onImage:(id:string)=>void;onError:(error:unknown)=>void;onContext:(x:number,y:number)=>void}

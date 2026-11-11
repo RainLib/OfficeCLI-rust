@@ -5168,7 +5168,12 @@ async fn index_page(
     let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
     let index = bundle.read_index_page(&manifest, page).map_err(bad)?;
     if query.word_regions != Some(true) {
-        return Ok(Json(serde_json::to_value(index).map_err(internal)?));
+        // A restore reuses the target's content-addressed index objects, which
+        // carry the older stored revision stamp. Echo the resolved revision so
+        // this route matches /chunks and clients can trust the page identity.
+        let mut value = serde_json::to_value(index).map_err(internal)?;
+        value["revision"] = serde_json::json!(manifest.revision);
+        return Ok(Json(value));
     }
     let result = tokio::task::spawn_blocking(move || {
         let regions = if query.word_bodies == Some(true) {
@@ -5177,6 +5182,7 @@ async fn index_page(
             hcd_core::word_region_index_page(&bundle, &manifest, &index)?
         };
         let mut value = serde_json::to_value(index)?;
+        value["revision"] = json!(manifest.revision);
         let chunks = value["chunks"]
             .as_array_mut()
             .ok_or_else(|| HcdError::InvalidBundle("invalid index".into()))?;
@@ -8510,6 +8516,154 @@ mod tests {
             .await,
             Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
         ));
+    }
+
+    #[tokio::test]
+    async fn index_page_echoes_the_resolved_revision_after_restore_reuses_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/assets/hcd-flow-layout-2026-10-26/source.docx");
+        let mut options = hcd_docx::ImportOptions::new("doc");
+        options.flow_layout = true;
+        let path = temp.path().join("doc.hcd");
+        hcd_docx::import_docx(source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(path).unwrap();
+        hcd_core::project_flow_regions(&bundle, 0).unwrap();
+        let state = edit_state(temp.path());
+        let headers = edit_headers(&state, "read");
+        // A restore copies the target's content-addressed index objects, whose
+        // stored stamp still names the old revision; the route must answer with
+        // the resolved revision so page identity matches /chunks.
+        hcd_core::restore_revision(&bundle, 0, 1, Some("alice".into()), Some("Alice".into()))
+            .unwrap();
+        let Json(index) = index_page(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            Query(IndexPageQuery {
+                revision: Some(2),
+                word_regions: None,
+                word_bodies: None,
+            }),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(index["revision"], 2);
+        assert_eq!(index["page"], 0);
+        assert_eq!(index["chunks"][0]["sequence"], 0);
+    }
+
+    #[tokio::test]
+    async fn layout_coordinated_restore_pins_the_word_layout_model_and_rotates_the_epoch() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = word_image_bundle(root.path());
+        let state = edit_state(root.path());
+        write_collaboration_metadata(
+            &state,
+            "doc",
+            &CollaborationMetadata {
+                epoch: 0,
+                protocol: CollaborationProtocol::WordRegions2,
+                node_edits: Some(7),
+                migration: None,
+            },
+        )
+        .await
+        .unwrap();
+        // A layout room fences with the confirmed journal tip in its owner
+        // store, never with a persisted collaboration state file.
+        let tip = "c".repeat(64);
+        let owners = root.path().join("collaboration/word-owners");
+        std::fs::create_dir_all(&owners).unwrap();
+        std::fs::write(
+            owners.join("doc.0.store.json"),
+            serde_json::to_vec(&json!({"version":1,"documentId":"doc","epoch":0,"storeId":"e".repeat(32),"journalHash":tip}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!collaboration_current_path(&state, "doc", 0)
+            .await
+            .unwrap()
+            .try_exists()
+            .unwrap_or(false));
+        let request = coordinated_restore::Request {
+            request_id: "d".repeat(32),
+            expected_revision: 1,
+            from_epoch: 0,
+            from_protocol: Some(CollaborationProtocol::WordRegions2),
+            source_hash: tip.clone(),
+            author_id: "alice".into(),
+            author_name: "Alice".into(),
+        };
+        let mut service = edit_headers_for(&state, "write", "hcd-collaboration");
+        for (key, value) in [
+            ("x-hcd-coordinator-version", "4"),
+            ("x-hcd-collaboration-epoch", "0"),
+            ("x-hcd-collaboration-protocol", "hcd-word-regions/2"),
+            ("x-hcd-word-regions-version", "2"),
+            ("x-hcd-word-layout-version", "1"),
+            ("x-hcd-node-edits-version", "7"),
+        ] {
+            service.insert(key, value.parse().unwrap());
+        }
+        // A missing layout acknowledgement fails closed before any journal write.
+        for key in [
+            "x-hcd-word-regions-version",
+            "x-hcd-word-layout-version",
+            "x-hcd-node-edits-version",
+        ] {
+            let mut old = service.clone();
+            old.remove(key);
+            assert!(matches!(
+                coordinated_restore::restore(
+                    State(state.clone()),
+                    Path(("doc".into(), 0)),
+                    old,
+                    Json(request.clone())
+                )
+                .await,
+                Err(ApiError(StatusCode::UPGRADE_REQUIRED, _))
+            ));
+            assert!(!coordinated_restore::pending(&state, "doc").await);
+        }
+        // A stale or never-recorded tip fails closed at the fence, not the
+        // request grammar, and leaves no pending journal behind.
+        for source_hash in ["a".repeat(64), "none".into()] {
+            let mut stale = request.clone();
+            stale.source_hash = source_hash;
+            assert!(matches!(
+                coordinated_restore::restore(
+                    State(state.clone()),
+                    Path(("doc".into(), 0)),
+                    service.clone(),
+                    Json(stale)
+                )
+                .await,
+                Err(ApiError(StatusCode::PRECONDITION_FAILED, _))
+            ));
+            assert!(!coordinated_restore::pending(&state, "doc").await);
+        }
+        let Json(receipt) = coordinated_restore::restore(
+            State(state.clone()),
+            Path(("doc".into(), 0)),
+            service,
+            Json(request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt["revision"], 2);
+        assert_eq!(receipt["collaborationEpoch"], 1);
+        assert_eq!(receipt["collaborationProtocol"], "hcd-word-regions/2");
+        let metadata = collaboration_metadata(&state, "doc").await.unwrap();
+        assert_eq!(metadata.protocol, CollaborationProtocol::WordRegions2);
+        assert_eq!(metadata.node_edits, Some(7));
+        assert_eq!(metadata.epoch, 1);
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert!(!coordinated_restore::pending(&state, "doc").await);
+        assert_eq!(
+            bundle.manifest().unwrap().root_hash,
+            bundle.revision(0).unwrap().root_hash
+        );
     }
 
     #[tokio::test]

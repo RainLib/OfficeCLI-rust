@@ -1,4 +1,5 @@
 import {checkpointContents} from './checkpointSnapshot.ts'
+import type {RevisionChangeRow,RevisionSelection} from './revisionSelection.ts'
 import type {Block,BlockContent,Inline,Projection} from './schema.ts'
 export type RevisionDifference={before?:Block;after?:Block;oldIndex?:number;newIndex?:number;kind:'same'|'added'|'removed'|'modified';moved:boolean;textChanged:boolean;formatChanged:boolean;objectChanged:boolean}
 export type TextDifference={kind:'same'|'added'|'removed';text:string}
@@ -11,8 +12,10 @@ function retained(pairs:Array<{old:number;next:number}>){
  pairs.forEach((pair,index)=>{let low=0,high=tails.length;while(low<high){const middle=(low+high)>>1;if(pairs[tails[middle]].old<pair.old)low=middle+1;else high=middle}previous[index]=low?tails[low-1]:-1;tails[low]=index})
  const result=new Set<number>();for(let index=tails.at(-1)??-1;index>=0;index=previous[index])result.add(pairs[index].next);return result
 }
-/** Stable IDs first, then semantic anchors. No whole-document text matrix. */
-export function revisionDifferences(before:Projection,after:Projection):RevisionDifference[]{
+/** Stable IDs first, then semantic anchors. No whole-document text matrix.
+ * Only the block sequences are read, so callers may pass partial surfaces
+ * without claiming a full network Projection. */
+export function revisionDifferences(before:{blocks:Block[]},after:{blocks:Block[]}):RevisionDifference[]{
  const old=before.blocks,next=after.blocks,paired=new Map<number,number>(),used=new Set<number>(),ids=new Map(old.map((block,index)=>[block.blockId,index]))
  next.forEach((block,index)=>{const found=ids.get(block.blockId);if(found!==undefined&&!used.has(found)){paired.set(index,found);used.add(found)}})
  const content=new Map<string,number[]>()
@@ -39,6 +42,12 @@ export function revisionDifferences(before:Projection,after:Projection):Revision
  })
  while(deleted<removed.length){const index=removed[deleted++];result.push({before:old[index],oldIndex:index,kind:'removed',moved:false,textChanged:true,formatChanged:false,objectChanged:false})}
  return result
+}
+/** Semantic-flow adapter: folds a Projection pair into the neutral review
+ * contract. Row text is captured eagerly so the mounted UI stays format-free. */
+export function semanticRevisionSelection(before:Projection,after:Projection,meta:{author?:string;createdAt?:number}={}):RevisionSelection{
+ const changes:RevisionChangeRow[]=revisionDifferences(before,after).map(diff=>({kind:diff.kind,moved:diff.moved,formatChanged:diff.formatChanged,objectChanged:diff.objectChanged,oldIndex:diff.oldIndex,newIndex:diff.newIndex,beforeText:diff.before?revisionBlockText(diff.before.content):'',afterText:diff.after?revisionBlockText(diff.after.content):''}))
+ return {target:before.revision,comparedWith:after.revision,...meta,changes}
 }
 /** Word/Chinese token diff, with a bounded matrix and a linear fallback for
  * very large paragraphs. Internal IDs never appear as a content change. */

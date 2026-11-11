@@ -47,6 +47,67 @@ test('a paused disconnect reports its exact round once while the old controller 
  }finally{await f.close()}
 })
 
+test('layout writers drain the coordinated restore handshake and follow the committed epoch',async()=>{
+ const f=await fixture(undefined,wordLayoutProtocol);let paused=0,resumed=0,followed:number|null=null
+ const document=new Y.Doc();Y.applyUpdate(document,Y.encodeStateAsUpdate(f.seed));const provider=new Provider()
+ const controller=new WordBrowserState({document,provider,scope:'write',protocol:wordLayoutProtocol,projection:async()=>f.native,onEpochChange:epoch=>{followed=epoch}})
+ try{
+  provider.emit('stateless',{payload:JSON.stringify(f.receipt)});await until(()=>controller.state().saved)
+  controller.setTopologyInputPause(()=>{paused++;return()=>{resumed++}})
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-prepare',requestId:'a'.repeat(32)})})
+  assert.equal(paused,1);assert.equal(controller.state().readOnly,true);await assert.rejects(controller.save(),/word-restore-paused/)
+  await until(()=>provider.sent.some(value=>value.type==='hcd-restore-ready'&&value.ready===true))
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-release',requestId:'a'.repeat(32)})})
+  assert.equal(resumed,1);assert.equal(controller.state().readOnly,false)
+  // An upload started mid-round answers not-ready; the matching release resumes.
+  controller.setLocalUploadPending(true)
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-prepare',requestId:'b'.repeat(32)})})
+  await until(()=>provider.sent.some(value=>value.type==='hcd-restore-ready'&&value.requestId==='b'.repeat(32)&&value.ready===false))
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-release',requestId:'b'.repeat(32)})})
+  controller.setLocalUploadPending(false)
+  // The committed broadcast freezes again, then the follow resumes and rotates.
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-committed',requestId:'a'.repeat(32),collaborationEpoch:5})})
+  await until(()=>followed===5);assert.equal(controller.state().readOnly,false)
+  // A concurrent duplicate (the submitter's receipt racing its own broadcast)
+  // cannot double-rotate, but a genuinely newer commit still follows.
+  followed=null;controller.notifyRestoreCommitted(6);provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-committed',requestId:'a'.repeat(32),collaborationEpoch:7})});await pause();assert.equal(followed,6)
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-committed',requestId:'a'.repeat(32),collaborationEpoch:7})});await until(()=>followed===7);assert.equal(controller.state().readOnly,false)
+  controller.dispose();document.destroy()
+ }finally{await f.close()}
+})
+test('legacy regional controllers never answer the restore drain and stay unaffected',async()=>{
+ const f=await fixture(undefined,wordRegionalProtocol);let followed=false
+ const document=new Y.Doc();Y.applyUpdate(document,Y.encodeStateAsUpdate(f.seed));const provider=new Provider()
+ const controller=new WordBrowserState({document,provider,scope:'write',projection:async()=>f.native,onEpochChange:()=>{followed=true}})
+ try{
+  provider.emit('stateless',{payload:JSON.stringify(f.receipt)});await until(()=>controller.state().saved)
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-prepare',requestId:'a'.repeat(32)})});await pause()
+  assert.equal(provider.sent.some(value=>value.type==='hcd-restore-ready'),false);assert.equal(controller.state().readOnly,false)
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-committed',requestId:'a'.repeat(32),collaborationEpoch:2})});await pause()
+  assert.equal(followed,false)
+  controller.dispose();document.destroy()
+ }finally{await f.close()}
+})
+test('a committed broadcast followed by the restore close still rotates the epoch',async()=>{
+ const f=await fixture(undefined,wordLayoutProtocol);let followed:number|null=null
+ const document=new Y.Doc();Y.applyUpdate(document,Y.encodeStateAsUpdate(f.seed));const provider=new Provider()
+ const controller=new WordBrowserState({document,provider,scope:'write',protocol:wordLayoutProtocol,projection:async()=>f.native,onEpochChange:epoch=>{followed=epoch}})
+ try{
+  provider.emit('stateless',{payload:JSON.stringify(f.receipt)});await until(()=>controller.state().saved)
+  controller.setTopologyInputPause(()=>()=>{})
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-committed',requestId:'c'.repeat(32),collaborationEpoch:4})})
+  // The sidecar closes the old-epoch connection right behind the broadcast:
+  // the expected reconnect fence must not veto the follow it just triggered,
+  // while a real save or device task still would.
+  provider.emit('close',{})
+  await until(()=>followed===4)
+  followed=null;controller.setLocalUploadPending(true)
+  provider.emit('stateless',{payload:JSON.stringify({type:'hcd-restore-committed',requestId:'d'.repeat(32),collaborationEpoch:5})})
+  await pause();assert.equal(followed,null)
+  controller.setLocalUploadPending(false)
+  controller.dispose();document.destroy()
+ }finally{await f.close()}
+})
 test('resource preparation prevents saved/close/export without making editable text read-only',async()=>{
  const f=await fixture();try{await until(()=>f.controller.state().saved);f.controller.setResourcePending(true);assert.equal(f.controller.state().saved,false);assert.equal(f.controller.state().readOnly,false);await assert.rejects(f.controller.save(),/node-resource-pending/);f.controller.setResourcePending(false);assert.equal(f.controller.state().saved,true)}finally{await f.close()}
 })

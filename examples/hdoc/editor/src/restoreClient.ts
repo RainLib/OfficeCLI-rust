@@ -1,12 +1,29 @@
-import {inlineProtocol,structuralProtocol,nodeEditWireVersion} from './collaborationProtocol.ts'
+import {inlineProtocol,structuralProtocol,wordLayoutProtocol,nodeEditWireVersion} from './collaborationProtocol.ts'
 import type {Session} from './api.ts'
 import {negotiationURL,protocolDelay} from './protocolClient.ts'
 type Transport={on:(event:string,handler:(value:any)=>void)=>unknown;off:(event:string,handler:(value:any)=>void)=>unknown;sendStateless:(value:string)=>void}
 export type RestoreSubmission={requestId:string;target:number;expectedRevision:number;fromEpoch:number}
+/** Reuse a prepared restore only when it is still the selection on screen.
+ * A different revision gets a new request; the previous prepare then fails
+ * closed instead of committing the old target. */
+export function restoreIntentForSelection(pending:RestoreSubmission|null,target:number,comparedWith:number):RestoreSubmission|null{
+ if(!pending||pending.target!==target||pending.expectedRevision!==comparedWith)return null
+ return pending
+}
+/** Replay a matching prepared request without saving. The submitting room
+ * stays paused until release, so a live save cannot run in that window.
+ * Save and the head fence run only when this selection needs a new request. */
+export async function prepareRestoreSubmission(pending:RestoreSubmission|null,target:number,comparedWith:number,save:()=>Promise<number>,fromEpoch:number):Promise<RestoreSubmission>{
+ const replay=restoreIntentForSelection(pending,target,comparedWith)
+ if(replay)return replay
+ const head=await save()
+ if(head!==comparedWith)throw new Error('restoreComparisonChanged')
+ return {requestId:crypto.randomUUID().replaceAll('-',''),target,expectedRevision:head,fromEpoch}
+}
 export class RestoreClientError extends Error{constructor(readonly code:string,readonly uncertain=false){super(code)}}
 export async function submitRestore(session:Session,submission:RestoreSubmission,signal:AbortSignal){
  let response:Response
- try{response=await fetch(negotiationURL(session).replace(/negotiate$/,`restore/${submission.target}`),{method:'POST',headers:{'X-HCD-Node-Edits-Version':String(nodeEditWireVersion),'X-HCD-Custom-Marks-Version':'1',...(session.collaborationProtocol===inlineProtocol?{'X-HCD-Inline-Containers-Version':'1','X-HCD-Extension-Version':'3'}:{}),Authorization:`Bearer ${session.token}`,'Content-Type':'application/json'},body:JSON.stringify({requestId:submission.requestId,expectedRevision:submission.expectedRevision,fromEpoch:submission.fromEpoch}),signal:AbortSignal.any([signal,AbortSignal.timeout(45000)])})}catch{throw new RestoreClientError('restore-pending',true)}
+ try{response=await fetch(negotiationURL(session).replace(/negotiate$/,`restore/${submission.target}`),{method:'POST',headers:{'X-HCD-Node-Edits-Version':String(nodeEditWireVersion),'X-HCD-Custom-Marks-Version':'1',...(session.collaborationProtocol===inlineProtocol?{'X-HCD-Inline-Containers-Version':'1','X-HCD-Extension-Version':'3'}:{}),...(session.collaborationProtocol===wordLayoutProtocol?{'X-HCD-Word-Regions-Version':'2','X-HCD-Word-Layout-Version':'1'}:{}),Authorization:`Bearer ${session.token}`,'Content-Type':'application/json'},body:JSON.stringify({requestId:submission.requestId,expectedRevision:submission.expectedRevision,fromEpoch:submission.fromEpoch}),signal:AbortSignal.any([signal,AbortSignal.timeout(45000)])})}catch{throw new RestoreClientError('restore-pending',true)}
  if(!response.ok){let code='restore-rejected';try{code=(await response.json()).code??code}catch{};throw new RestoreClientError(code,response.status>=500||code==='restore-pending'||code==='restore-busy')}
  try{const receipt=await response.json();if(receipt.requestId!==submission.requestId||receipt.revision!==submission.expectedRevision+1||receipt.restoredFrom!==submission.target||receipt.collaborationEpoch!==submission.fromEpoch+1||receipt.collaborationProtocol!==(session.collaborationProtocol??structuralProtocol))throw new Error();return receipt as {revision:number;collaborationEpoch:number}}catch{throw new RestoreClientError('restore-pending',true)}
 }
@@ -22,7 +39,13 @@ export function installRestoreHandoff(provider:Transport,host:{freeze:()=>void;r
    current=message.requestId;host.freeze()
    void host.ready().catch(()=>false).then(ready=>{if(!closed&&current===message.requestId)provider.sendStateless(JSON.stringify({type:'hcd-restore-ready',requestId:current,ready}))})
   }else if(message.type==='hcd-restore-release'&&current===message.requestId){current=null;host.release()}
-  else if(message.type==='hcd-restore-committed'&&Number.isSafeInteger(message.collaborationEpoch)){host.freeze();host.committed(message.collaborationEpoch)}
+  // The committed frame closes the round. The sidecar normally follows it
+  // with a 4409 close, but a close that races or fails would otherwise leave
+  // the old requestId pinned here: the prepare guard above would then
+  // silently swallow EVERY later round, the member never answers ready, and
+  // coordinated restore stays dead for the whole document until this tab
+  // reloads. Clearing on commit makes the handoff self-healing.
+  else if(message.type==='hcd-restore-committed'&&Number.isSafeInteger(message.collaborationEpoch)){current=null;host.freeze();host.committed(message.collaborationEpoch)}
  }
  provider.on('stateless',receive)
  return()=>{closed=true;provider.off('stateless',receive)}

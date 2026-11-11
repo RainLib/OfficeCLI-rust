@@ -4,7 +4,7 @@ import {mkdtemp,rm,stat,mkdir,writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {SidecarRestore} from './sidecarRestore.ts'
-import {RestoreJournal,type RestoreJob} from './restoreJournal.ts'
+import {RestoreJournal,validRestoreRequest,type RestoreJob} from './restoreJournal.ts'
 import {RoomMigrationGate,MigrationUncertain} from './roomMigrationGate.ts'
 import {MigrationRejected} from './sidecarMigration.ts'
 const input={requestId:'a'.repeat(32),expectedRevision:4,target:0,fromEpoch:2,authorId:'alice',authorName:'Alice'}
@@ -99,4 +99,28 @@ test('inline restore refuses a structural success receipt and keeps the exact in
 test('a journal with an unsupported restore model is never reinterpreted as the old protocol',async t=>{
  const f=await fixture(t);await mkdir(f.journal.directory,{recursive:true});await writeFile(join(f.journal.directory,'doc.json'),JSON.stringify({version:1,documentId:'doc',target:0,status:'prepared',request:{...input,sourceHash:'b'.repeat(64),fromProtocol:'hcd-word-regions/1'}}))
  await assert.rejects(f.service.recover('doc'),MigrationUncertain);assert.equal(f.jobs.length,0);assert.equal(f.gate.blocked('doc'),true)
+})
+test('layout restore journals the word-regions model and replays it after a lost response',async t=>{
+ const f=await fixture(t),layoutInput={...input,fromProtocol:'hcd-word-regions/2' as const}
+ f.host.submit=async job=>{f.jobs.push(structuredClone(job));throw new Error('response lost')}
+ await assert.rejects(f.service.run('doc',layoutInput),MigrationUncertain)
+ assert.equal((await f.journal.load('doc'))?.request.fromProtocol,layoutInput.fromProtocol)
+ await assert.rejects(f.service.run('doc',{...layoutInput,fromProtocol:'hcd-semantic-blocks/3' as const}),/restore-pending/)
+ const restartGate=new RoomMigrationGate(),restarted=new SidecarRestore(restartGate,new RestoreJournal(f.root,'http://core'),{...f.host,submit:async job=>{f.jobs.push(structuredClone(job));return Response.json({...receipt(job),collaborationProtocol:layoutInput.fromProtocol})}})
+ assert.equal((await restarted.recover('doc'))?.collaborationProtocol,layoutInput.fromProtocol)
+ await assert.rejects(restarted.run('doc',{...layoutInput,fromProtocol:'hcd-semantic-blocks/3' as const}),/restore-request-changed/)
+})
+test('layout restore refuses a structural success receipt and keeps the exact intent fenced',async t=>{
+ const f=await fixture(t);f.host.submit=async job=>Response.json(receipt(job))
+ await assert.rejects(f.service.run('doc',{...input,fromProtocol:'hcd-word-regions/2' as const}),MigrationUncertain)
+ assert.equal(f.gate.blocked('doc'),true);assert.equal((await f.journal.load('doc'))?.status,'prepared')
+})
+test('the journal carries a none tip only for word-layout rooms',()=>{
+ const base={requestId:'a'.repeat(32),expectedRevision:2,fromEpoch:0,sourceHash:'none',authorId:'alice',authorName:'Alice'}
+ assert.ok(validRestoreRequest({...base,fromProtocol:'hcd-word-regions/2' as const}))
+ assert.ok(!validRestoreRequest({...base,fromProtocol:'hcd-semantic-inline/1' as const}))
+ assert.ok(!validRestoreRequest(base as never))
+ assert.ok(validRestoreRequest({...base,sourceHash:'c'.repeat(64)}))
+ assert.ok(!validRestoreRequest({...base,fromProtocol:'hcd-word-regions/2' as const,sourceHash:'none '}))
+ assert.ok(!validRestoreRequest({...base,fromProtocol:'hcd-word-regions/2' as const,sourceHash:'NONE'}))
 })

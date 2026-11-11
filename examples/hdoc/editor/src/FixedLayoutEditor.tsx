@@ -24,9 +24,15 @@ import { ImageDraftStore, validGeometry } from './imageDrafts.ts'
 import type {FixedSaveController} from './fixedSaveController.ts'
 import { refreshImageDrafts } from './saveEdits.ts'
 import {fixedDocumentHead,verifyFixedDownload} from './fixedExportGuard.ts'
+import {RevisionReview} from './RevisionReview.tsx'
+import {RestoreRevisionDialog} from './RestoreRevisionDialog.tsx'
+import {loadFixedRevisionSelection} from './fixedRevisionReview.ts'
+import {DirectRestoreError,committedRestoreAdvance,directRestoreSupported,submitDirectRestore} from './directRestoreClient.ts'
+import type {RevisionSelection} from './revisionSelection.ts'
 
 type PageLoader = ReturnType<typeof createPageLoader>
 type RibbonTab = 'home' | 'view' | 'export'
+type FixedRevisionItem = {revision: number; patchId?: string; authorId?: string; authorName?: string; createdAtEpochMs?: number}
 
 const pdfMessages: Partial<Record<MessageKey, MessageKey>> = {
   slideContent: 'pageContent', slideThumbnails: 'pageThumbnails', slidePosition: 'pagePosition',
@@ -69,6 +75,17 @@ export function FixedLayoutEditor({ sourceHash,accessState,saveController, image
   useSyncExternalStore(history.subscribe,history.snapshot)
   const generation = useSyncExternalStore(drafts.subscribe, drafts.snapshot)
   const [historyReview,setHistoryReview]=useState<{direction:'undo'|'redo';version:number}|null>(null)
+  const [historyOpen,setHistoryOpen]=useState(false)
+  const [revisionList,setRevisionList]=useState<FixedRevisionItem[]>([])
+  const [revisionNextBefore,setRevisionNextBefore]=useState<number|null|undefined>(undefined)
+  const [revisionsLoading,setRevisionsLoading]=useState(false)
+  const [revisionSelection,setRevisionSelection]=useState<RevisionSelection|null>(null)
+  const [selectionLoading,setSelectionLoading]=useState(false)
+  const [restoreConfirmation,setRestoreConfirmation]=useState(false),[restoreUncertain,setRestoreUncertain]=useState(false)
+  const historyDialog=useRef<HTMLDialogElement|null>(null)
+  const selectionRequest=useRef<AbortController|null>(null)
+  useEffect(()=>()=>{selectionRequest.current?.abort()},[])
+  useEffect(()=>{const element=historyDialog.current;if(!element)return;if(historyOpen){if(!element.open)element.showModal()}else element.close()},[historyOpen])
   const [tab, setTab] = useState<RibbonTab>('home')
   const [paletteOpen,setPaletteOpen]=useState(false)
   const [,setSelectionVersion]=useState(0)
@@ -320,6 +337,70 @@ export function FixedLayoutEditor({ sourceHash,accessState,saveController, image
     finally{setBusy(false)}
   }
   const historyDisabled=!editable||busy||layoutBusy||updates==='expired'||updates==='unavailable'
+  const canRestoreRevision=editable&&revision!==null&&!exportBlocked()
+  const clearRevisionSelection=()=>{selectionRequest.current?.abort();selectionRequest.current=null;setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);setSelectionLoading(false)}
+  // The list is a point-in-time snapshot: a restore (or a later save) moves
+  // the head, and reopening history must offer the new revision instead of a
+  // stale cached page, so every exit from the review drops the cached list.
+  const resetRevisionList=()=>{setRevisionList([]);setRevisionNextBefore(undefined)}
+  const closeRevisionHistory=()=>{clearRevisionSelection();resetRevisionList();setHistoryOpen(false)}
+  const loadRevisionPage=async(before:number|null)=>{
+    setRevisionsLoading(true)
+    try{
+      const result=await (await api(session,before===null?'/revisions':`/revisions?before=${before}`)).json() as {revisions:FixedRevisionItem[];nextBefore:number|null}
+      setRevisionList(previous=>Array.from(new Map([...previous,...result.revisions].map(item=>[item.revision,item])).values()).sort((a,b)=>a.revision-b.revision))
+      setRevisionNextBefore(previous=>before===null?(previous===undefined?result.nextBefore:previous):result.nextBefore)
+    }catch(cause){onError(String(cause))}
+    finally{setRevisionsLoading(false)}
+  }
+  const openRevisionHistory=()=>{setHistoryOpen(true);if(revisionNextBefore===undefined)void loadRevisionPage(null)}
+  const showRevision=async(number:number)=>{
+    if(revision===null)return
+    selectionRequest.current?.abort();const controller=new AbortController();selectionRequest.current=controller
+    setSelectionLoading(true);setRevisionSelection(null);setRestoreUncertain(false)
+    try{
+      const item=revisionList.find(entry=>entry.revision===number)
+      const selection=await loadFixedRevisionSelection(session,number,revision,{author:item?.authorName||(number===0?t('initialImport'):undefined),createdAt:item?.createdAtEpochMs},controller.signal)
+      if(controller.signal.aborted||selectionRequest.current!==controller)return
+      setRevisionSelection(selection)
+    }catch(cause){if(!controller.signal.aborted&&selectionRequest.current===controller)onError(String(cause))}
+    finally{if(!controller.signal.aborted&&selectionRequest.current===controller)setSelectionLoading(false)}
+  }
+  const restoreRevision=async()=>{
+    if(!revisionSelection||!editable||revision===null)throw new Error(t('readOnlyMode'))
+    const controller=new AbortController();selectionRequest.current?.abort();selectionRequest.current=controller
+    let submitting=false
+    try{
+      const head=await fixedDocumentHead(session,sourceHash,controller.signal)
+      if(head!==revisionSelection.comparedWith){
+       // After an outcome-unknown submit the first restore may in fact have
+       // committed. The direct endpoint has no idempotent replay, so the
+       // number alone (head exactly one past the fence) is not identity: a
+       // peer save can land on the same head and a coincidental adopt would
+       // hide a failed restore. Adopt only when the head revision carries
+       // this restore's deterministic `restore-{target}-{head}` patch id;
+       // anything else — including an unreadable record — stays a comparison
+       // change, which the dialog can now leave instead of stranding the
+       // user.
+       if(restoreUncertain&&head===revisionSelection.comparedWith+1&&await committedRestoreAdvance(session,revisionSelection.target,head,controller.signal)){onRevised(head);setStatus(head);setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);onError('');resetRevisionList();return}
+       throw new Error(t('restoreComparisonChanged'))
+      }
+      submitting=true
+      const result=await submitDirectRestore(session,revisionSelection.target,head,controller.signal)
+      onRevised(result.revision);setStatus(result.revision);setRevisionSelection(null);setRestoreConfirmation(false);setRestoreUncertain(false);onError('');resetRevisionList()
+    }
+    catch(cause){
+      if(cause instanceof DirectRestoreError){
+        if(cause.kind==='outcome-unknown'){setRestoreUncertain(true);throw new Error(t('restoreOutcomeUnknown'))}
+        if(cause.kind==='conflict')throw new Error(t('restoreComparisonChanged'))
+        if(cause.kind==='coordinator')throw new Error(t('directRestoreUnsupported'))
+        throw new Error(String(cause))
+      }
+      if(controller.signal.aborted){if(submitting){setRestoreUncertain(true);throw new Error(t('restoreOutcomeUnknown'))}throw new Error(t('restoreCouldNotConfirm'))}
+      throw cause
+    }
+    finally{if(selectionRequest.current===controller)selectionRequest.current=null}
+  }
   const selectRun = (nodeId: string) => {
     setSelectedRun(nodeId)
     setTextSearch('')
@@ -448,6 +529,7 @@ export function FixedLayoutEditor({ sourceHash,accessState,saveController, image
         {session.format === 'pdf' && layoutStatus?.needsUpgrade && <div className="presentation-tool-group"><button className="presentation-ribbon-tool" disabled={!editable || layoutBusy || busy || loading || drafts.size > 0 || geometryPending || layoutStatus.revision !== revision} title={drafts.size || geometryPending ? t('pdfLayoutDraftHint') : t('pdfLayoutUpgradeHint')} onClick={() => void upgradeLayout()}><EditorIcon name="fit" /><span>{layoutBusy ? t('pdfLayoutUpgrading') : t('pdfLayoutUpgrade')}</span></button><span className="presentation-tool-caption">{t('pageOptions')}</span></div>}
 
         {onFullEditor && <button className="presentation-full-editor" disabled={pendingCount > 0 || geometryPending || busy || saveController.pending} title={t('fullEditorHint')} onClick={onFullEditor}>{t('fullEditing')}</button>}
+        <div className="presentation-tool-group"><button className="presentation-ribbon-tool" aria-pressed={historyOpen} onClick={()=>historyOpen?closeRevisionHistory():openRevisionHistory()}><EditorIcon name="panel" /><span>{t('revisionHistory')}</span></button><span className="presentation-tool-caption">{t('editHistory')}</span></div>
         <p className="presentation-ribbon-hint">{t('slideNavigationHint')}</p>
       </>}
       {tab === 'export' && <div className="presentation-export-options"><ExportControl session={session} revision={revision} runExport={session.scope==='write'?async operation=>{if(!imageTasks)throw new Error('imageUploadPending');await imageTasks.withClear(operation)}:undefined} beforeExport={async () => {
@@ -523,6 +605,10 @@ export function FixedLayoutEditor({ sourceHash,accessState,saveController, image
     </div>
     {paperOverview&&paperMode&&wordLayout.state&&typeof wordLayout.state==='object'&&<WordPaperOverview layout={wordLayout.state.layout} section={previewWordSection?previewWordSection.section-1:null} onClose={closePaperOverview}/>}
     <footer className="presentation-statusbar"><div><CommandAction registry={commands.registry} run={commands.run} id="view.navigation" className="presentation-icon-button" iconOnly/>{paperMode?<><select className="word-section-select" aria-label={t('wordSections')} value={active?.firstSequence??''} onChange={event=>{if(event.target.value==='more'){void loadWordIndex();return}selectSection(Number(event.target.value))}}>{slides.map((group,index)=><option value={group.firstSequence} key={group.firstSequence}>{t('wordSection',{count:index+1})}</option>)}{!indexComplete&&<option value="more">{t('wordSectionsMore')}</option>}</select><button className="presentation-icon-button" aria-label={t('previousPage')} disabled={!active||loading||activeIndex===0&&wordPageNumber===1} onClick={()=>turnWordPage(-1)}><EditorIcon name="left"/></button><span>{t('wordPaperPage',{current:wordPageNumber,total:wordPageCount})}</span><button className="presentation-icon-button" aria-label={t('nextPage')} disabled={!active||loading||indexComplete&&activeIndex===slides.length-1&&wordPageNumber>=wordPageCount} onClick={()=>turnWordPage(1)}><EditorIcon name="right"/></button><button ref={paperButton} type="button" className="word-paper-status" aria-haspopup="dialog" disabled={!wordLayout.state||typeof wordLayout.state!=='object'} onClick={()=>setPaperOverview(true)} title={`${paperDescription} · ${t('wordPaperOverview')}`}>{paperFormat??t('wordPaperSize')} · {paperOrientation}</button>{followed&&<button type="button" className="word-follow-status" onClick={stopFollowing}>{t('followingCollaborator',{name:followed.name})} · {t('stopFollowing')}</button>}</>:<span>{t('slidePosition',{current:active?activeIndex+1:0,total})}</span>}<span className={pendingCount ? 'has-drafts' : ''} role="status">{saveController.pending&&!busy?t('fixedSaveUnknown'):pendingCount ? t('unsavedChangesCount', { count: pendingCount }) : typeof status === 'number' && status === revision ? t('changesSavedAt', { revision: status }) : status === 'failed' ? t('saveFailed') : status === 'saving' ? t('saving') : t('saved')}</span></div><div className="presentation-zoom-controls"><CommandAction registry={commands.registry} run={commands.run} id="view.properties" className="presentation-icon-button" iconOnly/><CommandAction registry={commands.registry} run={commands.run} id="view.fit" className="presentation-fit-button" iconOnly/><input type="range" aria-label={t('zoom')} min="25" max="200" step="1" value={zoom === 'fit' ? Math.round(fit * 100) : zoom} onChange={event => commands.run('view.zoom.set',{percent:Number(event.target.value)})} /><span className="presentation-zoom-value">{Math.round(scale * 100)}%</span><CommandAction registry={commands.registry} run={commands.run} id="view.focus" className="presentation-icon-button" iconOnly/></div></footer>
+    {historyOpen&&<dialog ref={historyDialog} className="hcd-restore-dialog fixed-history-dialog" aria-label={t('revisionHistory')} onCancel={event=>{event.preventDefault();if(!selectionLoading)closeRevisionHistory()}}><div className="presentation-panel-heading"><strong>{t('revisionHistory')}</strong>{revisionSelection&&<button type="button" onClick={clearRevisionSelection}>← {t('revisionHistory')}</button>}<button className="presentation-icon-button" aria-label={t('close')} onClick={closeRevisionHistory}><EditorIcon name="close" /></button></div><div className="fixed-history-body">{selectionLoading&&<p role="status">{t('loadingRevision')}</p>}
+      {revisionSelection?<RevisionReview session={session} selection={revisionSelection} latest={revision} unsaved={drafts.size>0||imageDrafts.size>0} canRestore={canRestoreRevision} onClose={closeRevisionHistory} onRefresh={()=>void showRevision(revisionSelection.target)} onRestore={()=>setRestoreConfirmation(true)}/>:revisionsLoading&&!revisionList.length?<p role="status">{t('loadingRevision')}</p>:<><div className="history">{revisionList.slice().reverse().map(item=><button key={item.revision} type="button" onClick={()=>void showRevision(item.revision)} aria-busy={selectionLoading} title={item.patchId}><span className="revision-avatar">{item.authorName?.slice(0,1)||(item.revision===0?'I':'?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs?new Date(item.createdAtEpochMs).toLocaleString(locale,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):''}</small></strong><small>{item.authorName||(item.revision===0?t('initialImport'):t('unknownAuthor'))} · {item.revision===0?t('imported'):item.patchId?.startsWith('restore-')?t('restoredRevision'):item.patchId==='editor-projection'?t('editorProjection'):t('contentUpdated')}</small><span>{t('viewRevision')}</span></span></button>)}</div>{revisionNextBefore!==null&&revisionNextBefore!==undefined&&<button type="button" disabled={revisionsLoading} onClick={()=>void loadRevisionPage(revisionNextBefore)}>{t('loadOlder')}</button>}{!revisionList.length&&!revisionsLoading&&<p role="status">{t('loadingRevision')}</p>}</>}
+    </div></dialog>}
+    {restoreConfirmation&&revisionSelection&&<RestoreRevisionDialog selection={revisionSelection} latest={revision} uploading={imageDrafts.uploading||imageDrafts.saving||!!imageTasks&&imageTasks.pending} allowed={canRestoreRevision} supported={directRestoreSupported(session)} uncertain={restoreUncertain} onCancel={()=>setRestoreConfirmation(false)} onConfirm={restoreRevision}/>}
     {error && <div className="presentation-error" role="alert"><span>{error}</span><button className="presentation-icon-button" onClick={() => onError('')} aria-label={t('close')}><EditorIcon name="close" /></button></div>}
     {paletteOpen&&<CommandPalette registry={commands.registry} run={commands.run} onClose={()=>setPaletteOpen(false)}/>}
   </div>

@@ -648,6 +648,16 @@
 .hcd-surface .hcd-diff-row details{padding:0 12px 12px;color:#70829c;font-size:11px}.hcd-surface .hcd-diff-before-after{display:grid;grid-template-columns:1fr 1fr;gap:12px;color:#314b6c}.hcd-surface .hcd-diff-before-after p{white-space:pre-wrap;line-height:1.7;overflow-wrap:anywhere}
 @container(max-width:760px){.hcd-surface .hcd-revision-review{padding:0 10px 20px}.hcd-surface .hcd-revision-toolbar{align-items:flex-start}.hcd-surface .hcd-diff-before-after{grid-template-columns:1fr}}
 .hcd-surface .hcd-restore-dialog{width:min(480px,calc(100vw - 32px));padding:22px;border:1px solid #d9e3f1;border-radius:10px;box-shadow:0 15px 80px #172b4d40;color:#314867;font:13px/1.7 sans-serif}.hcd-surface .hcd-restore-dialog::backdrop{background:#1b2c4766}.hcd-surface .hcd-restore-dialog h2{font-size:17px;margin:0 0 12px}.hcd-surface .hcd-restore-dialog dl{display:grid;grid-template-columns:120px 1fr;gap:7px;padding:12px;background:#f5f8fc;border-radius:5px}.hcd-surface .hcd-restore-dialog dd{margin:0;font-weight:600}.hcd-surface .hcd-restore-dialog dt{color:#7c8ea7}.hcd-surface .hcd-restore-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.hcd-surface .hcd-restore-dialog button{border:1px solid #ccdaed;border-radius:4px;background:white;color:#365782;padding:7px 12px}.hcd-surface .hcd-restore-dialog button:last-child{background:#3976c7;color:white;border-color:#3976c7}.hcd-surface .hcd-restore-dialog button:disabled{opacity:.45}
+.hcd-surface .fixed-history-dialog{width:min(1020px,calc(100vw - 48px));height:min(720px,calc(100vh - 48px));display:flex;flex-direction:column;padding:0}
+.hcd-surface .fixed-history-dialog>.presentation-panel-heading{flex:none;border-bottom:1px solid #dce3ed;background:#f6f8fc;border-radius:10px 10px 0 0}
+.hcd-surface .fixed-history-dialog>.presentation-panel-heading button{background:white;color:#365782}
+.hcd-surface .fixed-history-dialog>.fixed-history-body{flex:1;min-height:0;overflow:auto;padding:6px 22px 24px}
+.hcd-surface .fixed-history-dialog>.fixed-history-body>button:last-child{background:white;color:#365782}
+.hcd-surface .fixed-history-dialog .hcd-revision-review{max-width:none;margin:8px auto;padding:0}
+.hcd-surface .fixed-history-dialog .history{margin-top:10px}
+.hcd-surface .fixed-history-dialog .history button{border:1px solid #d9e2ef;border-radius:6px;background:#fff;padding:8px 10px}
+.hcd-surface .fixed-history-dialog .history button:hover{background:#f2f7ff}
+.hcd-surface .fixed-history-dialog .history button[aria-pressed=true]{background:#e3edfc;border-color:#aac3e6}
 
 .hcd-surface .hcd-append-paragraph{display:block;margin:4px -6px 0;padding:5px 6px;border:0;border-radius:4px;background:transparent;color:#8490a2;font-size:12px;text-align:left;opacity:0}.hcd-surface .hcd-append-paragraph:hover,.hcd-surface .hcd-append-paragraph:focus-visible{opacity:1}.hcd-surface .hcd-append-paragraph:hover{color:#346dd3;background:#f3f6fb}.hcd-surface .hcd-append-paragraph:focus-visible{outline:2px solid #3478c0;outline-offset:3px}@media(hover:none){.hcd-surface .hcd-append-paragraph{opacity:.7}}
 
