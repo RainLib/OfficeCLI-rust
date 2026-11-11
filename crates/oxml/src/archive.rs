@@ -149,6 +149,35 @@ impl StreamingOxmlRewriter {
         additions: &HashMap<String, PathBuf>,
         required_main_part: &str,
     ) -> Result<Vec<String>, PackageError> {
+        Self::rewrite_with_changes(
+            source,
+            target,
+            replacements,
+            additions,
+            &HashSet::new(),
+            required_main_part,
+        )
+    }
+
+    /// Copy every source entry except `removals`, swap in the bytes of
+    /// `replacements`, and append the parts listed in `additions`.
+    ///
+    /// A removal is a part the source carries and the export must not keep,
+    /// such as a worksheet HCD deleted. Dropping it is only half the job: the
+    /// format layer rewrites whatever pointed at it in the same pass, or the
+    /// package keeps a reference to a part that no longer exists. A removal the
+    /// source never had is a bug upstream, and a part that is also replaced or
+    /// added contradicts itself, so both fail before the target exists, as does
+    /// dropping a part no package can live without.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rewrite_with_changes(
+        source: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+        replacements: &HashMap<String, PathBuf>,
+        additions: &HashMap<String, PathBuf>,
+        removals: &HashSet<String>,
+        required_main_part: &str,
+    ) -> Result<Vec<String>, PackageError> {
         let source = source.as_ref();
         let target = target.as_ref();
         if target.exists() {
@@ -171,6 +200,24 @@ impl StreamingOxmlRewriter {
             if names.contains(addition.as_str()) || replacements.contains_key(addition) {
                 return Err(PackageError::SaveError(format!(
                     "added part is not a new package entry: {addition}"
+                )));
+            }
+        }
+        for removal in removals {
+            validate_entry_name(removal)?;
+            if !names.contains(removal.as_str()) {
+                return Err(PackageError::PartNotFound(removal.clone()));
+            }
+            if replacements.contains_key(removal) || additions.contains_key(removal) {
+                return Err(PackageError::SaveError(format!(
+                    "removed part is also rewritten by this package: {removal}"
+                )));
+            }
+            if ["[Content_Types].xml", "_rels/.rels", required_main_part]
+                .contains(&removal.as_str())
+            {
+                return Err(PackageError::SaveError(format!(
+                    "required package part cannot be removed: {removal}"
                 )));
             }
         }
@@ -204,6 +251,10 @@ impl StreamingOxmlRewriter {
 
         for (index, entry) in entries.iter().enumerate() {
             let name = entry.name.clone();
+            if removals.contains(&name) {
+                changed.push(name);
+                continue;
+            }
             if let Some(replacement) = replacements.get(&name) {
                 let original = archive.by_index(index)?;
                 let options = SimpleFileOptions::default()
@@ -525,6 +576,113 @@ mod tests {
             );
             assert!(!target.exists());
         }
+    }
+
+    #[test]
+    fn rewrite_with_changes_drops_a_part_and_keeps_other_entries_raw() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let target = temp.path().join("target.docx");
+        write_test_package_with_extra(
+            &source,
+            b"<w:document xmlns:w=\"urn:test\"><w:body/></w:document>",
+            "word/deleted.xml",
+            b"<w:document xmlns:w=\"urn:test\"><w:body/></w:document>",
+        );
+
+        let removals = HashSet::from(["word/deleted.xml".to_string()]);
+        let changed = StreamingOxmlRewriter::rewrite_with_changes(
+            &source,
+            &target,
+            &HashMap::new(),
+            &HashMap::new(),
+            &removals,
+            "word/document.xml",
+        )
+        .unwrap();
+
+        assert_eq!(changed, vec!["word/deleted.xml".to_string()]);
+        let archive = ZipArchive::new(File::open(&target).unwrap()).unwrap();
+        assert_eq!(
+            archive
+                .file_names()
+                .filter(|name| *name == "word/deleted.xml")
+                .count(),
+            0,
+            "removed part is still in the package"
+        );
+        for kept in ["[Content_Types].xml", "_rels/.rels", "word/document.xml"] {
+            assert_eq!(
+                raw_entry(&source, kept),
+                raw_entry(&target, kept),
+                "raw compressed payload changed for {kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_with_changes_refuses_a_removal_that_would_break_the_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let target = temp.path().join("target.docx");
+        write_test_package_with_extra(
+            &source,
+            b"<w:document xmlns:w=\"urn:test\"><w:body/></w:document>",
+            "word/deleted.xml",
+            b"<w:document xmlns:w=\"urn:test\"><w:body/></w:document>",
+        );
+
+        for name in [
+            "word/never-had.xml",
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "word/document.xml",
+        ] {
+            let removals = HashSet::from([name.to_string()]);
+            let error = StreamingOxmlRewriter::rewrite_with_changes(
+                &source,
+                &target,
+                &HashMap::new(),
+                &HashMap::new(),
+                &removals,
+                "word/document.xml",
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(name), "{error}");
+            assert!(!target.exists());
+        }
+
+        let replacement = temp.path().join("document.xml");
+        std::fs::write(&replacement, b"<w:document xmlns:w=\"urn:test\"/>").unwrap();
+        let removals = HashSet::from(["word/deleted.xml".to_string()]);
+        let replacements = HashMap::from([("word/deleted.xml".to_string(), replacement)]);
+        let error = StreamingOxmlRewriter::rewrite_with_changes(
+            &source,
+            &target,
+            &replacements,
+            &HashMap::new(),
+            &removals,
+            "word/document.xml",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("also rewritten"), "{error}");
+        assert!(!target.exists());
+    }
+
+    fn write_test_package_with_extra(path: &Path, document: &[u8], extra: &str, bytes: &[u8]) {
+        let file = File::create(path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("[Content_Types].xml", options).unwrap();
+        zip.write_all(b"<Types/>").unwrap();
+        zip.start_file("_rels/.rels", options).unwrap();
+        zip.write_all(b"<Relationships/>").unwrap();
+        zip.start_file("word/document.xml", options).unwrap();
+        zip.write_all(document).unwrap();
+        zip.start_file(extra, options).unwrap();
+        zip.write_all(bytes).unwrap();
+        zip.finish().unwrap();
     }
 
     fn write_test_package(path: &Path, document: &[u8]) {
