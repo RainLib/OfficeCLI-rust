@@ -171,6 +171,92 @@ pub fn extract_html_image_nodes(html: &str) -> Result<BTreeMap<String, HtmlImage
     Ok(nodes)
 }
 
+/// Script faces a `text.font` patch pinned onto one mapped node.
+///
+/// Only nodes carrying `data-hcd-font-patched="true"` are reported, so a face the
+/// source document already had (recorded on the run wrapper as `data-hcd-font*`
+/// without a patch marker) stays out of this map and out of any rewrite.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HtmlFontNode {
+    pub latin: Option<String>,
+    pub east_asia: Option<String>,
+    pub bidi: Option<String>,
+}
+
+impl HtmlFontNode {
+    pub fn is_empty(&self) -> bool {
+        self.latin.is_none() && self.east_asia.is_none() && self.bidi.is_none()
+    }
+}
+
+pub fn extract_html_font_nodes(html: &str) -> Result<BTreeMap<String, HtmlFontNode>, HcdError> {
+    let mut reader = Reader::from_str(html);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::with_capacity(16 * 1024);
+    let mut nodes = BTreeMap::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("HTML XML parse error: {error}")))?;
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let attributes = decoded_attributes(&reader, &start)?;
+                if attributes.get("data-hcd-font-patched").map(String::as_str) != Some("true") {
+                    buffer.clear();
+                    continue;
+                }
+                let node_id = attributes.get("data-hcd-id").ok_or_else(|| {
+                    HcdError::InvalidBundle(
+                        "patched font marker is present without data-hcd-id".to_string(),
+                    )
+                })?;
+                let font = HtmlFontNode {
+                    latin: slot(&attributes, "data-hcd-font-latin")?,
+                    east_asia: slot(&attributes, "data-hcd-font-east-asia")?,
+                    bidi: slot(&attributes, "data-hcd-font-bidi")?,
+                };
+                if font.is_empty() {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "patched font node {node_id} records no script face"
+                    )));
+                }
+                if nodes.insert(node_id.clone(), font).is_some() {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "duplicate canonical font node {node_id}"
+                    )));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(nodes)
+}
+
+/// One `data-hcd-font-*` slot value. Family tokens written by `text.font` are
+/// already restricted to characters safe for an OOXML attribute, so a value that
+/// needs escaping is treated as a broken bundle rather than silently forwarded.
+fn slot(attributes: &BTreeMap<String, String>, name: &str) -> Result<Option<String>, HcdError> {
+    let Some(value) = attributes.get(name) else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err(HcdError::InvalidBundle(format!(
+            "invalid {name} value in a patched font node"
+        )));
+    }
+    if trimmed.contains(['<', '>', '"', '\'', ';', ':', '&'])
+        || trimmed.chars().any(|character| character.is_control())
+    {
+        return Err(HcdError::InvalidBundle(format!(
+            "{name} value in a patched font node contains a forbidden character"
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 fn decoded_attributes<B: std::io::BufRead>(
     reader: &Reader<B>,
     start: &quick_xml::events::BytesStart<'_>,
@@ -524,6 +610,38 @@ mod tests {
         assert_eq!(nodes.get("n_1").unwrap(), "甲&😀");
         assert_eq!(nodes.get("n_2").unwrap(), "");
         assert!(!nodes.contains_key("block"));
+    }
+
+    #[test]
+    fn font_nodes_are_only_the_patched_ones() {
+        let html = concat!(
+            r#"<span class="hcd-run" data-hcd-font-latin="Calibri">"#,
+            r#"<span data-hcd-id="n_1" data-hcd-node-hash="h">plain</span>"#,
+            r#"<span data-hcd-id="n_2" data-hcd-node-hash="h" style="font-family:'Brand Serif'" "#,
+            r#"data-hcd-font="Brand Serif" data-hcd-font-latin="Brand Serif" "#,
+            r#"data-hcd-font-east-asia="Brand Gothic" data-hcd-font-patched="true">pinned</span>"#,
+            "</span>",
+        );
+        let nodes = extract_html_font_nodes(html).unwrap();
+        assert!(nodes.is_empty() || nodes.contains_key("n_2"));
+        assert_eq!(nodes.len(), 1);
+        let font = nodes.get("n_2").expect("patched node");
+        assert_eq!(font.latin.as_deref(), Some("Brand Serif"));
+        assert_eq!(font.east_asia.as_deref(), Some("Brand Gothic"));
+        assert_eq!(font.bidi, None);
+        assert!(!nodes.contains_key("n_1"));
+    }
+
+    #[test]
+    fn a_patched_font_node_without_a_face_or_with_markup_is_broken() {
+        let missing = r#"<span data-hcd-id="n_1" data-hcd-font-patched="true">x</span>"#;
+        assert!(extract_html_font_nodes(missing).is_err());
+        let no_id = r#"<span data-hcd-font-patched="true">x</span>"#;
+        assert!(extract_html_font_nodes(no_id).is_err());
+        let markup = r#"<span data-hcd-id="n_1" data-hcd-font-patched="true" data-hcd-font-latin="A<b">x</span>"#;
+        assert!(extract_html_font_nodes(markup).is_err());
+        let blank = r#"<span data-hcd-id="n_1" data-hcd-font-patched="true" data-hcd-font-latin="  ">x</span>"#;
+        assert!(extract_html_font_nodes(blank).is_err());
     }
 
     #[test]

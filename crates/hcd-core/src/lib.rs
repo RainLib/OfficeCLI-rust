@@ -29,8 +29,8 @@ pub use hash::{
     hash_bytes, hash_file, hash_reader, node_bloom, node_bloom_might_contain, stable_node_id,
 };
 pub use html::{
-    extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, validate_css_text,
-    HtmlImageNode,
+    extract_html_font_nodes, extract_html_image_nodes, extract_html_text_nodes, image_visual_hash,
+    validate_css_text, HtmlFontNode, HtmlImageNode,
 };
 pub use patch::{
     apply_patch, extract_image_page, extract_text_page, get_image_node, get_text_node,

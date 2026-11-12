@@ -322,6 +322,99 @@ mod tests {
     }
 
     #[test]
+    fn source_export_pins_a_patched_face_onto_its_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let bundle_path = temp.path().join("document.hcd");
+        let exported = temp.path().join("exported.docx");
+        create_fixture(&source);
+        import_docx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("font-test"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let text = hcd_core::extract_text_page(&bundle, None, 100).unwrap();
+        let hello = text
+            .entries
+            .iter()
+            .find(|entry| entry.text == "Hello 😀 World")
+            .expect("fixture run");
+        let themed = text
+            .entries
+            .iter()
+            .find(|entry| entry.text == "主题中文")
+            .expect("fixture theme-resolved run");
+        hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-test".to_string(),
+                patch_id: "font-pin".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![
+                    PatchOperation::TextFont {
+                        node_id: hello.node_id.clone(),
+                        font: hcd_core::FontPatch {
+                            latin: Some("Brand Serif".to_string()),
+                            east_asia: None,
+                            bidi: None,
+                        },
+                        precondition: NodePrecondition {
+                            node_hash: hello.node_hash.clone(),
+                        },
+                    },
+                    PatchOperation::TextFont {
+                        node_id: themed.node_id.clone(),
+                        font: hcd_core::FontPatch {
+                            latin: Some("Brand Serif".to_string()),
+                            east_asia: Some("Brand Gothic".to_string()),
+                            bidi: Some("Brand Naskh".to_string()),
+                        },
+                        precondition: NodePrecondition {
+                            node_hash: themed.node_hash.clone(),
+                        },
+                    },
+                ],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+
+        let report =
+            export_docx(&bundle_path, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(
+            report
+                .preserved
+                .iter()
+                .any(|line| line.contains("run fonts pinned by text.font")),
+            "{:?}",
+            report.preserved
+        );
+        let xml = read_zip_entry(&exported, "word/document.xml");
+        assert!(xml.contains("w:ascii=\"Brand Serif\""), "{xml}");
+        assert!(xml.contains("w:hAnsi=\"Brand Serif\""), "{xml}");
+        assert!(xml.contains("w:eastAsia=\"Brand Gothic\""), "{xml}");
+        assert!(xml.contains("w:cs=\"Brand Naskh\""), "{xml}");
+        // a pinned slot's theme attribute would win over the literal family, so it
+        // has to go; the runs this patch never touched keep theirs
+        assert!(!xml.contains("minorHAnsi"), "{xml}");
+        assert!(!xml.contains("majorEastAsia"), "{xml}");
+        assert!(!xml.contains("majorHAnsi"), "{xml}");
+        // the text and the rest of each run's properties survive
+        assert!(xml.contains("Hello 😀 World"), "{xml}");
+        assert!(xml.contains("主题中文"), "{xml}");
+        assert!(xml.contains("w:themeColor=\"accent2\""), "{xml}");
+        assert!(xml.contains("w:eastAsia=\"zh-CN\""), "{xml}");
+        // neither pinned run needed new properties, and no other run gained any
+        assert_eq!(xml.matches("<w:rPr>").count(), 2, "{xml}");
+    }
+
+    #[test]
     fn validator_rejects_a_corrupted_revision_chain() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.docx");
