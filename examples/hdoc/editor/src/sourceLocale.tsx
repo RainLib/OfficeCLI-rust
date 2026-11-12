@@ -65,6 +65,8 @@ const sourceEn: Record<string, string> = {
   '把整段的字体改成钉住主题的字体': 'Set the whole paragraph to a font from the pinned theme',
   '把光标移到段落里再选字体': 'Place the caret in a paragraph to choose its font',
   '清除段落字体': 'Clear the paragraph font',
+  '清除字体': 'Clear the font',
+  '去掉钉在选中文字上的主题字体，回到文档原来的字体': 'Removes the theme font pinned on the selected text and gives the text back the font the document had before',
   '文档没有钉住主题字体，先在管理后台钉住主题': 'This document pins no theme font. Pin a theme in the admin console first.',
   '字体改动会进入预览、HTML 和语义导出；保留源 PDF 的导出仍拒绝带字体的修订': 'Font changes reach the preview, HTML, and semantic exports; exports that preserve the source PDF still reject revisions carrying a font.',
 }
@@ -176,6 +178,8 @@ const sourceTw: Record<string, string> = {
   "把整段的字体改成钉住主题的字体": "把整段的字體改成釘住主題的字體",
   "把光标移到段落里再选字体": "把光標移到段落裡再選字體",
   "清除段落字体": "清除段落字體",
+  "清除字体": "清除字體",
+  "去掉钉在选中文字上的主题字体，回到文档原来的字体": "去掉釘在選中文字上的主題字體，回到文件原來的字體",
   "文档没有钉住主题字体，先在管理后台钉住主题": "文件沒有釘住主題字體，請先在管理後臺釘住主題",
   "字体改动会进入预览、HTML 和语义导出；保留源 PDF 的导出仍拒绝带字体的修订": "字體改動會進入預覽、HTML 和語義匯出；保留源 PDF 的匯出仍拒絕帶字體的修訂",
 }

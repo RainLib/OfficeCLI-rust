@@ -17,7 +17,7 @@ type Manifest = { chunkCount: number; indexPageCount: number; revision: number; 
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
 type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
 type PdfGeometry = { xPt: number; yPt: number; widthPt: number; heightPt: number }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; pinnedFont?: string }
+type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; pinnedFont?: string; fontPinned?: boolean }
 type ShapeDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PptxGeometry; current: PptxGeometry; shape: HTMLElement }
 type PdfDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PdfGeometry; current: PdfGeometry; shape: HTMLElement; pointsPerPixel: number }
 function pptxGeometry(element: Element | null): PptxGeometry | undefined {
@@ -339,6 +339,29 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(`${String(cause)}。请重新选择文字后重试。`); return null }
     finally { setSaving(false) }
   }
+  async function clearFont(node: TextNode): Promise<number | null> {
+    if (readOnly || historical || !node.editable || saving || historyBusy) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/37', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'text.font.clear', nodeId: node.nodeId,
+            precondition: { nodeHash: node.nodeHash } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '清除钉住字体')
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setRefresh(previous => previous + 1)
+      setSelected(null)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字后重试。`); return null }
+    finally { setSaving(false) }
+  }
   async function saveGeometry(node: TextNode, geometry: PptxGeometry): Promise<number | null> {
     if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || !node.geometry || draft !== node.text) return null
     setSaving(true)
@@ -496,6 +519,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
         const option = themeFonts.find(item => item.family === event.target.value)
         if (option) void saveFont(selected.node, option)
       }}><option value="">{localizeSource(locale, themeFonts.length ? '选择主题字体' : '无钉住字体')}</option>{themeFonts.map(option => <option key={option.family} value={option.family}>{option.family}</option>)}</select></label>}
+      {selected && !readOnly && !historical && selected.node.fontPinned && <button disabled={saving || historyBusy || !selected.node.editable} title={localizeSource(locale, '去掉钉在选中文字上的主题字体，回到文档原来的字体')} onClick={() => void clearFont(selected.node)}><LocalText source={"清除字体"} /></button>}
       {selected && !readOnly && !historical && session.format === 'pdf' && themeFonts.length > 0 && <span className="ribbon-note">{localizeSource(locale, '字体改动会进入预览、HTML 和语义导出；保留源 PDF 的导出仍拒绝带字体的修订')}</span>}
       {selected && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}><LocalText source={"保存修改"} /></button>}
       {selected?.node.pdfGeometry && !readOnly && !historical && <button disabled={saving || draft !== selected.node.text} onClick={() => void deletePdfText(selected.node)}><LocalText source={"删除文字框"} /></button>}
@@ -650,6 +674,10 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           fontSize: position?.fontSize, fontFamily: position?.fontFamily, fontWeight: position?.fontWeight,
           fontStyle: position?.fontStyle, color: position?.color, lineHeight: position?.lineHeight,
           pinnedFont: element?.getAttribute('data-hcd-font') || anchor?.getAttribute('data-hcd-font') || undefined,
+          // Only a patch writes this marker, so a face the source document carried
+          // never shows a clear button it could not honour.
+          fontPinned: element?.getAttribute('data-hcd-font-patched') === 'true'
+            || anchor?.getAttribute('data-hcd-font-patched') === 'true',
         }
       })
       const hashes = Array.from(new Set(Array.from(chunk.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1])))
