@@ -3356,6 +3356,33 @@ pub(crate) fn export_pptx(
         std::fs::write(&path, BLANK_PPTX_SLIDE_XML)?;
         blank_slides.insert(addition.slide_part.clone(), path);
     }
+    // A page HCD copied is the source package's page again under a name the
+    // package does not carry yet. Which copies still stand, and which of them
+    // cancelled out, has to be settled before any part is rebuilt: a copy that
+    // this history also wrote on is rebuilt from the page it was made from rather
+    // than carried over as bytes.
+    let mut copy_parts: BTreeMap<String, String> = BTreeMap::new();
+    let mut cancelled_copies: BTreeSet<String> = BTreeSet::new();
+    for copy in &copied_slides {
+        if cancelled_parts.contains(copy.slide_part.as_str()) {
+            cancelled_copies.insert(copy.slide_part.clone());
+            continue;
+        }
+        slide_file_name(&copy.slide_part)?;
+        if archive.contains(&copy.slide_part) {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX slide copy {} is already in the source presentation",
+                copy.slide_part
+            )));
+        }
+        if !archive.contains(&copy.source_slide_part) {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX slide copy asks for {}, which the source presentation does not hold",
+                copy.source_slide_part
+            )));
+        }
+        copy_parts.insert(copy.slide_part.clone(), copy.source_slide_part.clone());
+    }
     let mut addition_paths: HashMap<String, PathBuf> = HashMap::new();
     for part in replacements
         .keys()
@@ -3380,21 +3407,31 @@ pub(crate) fn export_pptx(
                 &formats,
             )
         };
-        match blank_slides.get(part) {
-            Some(template) => {
-                let mut input = File::open(template)?;
-                rewrite(&mut input, output)?;
-                addition_paths.insert(part.clone(), path);
-            }
-            None => {
-                archive
-                    .with_part(part, |input| {
-                        rewrite(input, output)
-                            .map_err(|error| PackageError::ReadPartError(error.to_string()))
-                    })
-                    .map_err(package_error)?;
-                replacement_paths.insert(part.clone(), path);
-            }
+        if let Some(source_part) = copy_parts.get(part) {
+            // A page HCD copied that this history also wrote on has no part in the
+            // source package to rewrite in place. Its edits are rebuilt onto the
+            // page it was made from — the source's own bytes, which is what the copy
+            // was written from, not whatever a later revision has since said about
+            // that page — and come out under the copy's name.
+            archive
+                .with_part(source_part, |input| {
+                    rewrite(input, output)
+                        .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                })
+                .map_err(package_error)?;
+            addition_paths.insert(part.clone(), path);
+        } else if let Some(template) = blank_slides.get(part) {
+            let mut input = File::open(template)?;
+            rewrite(&mut input, output)?;
+            addition_paths.insert(part.clone(), path);
+        } else {
+            archive
+                .with_part(part, |input| {
+                    rewrite(input, output)
+                        .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                })
+                .map_err(package_error)?;
+            replacement_paths.insert(part.clone(), path);
         }
     }
     // A slide nobody typed into yet is still a slide the package has to carry.
@@ -3495,34 +3532,10 @@ pub(crate) fn export_pptx(
             replacement_paths.insert(part.to_string(), path);
         }
     }
-    // A page HCD copied is the source package's page again under a name the
-    // package does not carry yet. The slide part and its relationship list are
-    // written from the page it was made from, byte for byte, and each of the three
-    // control lists gains one entry. Where that entry stands is not decided here:
-    // the presentation's list is put in the order the index holds right below, and
-    // that is what stands the copy behind the page it came from.
-    let mut copy_parts: BTreeMap<String, String> = BTreeMap::new();
-    let mut cancelled_copies: BTreeSet<String> = BTreeSet::new();
-    for copy in &copied_slides {
-        if cancelled_parts.contains(copy.slide_part.as_str()) {
-            cancelled_copies.insert(copy.slide_part.clone());
-            continue;
-        }
-        slide_file_name(&copy.slide_part)?;
-        if archive.contains(&copy.slide_part) {
-            return Err(HcdError::InvalidBundle(format!(
-                "PPTX slide copy {} is already in the source presentation",
-                copy.slide_part
-            )));
-        }
-        if !archive.contains(&copy.source_slide_part) {
-            return Err(HcdError::InvalidBundle(format!(
-                "PPTX slide copy asks for {}, which the source presentation does not hold",
-                copy.source_slide_part
-            )));
-        }
-        copy_parts.insert(copy.slide_part.clone(), copy.source_slide_part.clone());
-    }
+    // Each standing copy gains one entry in the three control lists. Where that
+    // entry stands is not decided here: the presentation's list is put in the
+    // order the index holds right below, and that is what stands the copy behind
+    // the page it came from.
     if !copy_parts.is_empty() {
         let content_types =
             current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
@@ -3540,13 +3553,15 @@ pub(crate) fn export_pptx(
         let mut slide_children = Vec::new();
         for (index, (part, source_part)) in copy_parts.iter().enumerate() {
             let file_name = slide_file_name(part)?;
-            // The page exactly as the source package holds it. What this history
-            // said about the page it was copied from after the copy was made
-            // belongs to that page alone: a copy does not go on changing.
-            let part_path = scratch
-                .path()
-                .join(safe_temp_name(&format!("copied-slide-{part}")));
-            {
+            // The page exactly as the source package holds it — unless this history
+            // also wrote on the copy, in which case the page rebuilt above already
+            // stands under its name. Either way, what this history said about the
+            // page it was copied from belongs to that page alone: a copy does not go
+            // on changing with its original.
+            if !addition_paths.contains_key(part.as_str()) {
+                let part_path = scratch
+                    .path()
+                    .join(safe_temp_name(&format!("copied-slide-{part}")));
                 let mut output = File::create(&part_path)?;
                 archive
                     .with_part(source_part, |input| {
@@ -3554,8 +3569,8 @@ pub(crate) fn export_pptx(
                             .map_err(|error| PackageError::ReadPartError(error.to_string()))
                     })
                     .map_err(package_error)?;
+                addition_paths.insert(part.clone(), part_path);
             }
-            addition_paths.insert(part.clone(), part_path);
             // The relationship list travels with it, because the page names its
             // pictures by the ids that list holds: the copy points at the same
             // media the original does, and the ids still resolve because the copy
@@ -3783,9 +3798,17 @@ pub(crate) fn export_pptx(
         });
     }
     for (part, source_part) in &copy_parts {
+        // The copy is written from the page the source holds, and this history's own
+        // edits on the copy are rebuilt onto it; an edit on the page it came from
+        // never reaches the copy.
+        let followed = if dirty_parts.contains(part.as_str()) {
+            "; the copy carries the edits this history wrote on it, rebuilt onto the page it was made from"
+        } else {
+            "; what this history wrote on the page it was copied from after the copy was made does not reach it"
+        };
         warnings.push(FidelityWarning {
             code: "PPTX_SLIDE_COPY".to_string(),
-            message: format!("slide {part} was copied in HCD from {source_part}; the export wrote that page again under a name the source package did not carry, with its own relationship list, entry in the presentation's slide list, and content-type override"),
+            message: format!("slide {part} was copied in HCD from {source_part}; the export wrote that page again under a name the source package did not carry, with its own relationship list, entry in the presentation's slide list, and content-type override{followed}"),
             node_id: None,
             source_part: Some(part.clone()),
         });
@@ -7330,6 +7353,159 @@ mod tests {
             ]
         );
         assert!(validate_bundle(&reopened_bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn an_edit_on_a_copied_page_is_rebuilt_onto_the_page_it_was_made_from() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("edited-copy.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-then-edit-the-copy"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+
+        // The copy is addressed by its own name and holds its own node ids, which
+        // are not the ids of the page it was made from.
+        let entries = extract_text_page(&bundle, None, 200).unwrap().entries;
+        let text_node = |part: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.source.part == part && entry.text == "样式 😀")
+                .cloned()
+                .unwrap_or_else(|| panic!("no text node naming {part}"))
+        };
+        let copied = text_node("ppt/slides/slide3.xml");
+        assert_ne!(copied.node_id, text_node("ppt/slides/slide2.xml").node_id);
+
+        let editor = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "edit-the-copy".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: copied.node_id.clone(),
+                start: 0,
+                delete_count: 2,
+                insert_text: "已复制".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: copied.node_hash.clone(),
+                },
+            }],
+        };
+        let result = apply_patch(&bundle, &editor, 1).unwrap();
+        assert_eq!(result.revision, 2);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "PPTX_SLIDE_COPY"
+                    && warning
+                        .source_part
+                        .as_deref()
+                        .is_some_and(|part| part == "ppt/slides/slide3.xml")
+                    && warning
+                        .message
+                        .contains("the copy carries the edits this history wrote on it")),
+            "{:?}",
+            report.warnings
+        );
+
+        // The copy has no part in the source package to rewrite in place, so it is
+        // rebuilt onto the page it was made from: the new words land on the copy,
+        // the formatting the page was copied with stays, and the page it was copied
+        // from keeps its own words.
+        let copy = read_zip_entry(&exported, "ppt/slides/slide3.xml");
+        assert!(copy.contains("已复制 😀"), "{copy}");
+        assert!(!copy.contains("样式"), "{copy}");
+        assert!(copy.contains("sz=\"2400\""), "{copy}");
+        assert!(copy.contains("rot=\"5400000\""), "{copy}");
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/slide2.xml"),
+            read_zip_entry(&source, "ppt/slides/slide2.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels"),
+            read_zip_entry(&source, "ppt/slides/_rels/slide2.xml.rels")
+        );
+
+        // The package still gains only the copy's own page and relationship list.
+        let mut expected_names = zip_entry_names(&source);
+        expected_names.push("ppt/slides/slide3.xml".to_string());
+        expected_names.push("ppt/slides/_rels/slide3.xml.rels".to_string());
+        expected_names.sort();
+        let mut written_names = zip_entry_names(&exported);
+        written_names.sort();
+        assert_eq!(written_names, expected_names);
+        assert_eq!(
+            slide_part_order(
+                &read_zip_entry(&exported, "ppt/presentation.xml"),
+                &read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels"),
+            ),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+
+        // Re-importing the export shows the edit on the copy alone.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened_manifest = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("copy-then-edit-the-copy"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened = Bundle::open(&reopened_path).unwrap();
+        assert!(validate_bundle(&reopened).unwrap().valid);
+        let texts = extract_text_page(&reopened, None, 200).unwrap().entries;
+        assert!(
+            texts
+                .iter()
+                .any(|entry| entry.source.part == "ppt/slides/slide3.xml"
+                    && entry.text == "已复制 😀")
+        );
+        assert!(texts
+            .iter()
+            .any(|entry| entry.source.part == "ppt/slides/slide2.xml" && entry.text == "样式 😀"));
+        assert_eq!(
+            index_slide_order(&reopened, &reopened_manifest),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
     }
 
     #[test]
