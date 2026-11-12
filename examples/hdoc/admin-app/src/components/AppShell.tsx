@@ -6,6 +6,7 @@ import {
   Moon,
   Palette,
   RefreshCw,
+  ScrollText,
   Sun,
   Type,
   Upload,
@@ -32,8 +33,9 @@ export interface NavGroup {
 }
 
 /**
- * Two authority groups, one page each: the catalog (管理) and the documents
- * that pin it (内容). Nothing is stacked below a list any more.
+ * Groups follow authority, not screen space: the catalog is managed here
+ * (目录管理), the documents that pin it are content (内容), and what the
+ * changes actually left behind is read-only trail (留痕).
  */
 export const NAV: NavGroup[] = [
   {
@@ -69,6 +71,17 @@ export const NAV: NavGroup[] = [
         label: "文档",
         hint: "本服务文档的钉版状态",
         icon: <FileText />,
+      },
+    ],
+  },
+  {
+    title: "留痕",
+    items: [
+      {
+        route: "audit",
+        label: "操作记录",
+        hint: "谁在什么时候改了什么",
+        icon: <ScrollText />,
       },
     ],
   },

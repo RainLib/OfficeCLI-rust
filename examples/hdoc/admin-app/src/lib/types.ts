@@ -115,6 +115,27 @@ export interface FontDeleteReport {
   removedBlobs: string[];
 }
 
+/**
+ * One appended catalog operation. `detail` is omitted by the server when it is
+ * empty, and an older line may carry an action this build has no name for, so
+ * both fields are read as text rather than as a closed union.
+ */
+export interface AuditEntry {
+  at: number;
+  action: string;
+  target: string;
+  actor: string;
+  detail?: string;
+}
+
+export interface AuditPage {
+  entries: AuditEntry[];
+  /** Lines that could not be read as records, so a short list is not the whole trail. */
+  unreadable: number;
+  /** The limit the server actually applied. */
+  limit: number;
+}
+
 /** A face picked off disk, before its bytes are stored as a blob. */
 export interface PendingFace {
   name: string;

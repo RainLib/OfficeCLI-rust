@@ -41,6 +41,63 @@ export function formatDate(epochMs: number): string {
   return new Date(epochMs).toLocaleDateString("zh-CN");
 }
 
+/** Log rows are read in order, so the seconds have to show. */
+export function formatDateTime(epochMs: number): string {
+  return new Date(epochMs).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+/**
+ * Names for the actions this build writes. A log line may carry an action from a
+ * newer build, so an unknown id is shown as itself rather than guessed away.
+ */
+export const AUDIT_ACTION_NAMES: Record<string, string> = {
+  "font.bytes.put": "存入字库",
+  "font.revision.put": "登记字体修订",
+  "font.revision.delete": "删除字体修订",
+  "font.delete": "删除字体",
+  "theme.put": "保存主题",
+  "theme.retire": "退役主题",
+  "theme.unretire": "取消退役",
+  "theme.delete": "删除主题",
+  "document.theme.pin": "钉上主题",
+  "document.theme.unpin": "取消钉版",
+};
+
+export function auditActionName(action: string): string {
+  return AUDIT_ACTION_NAMES[action] ?? action;
+}
+
+export type AuditGroup = "font" | "theme" | "document";
+
+export const AUDIT_GROUP_NAMES: Record<AuditGroup, string> = {
+  font: "字体",
+  theme: "主题",
+  document: "文档钉版",
+};
+
+/** Which half of the catalog a line belongs to, for the filter. */
+export function auditGroup(action: string): AuditGroup | null {
+  if (action.startsWith("font.")) return "font";
+  if (action.startsWith("theme.")) return "theme";
+  if (action.startsWith("document.")) return "document";
+  return null;
+}
+
+/** Removing something reads louder than adding it, so the row tone follows that. */
+export function auditTone(action: string): "destructive" | "warning" | "secondary" {
+  if (action.endsWith(".delete")) return "destructive";
+  if (action === "theme.retire") return "warning";
+  return "secondary";
+}
+
 export function licenseExpired(license: FontLicense): boolean {
   if (license.expiresAtEpochMs === undefined) return false;
   return Date.now() > license.expiresAtEpochMs;

@@ -1,4 +1,5 @@
 import type {
+  AuditPage,
   CatalogFont,
   DocumentSummary,
   FontDeleteReport,
@@ -102,6 +103,12 @@ export const api = {
   themes: () => json<ThemeRevision[]>("/v1/catalog/themes"),
   retiredThemes: () => json<string[]>("/v1/catalog/themes/retired"),
   documents: () => json<DocumentSummary[]>("/v1/documents"),
+
+  /**
+   * The catalog operation log, newest first. The server applies its own ceiling,
+   * so a large `limit` asks for the tail of the trail rather than all of it.
+   */
+  audit: (limit = 100) => json<AuditPage>(`/v1/catalog/audit?limit=${limit}`),
 
   /** Store one font binary; the catalog answers with its sha256. */
   putBlob: (

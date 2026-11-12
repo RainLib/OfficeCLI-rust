@@ -2,6 +2,7 @@ import { AppShell } from "@/components/AppShell";
 import { ToastProvider } from "@/components/Toast";
 import { useRoute } from "@/lib/router";
 import { CatalogProvider } from "@/state/CatalogProvider";
+import { AuditView } from "@/views/AuditView";
 import { DocumentsView } from "@/views/DocumentsView";
 import { FontsView } from "@/views/FontsView";
 import { OverviewView } from "@/views/OverviewView";
@@ -27,6 +28,8 @@ function Routes({
       return <PreviewView />;
     case "documents":
       return <DocumentsView />;
+    case "audit":
+      return <AuditView />;
     default:
       return <OverviewView onNavigate={onNavigate} />;
   }
