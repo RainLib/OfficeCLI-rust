@@ -79,76 +79,6 @@ fn split_run_child(node: &WordNode, offset: usize) -> (Option<WordNode>, Option<
     (None, Some(node.clone()))
 }
 
-#[cfg(test)]
-mod split_run_tests {
-    use super::*;
-
-    fn text(value: &str) -> WordNode {
-        WordNode::new(WordElementType::Text).with_text(value)
-    }
-
-    #[test]
-    fn splits_chinese_after_leading_tab_without_panicking() {
-        let run = WordNode::new(WordElementType::Run)
-            .with_attribute("rsidRPr", "004E3B96")
-            .with_children(vec![
-                WordNode::new(WordElementType::RunProperties),
-                WordNode::new(WordElementType::Tab),
-                text("采购合同条件"),
-            ]);
-        // The contract's /body/p[85]/r[2][1..6]: split off the tab, then
-        // enclose five Chinese characters, leaving the final character intact.
-        let (left, rest) = split_run_at_offset(&run, 1);
-        let (middle, right) = split_run_at_offset(&rest.unwrap(), "采购合同条".len());
-        let (left, middle, right) = (left.unwrap(), middle.unwrap(), right.unwrap());
-        assert_eq!(left.paragraph_text(), "\t");
-        assert_eq!(middle.paragraph_text(), "采购合同条");
-        assert_eq!(right.paragraph_text(), "件");
-        for fragment in [&left, &middle, &right] {
-            assert_eq!(fragment.attributes, run.attributes);
-            assert!(fragment.run_properties().is_some());
-        }
-    }
-
-    #[test]
-    fn preserves_all_text_and_non_text_children_at_every_boundary() {
-        let run = WordNode::new(WordElementType::Run).with_children(vec![
-            WordNode::new(WordElementType::RunProperties),
-            WordNode::new(WordElementType::Unknown("fldChar".into()))
-                .with_attribute("fldCharType", "begin"),
-            text("甲😀"),
-            WordNode::new(WordElementType::Tab),
-            text("乙 丙"),
-            WordNode::new(WordElementType::Break),
-            WordNode::new(WordElementType::Drawing),
-            text("丁"),
-        ]);
-        let original = run.paragraph_text();
-        for offset in original
-            .char_indices()
-            .map(|(i, _)| i)
-            .chain([original.len()])
-        {
-            let (left, right) = split_run_at_offset(&run, offset);
-            let fragments: Vec<_> = left.into_iter().chain(right).collect();
-            let combined: String = fragments.iter().map(WordNode::paragraph_text).collect();
-            assert_eq!(combined, original, "offset={offset}");
-            let children: Vec<_> = fragments.iter().flat_map(|n| &n.children).collect();
-            for kind in [
-                WordElementType::Tab,
-                WordElementType::Break,
-                WordElementType::Drawing,
-                WordElementType::Unknown("fldChar".into()),
-            ] {
-                assert_eq!(
-                    children.iter().filter(|n| n.element_type == kind).count(),
-                    1
-                );
-            }
-        }
-    }
-}
-
 /// Build a new run carrying `text`, inheriting the source run's rPr (so the
 /// replacement keeps the original formatting unless overridden later).
 pub fn build_run_with_text(source_run: &WordNode, text: &str) -> WordNode {
@@ -776,4 +706,74 @@ fn build_pborder_children(value: &str) -> Vec<WordNode> {
         }
     }
     entries
+}
+
+#[cfg(test)]
+mod split_run_tests {
+    use super::*;
+
+    fn text(value: &str) -> WordNode {
+        WordNode::new(WordElementType::Text).with_text(value)
+    }
+
+    #[test]
+    fn splits_chinese_after_leading_tab_without_panicking() {
+        let run = WordNode::new(WordElementType::Run)
+            .with_attribute("rsidRPr", "004E3B96")
+            .with_children(vec![
+                WordNode::new(WordElementType::RunProperties),
+                WordNode::new(WordElementType::Tab),
+                text("采购合同条件"),
+            ]);
+        // The contract's /body/p[85]/r[2][1..6]: split off the tab, then
+        // enclose five Chinese characters, leaving the final character intact.
+        let (left, rest) = split_run_at_offset(&run, 1);
+        let (middle, right) = split_run_at_offset(&rest.unwrap(), "采购合同条".len());
+        let (left, middle, right) = (left.unwrap(), middle.unwrap(), right.unwrap());
+        assert_eq!(left.paragraph_text(), "\t");
+        assert_eq!(middle.paragraph_text(), "采购合同条");
+        assert_eq!(right.paragraph_text(), "件");
+        for fragment in [&left, &middle, &right] {
+            assert_eq!(fragment.attributes, run.attributes);
+            assert!(fragment.run_properties().is_some());
+        }
+    }
+
+    #[test]
+    fn preserves_all_text_and_non_text_children_at_every_boundary() {
+        let run = WordNode::new(WordElementType::Run).with_children(vec![
+            WordNode::new(WordElementType::RunProperties),
+            WordNode::new(WordElementType::Unknown("fldChar".into()))
+                .with_attribute("fldCharType", "begin"),
+            text("甲😀"),
+            WordNode::new(WordElementType::Tab),
+            text("乙 丙"),
+            WordNode::new(WordElementType::Break),
+            WordNode::new(WordElementType::Drawing),
+            text("丁"),
+        ]);
+        let original = run.paragraph_text();
+        for offset in original
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([original.len()])
+        {
+            let (left, right) = split_run_at_offset(&run, offset);
+            let fragments: Vec<_> = left.into_iter().chain(right).collect();
+            let combined: String = fragments.iter().map(WordNode::paragraph_text).collect();
+            assert_eq!(combined, original, "offset={offset}");
+            let children: Vec<_> = fragments.iter().flat_map(|n| &n.children).collect();
+            for kind in [
+                WordElementType::Tab,
+                WordElementType::Break,
+                WordElementType::Drawing,
+                WordElementType::Unknown("fldChar".into()),
+            ] {
+                assert_eq!(
+                    children.iter().filter(|n| n.element_type == kind).count(),
+                    1
+                );
+            }
+        }
+    }
 }
