@@ -18,9 +18,24 @@ export function editorThemeRules(): string {
   return '.hcd-editor-body{font-family:var(--hcd-minor-latin,var(--hcd-major-latin))}.hcd-editor-body h1,.hcd-editor-body h2{font-family:var(--hcd-major-latin,var(--hcd-minor-latin))}'
 }
 
-function themeRequestUrl(session: Session, revision: number | null): string {
+/**
+ * Delimiter `pin_document_theme` writes into the document's own stylesheet. When
+ * it is there, the document already carries the theme variables and the rules
+ * that use them, so a surface rendering that stylesheet only needs the bytes.
+ */
+export const THEME_REGION_MARK = '/* hcd-theme-begin */'
+
+export function hasThemeRegion(styles: string): boolean {
+  return styles.includes(THEME_REGION_MARK)
+}
+
+function themeRequestUrl(session: Session, revision: number | null, facesOnly: boolean): string {
   const base = `${session.apiUrl || '/v1/documents'}/${encodeURIComponent(session.documentId)}/theme`
-  return revision === null ? base : `${base}?revision=${encodeURIComponent(String(revision))}`
+  const query = new URLSearchParams()
+  if (revision !== null) query.set('revision', String(revision))
+  if (facesOnly) query.set('faces', 'only')
+  const suffix = query.toString()
+  return suffix ? `${base}?${suffix}` : base
 }
 
 function fontRequestUrl(session: Session, href: string): string {
@@ -37,9 +52,19 @@ async function dataUrl(blob: Blob): Promise<string> {
   })
 }
 
+export type ThemeCssOptions = {
+  /** Append the editor's own rules that apply the theme variables. */
+  editor?: boolean
+  /** Ask for the `@font-face` rules alone: the caller renders a stylesheet that
+   * already carries the pinned theme, so the variables and family rules must not
+   * arrive a second time. */
+  facesOnly?: boolean
+}
+
 /** Load the pinned theme. A document with no pin resolves to an empty stylesheet. */
-export async function loadThemeCss(session: Session, revision: number | null, editor = false): Promise<string> {
-  const response = await fetch(themeRequestUrl(session, revision), {
+export async function loadThemeCss(session: Session, revision: number | null, options: ThemeCssOptions = {}): Promise<string> {
+  const { editor = false, facesOnly = false } = options
+  const response = await fetch(themeRequestUrl(session, revision, facesOnly), {
     headers: { Authorization: `Bearer ${session.token}` },
   })
   if (response.status === 404) return ''

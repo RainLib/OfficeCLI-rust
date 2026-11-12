@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import type { Editor } from '@tiptap/core'
 import { redo, redoDepth, undo, undoDepth } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
-import { loadThemeCss } from './themeCss.ts'
+import { hasThemeRegion, loadThemeCss } from './themeCss.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
@@ -213,13 +213,17 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
   }, [session])
+  // The pages render `${style}\n${themeCss}`, so the pair has to be decided
+  // together: when the document's own stylesheet already carries the pinned
+  // theme, the request asks for the font bytes alone instead of getting the
+  // same variables and family rules a second time.
   useEffect(() => {
     let live = true
-    loadThemeCss(session, viewRevision)
+    loadThemeCss(session, viewRevision, { facesOnly: hasThemeRegion(style) })
       .then(css => { if (live) setThemeCss(css) })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
-  }, [session, viewRevision])
+  }, [session, viewRevision, style])
   useEffect(() => {
     let live = true
     api(session, '/revisions').then(response => response.json())

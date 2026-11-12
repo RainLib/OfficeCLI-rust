@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { applyThemeFaces, editorThemeRules } from './themeCss.ts'
+import { applyThemeFaces, editorThemeRules, hasThemeRegion, loadThemeCss } from './themeCss.ts'
 
 const href = '/v1/documents/demo/theme/files/abcd'
 const css = `@font-face{src:url("${href}");}\n:root{--hcd-major-latin:'Source Han Sans',sans-serif;}`
@@ -10,4 +10,46 @@ const blocked = applyThemeFaces(`${css}url("https://evil.test/font")`, [{ href: 
 assert.equal(blocked.includes('https://evil.test/font'), true)
 assert.equal(blocked.includes('data:font/woff2'), false)
 assert.equal(editorThemeRules().includes('--hcd-minor-latin'), true)
+assert.equal(hasThemeRegion('article{color:#222}\n/* hcd-theme-begin */\n:root{--hcd-major-latin:\'A\'}\n/* hcd-theme-end */'), true)
+assert.equal(hasThemeRegion('article{color:#222}\n:root{--hcd-major-latin:\'A\';}'), false)
+
+// A surface that renders the document stylesheet asks for font bytes alone, and
+// gets back only the @font-face rules with the bytes inlined.
+const requested: string[] = []
+const themeCssBody = `${css}\n:root{--hcd-major-latin:'Source Han Sans',sans-serif;}`
+const fetches: string[] = []
+;(globalThis as Record<string, unknown>).fetch = async (input: string | URL, init?: { headers?: Record<string, string> }) => {
+  const url = String(input)
+  fetches.push(url)
+  requested.push(String(init?.headers?.Authorization ?? ''))
+  if (url.includes('/theme/files/')) return { ok: true, blob: async () => new Blob(['font bytes'], { type: 'font/ttf' }) }
+  if (url.includes('/theme')) {
+    // What the server does for faces=only: keep the @font-face lines, drop the rest.
+    const served = url.includes('faces=only')
+      ? themeCssBody.split('\n').filter(line => line.startsWith('@font-face{')).join('\n')
+      : themeCssBody
+    return { status: 200, ok: true, json: async () => ({ theme: { css: served, faces: [{ href, webPreview: true }] } }) }
+  }
+  return { ok: true, blob: async () => new Blob(['font bytes'], { type: 'font/ttf' }) }
+}
+;(globalThis as Record<string, unknown>).FileReader = class {
+  result = `data:font/ttf;base64,${Buffer.from('font bytes').toString('base64')}`
+  onload: (() => void) | null = null
+  onerror: (() => void) | null = null
+  readAsDataURL() { queueMicrotask(() => this.onload?.()) }
+}
+const session = { apiUrl: '/v1/documents', documentId: 'demo', token: 'doc-token' } as unknown as Parameters<typeof loadThemeCss>[0]
+const onlyFaces = await loadThemeCss(session, 3, { facesOnly: true })
+assert.equal(fetches[0], '/v1/documents/demo/theme?revision=3&faces=only')
+assert.equal(onlyFaces.includes('data:font/ttf;base64,'), true)
+assert.equal(onlyFaces.includes('--hcd-major-latin'), false)
+assert.equal(onlyFaces.includes('@font-face'), true)
+
+// Without the option the whole block still comes back, and a revision-less
+// request carries no query string at all.
+fetches.length = 0
+const fullBlock = await loadThemeCss(session, null)
+assert.equal(fetches[0], '/v1/documents/demo/theme')
+assert.equal(fullBlock.includes('--hcd-major-latin'), true)
+assert.equal(requested.every(header => header === 'Bearer doc-token'), true)
 console.log('theme css rewrite ok')

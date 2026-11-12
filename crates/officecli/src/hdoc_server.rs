@@ -965,6 +965,30 @@ struct RevisionQuery {
     revision: Option<u64>,
 }
 
+/// `GET /v1/documents/{id}/theme`. `faces=only` returns just the `@font-face`
+/// rules: the pin writes the variables and the family rules into the document's
+/// own stylesheet as a content revision, so a surface that renders that
+/// stylesheet asks for the font bytes alone instead of getting the same
+/// declarations twice.
+#[derive(Deserialize)]
+struct ThemeQuery {
+    revision: Option<u64>,
+    faces: Option<String>,
+}
+
+/// Keep only the `@font-face` lines of a resolved theme stylesheet. Each rule is
+/// emitted on its own line by `DiskCatalog::resolve`, and the declarations that
+/// belong to the document are the rest.
+fn font_faces_only(css: &str) -> String {
+    css.lines()
+        .filter(|line| line.starts_with("@font-face{"))
+        .fold(String::new(), |mut kept, line| {
+            kept.push_str(line);
+            kept.push('\n');
+            kept
+        })
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
@@ -1501,18 +1525,27 @@ fn theme_font_href(
 async fn document_theme(
     State(state): State<ServerState>,
     Path(id): Path<String>,
-    Query(query): Query<RevisionQuery>,
+    Query(query): Query<ThemeQuery>,
     headers: HeaderMap,
 ) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    let resolved = resolve_document_theme(
+    let mut resolved = resolve_document_theme(
         &state.catalog,
         &bundle,
         query.revision,
         |font_id, revision, sha| document_font_href(&id, font_id, revision, sha),
     )
     .map_err(hcd_error)?;
+    match query.faces.as_deref() {
+        None | Some("") => {}
+        Some("only") => resolved.theme.css = font_faces_only(&resolved.theme.css),
+        Some(other) => {
+            return Err(bad(format!(
+                "unknown faces value {other}; only faces=only is supported"
+            )))
+        }
+    }
     Ok(Json(resolved))
 }
 
@@ -3528,5 +3561,126 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[test]
+    fn font_faces_only_keeps_face_lines_and_drops_the_rest() {
+        let css = "@font-face{font-family:'A';src:url(data:font/ttf;base64,AAA)}\n\
+                   :root{--hcd-major-latin:'A',serif}\n\
+                   body[data-hcd-profile=\"semantic-flow\"]{font-family:var(--hcd-major-latin)}\n";
+        assert_eq!(
+            font_faces_only(css),
+            "@font-face{font-family:'A';src:url(data:font/ttf;base64,AAA)}\n"
+        );
+        // A theme with no web face stays empty: the caller asked for font bytes
+        // alone, so nothing else may slip through.
+        assert_eq!(font_faces_only(":root{--hcd-major-latin:'A',serif}\n"), "");
+    }
+
+    #[tokio::test]
+    async fn theme_faces_only_query_serves_font_bytes_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let id = "doc-a";
+        // A pin on the manifest whose stylesheet has no theme region — the shape a
+        // surface that does not render `/styles` (the semantic editor) needs served
+        // in full, and the shape `faces=only` is for everywhere else.
+        imported_bundle(
+            &temp.path().join(format!("{id}.hcd")),
+            id,
+            Some(theme.clone()),
+        );
+
+        let full = document_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(ThemeQuery {
+                revision: None,
+                faces: None,
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(full.0.theme_revision_id, theme);
+        let full = full.0.theme.css;
+        assert!(full.contains("@font-face{"), "{full}");
+        assert!(full.contains("--hcd-major-latin:"), "{full}");
+
+        let faces = document_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(ThemeQuery {
+                revision: None,
+                faces: Some("only".to_string()),
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0
+        .theme
+        .css;
+        assert!(faces.contains("@font-face{"), "{faces}");
+        assert!(!faces.contains("--hcd-major-latin:"), "{faces}");
+
+        // Any other value is refused instead of quietly serving the full block.
+        assert_eq!(
+            document_theme(
+                State(state),
+                Path(id.to_string()),
+                Query(ThemeQuery {
+                    revision: None,
+                    faces: Some("all".to_string()),
+                }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_document_gets_theme_bytes_not_a_second_copy_of_its_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let id = "doc-a";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+
+        // The pin the console and the CLI both go through: a content revision whose
+        // stylesheet is the one copy of the theme's declarations.
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody {
+                theme_revision_id: theme,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1);
+
+        let bundle = open(&state, id).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        let styles = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(styles.contains("/* hcd-theme-begin */"), "{styles}");
+        assert_eq!(styles.matches("--hcd-major-latin:").count(), 1, "{styles}");
+
+        // What the HTML presentation adds on top of that stylesheet: the bytes, and
+        // nothing that would make two stylesheets claim one document.
+        let transport = hcd_core::theme_presentation_css(&state.catalog, &bundle, None)
+            .unwrap()
+            .unwrap();
+        assert!(transport.contains("@font-face{"), "{transport}");
+        assert!(transport.contains("Demo Serif"), "{transport}");
+        assert!(!transport.contains("--hcd-major-latin:"), "{transport}");
+        assert!(!transport.contains("body[data-hcd-profile"), "{transport}");
     }
 }

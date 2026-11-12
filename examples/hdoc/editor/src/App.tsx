@@ -163,7 +163,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   useEffect(() => { saveLayout(layout) }, [layout])
   useEffect(() => {
     let live = true
-    loadThemeCss(session, historical?.revision ?? null, true)
+    loadThemeCss(session, historical?.revision ?? null, { editor: true })
       .then(css => { if (live) setThemeCss(css) })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
