@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { applyThemeFaces, editorThemeRules, hasThemeRegion, loadThemeCss } from './themeCss.ts'
+import { applyThemeFaces, editorThemeRules, hasThemeRegion, loadTheme, loadThemeCss, themeFontOptions, themeFontPatch } from './themeCss.ts'
 
 const href = '/v1/documents/demo/theme/files/abcd'
 const css = `@font-face{src:url("${href}");}\n:root{--hcd-major-latin:'Source Han Sans',sans-serif;}`
@@ -28,7 +28,21 @@ const fetches: string[] = []
     const served = url.includes('faces=only')
       ? themeCssBody.split('\n').filter(line => line.startsWith('@font-face{')).join('\n')
       : themeCssBody
-    return { status: 200, ok: true, json: async () => ({ theme: { css: served, faces: [{ href, webPreview: true }] } }) }
+    return { status: 200, ok: true, json: async () => ({ theme: { css: served, faces: [
+      { href, webPreview: true, slot: 'major-latin', family: 'Brand Serif' },
+      { href: '/v1/documents/demo/theme/files/efgh', webPreview: true, slot: 'minor-east-asia', family: 'Brand Gothic' },
+      // The same family in another slot merges into one option, not a second row.
+      { slot: 'minor-latin', family: 'Brand Gothic' },
+      { slot: 'major-bidi', family: 'Brand Naskh' },
+      // Names a text.font patch would refuse, or that fills no known slot, are not offered.
+      { slot: 'major-latin', family: 'Evil;' },
+      { slot: 'major-latin', family: '<b>Tag</b>' },
+      { slot: 'major-latin', family: 'Tab\tFace' },
+      { slot: 'huge-latin', family: 'Unknown Slot' },
+      { slot: '', family: 'No Slot' },
+      { family: '  ' },
+      { slot: 'major-latin', family: 'x'.repeat(129) },
+    ] } }) }
   }
   return { ok: true, blob: async () => new Blob(['font bytes'], { type: 'font/ttf' }) }
 }
@@ -52,4 +66,29 @@ const fullBlock = await loadThemeCss(session, null)
 assert.equal(fetches[0], '/v1/documents/demo/theme')
 assert.equal(fullBlock.includes('--hcd-major-latin'), true)
 assert.equal(requested.every(header => header === 'Bearer doc-token'), true)
+// The fixed viewer lists the families the pinned theme covers and patches
+// exactly those slots, so an option never offers a slot the theme has no face for.
+const theme = await loadTheme(session, null)
+assert.deepEqual(themeFontOptions(theme.faces), [
+  { family: 'Brand Gothic', latin: true, eastAsia: true, bidi: false },
+  { family: 'Brand Naskh', latin: false, eastAsia: false, bidi: true },
+  { family: 'Brand Serif', latin: true, eastAsia: false, bidi: false },
+])
+assert.deepEqual(themeFontPatch({ family: 'Brand Gothic', latin: true, eastAsia: true, bidi: false }),
+  { latin: 'Brand Gothic', eastAsia: 'Brand Gothic' })
+assert.deepEqual(themeFontPatch({ family: 'Brand Naskh', latin: false, eastAsia: false, bidi: true }),
+  { bidi: 'Brand Naskh' })
+// A CJK family is a legal patch value: only the characters that break an HTML
+// attribute or a CSS declaration are refused.
+assert.deepEqual(themeFontOptions([{ slot: 'minor-east-asia', family: '等线' }]),
+  [{ family: '等线', latin: false, eastAsia: true, bidi: false }])
+// A document with no pin has no css and no faces, so the viewer has nothing to offer.
+const unpinned = { apiUrl: '/v1/documents', documentId: 'fresh', token: 'doc-token' } as unknown as Parameters<typeof loadTheme>[0]
+;(globalThis as Record<string, unknown>).fetch = async (input: string | URL) => {
+  if (String(input).includes('/fresh/theme')) return { status: 404, ok: false, text: async () => 'not found' }
+  throw new Error(`unexpected request ${String(input)}`)
+}
+const noTheme = await loadTheme(unpinned, null)
+assert.deepEqual(noTheme, { css: '', faces: [] })
+assert.deepEqual(themeFontOptions(noTheme.faces), [])
 console.log('theme css rewrite ok')

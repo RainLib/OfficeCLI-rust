@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import type { Editor } from '@tiptap/core'
 import { redo, redoDepth, undo, undoDepth } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
-import { hasThemeRegion, loadThemeCss } from './themeCss.ts'
+import { hasThemeRegion, loadTheme, themeFontOptions, themeFontPatch, type ThemeFontOption } from './themeCss.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
@@ -17,7 +17,7 @@ type Manifest = { chunkCount: number; indexPageCount: number; revision: number; 
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
 type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
 type PdfGeometry = { xPt: number; yPt: number; widthPt: number; heightPt: number }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
+type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; pinnedFont?: string }
 type ShapeDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PptxGeometry; current: PptxGeometry; shape: HTMLElement }
 type PdfDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PdfGeometry; current: PdfGeometry; shape: HTMLElement; pointsPerPixel: number }
 function pptxGeometry(element: Element | null): PptxGeometry | undefined {
@@ -74,6 +74,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [viewRevision, setViewRevision] = useState<number | null>(null)
   const [themeCss, setThemeCss] = useState('')
+  const [themeFonts, setThemeFonts] = useState<ThemeFontOption[]>([])
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchTarget, setSearchTarget] = useState<SearchHit | null>(null)
@@ -123,6 +124,9 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const canUndoSaved = !draftDirty && editHistory.head === manifest?.revision && editHistory.past.length > 0
   const canRedoSaved = !draftDirty && editHistory.head === manifest?.revision && editHistory.future.length > 0
   const historyLocked = readOnly || historical || saving || historyBusy
+  // A pinned face that is not one of the theme's families stays out of the list,
+  // so the select never claims a value it cannot offer.
+  const selectedFamily = selected && themeFonts.some(item => item.family === selected.node.pinnedFont) ? selected.node.pinnedFont : null
   async function travelHistory(direction: 'undo' | 'redo') {
     const steps = direction === 'undo' ? editHistory.past : editHistory.future
     const head = manifest?.revision
@@ -219,8 +223,12 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   // same variables and family rules a second time.
   useEffect(() => {
     let live = true
-    loadThemeCss(session, viewRevision, { facesOnly: hasThemeRegion(style) })
-      .then(css => { if (live) setThemeCss(css) })
+    loadTheme(session, viewRevision, { facesOnly: hasThemeRegion(style) })
+      .then(theme => {
+        if (!live) return
+        setThemeCss(theme.css)
+        setThemeFonts(themeFontOptions(theme.faces))
+      })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
   }, [session, viewRevision, style])
@@ -305,6 +313,30 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       setSelected(null)
       return result.revision
     } catch (cause) { setError(`${String(cause)}。如文档已被其他人修改，请重新打开。`); return null }
+    finally { setSaving(false) }
+  }
+  async function saveFont(node: TextNode, option: ThemeFontOption): Promise<number | null> {
+    if (readOnly || historical || !node.editable || saving || historyBusy) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/37', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'text.font', nodeId: node.nodeId, font: themeFontPatch(option),
+            precondition: { nodeHash: node.nodeHash } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      recordEdit(result.revision, `设置字体 ${option.family}`)
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setRefresh(previous => previous + 1)
+      // The reloaded node carries a new hash, so the old selection cannot patch again.
+      setSelected(null)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字后重试。`); return null }
     finally { setSaving(false) }
   }
   async function saveGeometry(node: TextNode, geometry: PptxGeometry): Promise<number | null> {
@@ -460,6 +492,11 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示页面目录"} /></label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><button disabled={historyLocked || !canUndoSaved} onClick={() => travel('undo')}><LocalText source={"撤销 "} />{editHistory.past.length} <LocalText source={" 步"} /></button><button disabled={historyLocked || !canRedoSaved} onClick={() => travel('redo')}><LocalText source={"重做 "} />{editHistory.future.length} <LocalText source={" 步"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{manifest?.revision ?? '…'} · {editHistory.past.length ? `下一步可撤销：${editHistory.past.at(-1)?.label}` : '当前会话无已保存的可撤销步骤'}</span></>}
+      {selected && !readOnly && !historical && <label className="tool-group font-group" title={localizeSource(locale, themeFonts.length ? '把选中文字改成钉住主题的字体' : '文档没有钉住主题字体，先在管理后台钉住主题')}><LocalText source={"字体"} /><select value={selectedFamily ?? ''} disabled={saving || historyBusy || !selected.node.editable || themeFonts.length === 0} onChange={event => {
+        const option = themeFonts.find(item => item.family === event.target.value)
+        if (option) void saveFont(selected.node, option)
+      }}><option value="">{localizeSource(locale, themeFonts.length ? '选择主题字体' : '无钉住字体')}</option>{themeFonts.map(option => <option key={option.family} value={option.family}>{option.family}</option>)}</select></label>}
+      {selected && !readOnly && !historical && session.format === 'pdf' && themeFonts.length > 0 && <span className="ribbon-note">{localizeSource(locale, '字体改动会进入预览、HTML 和语义导出；保留源 PDF 的导出仍拒绝带字体的修订')}</span>}
       {selected && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}><LocalText source={"保存修改"} /></button>}
       {selected?.node.pdfGeometry && !readOnly && !historical && <button disabled={saving || draft !== selected.node.text} onClick={() => void deletePdfText(selected.node)}><LocalText source={"删除文字框"} /></button>}
       {session.format === 'pptx' && selected?.node.createdInHcd && !readOnly && !historical && <button disabled={saving || draft !== selected.node.text} onClick={() => void deletePptxText(selected.node)}><LocalText source={"删除文字框"} /></button>}
@@ -612,6 +649,7 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           pdfGeometry: session.format === 'pdf' ? pdfGeometry(anchor) : undefined,
           fontSize: position?.fontSize, fontFamily: position?.fontFamily, fontWeight: position?.fontWeight,
           fontStyle: position?.fontStyle, color: position?.color, lineHeight: position?.lineHeight,
+          pinnedFont: element?.getAttribute('data-hcd-font') || anchor?.getAttribute('data-hcd-font') || undefined,
         }
       })
       const hashes = Array.from(new Set(Array.from(chunk.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1])))
