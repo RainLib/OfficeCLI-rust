@@ -195,6 +195,26 @@ struct XlsxSheetFreeze {
     columns: u32,
 }
 
+/// One row or column a grid shift moved, seen from the frozen band of the
+/// worksheet it belongs to: where the move lands decides whether the band grows
+/// with it, narrows, or keeps the count it already named.
+#[derive(Clone, Copy)]
+enum XlsxPaneBandShift {
+    InsertRow(u32),
+    DeleteRow(u32),
+    InsertColumn(u32),
+    DeleteColumn(u32),
+}
+
+/// The frozen band a grid shift moves through, and how many rows or columns that
+/// shift asks for, so a band can be widened once per inserted row.
+#[derive(Clone)]
+struct XlsxPaneBandMove {
+    sheet_id: String,
+    shift: XlsxPaneBandShift,
+    count: u32,
+}
+
 /// Worksheet a patch creates. HCD owns the tab's grid identity, the worksheet
 /// part name the package will carry, and the tab position after every worksheet
 /// the bundle already knows.
@@ -498,6 +518,15 @@ pub fn apply_patch(
     let xlsx_column_width = collect_xlsx_column_width(patch);
     let xlsx_row_height = collect_xlsx_row_height(patch);
     let xlsx_sheet_freeze = collect_xlsx_sheet_freeze(patch);
+    // A frozen band names the rows and columns that stand inside it, so a shift
+    // that moves one through the band moves the band with it the way Excel keeps a
+    // freeze covering the window it was set on.
+    let xlsx_pane_band = xlsx_pane_band_move(
+        xlsx_row_insert.as_ref(),
+        xlsx_row_delete.as_ref(),
+        xlsx_column_insert.as_ref(),
+        xlsx_column_delete.as_ref(),
+    );
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
@@ -837,6 +866,14 @@ pub fn apply_patch(
                     grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == freeze.sheet_id
                 })
             });
+            // Every window of a shifted sheet is asked about its band, not only
+            // the windows whose own rows or columns moved: the band is the sheet's
+            // split and the export refuses a sheet whose windows disagree.
+            let pane_band_here = xlsx_pane_band.as_ref().filter(|band| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == band.sheet_id
+                })
+            });
             let rename_here = xlsx_sheet_rename.as_ref().is_some_and(|rename| {
                 descriptor
                     .grid
@@ -923,6 +960,7 @@ pub fn apply_patch(
                 && width_here.is_none()
                 && height_here.is_none()
                 && freeze_here.is_none()
+                && pane_band_here.is_none()
                 // A rename can touch a formula in any worksheet, so every chunk
                 // is inspected for references to the old tab name.
                 && xlsx_sheet_rename.is_none()
@@ -1885,6 +1923,18 @@ pub fn apply_patch(
                     );
                     chunk_changed = true;
                 }
+            }
+            if let Some(band) = pane_band_here {
+                // The band each window keeps follows the rows and columns the
+                // history moved through it, once per moved row or column. The
+                // worksheet part this sheet lives in is already marked for a
+                // rebuild by the shift itself, so a window that only its band
+                // changed needs no part of its own.
+                let mut moved = false;
+                for _ in 0..band.count {
+                    moved |= shift_xlsx_pane_band(&mut html, band.shift)?;
+                }
+                chunk_changed |= moved;
             }
             if let Some(rename) = xlsx_sheet_rename.as_ref() {
                 let mut sheet_changed_here = rename_here;
@@ -5459,6 +5509,181 @@ fn rewrite_pane_attributes(tag: &str, rows: u32, columns: u32) -> Result<String,
         set_tag_attribute(&mut pane, "data-hcd-frozen-rows", &rows.to_string());
     }
     Ok(pane)
+}
+
+/// The last row and the last column a frozen band can name: a pane has to leave a
+/// scrolling corner, so one of each stays outside it.
+const XLSX_FROZEN_ROW_LIMIT: u32 = 1_048_575;
+const XLSX_FROZEN_COLUMN_LIMIT: u32 = 16_383;
+
+/// The frozen band one worksheet keeps, moved along with a row or column the
+/// history put through it, in every window the sheet is read in. Excel freezes
+/// the rows and columns that stand inside the band, so a row inserted at or above
+/// the last frozen row is frozen from then on and a row deleted inside the band
+/// leaves it; a move below the band says nothing about it. The rule is the one the
+/// export follows when it shifts a pane the source workbook wrote, so the window
+/// attributes a shift leaves behind still describe the freeze the worksheet part
+/// carries. Returns whether any window tag changed.
+fn shift_xlsx_pane_band(html: &mut String, shift: XlsxPaneBandShift) -> Result<bool, HcdError> {
+    const MARKER: &str = "<section class=\"hcd-sheet\"";
+    let mut output = String::with_capacity(html.len());
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while let Some(offset) = html[cursor..].find(MARKER) {
+        let start = cursor + offset;
+        let gap = html[start..].find('>').ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX worksheet window is not closed".to_string())
+        })?;
+        let end = start + gap;
+        let tag = &html[start..=end];
+        output.push_str(&html[cursor..start]);
+        match shift_one_xlsx_pane_band(tag, shift)? {
+            Some(shifted) => {
+                changed = true;
+                output.push_str(&shifted);
+            }
+            None => output.push_str(tag),
+        }
+        cursor = end + 1;
+    }
+    output.push_str(&html[cursor..]);
+    if changed {
+        *html = output;
+    }
+    Ok(changed)
+}
+
+/// One window's band after one row or column moved through it. `None` means the
+/// window names no band, or this move says nothing about the one it names, so its
+/// tag is left exactly as it arrived. A window whose pane HCD wrote is rebuilt
+/// from the moved counts the way a freeze writes it; a window the importer filled
+/// in from the source workbook has only its counts moved, because the export
+/// shifts that pane itself and which corner or which pane it names is not HCD's to
+/// recompute.
+fn shift_one_xlsx_pane_band(
+    tag: &str,
+    shift: XlsxPaneBandShift,
+) -> Result<Option<String>, HcdError> {
+    let Some((held_rows, held_columns)) = xlsx_frozen_band(tag) else {
+        return Ok(None);
+    };
+    let (rows, columns) = match shift {
+        XlsxPaneBandShift::InsertRow(at) if held_rows >= at => (
+            widened_xlsx_pane_band(held_rows, XLSX_FROZEN_ROW_LIMIT)?,
+            held_columns,
+        ),
+        XlsxPaneBandShift::DeleteRow(at) if held_rows >= at && held_rows > 0 => {
+            (held_rows - 1, held_columns)
+        }
+        XlsxPaneBandShift::InsertColumn(at) if held_columns >= at => (
+            held_rows,
+            widened_xlsx_pane_band(held_columns, XLSX_FROZEN_COLUMN_LIMIT)?,
+        ),
+        XlsxPaneBandShift::DeleteColumn(at) if held_columns >= at && held_columns > 0 => {
+            (held_rows, held_columns - 1)
+        }
+        _ => return Ok(None),
+    };
+    if xlsx_attribute(tag, "data-hcd-pane-edited") == Some("true") {
+        return Ok(Some(rewrite_pane_attributes(tag, rows, columns)?));
+    }
+    let mut pane = tag.to_string();
+    for (name, count) in [
+        ("data-hcd-frozen-rows", rows),
+        ("data-hcd-frozen-columns", columns),
+    ] {
+        drop_tag_attribute(&mut pane, name)?;
+        // Excel names only the side it splits, and a reader that finds no count
+        // reads the band as empty on that side, which is what a narrowed split
+        // that ran out of rows or columns now is.
+        if count > 0 {
+            set_tag_attribute(&mut pane, name, &count.to_string());
+        }
+    }
+    Ok(Some(pane))
+}
+
+/// The band one window keeps: how many of its rows and its columns stay put.
+/// `None` means this window has no band for a shift to speak about, either because
+/// it names no count at all or because a count it does name is not one a band can
+/// hold. The bound is the same one the export reads these attributes with; a
+/// number past it came out of a workbook that froze more of its sheet than a sheet
+/// has, and that pane is the export's to shift and to refuse, not one to guess at
+/// here.
+fn xlsx_frozen_band(tag: &str) -> Option<(u32, u32)> {
+    let rows = xlsx_frozen_band_side(tag, "data-hcd-frozen-rows", XLSX_FROZEN_ROW_LIMIT);
+    let columns = xlsx_frozen_band_side(tag, "data-hcd-frozen-columns", XLSX_FROZEN_COLUMN_LIMIT);
+    match (rows, columns) {
+        // No count on either side: the window keeps no split to move.
+        (None, None) => None,
+        // A count that is not a band this shift could leave a sane number for.
+        (Some(None), _) | (_, Some(None)) => None,
+        (rows, columns) => Some((
+            rows.flatten().unwrap_or_default(),
+            columns.flatten().unwrap_or_default(),
+        )),
+    }
+}
+
+/// One side of a window's band, where the outer `None` is a side the window names
+/// no count for — nothing frozen on that side, which is how a freeze of the first
+/// row alone reads — and the inner one a count that cannot be read as a band.
+fn xlsx_frozen_band_side(tag: &str, name: &str, maximum: u32) -> Option<Option<u32>> {
+    let value = xlsx_attribute(tag, name)?;
+    Some(
+        value
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|count| *count <= maximum),
+    )
+}
+
+/// One row or column added inside the band. The last row or column of a sheet
+/// stays out of reach because a frozen pane must leave something to scroll.
+fn widened_xlsx_pane_band(count: u32, maximum: u32) -> Result<u32, HcdError> {
+    if count >= maximum {
+        return Err(HcdError::ResourceLimit(
+            "XLSX frozen band grows past the worksheet it freezes".to_string(),
+        ));
+    }
+    Ok(count + 1)
+}
+
+/// The band a grid shift moves through, from whichever grid operation this patch
+/// carries. A patch holds one operation, so at most one of these can name a sheet.
+fn xlsx_pane_band_move(
+    row_insert: Option<&XlsxRowInsert>,
+    row_delete: Option<&XlsxRowDelete>,
+    column_insert: Option<&XlsxColumnInsert>,
+    column_delete: Option<&XlsxColumnDelete>,
+) -> Option<XlsxPaneBandMove> {
+    if let Some(insert) = row_insert {
+        return Some(XlsxPaneBandMove {
+            sheet_id: insert.sheet_id.clone(),
+            shift: XlsxPaneBandShift::InsertRow(insert.before_row),
+            count: insert.count,
+        });
+    }
+    if let Some(delete) = row_delete {
+        return Some(XlsxPaneBandMove {
+            sheet_id: delete.sheet_id.clone(),
+            shift: XlsxPaneBandShift::DeleteRow(delete.row),
+            count: delete.count,
+        });
+    }
+    if let Some(insert) = column_insert {
+        return Some(XlsxPaneBandMove {
+            sheet_id: insert.sheet_id.clone(),
+            shift: XlsxPaneBandShift::InsertColumn(insert.before_column),
+            count: insert.count,
+        });
+    }
+    column_delete.map(|delete| XlsxPaneBandMove {
+        sheet_id: delete.sheet_id.clone(),
+        shift: XlsxPaneBandShift::DeleteColumn(delete.column),
+        count: delete.count,
+    })
 }
 
 fn drop_tag_attribute(tag: &mut String, name: &str) -> Result<(), HcdError> {
@@ -12245,5 +12470,124 @@ mod tests {
         assert!(!html.contains("data-hcd-pane-top-left-cell"));
         assert!(!html.contains("data-hcd-active-pane"));
         assert!(!html.contains("data-hcd-frozen-"));
+    }
+
+    #[test]
+    fn a_row_or_column_moved_through_a_frozen_band_moves_the_band_in_every_window() {
+        // Two windows of one worksheet. The first carries a pane the history froze,
+        // so its whole vocabulary is rebuilt from the moved counts; the second was
+        // filled in from a source workbook that froze the sheet itself.
+        let mut html = concat!(
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"1\" ",
+            "data-hcd-pane-edited=\"true\" data-hcd-pane-state=\"frozen\" ",
+            "data-hcd-pane-top-left-cell=\"B3\" data-hcd-active-pane=\"bottom-right\" ",
+            "data-hcd-frozen-rows=\"2\" data-hcd-frozen-columns=\"1\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"21\" ",
+            "data-hcd-pane-state=\"frozen\" data-hcd-pane-top-left-cell=\"A3\" ",
+            "data-hcd-active-pane=\"bottom-left\" data-hcd-frozen-rows=\"2\"></section>",
+            "<section class=\"hcd-text\" data-hcd-node=\"n_00000000000000000000000000000001\"></section>",
+        )
+        .to_string();
+
+        // A row inserted at the top now stands inside the band, so the band holds
+        // three frozen rows, in every window of the sheet and not only the one the
+        // shift itself worked on.
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertRow(1)).unwrap());
+        assert_eq!(
+            html.matches("data-hcd-frozen-rows=\"3\"").count(),
+            2,
+            "{html}"
+        );
+        // The window HCD wrote moves its corner along with the band, the way a
+        // freeze writes it.
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"B4\""));
+        assert!(html.contains("data-hcd-pane-state=\"frozen\""));
+        assert!(html.contains("data-hcd-frozen-columns=\"1\""));
+        // The window the importer filled in keeps the corner and the pane the
+        // source workbook named: an export shifts that pane itself, so all this
+        // window has to say is how wide the band became. It also keeps the absence
+        // of a marker, which is what leaves the source part HCD's to copy.
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"A3\""));
+        assert!(html.contains("data-hcd-active-pane=\"bottom-left\""));
+        assert_eq!(html.matches("data-hcd-pane-edited=\"true\"").count(), 1);
+        // A window of another chunk kind is not a worksheet window at all.
+        assert_eq!(html.matches("data-hcd-sheet=").count(), 2);
+
+        // Work below the band says nothing about it.
+        assert!(!shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertRow(9)).unwrap());
+        // A column inserted inside the band widens that side, and the window HCD
+        // wrote moves the corner it derives to the new column.
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertColumn(1)).unwrap());
+        assert_eq!(html.matches("data-hcd-frozen-columns=\"2\"").count(), 1);
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"C4\""));
+        assert!(html.contains("data-hcd-active-pane=\"bottom-right\""));
+        // A column deleted from inside the band narrows it back, and a row deleted
+        // from inside it narrows the rows the same way.
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::DeleteColumn(2)).unwrap());
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::DeleteRow(2)).unwrap());
+        assert_eq!(html.matches("data-hcd-frozen-rows=\"2\"").count(), 2);
+        assert_eq!(html.matches("data-hcd-frozen-columns=\"1\"").count(), 1);
+
+        // Deleting the last frozen row of a one-row band leaves no split at all:
+        // the release vocabulary is what a patch that freezes nothing writes, so
+        // the marker stays and the pane words go.
+        let mut single = concat!(
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Ledger\" ",
+            "data-hcd-pane-edited=\"true\" data-hcd-pane-state=\"frozen\" ",
+            "data-hcd-pane-top-left-cell=\"A2\" data-hcd-active-pane=\"bottom-left\" ",
+            "data-hcd-frozen-rows=\"1\"></section>",
+        )
+        .to_string();
+        assert!(shift_xlsx_pane_band(&mut single, XlsxPaneBandShift::DeleteRow(1)).unwrap());
+        assert!(!single.contains("data-hcd-frozen-rows"), "{single}");
+        assert!(!single.contains("data-hcd-pane-state"), "{single}");
+        assert!(!single.contains("data-hcd-pane-top-left-cell"), "{single}");
+        assert!(!single.contains("data-hcd-active-pane"), "{single}");
+        assert!(single.contains("data-hcd-pane-edited=\"true\""), "{single}");
+    }
+
+    #[test]
+    fn a_frozen_band_that_cannot_grow_past_its_sheet_is_refused_untouched() {
+        let frozen_last_row = format!(
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"{XLSX_FROZEN_ROW_LIMIT}\"></section>"
+        );
+        let mut html = frozen_last_row.clone();
+        let error = shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertRow(1)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("frozen band grows past the worksheet"),
+            "{error}"
+        );
+        // A refusal leaves the window exactly as it arrived, so a chunk whose later
+        // window could be moved is never half-written.
+        assert_eq!(html, frozen_last_row);
+
+        // The same bound on the other axis, and the count the export reads with:
+        // past it a window names a band no worksheet can hold.
+        let mut columns =
+            "<section class=\"hcd-sheet\" data-hcd-frozen-columns=\"16383\"></section>".to_string();
+        assert!(shift_xlsx_pane_band(&mut columns, XlsxPaneBandShift::InsertColumn(1)).is_err());
+        // A count that is not a band — junk, or a number past what a sheet can
+        // hold — is the workbook's own, and a shift applied here leaves it for the
+        // export, which is the one that reads the pane the count came from.
+        for unreadable in [
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"many\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"1048576\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"2\" \
+             data-hcd-frozen-columns=\"max\"></section>",
+        ] {
+            let mut left_alone = unreadable.to_string();
+            assert!(
+                !shift_xlsx_pane_band(&mut left_alone, XlsxPaneBandShift::InsertRow(1)).unwrap(),
+                "{left_alone}"
+            );
+            assert_eq!(left_alone, unreadable);
+        }
+        // A window that names no band has nothing to move.
+        let mut split_only = "<section class=\"hcd-sheet\" data-hcd-pane-state=\"split\" \
+                              data-hcd-split-y-twips=\"4400\"></section>"
+            .to_string();
+        assert!(!shift_xlsx_pane_band(&mut split_only, XlsxPaneBandShift::InsertRow(1)).unwrap());
     }
 }

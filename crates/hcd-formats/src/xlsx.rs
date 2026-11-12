@@ -14931,7 +14931,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_a_shift_would_move_off_the_sheet_stops_the_export() {
+    fn a_band_that_cannot_grow_past_its_sheet_stops_the_shift() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("full-band.xlsx");
         let bundle_path = temp.path().join("full-band.hcd");
@@ -14968,13 +14968,72 @@ mod tests {
             }],
             metadata: BTreeMap::new(),
         };
+        // The band already holds every row the sheet can have, so the shift has
+        // nowhere to grow it and the patch says so when asked, before a revision is
+        // recorded that no export could write.
+        let error = hcd_core::apply_patch(&bundle, &patch, 0).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("frozen band grows past the worksheet"),
+            "{error}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        // Nothing was recorded, so the worksheet still carries the pane exactly as
+        // the source workbook wrote it.
+        let exported = temp.path().join("unchanged.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("ySplit=\"1048575\""), "{xml}");
+    }
+
+    #[test]
+    fn a_pane_no_window_counted_stops_the_export_that_would_move_it_off_the_sheet() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("uncounted.xlsx");
+        let bundle_path = temp.path().join("uncounted.hcd");
+        // A pane that froze every row the sheet has and one more: the windows keep
+        // the number as the workbook wrote it, which is past what a band holds, so
+        // no shift recorded here moves it and the export is left to say whether the
+        // pane it shifts still fits the sheet.
+        create_views_rows_fixture(
+            &source,
+            3,
+            "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1048576\" \
+             topLeftCell=\"A1048576\" activePane=\"bottomLeft\" state=\"frozen\"/>\
+             </sheetView></sheetViews>",
+        );
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("uncounted-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+            document_id: "uncounted-doc".to_string(),
+            patch_id: "shift-past-a-full-band".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id,
+                before_row: 1,
+            }],
+            metadata: BTreeMap::new(),
+        };
         assert_eq!(
             hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
             1
         );
-        // The band already holds every row the sheet has, so the shift has nowhere
-        // to grow it and the export says so rather than guessing.
-        let exported = temp.path().join("widened.xlsx");
+        let exported = temp.path().join("past-the-sheet.xlsx");
         let error =
             export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap_err();
         assert!(
@@ -15054,6 +15113,208 @@ mod tests {
         assert!(!xml.contains("horizontalSplit"), "{xml}");
         assert!(!xml.contains("verticalSplit"), "{xml}");
         assert!(!xml.contains("state=\"split\""), "{xml}");
+    }
+
+    #[test]
+    fn a_frozen_band_the_history_records_follows_the_rows_and_columns_a_shift_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("moving-band.xlsx");
+        let bundle_path = temp.path().join("moving-band.hcd");
+        // Two windows of one worksheet, and no pane in the source, so every split
+        // either window names is one the history wrote.
+        create_views_rows_fixture(
+            &source,
+            5,
+            "<sheetViews><sheetView workbookViewId=\"0\"/>\
+             <sheetView workbookViewId=\"1\" view=\"pageBreakPreview\"/></sheetViews>",
+        );
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("moving-band-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        // A frozen band counts the rows and columns standing inside it, so a shift
+        // that moves one of those moves the band, once per moved row or column,
+        // and a shift working outside the band leaves the count alone.
+        let steps = [
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_45,
+                PatchOperation::XlsxSheetFreeze {
+                    sheet_id: sheet_id.clone(),
+                    rows: 2,
+                    columns: 1,
+                },
+                // the split exactly as the history set it
+                "<pane xSplit=\"1\" ySplit=\"2\" topLeftCell=\"B3\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_25,
+                PatchOperation::XlsxGridRange {
+                    sheet_id: sheet_id.clone(),
+                    axis: hcd_core::XlsxGridAxis::Row,
+                    action: hcd_core::XlsxGridAction::Insert,
+                    start: 1,
+                    count: 3,
+                },
+                // three rows inserted at the top now stand inside the band too
+                "<pane xSplit=\"1\" ySplit=\"5\" topLeftCell=\"B6\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 2,
+                },
+                // and a row deleted from inside the band leaves it behind
+                "<pane xSplit=\"1\" ySplit=\"4\" topLeftCell=\"B5\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
+                PatchOperation::XlsxColumnInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_column: 1,
+                },
+                "<pane xSplit=\"2\" ySplit=\"4\" topLeftCell=\"C5\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id,
+                    before_row: 5,
+                },
+                // work below the band says nothing about it
+                "<pane xSplit=\"2\" ySplit=\"4\" topLeftCell=\"C5\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+        ];
+        for (index, (schema, operation, expected_pane)) in steps.into_iter().enumerate() {
+            let revision = index as u64;
+            let patch = PatchBatch {
+                schema_version: schema.to_string(),
+                document_id: "moving-band-doc".to_string(),
+                patch_id: format!("band-{index}"),
+                base_revision: revision,
+                actor: BTreeMap::new(),
+                operations: vec![operation],
+                metadata: BTreeMap::new(),
+            };
+            assert_eq!(
+                hcd_core::apply_patch(&bundle, &patch, revision)
+                    .unwrap()
+                    .revision,
+                revision + 1
+            );
+            assert!(validate_bundle(&bundle).unwrap().valid);
+            let latest = bundle.manifest().unwrap();
+            let html = bundle
+                .read_chunk(&bundle.read_index_page(&latest, 0).unwrap().chunks[0])
+                .unwrap();
+            assert!(html.contains("data-hcd-pane-edited=\"true\""), "{html}");
+            let exported = temp.path().join(format!("band-{revision}.xlsx"));
+            export_xlsx(
+                &bundle,
+                &source,
+                &exported,
+                &ExportOptions {
+                    revision: Some(revision + 1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+            // Both windows moved with the band. An export that found one still
+            // naming the older split refuses the worksheet outright, so writing
+            // the pane twice is what says every window was asked.
+            assert_eq!(xml.matches(expected_pane).count(), 2, "r{revision}: {xml}");
+        }
+    }
+
+    #[test]
+    fn a_window_the_importer_filled_in_names_the_band_the_shift_widened() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-band.xlsx");
+        let bundle_path = temp.path().join("source-band.hcd");
+        create_views_rows_fixture(
+            &source,
+            5,
+            "<sheetViews><sheetView workbookViewId=\"0\"><pane xSplit=\"1\" ySplit=\"1\" \
+             topLeftCell=\"B2\" activePane=\"bottomRight\" state=\"frozen\"/></sheetView></sheetViews>",
+        );
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("source-band-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let window = || {
+            let manifest = bundle.manifest().unwrap();
+            bundle
+                .read_chunk(&bundle.read_index_page(&manifest, 0).unwrap().chunks[0])
+                .unwrap()
+        };
+        let arrived = window();
+        assert!(arrived.contains("data-hcd-frozen-rows=\"1\""), "{arrived}");
+        assert!(
+            arrived.contains("data-hcd-frozen-columns=\"1\""),
+            "{arrived}"
+        );
+        assert!(!arrived.contains("data-hcd-pane-edited"), "{arrived}");
+
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+            document_id: "source-band-doc".to_string(),
+            patch_id: "widen-source-band".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id,
+                before_row: 1,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        let shifted = window();
+        // The window now names the band the worksheet part carries, so a reader of
+        // the window and a reader of the file agree, while the pane the source
+        // workbook wrote keeps the marker it arrived with: it is not HCD's to
+        // recompute, which is why the corner still reads as the source wrote it.
+        assert!(shifted.contains("data-hcd-frozen-rows=\"2\""), "{shifted}");
+        assert!(
+            shifted.contains("data-hcd-frozen-columns=\"1\""),
+            "{shifted}"
+        );
+        assert!(
+            shifted.contains("data-hcd-pane-top-left-cell=\"B2\""),
+            "{shifted}"
+        );
+        assert!(!shifted.contains("data-hcd-pane-edited"), "{shifted}");
+
+        let exported = temp.path().join("widened.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains("<pane xSplit=\"1\" ySplit=\"2\" topLeftCell=\"B3\" activePane=\"bottomRight\" state=\"frozen\"/>"),
+            "{xml}"
+        );
     }
 
     #[test]
