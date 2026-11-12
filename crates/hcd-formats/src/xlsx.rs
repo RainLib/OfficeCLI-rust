@@ -294,6 +294,40 @@ impl WorksheetViewMetadata {
     }
 }
 
+/// The frozen pane one worksheet's HCD windows agree on: how many of its rows and
+/// columns stay put while the rest of the sheet scrolls. `0`/`0` is not a split at
+/// all but the history releasing the pane the source workbook carried, so the
+/// worksheet is written without one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorksheetPane {
+    rows: u32,
+    columns: u32,
+}
+
+impl WorksheetPane {
+    /// Whether this asks for the pane to be taken out rather than put in.
+    fn releases(self) -> bool {
+        self.rows == 0 && self.columns == 0
+    }
+
+    /// The cell the scrolling corner starts at: one row past the frozen rows and
+    /// one column past the frozen ones.
+    fn top_left_cell(self) -> String {
+        format!("{}{}", column_name(self.columns + 1), self.rows + 1)
+    }
+
+    /// The pane a frozen window keeps its selection in, and the whole sheet once
+    /// the freeze is gone.
+    fn active_pane(self) -> &'static str {
+        match (self.rows, self.columns) {
+            (0, 0) => "topLeft",
+            (0, _) => "topRight",
+            (_, 0) => "bottomLeft",
+            _ => "bottomRight",
+        }
+    }
+}
+
 fn push_data_attribute(output: &mut String, name: &str, value: Option<&str>) {
     if let Some(value) = value {
         output.push(' ');
@@ -5082,6 +5116,7 @@ pub(crate) fn export_xlsx(
         &column_shifts,
     )?;
     let row_heights = collect_canonical_row_heights(bundle, &manifest, &workbook, &replacements)?;
+    let panes = collect_canonical_panes(bundle, &manifest, &workbook, &replacements)?;
     // A worksheet HCD created has no entry in the source package, so it is
     // rebuilt over the blank one the export writes: as the rebuilt file when a
     // cell landed on the new tab, and as the blank file itself otherwise.
@@ -5125,6 +5160,7 @@ pub(crate) fn export_xlsx(
         let column_shifts = column_shifts.get(part).cloned().unwrap_or_default();
         let last_column = canonical_last_columns.get(part).copied().unwrap_or(0);
         let styles = cell_style_indexes.get(part).unwrap_or(&empty_cell_styles);
+        let pane = panes.get(part).copied();
         let rebuild = |input: &mut dyn Read, output: File| {
             rewrite_worksheet(
                 input,
@@ -5143,6 +5179,7 @@ pub(crate) fn export_xlsx(
                 &column_shifts,
                 last_column,
                 styles,
+                pane,
             )
         };
         match blank_templates.get(part) {
@@ -5799,6 +5836,90 @@ fn collect_canonical_row_heights(
         }
     }
     Ok(heights)
+}
+
+/// The frozen pane each worksheet being rebuilt describes in its HCD windows. A
+/// window only speaks for its worksheet once a patch has rewritten its pane
+/// attributes, so a worksheet nobody froze keeps the window the source workbook
+/// stored, and a sheet split across windows has to name the same split in every
+/// one of them before the export will write it.
+fn collect_canonical_panes(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    workbook: &WorkbookInfo,
+    replacements: &HashMap<String, BTreeMap<String, String>>,
+) -> Result<HashMap<String, WorksheetPane>, HcdError> {
+    let mut panes = HashMap::new();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != GridChunkKind::Cells {
+                continue;
+            }
+            let sheet = workbook.sheets.get(grid.sheet_index).ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX HCD sheet index is missing".to_string())
+            })?;
+            if !replacements.contains_key(&sheet.part) {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut cursor = 0usize;
+            while let Some(relative) = html[cursor..].find("<section class=\"hcd-sheet\"") {
+                let start = cursor + relative;
+                let end = html[start..]
+                    .find('>')
+                    .map(|offset| start + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle(
+                            "XLSX HCD worksheet window is not closed".to_string(),
+                        )
+                    })?;
+                let tag = &html[start..=end];
+                cursor = end + 1;
+                if hcd_column_attribute(tag, "data-hcd-pane-edited") != Some("true") {
+                    continue;
+                }
+                if hcd_column_attribute(tag, "data-hcd-pane-state")
+                    .is_some_and(|state| state != "frozen")
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX HCD edited pane is not a frozen pane".to_string(),
+                    ));
+                }
+                let pane = WorksheetPane {
+                    rows: hcd_pane_split(tag, "data-hcd-frozen-rows", 1_048_575)?,
+                    columns: hcd_pane_split(tag, "data-hcd-frozen-columns", 16_383)?,
+                };
+                if panes
+                    .insert(sheet.part.clone(), pane)
+                    .is_some_and(|previous| previous != pane)
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "XLSX HCD frozen pane differs between windows".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(panes)
+}
+
+/// One frozen split counted in rows or columns. A window that does not split
+/// that way names no count at all, which is how the importer reads a pane the
+/// source workbook wrote.
+fn hcd_pane_split(tag: &str, name: &str, maximum: u32) -> Result<u32, HcdError> {
+    match hcd_column_attribute(tag, name) {
+        None => Ok(0),
+        Some(value) => value
+            .parse::<u32>()
+            .ok()
+            .filter(|count| *count <= maximum)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle(format!("XLSX HCD frozen pane {name} is invalid"))
+            }),
+    }
 }
 
 fn hcd_column_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
@@ -7273,12 +7394,28 @@ fn rewrite_worksheet(
     column_shifts: &[ColumnShift],
     hcd_last_column: u32,
     cell_styles: &BTreeMap<String, u32>,
+    pane: Option<WorksheetPane>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
     let mut writer = Writer::new(output);
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut skip_depth = 0usize;
+    // A frozen pane is written into every window the worksheet carries, and the
+    // pane the source workbook stored in it is dropped in favour of HCD's; a
+    // released pane means only that drop. A window the history freezes carries
+    // HCD's pane and HCD's selection, so the ones the source stored leave with
+    // it. A worksheet naming no window list at all — every tab HCD creates —
+    // gets one in front of the first element that must follow it, which is what
+    // `views_owed` holds until such an element is reached.
+    let wants_pane = pane.is_some_and(|pane| !pane.releases());
+    let frozen_pane = pane.unwrap_or(WorksheetPane {
+        rows: 0,
+        columns: 0,
+    });
+    let mut views_owed = wants_pane;
+    let mut in_views = false;
+    let mut in_view = false;
     let mut seen_original = BTreeSet::new();
     let mut seen_formulas = BTreeSet::new();
     let mut seen_created = BTreeSet::new();
@@ -7368,6 +7505,38 @@ fn rewrite_worksheet(
             }
             buffer.clear();
             continue;
+        }
+        // The freeze has nowhere to sit until the worksheet names its window
+        // list. A worksheet that never does gets the list in front of the first
+        // element that must follow it, and one holding nothing at all gets it
+        // just before its own end tag, so the part stays in the order Excel reads.
+        if views_owed {
+            let open_list = match event {
+                Event::Start(ref start) => {
+                    xlsx_element_follows_sheet_views(local_name(start.name().as_ref()))
+                }
+                Event::Empty(ref empty) => {
+                    xlsx_element_follows_sheet_views(local_name(empty.name().as_ref()))
+                }
+                Event::End(ref end) => local_name(end.name().as_ref()) == "worksheet",
+                _ => false,
+            };
+            if open_list {
+                let parent = match event {
+                    Event::Start(ref start) => {
+                        String::from_utf8_lossy(start.name().as_ref()).into_owned()
+                    }
+                    Event::Empty(ref empty) => {
+                        String::from_utf8_lossy(empty.name().as_ref()).into_owned()
+                    }
+                    Event::End(ref end) => {
+                        String::from_utf8_lossy(end.name().as_ref()).into_owned()
+                    }
+                    _ => String::new(),
+                };
+                write_worksheet_views(&mut writer, &parent, frozen_pane)?;
+                views_owed = false;
+            }
         }
         match event {
             Event::Start(ref start)
@@ -7541,6 +7710,153 @@ fn rewrite_worksheet(
                         .iter()
                         .any(|shift| matches!(shift, ColumnShift::Delete(_))),
                 )?))?;
+            }
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "sheetViews" && pane.is_some() =>
+            {
+                // The part names its own window list, so the pane the history set
+                // goes into a window of it and nothing is invented.
+                in_views = true;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::End(ref end) if local_name(end.name().as_ref()) == "sheetViews" && in_views => {
+                // A list holding no window still has to hold the pane, so one is
+                // made for it before the list closes.
+                let name = String::from_utf8_lossy(end.name().as_ref()).into_owned();
+                if wants_pane && views_owed {
+                    let view_name = qualified_child_name(end.name().as_ref(), "sheetView");
+                    write_worksheet_view(&mut writer, &view_name, frozen_pane)?;
+                    views_owed = false;
+                }
+                in_views = false;
+                writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+            }
+            Event::Empty(ref empty)
+                if local_name(empty.name().as_ref()) == "sheetViews" && pane.is_some() =>
+            {
+                // A list written with nothing in it has no room for a pane, so it
+                // is opened and one window holding the pane is written inside.
+                let name = String::from_utf8_lossy(empty.name().as_ref()).into_owned();
+                if wants_pane {
+                    let view_name = qualified_child_name(empty.name().as_ref(), "sheetView");
+                    writer.write_event(Event::Start(BytesStart::new(name.as_str())))?;
+                    write_worksheet_view(&mut writer, &view_name, frozen_pane)?;
+                    views_owed = false;
+                    writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+                } else {
+                    writer.write_event(event.into_owned())?;
+                }
+            }
+            Event::Start(ref start)
+                if local_name(start.name().as_ref()) == "sheetView" && pane.is_some() =>
+            {
+                in_view = true;
+                let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+                write_xlsx_view_element(
+                    &mut writer,
+                    start,
+                    false,
+                    row_insertions,
+                    column_shifts,
+                    false,
+                )?;
+                if wants_pane {
+                    write_pane_and_selection(&mut writer, &name, frozen_pane)?;
+                    views_owed = false;
+                }
+            }
+            Event::Empty(ref empty)
+                if local_name(empty.name().as_ref()) == "sheetView" && pane.is_some() =>
+            {
+                // A window the source stores with nothing in it is opened so the
+                // pane has somewhere to sit; a released pane leaves it as it was.
+                let name = String::from_utf8_lossy(empty.name().as_ref()).into_owned();
+                if wants_pane {
+                    write_xlsx_view_element(
+                        &mut writer,
+                        empty,
+                        false,
+                        row_insertions,
+                        column_shifts,
+                        false,
+                    )?;
+                    write_pane_and_selection(&mut writer, &name, frozen_pane)?;
+                    views_owed = false;
+                    writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+                } else {
+                    write_xlsx_view_element(
+                        &mut writer,
+                        empty,
+                        true,
+                        row_insertions,
+                        column_shifts,
+                        true,
+                    )?;
+                }
+            }
+            Event::End(ref end) if local_name(end.name().as_ref()) == "sheetView" => {
+                in_view = false;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Start(ref start)
+                if in_view && local_name(start.name().as_ref()) == "pane" && pane.is_some() =>
+            {
+                // The window keeps one pane: the one the history asked for. A
+                // release writes no pane at all, so the source's simply leaves.
+                skip_depth = 1;
+            }
+            Event::Empty(ref empty)
+                if in_view && local_name(empty.name().as_ref()) == "pane" && pane.is_some() =>
+            {
+                let _ = empty;
+            }
+            Event::Start(ref start)
+                if in_view
+                    && local_name(start.name().as_ref()) == "selection"
+                    && pane.is_some()
+                    && wants_pane =>
+            {
+                // A frozen window carries the selection written with its pane, so
+                // the ones the source spread over its own panes leave with them.
+                skip_depth = 1;
+            }
+            Event::Empty(ref empty)
+                if in_view
+                    && local_name(empty.name().as_ref()) == "selection"
+                    && pane.is_some()
+                    && wants_pane =>
+            {
+                let _ = empty;
+            }
+            Event::Start(ref start)
+                if in_view
+                    && local_name(start.name().as_ref()) == "selection"
+                    && pane.is_some() =>
+            {
+                // A released window keeps the cursor the source stored in it and
+                // loses only the pane that cursor used to point at.
+                write_xlsx_view_element(
+                    &mut writer,
+                    start,
+                    false,
+                    row_insertions,
+                    column_shifts,
+                    true,
+                )?;
+            }
+            Event::Empty(ref empty)
+                if in_view
+                    && local_name(empty.name().as_ref()) == "selection"
+                    && pane.is_some() =>
+            {
+                write_xlsx_view_element(
+                    &mut writer,
+                    empty,
+                    true,
+                    row_insertions,
+                    column_shifts,
+                    true,
+                )?;
             }
             Event::Start(ref start)
                 if (!row_insertions.is_empty() || !column_shifts.is_empty())
@@ -7867,6 +8183,13 @@ fn rewrite_worksheet(
     if !sheet_data_seen {
         return Err(HcdError::InvalidBundle(
             "XLSX worksheet is missing sheetData".to_string(),
+        ));
+    }
+    if views_owed {
+        // Every shape the export knows about writes the pane it owes; a part that
+        // ends without one is not silently published with the freeze missing.
+        return Err(HcdError::InvalidBundle(
+            "XLSX worksheet ended before its frozen pane was written".to_string(),
         ));
     }
     if seen_original.len() != replacements.len()
@@ -9159,6 +9482,146 @@ fn shifted_xlsx_view_reference(
         )));
     }
     Ok(rewritten.join(" "))
+}
+
+/// Elements that must follow a worksheet's window list, so the first of them is
+/// where a worksheet that never named a list gets one.
+fn xlsx_element_follows_sheet_views(name: &str) -> bool {
+    matches!(
+        name,
+        "sheetFormatPr"
+            | "cols"
+            | "sheetData"
+            | "sheetCalcPr"
+            | "sheetProtection"
+            | "protectedRanges"
+            | "scenarios"
+            | "autoFilter"
+            | "sortState"
+            | "dataConsolidate"
+            | "customSheetViews"
+            | "mergeCells"
+            | "phoneticPr"
+            | "conditionalFormatting"
+            | "dataValidations"
+            | "hyperlinks"
+            | "printOptions"
+            | "pageMargins"
+            | "pageSetup"
+            | "headerFooter"
+            | "rowBreaks"
+            | "colBreaks"
+            | "customProperties"
+            | "cellWatches"
+            | "smartTags"
+            | "ignoredErrors"
+            | "smartTagPr"
+            | "smartTagTypes"
+            | "webPublishing"
+            | "tableParts"
+            | "extLst"
+    )
+}
+
+/// Write a window or selection element, shifting the cells it names when the
+/// history moved rows or columns and dropping the pane it points at when the
+/// history released the freeze.
+fn write_xlsx_view_element(
+    writer: &mut Writer<impl Write>,
+    element: &BytesStart<'_>,
+    empty: bool,
+    row_insertions: &[RowShift],
+    column_shifts: &[ColumnShift],
+    release_pane: bool,
+) -> Result<(), HcdError> {
+    let shifted = (!row_insertions.is_empty() || !column_shifts.is_empty())
+        .then(|| rewrite_xlsx_view_attributes(element, row_insertions, column_shifts))
+        .transpose()?;
+    let source: &BytesStart<'_> = shifted.as_ref().unwrap_or(element);
+    let written = if release_pane {
+        let name = String::from_utf8_lossy(source.name().as_ref()).into_owned();
+        let mut kept = BytesStart::new(name);
+        for attr in source.attributes().with_checks(false) {
+            let attr = attr.map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid XLSX view attribute: {error}"))
+            })?;
+            if local_name(attr.key.as_ref()) == "pane" {
+                continue;
+            }
+            let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+            let value = String::from_utf8_lossy(attr.value.as_ref()).into_owned();
+            kept.push_attribute((key.as_str(), value.as_str()));
+        }
+        kept
+    } else {
+        source.to_owned()
+    };
+    if empty {
+        writer.write_event(Event::Empty(written))?;
+    } else {
+        writer.write_event(Event::Start(written))?;
+    }
+    Ok(())
+}
+
+/// Write the pane one window freezes with and the selection that stands the
+/// cursor in the pane the freeze leaves moving. `parent` is the element they are
+/// written beside, so both carry the prefix the part already uses.
+fn write_pane_and_selection(
+    writer: &mut Writer<impl Write>,
+    parent: &str,
+    frozen: WorksheetPane,
+) -> Result<(), HcdError> {
+    let rows = frozen.rows.to_string();
+    let columns = frozen.columns.to_string();
+    let top_left = frozen.top_left_cell();
+    let active = frozen.active_pane();
+    let mut pane = BytesStart::new(qualified_child_name(parent.as_bytes(), "pane"));
+    if frozen.columns > 0 {
+        pane.push_attribute(("xSplit", columns.as_str()));
+    }
+    if frozen.rows > 0 {
+        pane.push_attribute(("ySplit", rows.as_str()));
+    }
+    pane.push_attribute(("topLeftCell", top_left.as_str()));
+    pane.push_attribute(("activePane", active));
+    pane.push_attribute(("state", "frozen"));
+    writer.write_event(Event::Empty(pane))?;
+    let mut selection = BytesStart::new(qualified_child_name(parent.as_bytes(), "selection"));
+    selection.push_attribute(("pane", active));
+    selection.push_attribute(("activeCell", top_left.as_str()));
+    selection.push_attribute(("sqref", top_left.as_str()));
+    writer.write_event(Event::Empty(selection))?;
+    Ok(())
+}
+
+/// Write a window holding the pane the history froze the worksheet with, the way
+/// a worksheet that names its own list gets one for each window it carries.
+fn write_worksheet_view(
+    writer: &mut Writer<impl Write>,
+    view_name: &str,
+    frozen: WorksheetPane,
+) -> Result<(), HcdError> {
+    let mut view = BytesStart::new(view_name);
+    view.push_attribute(("workbookViewId", "0"));
+    writer.write_event(Event::Start(view))?;
+    write_pane_and_selection(writer, view_name, frozen)?;
+    writer.write_event(Event::End(BytesEnd::new(view_name)))?;
+    Ok(())
+}
+
+/// Write a window list for a worksheet that never named one.
+fn write_worksheet_views(
+    writer: &mut Writer<impl Write>,
+    parent: &str,
+    frozen: WorksheetPane,
+) -> Result<(), HcdError> {
+    let views_name = qualified_child_name(parent.as_bytes(), "sheetViews");
+    let view_name = qualified_child_name(parent.as_bytes(), "sheetView");
+    writer.write_event(Event::Start(BytesStart::new(views_name.as_str())))?;
+    write_worksheet_view(writer, &view_name, frozen)?;
+    writer.write_event(Event::End(BytesEnd::new(views_name.as_str())))?;
+    Ok(())
 }
 
 fn rewrite_xlsx_view_attributes(
@@ -13959,6 +14422,161 @@ mod tests {
     }
 
     #[test]
+    fn freezing_a_worksheet_writes_a_window_list_for_a_part_that_names_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("plain.xlsx");
+        let bundle_path = temp.path().join("plain.hcd");
+        create_plain_rows_fixture(&source, 3);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("freeze-plain-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = |id: &str, revision: u64, rows: u32, columns: u32| PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_45.to_string(),
+            document_id: "freeze-plain-doc".to_string(),
+            patch_id: id.to_string(),
+            base_revision: revision,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetFreeze {
+                sheet_id: sheet_id.clone(),
+                rows,
+                columns,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        // A worksheet that never asks for rows leaves nothing recorded, and a
+        // repeat of a freeze the sheet already stands at is refused the same way.
+        let first = patch("freeze", 0, 1, 2);
+        hcd_core::apply_patch(&bundle, &first, 0).unwrap();
+        let repeat = patch("freeze-repeat", 1, 1, 2);
+        let error = hcd_core::apply_patch(&bundle, &repeat, 1).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("already freezes 1 rows and 2 columns"),
+            "{error}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        let exported = temp.path().join("frozen.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains(
+                "<sheetViews><sheetView workbookViewId=\"0\"><pane xSplit=\"2\" ySplit=\"1\" \
+                 topLeftCell=\"C2\" activePane=\"bottomRight\" state=\"frozen\"/><selection \
+                 pane=\"bottomRight\" activeCell=\"C2\" sqref=\"C2\"/></sheetView></sheetViews>"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<dimension ref=\"A1:D3\"/><sheetViews>"),
+            "the window list must follow the dimension: {xml}"
+        );
+        assert!(
+            xml.contains("</sheetViews><sheetData>"),
+            "and the cell data must follow the window list: {xml}"
+        );
+
+        // The revision before the freeze reads the workbook as it arrived.
+        let historical = temp.path().join("before.xlsx");
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(!read_zip_entry(&historical, "xl/worksheets/sheet1.xml").contains("sheetViews"));
+    }
+
+    #[test]
+    fn freezing_a_worksheet_replaces_the_panes_of_every_window_it_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("views.xlsx");
+        let bundle_path = temp.path().join("views.hcd");
+        create_shared_string_fixture(&source);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("freeze-views-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = |id: &str, revision: u64, rows: u32, columns: u32| PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_45.to_string(),
+            document_id: "freeze-views-doc".to_string(),
+            patch_id: id.to_string(),
+            base_revision: revision,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetFreeze {
+                sheet_id: sheet_id.clone(),
+                rows,
+                columns,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        hcd_core::apply_patch(&bundle, &patch("freeze-rows", 0, 2, 0), 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        let exported = temp.path().join("refrozen.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        // Both windows carry the freeze the history set, and neither keeps the
+        // split the source workbook stored in it.
+        let frozen = "<pane ySplit=\"2\" topLeftCell=\"A3\" activePane=\"bottomLeft\" state=\"frozen\"/><selection pane=\"bottomLeft\" activeCell=\"A3\" sqref=\"A3\"/>";
+        assert_eq!(xml.matches("<pane ").count(), 2, "{xml}");
+        assert_eq!(xml.matches(frozen).count(), 2, "{xml}");
+        assert!(!xml.contains("topLeftCell=\"$C$4\""), "{xml}");
+        assert!(!xml.contains("xSplit"), "{xml}");
+        // The windows keep everything the freeze is not about.
+        assert!(
+            xml.contains("<sheetView workbookViewId=\"7\" zoomScale=\"75\">"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<sheetView workbookViewId=\"0\" view=\"pageBreakPreview\""),
+            "{xml}"
+        );
+        assert!(xml.contains("<mergeCells count=\"2\">"), "{xml}");
+        // Undoing the freeze takes the panes out and leaves the windows.
+        hcd_core::apply_patch(&bundle, &patch("release", 1, 0, 0), 1).unwrap();
+        let released = temp.path().join("released.xlsx");
+        export_xlsx(&bundle, &source, &released, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&released, "xl/worksheets/sheet1.xml");
+        assert!(!xml.contains("<pane"), "{xml}");
+        assert!(!xml.contains("state=\"frozen\""), "{xml}");
+        assert!(xml.contains("<sheetView workbookViewId=\"7\""), "{xml}");
+        let nothing_to_release = patch("release-twice", 2, 0, 0);
+        let error = hcd_core::apply_patch(&bundle, &nothing_to_release, 2).unwrap_err();
+        assert!(
+            error.to_string().contains("no frozen panes to release"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn removes_only_empty_appended_xlsx_tail_row() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("tail.xlsx");
@@ -14109,6 +14727,7 @@ mod tests {
             &[],
             5,
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();
