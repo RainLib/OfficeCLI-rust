@@ -615,6 +615,48 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(`${direction === 'up' ? '上移' : '下移'}幻灯片失败：${String(cause)}`); return null }
     finally { setSaving(false) }
   }
+  async function duplicateSlide(chunkId: string): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    // The page that is duplicated is whichever one the row names, so text still
+    // being typed has to reach a revision before the patch asks for its base.
+    const base = await saveBeforeExport()
+    if (base === null) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/44', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: base,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.slide.copy', chunkId }] }),
+      })
+      const result = await response.json() as { revision: number }
+      // The copy is inserted right behind the page it came from, so every row
+      // after it is numbered wrong rather than only the one that was copied: the
+      // pages the editor had loaded are read again and replace the list. A copied
+      // page can also start an index page of its own, so a deck whose every chunk
+      // had arrived reads the whole of the new list, and one still being scrolled
+      // keeps its own frontier.
+      const info = await api(session, '').then(current => current.json() as Promise<Manifest>)
+      const pages = deckFullyLoaded ? info.indexPageCount : Math.min(loadedPages, info.indexPageCount)
+      const indexes = await Promise.all(Array.from({ length: pages }, (_, page) =>
+        api(session, `/index/${page}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
+          .then(current => current.json() as Promise<{ chunks: Descriptor[] }>)))
+      recordEdit(result.revision, '复制幻灯片')
+      setManifest(info)
+      collaboration.announceRevision(result.revision)
+      setDescriptors(indexes.flatMap(index => index.chunks))
+      setLoadedPages(pages)
+      setSelected(null)
+      setNewBox(null)
+      setNewDraft('')
+      setPlacingText(false)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`复制幻灯片失败：${String(cause)}`); return null }
+    finally { setSaving(false) }
+  }
   function placeText(box: NewTextBox) {
     setSelected(null)
     setNewBox(box)
@@ -654,7 +696,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {newBox && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || !newDraft.trim()} onClick={() => void saveNewBox(newBox, newDraft)}><LocalText source={"保存新增文字"} /></button>}
     </nav>}
     <div className="layout editor-layout">
-      {layout.showOutline && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <div className="outline-entry" key={chunk.sequence}><button onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</button>{session.format === 'pptx' && chunk.region === 'slide' && !chunk.continuation && !readOnly && !historical && <><button className="outline-move" title={localizeSource(locale, "把这一页上移一位")} disabled={saving || historyBusy || slidePages[0]?.chunkId === chunk.chunkId} onClick={() => void moveSlide(chunk.chunkId, 'up')}><LocalText source={"↑ 上移"} /></button><button className="outline-move" title={localizeSource(locale, "把这一页下移一位")} disabled={saving || historyBusy || (deckFullyLoaded && slidePages[slidePages.length - 1]?.chunkId === chunk.chunkId)} onClick={() => void moveSlide(chunk.chunkId, 'down')}><LocalText source={"↓ 下移"} /></button><button className="outline-remove" title={localizeSource(locale, "删除这一页幻灯片")} disabled={saving || historyBusy} onClick={() => void deleteSlide(chunk.chunkId)}><LocalText source={"✕ 删除"} /></button></>}</div>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
+      {layout.showOutline && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <div className="outline-entry" key={chunk.sequence}><button onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</button>{session.format === 'pptx' && chunk.region === 'slide' && !chunk.continuation && !readOnly && !historical && <><button className="outline-move" title={localizeSource(locale, "把这一页上移一位")} disabled={saving || historyBusy || slidePages[0]?.chunkId === chunk.chunkId} onClick={() => void moveSlide(chunk.chunkId, 'up')}><LocalText source={"↑ 上移"} /></button><button className="outline-move" title={localizeSource(locale, "把这一页下移一位")} disabled={saving || historyBusy || (deckFullyLoaded && slidePages[slidePages.length - 1]?.chunkId === chunk.chunkId)} onClick={() => void moveSlide(chunk.chunkId, 'down')}><LocalText source={"↓ 下移"} /></button><button className="outline-copy" title={localizeSource(locale, "把这一页复制一份")} disabled={saving || historyBusy} onClick={() => void duplicateSlide(chunk.chunkId)}><LocalText source={"⧉ 复制"} /></button><button className="outline-remove" title={localizeSource(locale, "删除这一页幻灯片")} disabled={saving || historyBusy} onClick={() => void deleteSlide(chunk.chunkId)}><LocalText source={"✕ 删除"} /></button></>}</div>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
       <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示页面目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}

@@ -226,9 +226,9 @@
 .hcd-surface .semantic-workspace .outline-panel nav button:hover{background:#e9f1ff;color:#0d5bce}
 .hcd-surface .semantic-workspace .outline-panel nav .outline-entry{display:flex;align-items:center;gap:2px}
 .hcd-surface .semantic-workspace .outline-panel nav .outline-entry>button:first-child{flex:1;min-width:0}
-.hcd-surface .semantic-workspace .outline-panel nav button.outline-move{border:0;background:transparent;color:#3d5f8f;font-size:11px;padding:3px 5px;border-radius:6px;white-space:nowrap}
-.hcd-surface .semantic-workspace .outline-panel nav button.outline-move:hover{background:#e9f1ff;color:#0d5bce}
-.hcd-surface .semantic-workspace .outline-panel nav button.outline-move:disabled{color:#a6b4c6;background:transparent}
+.hcd-surface .semantic-workspace .outline-panel nav button.outline-move,.hcd-surface .semantic-workspace .outline-panel nav button.outline-copy{border:0;background:transparent;color:#3d5f8f;font-size:11px;padding:3px 5px;border-radius:6px;white-space:nowrap}
+.hcd-surface .semantic-workspace .outline-panel nav button.outline-move:hover,.hcd-surface .semantic-workspace .outline-panel nav button.outline-copy:hover{background:#e9f1ff;color:#0d5bce}
+.hcd-surface .semantic-workspace .outline-panel nav button.outline-move:disabled,.hcd-surface .semantic-workspace .outline-panel nav button.outline-copy:disabled{color:#a6b4c6;background:transparent}
 .hcd-surface .semantic-workspace .outline-panel nav button.outline-remove{border:0;background:transparent;color:#8d3434;font-size:11px;padding:3px 6px;border-radius:6px;white-space:nowrap}
 .hcd-surface .semantic-workspace .outline-panel nav button.outline-remove:hover{background:#fbeaea;color:#7a1f1f}
 .hcd-surface .semantic-workspace .outline-panel nav .outline-level-2{padding-left:20px}
