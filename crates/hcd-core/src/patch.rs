@@ -5334,8 +5334,8 @@ fn resolve_pptx_slide_removal(
     removal: &PptxSlideRemovalTarget,
 ) -> Result<PptxSlideRemovalTarget, HcdError> {
     let mut pages: HashSet<String> = HashSet::new();
-    let mut dropped_chunk_ids = HashSet::new();
     let mut slide_part: Option<String> = None;
+    let mut carriers: Vec<(String, String)> = Vec::new();
     for page_number in 0..manifest.index_page_count {
         for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
             if descriptor.region != "slide" {
@@ -5346,9 +5346,7 @@ fn resolve_pptx_slide_removal(
             if descriptor.chunk_id == removal.chunk_id {
                 slide_part = Some(part.clone());
             }
-            if Some(&part) == slide_part.as_ref() {
-                dropped_chunk_ids.insert(descriptor.chunk_id.clone());
-            }
+            carriers.push((descriptor.chunk_id, part));
         }
     }
     let Some(slide_part) = slide_part else {
@@ -5361,6 +5359,14 @@ fn resolve_pptx_slide_removal(
             "PPTX presentation must keep one slide".to_string(),
         ));
     }
+    // A page that spans chunks repeats its section in every one of them, so the
+    // whole page leaves whichever chunk the patch named: the chunks in front of
+    // that one go with the ones behind it.
+    let dropped_chunk_ids: HashSet<String> = carriers
+        .into_iter()
+        .filter(|(_, part)| *part == slide_part)
+        .map(|(chunk_id, _)| chunk_id)
+        .collect();
     Ok(PptxSlideRemovalTarget {
         chunk_id: removal.chunk_id.clone(),
         slide_part,

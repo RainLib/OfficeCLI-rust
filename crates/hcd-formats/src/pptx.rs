@@ -5331,9 +5331,10 @@ mod tests {
         assert!(validate_bundle(&bundle).unwrap().valid);
     }
 
-    /// The page chunk that carries a slide's section, named by the source part
-    /// that section points at.
-    fn slide_page_chunk(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> String {
+    /// Every page chunk that carries a slide's section, in index order, named by
+    /// the source part those sections point at. A page whose table is split keeps
+    /// repeating its section in every chunk it spans, so more than one answers.
+    fn slide_page_chunks(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> Vec<String> {
         (0..manifest.index_page_count)
             .flat_map(|page_number| {
                 bundle
@@ -5341,12 +5342,20 @@ mod tests {
                     .unwrap()
                     .chunks
             })
-            .find(|descriptor| {
+            .filter(|descriptor| {
                 descriptor.region == "slide"
                     && bundle.read_chunk(descriptor).unwrap().contains(part)
             })
+            .map(|descriptor| descriptor.chunk_id)
+            .collect()
+    }
+
+    /// The first page chunk that carries a slide's section.
+    fn slide_page_chunk(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> String {
+        slide_page_chunks(bundle, manifest, part)
+            .into_iter()
+            .next()
             .unwrap_or_else(|| panic!("no page chunk names {part}"))
-            .chunk_id
     }
 
     fn drop_slide_patch(document_id: &str, chunk_id: &str, base: u64) -> PatchBatch {
@@ -5579,6 +5588,55 @@ mod tests {
         // validates so the export can be retried without --source.
         assert!(!exported.exists());
         assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn deleting_a_page_that_spans_chunks_takes_every_chunk_that_carries_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("dropped.pptx");
+        create_layout_fixture(&source);
+        // A deck written out one block per chunk: the page arrives as several
+        // chunks, each repeating the section that names its part.
+        let mut options = ImportOptions::new("split-slide");
+        options.chunk_soft_bytes = 1;
+        let manifest = import_pptx(&source, &bundle_path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let carriers = slide_page_chunks(&bundle, &manifest, "ppt/slides/slide2.xml");
+        assert!(
+            carriers.len() > 1,
+            "the fixture must spread one page over several chunks, got {}",
+            carriers.len()
+        );
+        // The patch may name any of them; the outline shows only the first, but a
+        // client that holds the last one must not be able to leave the rest.
+        let dropped = carriers.len();
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, carriers.last().unwrap(), 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count - dropped);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        assert!(
+            slide_page_chunks(&bundle, &head, "ppt/slides/slide2.xml").is_empty(),
+            "a chunk still carries the page the deck dropped"
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide2.xml"));
+        assert!(!has_zip_entry(
+            &exported,
+            "ppt/slides/_rels/slide2.xml.rels"
+        ));
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/slide1.xml"),
+            read_zip_entry(&source, "ppt/slides/slide1.xml")
+        );
     }
 
     #[test]
