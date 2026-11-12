@@ -5248,6 +5248,17 @@ fn resolve_pptx_slide_add(
             size = Some(page_size);
         }
     }
+    // A page the source deck carried can leave the index through a deletion, and
+    // the name it held then looks free to hand out again. The package does not
+    // agree: it still carries that part until the export drops it, and a page
+    // named after one the history already used would ask the export to both write
+    // and delete the same entry. So a number the history spent is spent.
+    for revision in 1..=manifest.revision {
+        for removal in &bundle.revision(revision)?.slide_removals {
+            highest_number =
+                highest_number.max(slide_part_number(&removal.slide_part).unwrap_or_default());
+        }
+    }
     let Some((width_emu, height_emu)) = size else {
         return Err(HcdError::Unsupported(
             "hcd-patch/41 needs a presentation with at least one slide".to_string(),
@@ -10414,6 +10425,64 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn an_added_slide_never_takes_a_part_name_the_deck_already_spent() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 3);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "drop-last".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: "c_00000000000000000000000000000002".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            bundle.revision(1).unwrap().slide_removals[0].slide_part,
+            "ppt/slides/slide3.xml"
+        );
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "add-after-drop".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideAdd {}],
+                metadata: BTreeMap::new(),
+            },
+            1,
+        )
+        .unwrap();
+        // The deck is back to three pages and the new one is named past the hole,
+        // not into it: the export could not drop and write the same entry.
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.chunk_count, 3);
+        let page = bundle
+            .read_index_page(&manifest, manifest.index_page_count - 1)
+            .unwrap();
+        let added = page.chunks.last().unwrap();
+        assert_eq!(added.region, "slide");
+        assert_eq!(
+            bundle.revision(2).unwrap().slide_additions[0].slide_part,
+            "ppt/slides/slide4.xml"
+        );
+        assert!(bundle
+            .read_chunk(added)
+            .unwrap()
+            .contains("ppt/slides/slide4.xml"));
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
     fn pptx_slide_deletion_needs_the_page_version_it_addresses() {
         let temp = tempfile::tempdir().unwrap();
         let bundle = slide_deck(&temp.path().join("bundle"), 2);
