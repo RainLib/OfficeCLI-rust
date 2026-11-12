@@ -1237,6 +1237,208 @@ fn edited_hcd_revision_semantically_exports_to_all_rust_targets_without_source()
     assert!(!mismatched.exists());
 }
 
+fn apply_font_patch(root: &Path, bundle: &Path, document_id: &str, operations: Vec<Value>) {
+    let patch = root.join(format!("{document_id}-font-patch.json"));
+    std::fs::write(
+        &patch,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": "hcd-patch/37",
+            "documentId": document_id,
+            "patchId": format!("{document_id}-font-patch-1"),
+            "baseRevision": 0,
+            "operations": operations
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "apply",
+            bundle.to_string_lossy().as_ref(),
+            "--patch",
+            patch.to_string_lossy().as_ref(),
+            "--expected-revision",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""revision": 1"#));
+}
+
+fn font_operation(entry: &Value, font: Value) -> Value {
+    serde_json::json!({
+        "op": "text.font",
+        "nodeId": entry["nodeId"],
+        "font": font,
+        "precondition": { "nodeHash": entry["nodeHash"] }
+    })
+}
+
+#[test]
+fn pinned_block_fonts_reach_semantic_docx_and_pptx_exports() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("font-source.html");
+    let bundle = temp.path().join("font-bundle");
+    std::fs::write(
+        &source,
+        "<!doctype html><h1>Brand Deck</h1><p>Quarterly numbers</p><p>Revenue in yen</p><p>Arabic totals</p>",
+    )
+    .unwrap();
+    let extracted = import_and_extract(&source, &bundle, "hcd-font-pin");
+    let document_id = extracted["data"]["documentId"].as_str().unwrap();
+    let entries = extracted["data"]["entries"].as_array().unwrap();
+    let entry_for = |text: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["text"] == text)
+            .unwrap_or_else(|| panic!("no node for {text}"))
+            .clone()
+    };
+    apply_font_patch(
+        temp.path(),
+        &bundle,
+        document_id,
+        vec![
+            font_operation(
+                &entry_for("Quarterly numbers"),
+                serde_json::json!({ "latin": "Brand Serif" }),
+            ),
+            font_operation(
+                &entry_for("Revenue in yen"),
+                serde_json::json!({ "latin": "Brand Serif", "eastAsia": "Brand Gothic" }),
+            ),
+            // A complex-script face is outside what the semantic export writes.
+            font_operation(
+                &entry_for("Arabic totals"),
+                serde_json::json!({ "bidi": "Brand Naskh" }),
+            ),
+        ],
+    );
+    std::fs::remove_file(&source).unwrap();
+
+    let word = temp.path().join("pinned.docx");
+    let word_report = temp.path().join("pinned-docx.json");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            word.to_string_lossy().as_ref(),
+            "--to",
+            "docx",
+            "--revision",
+            "1",
+            "--fidelity-report",
+            word_report.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["validate", word.to_string_lossy().as_ref()])
+        .assert()
+        .success();
+    let document = office_zip_text(&word, "word/document.xml");
+    assert!(
+        document.contains(r#"w:ascii="Brand Serif""#)
+            && document.contains(r#"w:hAnsi="Brand Serif""#),
+        "{document}"
+    );
+    assert!(
+        document.contains(r#"w:eastAsia="Brand Gothic""#),
+        "{document}"
+    );
+    assert!(!document.contains("Brand Naskh"), "{document}");
+    let word_report: Value = serde_json::from_slice(&std::fs::read(&word_report).unwrap()).unwrap();
+    assert!(
+        word_report["preserved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("block fonts pinned by text.font on 2 generated paragraph(s)")),
+        "{word_report}"
+    );
+    assert!(
+        word_report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("bidi face was not exported")),
+        "{word_report}"
+    );
+
+    let deck = temp.path().join("pinned.pptx");
+    let deck_report = temp.path().join("pinned-pptx.json");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            deck.to_string_lossy().as_ref(),
+            "--to",
+            "pptx",
+            "--revision",
+            "1",
+            "--fidelity-report",
+            deck_report.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["validate", deck.to_string_lossy().as_ref()])
+        .assert()
+        .success();
+    let slides = office_zip_text_parts(&deck, "ppt/slides/slide", ".xml").join("\n");
+    assert!(
+        slides.contains(r#"<a:latin typeface="Brand Serif""#),
+        "{slides}"
+    );
+    assert!(
+        slides.contains(r#"<a:ea typeface="Brand Gothic""#),
+        "{slides}"
+    );
+    assert!(!slides.contains("Brand Naskh"), "{slides}");
+    assert!(
+        slides.contains("<a:t>Quarterly numbers</a:t>")
+            && slides.contains("<a:t>Revenue in yen</a:t>"),
+        "the folded slide paragraph was not split by line: {slides}"
+    );
+    let deck_report: Value = serde_json::from_slice(&std::fs::read(&deck_report).unwrap()).unwrap();
+    assert!(
+        deck_report["preserved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line
+                .as_str()
+                .unwrap_or_default()
+                .contains("slide paragraph(s) were split by line to carry them")),
+        "{deck_report}"
+    );
+
+    // Text is unchanged by the pinning, so both targets still read the same content.
+    for output in [&word, &deck] {
+        officecli()
+            .args(["view", output.to_string_lossy().as_ref()])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Quarterly numbers"))
+            .stdout(predicate::str::contains("Revenue in yen"))
+            .stdout(predicate::str::contains("Arabic totals"));
+    }
+}
+
 #[test]
 fn large_pptx_hcd_table_rebuilds_as_bounded_native_pptx_windows() {
     let temp = tempfile::tempdir().unwrap();

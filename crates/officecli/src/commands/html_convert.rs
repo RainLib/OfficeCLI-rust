@@ -39,6 +39,10 @@ pub(crate) struct HtmlConversionSummary {
     pub block_count: usize,
     pub image_count: usize,
     pub embedded_image_count: usize,
+    /// Paragraphs whose runs carry a face a `text.font` patch pinned on a block.
+    pub pinned_font_paragraphs: usize,
+    /// Slide paragraphs that had to be split by line to carry different faces.
+    pub pinned_font_split_paragraphs: usize,
     pub warnings: Vec<String>,
 }
 
@@ -151,9 +155,63 @@ struct SemanticHtml {
     links: Vec<SemanticLink>,
     table_links: Vec<SemanticTableLink>,
     merges: Vec<SemanticMerge>,
+    block_fonts: Vec<SemanticBlockFont>,
     table_row_heights: HashMap<usize, HashMap<usize, f64>>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
+}
+
+/// A script face that a `text.font` patch pinned onto one canonical node. The
+/// semantic export has no run structure to pin onto, so a pinned face is applied
+/// to the whole block the node was read from: `latin` becomes
+/// `w:rFonts w:ascii`/`w:hAnsi` in DOCX and `<a:latin>` in PPTX, and
+/// `east_asia` becomes `w:rFonts w:eastAsia` and `<a:ea>`. A bidi-only pin is
+/// not written by the semantic export.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BlockFaces {
+    latin: Option<String>,
+    east_asia: Option<String>,
+}
+
+impl BlockFaces {
+    fn is_empty(&self) -> bool {
+        self.latin.is_none() && self.east_asia.is_none()
+    }
+
+    /// A later face in the same block fills a slot the block does not have yet,
+    /// so an outer wrapper and an inner run agree on the first face written.
+    fn merge(&mut self, faces: &BlockFaces) {
+        if self.latin.is_none() {
+            self.latin = faces.latin.clone();
+        }
+        if self.east_asia.is_none() {
+            self.east_asia = faces.east_asia.clone();
+        }
+    }
+}
+
+/// The faces pinned on one semantic block, kept beside the block index because
+/// the block itself carries only text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticBlockFont {
+    block_index: usize,
+    faces: BlockFaces,
+}
+
+/// The family rules a `text.font` patch accepted, applied again here because the
+/// attribute may also appear in HTML a caller wrote by hand. A face that breaks
+/// them is dropped rather than written into the target package.
+fn semantic_font_face(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+    if trimmed.contains(['<', '>', '"', '\'', ';', ':', '&'])
+        || trimmed.chars().any(|character| character.is_control())
+    {
+        return None;
+    }
+    Some(trimmed)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,6 +355,7 @@ struct HtmlParser {
     links: Vec<ActiveLink>,
     image_geometry_stack: Vec<Option<ImageGeometry>>,
     pdf_line: Option<PdfLineBuilder>,
+    pending_font: Option<BlockFaces>,
     in_title: bool,
     suppressed_tag: Option<String>,
 }
@@ -541,10 +600,11 @@ pub(crate) fn convert_html_with_assets(
     let legacy_pdf = output_format == "pdf"
         && std::env::var("OFFICECLI_HTML_PDF_MODE")
             .is_ok_and(|mode| mode.eq_ignore_ascii_case("semantic"));
+    let mut pinning = SemanticFontPinning::default();
     let conversion = match output_format {
-        "docx" => export_docx(&document, &temporary),
+        "docx" => export_docx(&document, &temporary, &mut pinning),
         "xlsx" => export_xlsx(&document, &temporary),
-        "pptx" => export_pptx(&document, &temporary),
+        "pptx" => export_pptx(&document, &temporary, &mut pinning),
         "pdf" if legacy_pdf => export_pdf(&mut document, &temporary),
         "pdf" => export_pdf_css(&source, input, &document.assets, &temporary),
         "md" => export_textual(&document, &temporary, true),
@@ -593,6 +653,16 @@ pub(crate) fn convert_html_with_assets(
             "CSS layout is not reproduced; output uses semantic document defaults".to_string(),
         );
     }
+    for text in &pinning.conflicts {
+        document.warnings.insert(format!(
+            "two pinned text.font faces share the text {text:?}; neither was applied because the semantic export addresses paragraphs by text"
+        ));
+    }
+    for text in &pinning.missed {
+        document.warnings.insert(format!(
+            "the pinned text.font face on {text:?} reached no paragraph in the semantic output"
+        ));
+    }
     Ok(HtmlConversionSummary {
         engine: if output_format == "pdf" && !legacy_pdf {
             "rust-html-css-pdf"
@@ -607,6 +677,8 @@ pub(crate) fn convert_html_with_assets(
         block_count: document.blocks.len(),
         image_count,
         embedded_image_count,
+        pinned_font_paragraphs: pinning.pinned_paragraphs,
+        pinned_font_split_paragraphs: pinning.split_paragraphs,
         warnings: document.warnings.into_iter().collect(),
     })
 }
@@ -972,6 +1044,9 @@ impl HtmlParser {
             self.document
                 .warnings
                 .insert("inline CSS was ignored".to_string());
+        }
+        if !tag.closing {
+            self.note_block_font(&tag.attributes);
         }
         if tag.closing {
             self.end_tag(&tag.name)
@@ -1503,6 +1578,49 @@ impl HtmlParser {
         ensure_text_limit(&pending.text)
     }
 
+    /// A `text.font` patch leaves its slots on the canonical node element as
+    /// `data-hcd-font-latin` / `data-hcd-font-east-asia`. The semantic writers
+    /// address whole paragraphs, so the face is remembered for the block this
+    /// element belongs to.
+    fn note_block_font(&mut self, attributes: &HashMap<String, String>) {
+        let faces = BlockFaces {
+            latin: attributes
+                .get("data-hcd-font-latin")
+                .and_then(|value| semantic_font_face(value).map(str::to_string)),
+            east_asia: attributes
+                .get("data-hcd-font-east-asia")
+                .and_then(|value| semantic_font_face(value).map(str::to_string)),
+        };
+        let bidi = attributes
+            .get("data-hcd-font-bidi")
+            .and_then(|value| semantic_font_face(value))
+            .is_some();
+        if faces.is_empty() && !bidi {
+            return;
+        }
+        if self.table.is_some() || self.logical_table.is_some() {
+            // A cell face cannot be written onto the table block without changing
+            // every other cell, so it is reported instead of leaking onward.
+            self.document.warnings.insert(
+                "a pinned text.font face on a table cell was not exported; the semantic export applies faces to whole blocks, so use the source-backed export for one cell".to_string(),
+            );
+            return;
+        }
+        if bidi {
+            self.document.warnings.insert(
+                "a pinned text.font bidi face was not exported; the semantic export writes only the latin and eastAsia slots, so use the source-backed export for complex-script text"
+                    .to_string(),
+            );
+        }
+        if faces.is_empty() {
+            return;
+        }
+        match &mut self.pending_font {
+            Some(stored) => stored.merge(&faces),
+            None => self.pending_font = Some(faces),
+        }
+    }
+
     fn flush_pending(&mut self) -> Result<(), HandlerError> {
         let Some(pending) = self.pending.take() else {
             return Ok(());
@@ -1516,11 +1634,22 @@ impl HtmlParser {
         let trim_end = trim_start + trimmed.len();
         let text = trimmed.to_string();
         if text.is_empty() {
+            if self.pending_font.take().is_some() {
+                self.document.warnings.insert(
+                    "a pinned text.font face was not exported because its block has no text"
+                        .to_string(),
+                );
+            }
             return Ok(());
         }
         let block = match pending.kind {
             PendingKind::Paragraph => HtmlBlock::Paragraph(text),
-            PendingKind::PdfText(geometry) => return self.push_pdf_line_fragment(geometry, text),
+            // A PDF text block keeps its face in the canonical inline style, which the
+            // PDF print engine reads; it is not a block the semantic writers match.
+            PendingKind::PdfText(geometry) => {
+                self.pending_font = None;
+                return self.push_pdf_line_fragment(geometry, text);
+            }
             PendingKind::Heading(level) => HtmlBlock::Heading { level, text },
             PendingKind::ListItem { ordered, ordinal } => HtmlBlock::ListItem {
                 ordered,
@@ -1532,6 +1661,13 @@ impl HtmlParser {
         };
         let block_index = self.document.blocks.len();
         self.push_block(block)?;
+        if let Some(faces) = self.pending_font.take() {
+            if !faces.is_empty() {
+                self.document
+                    .block_fonts
+                    .push(SemanticBlockFont { block_index, faces });
+            }
+        }
         self.document
             .links
             .extend(pending.links.into_iter().filter_map(|link| {
@@ -1658,8 +1794,12 @@ impl HtmlParser {
     }
 }
 
-fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
-    let output = output.to_string_lossy();
+fn export_docx(
+    document: &SemanticHtml,
+    package: &Path,
+    pinning: &mut SemanticFontPinning,
+) -> Result<usize, HandlerError> {
+    let output = package.to_string_lossy();
     super::create::create_blank_docx(&output)?;
     let handler = WordHandler::open(&output, true)?;
     let _ = handler.remove("/body/p[1]")?;
@@ -1699,6 +1839,7 @@ fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
         &document.table_links,
     )?;
     handler.save()?;
+    *pinning = pin_semantic_block_fonts(package, document, SemanticFontTarget::Word)?;
     Ok(embedded)
 }
 
@@ -1928,8 +2069,12 @@ fn append_xlsx_row(
     Ok(())
 }
 
-fn export_pptx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
-    let output = output.to_string_lossy();
+fn export_pptx(
+    document: &SemanticHtml,
+    package: &Path,
+    pinning: &mut SemanticFontPinning,
+) -> Result<usize, HandlerError> {
+    let output = package.to_string_lossy();
     super::create::create_blank_pptx(&output)?;
     let handler = PptxHandler::open(&output, true)?;
     let slides = semantic_slides(document);
@@ -2025,6 +2170,7 @@ fn export_pptx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
         }
     }
     handler.save()?;
+    *pinning = pin_semantic_block_fonts(package, document, SemanticFontTarget::PowerPoint)?;
     Ok(embedded)
 }
 
@@ -2969,6 +3115,697 @@ fn block_lines(block: &HtmlBlock) -> Vec<String> {
     }
 }
 
+/// The address a pinned face is looked up by. The parser and the writers both
+/// collapse whitespace, so a block meets the paragraph it became on this key.
+fn face_lookup_key(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Every text the semantic writers can produce for one block: the whole block
+/// and each of its lines, because a multi-line block can become paragraphs.
+fn face_keys(block: &HtmlBlock) -> Vec<String> {
+    let text = match block {
+        HtmlBlock::Heading { text, .. }
+        | HtmlBlock::Paragraph(text)
+        | HtmlBlock::Preformatted(text)
+        | HtmlBlock::Quote(text)
+        | HtmlBlock::ListItem { text, .. } => text.as_str(),
+        _ => return Vec::new(),
+    };
+    let mut keys = Vec::new();
+    for candidate in std::iter::once(text).chain(text.lines()) {
+        let key = face_lookup_key(candidate);
+        if !key.is_empty() && !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// Maps the text of a generated paragraph back to the face pinned on the block
+/// it came from. Two blocks that share text but carry different faces are not
+/// addressable, so neither pins and the collision is reported.
+#[derive(Default)]
+struct BlockFaceMatcher {
+    by_text: HashMap<String, BlockFaces>,
+    conflicts: Vec<String>,
+}
+
+impl BlockFaceMatcher {
+    fn new(document: &SemanticHtml) -> Self {
+        let mut matcher = Self::default();
+        for pinned in &document.block_fonts {
+            let Some(block) = document.blocks.get(pinned.block_index) else {
+                continue;
+            };
+            for key in face_keys(block) {
+                match matcher.by_text.get(&key) {
+                    None => {
+                        matcher.by_text.insert(key, pinned.faces.clone());
+                    }
+                    Some(seen) if *seen == pinned.faces => {}
+                    Some(_) => matcher.conflicts.push(key),
+                }
+            }
+        }
+        let conflicts = std::mem::take(&mut matcher.conflicts);
+        for key in conflicts {
+            matcher.by_text.remove(&key);
+            if !matcher.conflicts.contains(&key) {
+                matcher.conflicts.push(key);
+            }
+        }
+        matcher.conflicts.sort();
+        matcher
+    }
+
+    fn lookup(&self, key: &str) -> Option<&BlockFaces> {
+        self.by_text.get(key)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SemanticFontTarget {
+    Word,
+    PowerPoint,
+}
+
+/// What the semantic block-font pass did, so nothing is dropped silently.
+#[derive(Debug, Default)]
+struct SemanticFontPinning {
+    /// Blocks that carry a pinned face.
+    faces: usize,
+    /// Paragraphs whose runs were pinned.
+    pinned_paragraphs: usize,
+    /// Slide paragraphs that had to be split by line to carry different faces.
+    split_paragraphs: usize,
+    /// Text shared by blocks with different faces.
+    conflicts: Vec<String>,
+    /// Blocks whose face reached no paragraph.
+    missed: Vec<String>,
+}
+
+/// Writes the faces a `text.font` patch pinned onto whole blocks into the
+/// package the semantic writer just produced. The semantic path has no run
+/// structure to pin onto — one block becomes one paragraph — so the face lands
+/// on every run of that paragraph.
+fn pin_semantic_block_fonts(
+    package: &Path,
+    document: &SemanticHtml,
+    kind: SemanticFontTarget,
+) -> Result<SemanticFontPinning, HandlerError> {
+    let mut pinning = SemanticFontPinning::default();
+    if document.block_fonts.is_empty() {
+        return Ok(pinning);
+    }
+    let path = package.to_str().ok_or_else(|| {
+        HandlerError::InvalidArgument("semantic output path is not UTF-8".to_string())
+    })?;
+    let matcher = BlockFaceMatcher::new(document);
+    pinning.faces = document.block_fonts.len();
+    pinning.conflicts = matcher.conflicts.clone();
+    let mut archive = oxml::OxmlPackage::open(path, true)
+        .map_err(|error| HandlerError::OperationFailed(format!("open {path}: {error}")))?;
+    let parts: Vec<String> = match kind {
+        SemanticFontTarget::Word => vec!["word/document.xml".to_string()],
+        SemanticFontTarget::PowerPoint => archive
+            .list_parts()
+            .into_iter()
+            .filter(|part| part.starts_with("ppt/slides/") && part.ends_with(".xml"))
+            .cloned()
+            .collect(),
+    };
+    let mut matched = HashSet::new();
+    let mut rewritten: Vec<(String, String)> = Vec::new();
+    for part in parts {
+        let Ok(xml) = archive.read_part_xml(&part) else {
+            continue;
+        };
+        let (updated, pinned) = match kind {
+            SemanticFontTarget::Word => pin_docx_paragraphs(&xml, &matcher, &mut matched),
+            SemanticFontTarget::PowerPoint => {
+                pin_pptx_paragraphs(&xml, &matcher, &mut matched, &mut pinning.split_paragraphs)
+            }
+        };
+        if pinned > 0 {
+            pinning.pinned_paragraphs += pinned;
+            rewritten.push((part, updated));
+        }
+    }
+    if pinning.pinned_paragraphs > 0 {
+        for (part, xml) in rewritten {
+            archive
+                .write_part_xml(&part, &xml)
+                .map_err(|error| HandlerError::OperationFailed(format!("write {part}: {error}")))?;
+        }
+        archive
+            .save()
+            .map_err(|error| HandlerError::OperationFailed(format!("save {path}: {error}")))?;
+    }
+    for pinned in &document.block_fonts {
+        let Some(block) = document.blocks.get(pinned.block_index) else {
+            continue;
+        };
+        let keys = face_keys(block);
+        if keys.iter().any(|key| matched.contains(key))
+            || keys.iter().any(|key| matcher.conflicts.contains(key))
+        {
+            continue;
+        }
+        pinning.missed.push(truncated_face_text(&keys));
+    }
+    Ok(pinning)
+}
+
+fn truncated_face_text(keys: &[String]) -> String {
+    let first = keys.first().cloned().unwrap_or_default();
+    if first.chars().count() > 60 {
+        format!("{}…", first.chars().take(60).collect::<String>())
+    } else {
+        first
+    }
+}
+
+/// One element found in a string by exact name: where it starts, where its
+/// start tag ends, where its content ends, and where the whole element ends.
+#[derive(Debug, Clone, Copy)]
+struct ElementScan<'a> {
+    source: &'a str,
+    name: &'a str,
+    open: usize,
+    tag_end: usize,
+    content_end: usize,
+    end: usize,
+    self_closed: bool,
+}
+
+impl<'a> ElementScan<'a> {
+    /// The next element named `name` at or after `from`. The byte after the name
+    /// has to end it, so `<w:pPr` is never mistaken for `<w:p>`. An element that
+    /// is never closed is treated as absent, which leaves the text untouched.
+    fn find(source: &'a str, from: usize, name: &'a str) -> Option<Self> {
+        let needle = format!("<{name}");
+        let mut cursor = from;
+        loop {
+            let tag_relative = source.get(cursor..)?.find(&needle)?;
+            let open = cursor + tag_relative;
+            let after = open + needle.len();
+            let next = source.get(after..)?.chars().next()?;
+            let (tag_end, self_closed) = if next == '>' {
+                (after + 1, false)
+            } else if next == '/' {
+                (source.get(after..)?.find('>')? + after + 1, true)
+            } else if next.is_whitespace() {
+                let close = source.get(after..)?.find('>')? + after;
+                (
+                    close + 1,
+                    source.get(after..close)?.trim_end().ends_with('/'),
+                )
+            } else {
+                cursor = open + 1;
+                continue;
+            };
+            if self_closed {
+                return Some(Self {
+                    source,
+                    name,
+                    open,
+                    tag_end,
+                    content_end: tag_end,
+                    end: tag_end,
+                    self_closed,
+                });
+            }
+            let closing = format!("</{name}>");
+            let relative = source.get(tag_end..)?.find(closing.as_str())?;
+            let content_end = tag_end + relative;
+            return Some(Self {
+                source,
+                name,
+                open,
+                tag_end,
+                content_end,
+                end: content_end + closing.len(),
+                self_closed,
+            });
+        }
+    }
+
+    fn tag(&self) -> &'a str {
+        &self.source[self.open..self.tag_end]
+    }
+
+    fn content(&self) -> &'a str {
+        &self.source[self.tag_end..self.content_end]
+    }
+
+    fn closing(&self) -> String {
+        format!("</{}>", self.name)
+    }
+
+    /// The start tag with a self-closing element turned back into an open one,
+    /// so pinned children can be written inside it.
+    fn reopened(&self) -> String {
+        if !self.self_closed {
+            return self.tag().to_string();
+        }
+        let tag = self.tag().trim_end();
+        let without = tag.strip_suffix("/>").unwrap_or(tag);
+        format!("{}>", without.trim_end())
+    }
+}
+
+/// Walks every Word paragraph and pins the runs of those whose text carries a
+/// face. The Word writer gives one semantic block one paragraph, so a paragraph
+/// is either pinned whole or left alone.
+fn pin_docx_paragraphs(
+    xml: &str,
+    matcher: &BlockFaceMatcher,
+    matched: &mut HashSet<String>,
+) -> (String, usize) {
+    let mut output = String::with_capacity(xml.len());
+    let mut cursor = 0usize;
+    let mut pinned = 0usize;
+    while let Some(found) = ElementScan::find(xml, cursor, "w:p") {
+        output.push_str(&xml[cursor..found.open]);
+        cursor = found.end;
+        if found.self_closed {
+            output.push_str(found.tag());
+            continue;
+        }
+        let body = found.content();
+        let key = face_lookup_key(&element_text(body, "w:t"));
+        match (!key.is_empty()).then(|| matcher.lookup(&key)).flatten() {
+            Some(faces) => {
+                output.push_str(found.tag());
+                output.push_str(&pin_docx_runs(body, faces));
+                output.push_str(&found.closing());
+                matched.insert(key);
+                pinned += 1;
+            }
+            None => output.push_str(&xml[found.open..found.end]),
+        }
+    }
+    output.push_str(&xml[cursor..]);
+    (output, pinned)
+}
+
+/// Walks every slide paragraph. The slide writer folds a slide's lines into one
+/// paragraph, so lines that were pinned with different faces are split into one
+/// paragraph per line before their faces are written.
+fn pin_pptx_paragraphs(
+    xml: &str,
+    matcher: &BlockFaceMatcher,
+    matched: &mut HashSet<String>,
+    splits: &mut usize,
+) -> (String, usize) {
+    let mut output = String::with_capacity(xml.len());
+    let mut cursor = 0usize;
+    let mut pinned = 0usize;
+    while let Some(found) = ElementScan::find(xml, cursor, "a:p") {
+        output.push_str(&xml[cursor..found.open]);
+        cursor = found.end;
+        if found.self_closed {
+            output.push_str(found.tag());
+            continue;
+        }
+        let body = found.content();
+        let text = element_text(body, "a:t");
+        let whole = face_lookup_key(&text);
+        if let Some(faces) = (!whole.is_empty())
+            .then(|| matcher.lookup(&whole))
+            .flatten()
+        {
+            let line_keys: Vec<String> = text.split('\n').map(face_lookup_key).collect();
+            output.push_str(found.tag());
+            output.push_str(&pin_pptx_runs(body, faces));
+            output.push_str(&found.closing());
+            matched.insert(whole);
+            matched.extend(line_keys.into_iter().filter(|key| !key.is_empty()));
+            pinned += 1;
+            continue;
+        }
+        let line_keys: Vec<String> = text.split('\n').map(face_lookup_key).collect();
+        let faces: Vec<Option<BlockFaces>> = line_keys
+            .iter()
+            .map(|key| {
+                (!key.is_empty())
+                    .then(|| matcher.lookup(key))
+                    .flatten()
+                    .cloned()
+            })
+            .collect();
+        if faces.iter().all(Option::is_none) {
+            output.push_str(&xml[found.open..found.end]);
+            continue;
+        }
+        let shared = faces
+            .first()
+            .and_then(|slot| slot.as_ref())
+            .filter(|face| {
+                faces
+                    .iter()
+                    .all(|slot| slot.as_ref().is_some_and(|inner| inner == *face))
+            })
+            .cloned();
+        if let Some(faces) = shared {
+            output.push_str(found.tag());
+            output.push_str(&pin_pptx_runs(body, &faces));
+            output.push_str(&found.closing());
+            matched.extend(line_keys.into_iter().filter(|key| !key.is_empty()));
+            pinned += 1;
+            continue;
+        }
+        match split_pptx_line_paragraphs(body) {
+            Some(paragraphs) => {
+                *splits += 1;
+                for (index, paragraph) in paragraphs.iter().enumerate() {
+                    output.push_str("<a:p>");
+                    match faces.get(index).and_then(|slot| slot.as_ref()) {
+                        Some(faces) => {
+                            output.push_str(&pin_pptx_runs(paragraph, faces));
+                            if let Some(key) = line_keys.get(index) {
+                                matched.insert(key.clone());
+                            }
+                            pinned += 1;
+                        }
+                        None => output.push_str(paragraph),
+                    }
+                    output.push_str("</a:p>");
+                }
+            }
+            None => output.push_str(&xml[found.open..found.end]),
+        }
+    }
+    output.push_str(&xml[cursor..]);
+    (output, pinned)
+}
+
+/// Splits a slide paragraph whose single run folds several lines into one text
+/// element into one paragraph per line, keeping the run properties, the
+/// paragraph properties and the properties of the paragraph end. A paragraph
+/// the writers built any other way — more than one run, a field, or an explicit
+/// break — is left as it is rather than re-guessed, and the face on it is
+/// reported as unpinned.
+fn split_pptx_line_paragraphs(body: &str) -> Option<Vec<String>> {
+    let run = ElementScan::find(body, 0, "a:r")?;
+    if ElementScan::find(body, run.end, "a:r").is_some() {
+        return None;
+    }
+    let (prefix, suffix) = (&body[..run.open], &body[run.end..]);
+    let inner = run.content();
+    if prefix.contains("<a:br")
+        || suffix.contains("<a:br")
+        || inner.contains("<a:br")
+        || prefix.contains("<a:fld")
+        || suffix.contains("<a:fld")
+    {
+        return None;
+    }
+    let text = ElementScan::find(inner, 0, "a:t")?;
+    if text.self_closed || ElementScan::find(inner, text.end, "a:t").is_some() {
+        return None;
+    }
+    let properties = &inner[..text.open];
+    let raw = decode_entities(text.content());
+    let lines: Vec<&str> = raw.split('\n').collect();
+    if lines.len() < 2 {
+        return None;
+    }
+    let run_tag = run.tag();
+    lines
+        .iter()
+        .map(|line| {
+            let escaped = escape_xml_text(line).ok()?;
+            Some(format!(
+                "{prefix}{run_tag}{properties}<a:t>{escaped}</a:t></a:r>{suffix}"
+            ))
+        })
+        .collect()
+}
+
+fn element_text(xml: &str, name: &str) -> String {
+    let mut text = String::new();
+    let mut cursor = 0usize;
+    while let Some(found) = ElementScan::find(xml, cursor, name) {
+        if !found.self_closed {
+            text.push_str(&decode_entities(found.content()));
+        }
+        cursor = found.end;
+    }
+    text
+}
+
+/// The `name="value"` pairs of a start tag, in source order and with their
+/// escaping kept, because they are written back unchanged.
+fn tag_attributes(tag: &str) -> Vec<(String, String)> {
+    let bytes = tag.as_bytes();
+    let mut pairs = Vec::new();
+    let mut index = tag.find('<').unwrap_or(0) + 1;
+    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    while index < bytes.len() {
+        while index < bytes.len() && (bytes[index].is_ascii_whitespace() || bytes[index] == b'/') {
+            index += 1;
+        }
+        let name_start = index;
+        while index < bytes.len() && !bytes[index].is_ascii_whitespace() && bytes[index] != b'=' {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            break;
+        }
+        let name = &tag[name_start..index];
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let quote = match bytes.get(index) {
+            Some(b'"') | Some(b'\'') => bytes[index],
+            _ => break,
+        };
+        index += 1;
+        let value_start = index;
+        while index < bytes.len() && bytes[index] != quote {
+            index += 1;
+        }
+        pairs.push((name.to_string(), tag[value_start..index].to_string()));
+        index += 1;
+    }
+    pairs
+}
+
+fn escape_face(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn docx_font_element(existing: Option<&str>, faces: &BlockFaces) -> String {
+    const OVERRIDDEN: [&str; 7] = [
+        "w:ascii",
+        "w:hAnsi",
+        "w:eastAsia",
+        "w:asciiTheme",
+        "w:hAnsiTheme",
+        "w:eastAsiaTheme",
+        "w:hint",
+    ];
+    let mut attributes: Vec<(String, String)> = existing
+        .map(|tag| {
+            tag_attributes(tag)
+                .into_iter()
+                .filter(|(name, _)| !OVERRIDDEN.contains(&name.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(latin) = faces.latin.as_deref() {
+        attributes.push(("w:ascii".to_string(), escape_face(latin)));
+        attributes.push(("w:hAnsi".to_string(), escape_face(latin)));
+    }
+    if let Some(east_asia) = faces.east_asia.as_deref() {
+        attributes.push(("w:eastAsia".to_string(), escape_face(east_asia)));
+    }
+    let rendered = attributes
+        .into_iter()
+        .map(|(name, value)| format!("{name}=\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("<w:rFonts {rendered} />")
+}
+
+/// Pins the faces onto every run of one paragraph body.
+fn pin_docx_runs(body: &str, faces: &BlockFaces) -> String {
+    let mut output = String::with_capacity(body.len() + 64);
+    let mut cursor = 0usize;
+    while let Some(run) = ElementScan::find(body, cursor, "w:r") {
+        output.push_str(&body[cursor..run.open]);
+        if run.self_closed {
+            output.push_str(run.tag());
+            cursor = run.end;
+            continue;
+        }
+        let inner = run.content();
+        output.push_str(run.tag());
+        match ElementScan::find(inner, 0, "w:rPr") {
+            Some(properties) if properties.open == 0 => {
+                let (open, end) = (properties.open, properties.end);
+                output.push_str(&inner[..open]);
+                output.push_str(&pin_docx_properties(&properties, faces));
+                output.push_str(&inner[end..]);
+            }
+            _ => {
+                output.push_str(&docx_rpr(faces));
+                output.push_str(inner);
+            }
+        }
+        output.push_str("</w:r>");
+        cursor = run.end;
+    }
+    output.push_str(&body[cursor..]);
+    output
+}
+
+fn docx_rpr(faces: &BlockFaces) -> String {
+    format!("<w:rPr>{}</w:rPr>", docx_font_element(None, faces))
+}
+
+/// Rewrites one existing `<w:rPr>` so it carries the pinned slots. Every other
+/// property stays, and the theme attributes Word would resolve ahead of the
+/// faces that were just written go with the slots they replace.
+fn pin_docx_properties(properties: &ElementScan<'_>, faces: &BlockFaces) -> String {
+    let inner = if properties.self_closed {
+        String::new()
+    } else {
+        properties.content().to_string()
+    };
+    let existing = ElementScan::find(&inner, 0, "w:rFonts");
+    let replacement = docx_font_element(existing.as_ref().map(|found| found.tag()), faces);
+    let body = match existing.map(|found| (found.open, found.end)) {
+        Some((open, end)) => format!("{}{replacement}{}", &inner[..open], &inner[end..]),
+        None => {
+            let insert_at = match ElementScan::find(&inner, 0, "w:rStyle") {
+                Some(style) if style.open == 0 => style.end,
+                _ => 0,
+            };
+            format!(
+                "{}{replacement}{}",
+                &inner[..insert_at],
+                &inner[insert_at..]
+            )
+        }
+    };
+    format!("{}{body}</w:rPr>", properties.reopened())
+}
+
+fn pptx_font_children(faces: &BlockFaces) -> String {
+    let mut children = String::new();
+    if let Some(latin) = faces.latin.as_deref() {
+        children.push_str(&format!("<a:latin typeface=\"{}\" />", escape_face(latin)));
+    }
+    if let Some(east_asia) = faces.east_asia.as_deref() {
+        children.push_str(&format!("<a:ea typeface=\"{}\" />", escape_face(east_asia)));
+    }
+    children
+}
+
+/// Pins the faces onto every run and field of one slide paragraph body.
+fn pin_pptx_runs(body: &str, faces: &BlockFaces) -> String {
+    let mut output = String::with_capacity(body.len() + 64);
+    let mut cursor = 0usize;
+    loop {
+        let run = match (
+            ElementScan::find(body, cursor, "a:r"),
+            ElementScan::find(body, cursor, "a:fld"),
+        ) {
+            (Some(text), Some(field)) => {
+                if text.open <= field.open {
+                    text
+                } else {
+                    field
+                }
+            }
+            (Some(text), None) => text,
+            (None, Some(field)) => field,
+            (None, None) => break,
+        };
+        output.push_str(&body[cursor..run.open]);
+        if run.self_closed {
+            output.push_str(run.tag());
+            cursor = run.end;
+            continue;
+        }
+        let inner = run.content();
+        output.push_str(run.tag());
+        match ElementScan::find(inner, 0, "a:rPr") {
+            Some(properties) if properties.open == 0 => {
+                let (open, end) = (properties.open, properties.end);
+                output.push_str(&inner[..open]);
+                output.push_str(&pin_pptx_properties(&properties, faces));
+                output.push_str(&inner[end..]);
+            }
+            _ => {
+                output.push_str("<a:rPr>");
+                output.push_str(&pptx_font_children(faces));
+                output.push_str("</a:rPr>");
+                output.push_str(inner);
+            }
+        }
+        output.push_str(&run.closing());
+        cursor = run.end;
+    }
+    output.push_str(&body[cursor..]);
+    output
+}
+
+/// Replaces the font children of one properties element. The theme references and
+/// the pitch and charset that belonged to the old typeface leave with it, and
+/// the new children land where DrawingML expects them.
+fn pin_pptx_properties(properties: &ElementScan<'_>, faces: &BlockFaces) -> String {
+    let mut inner = if properties.self_closed {
+        String::new()
+    } else {
+        properties.content().to_string()
+    };
+    for (slot, pinned) in [
+        ("a:latin", faces.latin.is_some()),
+        ("a:ea", faces.east_asia.is_some()),
+    ] {
+        if !pinned {
+            continue;
+        }
+        if let Some((open, end)) =
+            ElementScan::find(&inner, 0, slot).map(|found| (found.open, found.end))
+        {
+            inner = format!("{}{}", &inner[..open], &inner[end..]);
+        }
+    }
+    let insert_at = [
+        "a:sym",
+        "a:hlinkClick",
+        "a:hlinkMouseOver",
+        "a:rtl",
+        "a:extLst",
+    ]
+    .iter()
+    .filter_map(|later| ElementScan::find(&inner, 0, later).map(|found| found.open))
+    .min()
+    .unwrap_or(inner.len());
+    let children = pptx_font_children(faces);
+    format!(
+        "{}{}{}{}</{}>",
+        properties.reopened(),
+        &inner[..insert_at],
+        children,
+        &inner[insert_at..],
+        properties.name
+    )
+}
+
 #[cfg(test)]
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     wrap_text_spans(text, width)
@@ -3509,6 +4346,212 @@ mod tests {
         assert!(semantic_pdf_uri_target("mailto:test@example.com"));
         assert!(!semantic_pdf_uri_target("#hcd-footnote-note"));
         assert!(!semantic_pdf_uri_target("../relative.md"));
+    }
+
+    #[test]
+    fn semantic_parser_records_pinned_block_faces() {
+        let document = parse_html(
+            r#"<h2 data-hcd-id="n_one" data-hcd-font-latin="Brand Serif">Quarterly numbers</h2><p data-hcd-id="n_two"><span data-hcd-id="n_two" data-hcd-font-latin="Brand Serif" data-hcd-font-east-asia="Brand Gothic">Revenue in yen</span></p>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            document.block_fonts,
+            vec![
+                SemanticBlockFont {
+                    block_index: 0,
+                    faces: BlockFaces {
+                        latin: Some("Brand Serif".to_string()),
+                        east_asia: None,
+                    },
+                },
+                SemanticBlockFont {
+                    block_index: 1,
+                    faces: BlockFaces {
+                        latin: Some("Brand Serif".to_string()),
+                        east_asia: Some("Brand Gothic".to_string()),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_parser_reports_faces_it_cannot_write() {
+        let bidi = parse_html(r#"<p data-hcd-font-bidi="Brand Naskh">مرحبا</p>"#).unwrap();
+        assert!(bidi.block_fonts.is_empty(), "{:?}", bidi.block_fonts);
+        assert!(
+            bidi.warnings
+                .iter()
+                .any(|warning| warning.contains("bidi face was not exported")),
+            "{:?}",
+            bidi.warnings
+        );
+
+        let cell = parse_html(
+            r#"<table><tr><td data-hcd-font-latin="Brand Serif">Cell</td></tr></table>"#,
+        )
+        .unwrap();
+        assert!(cell.block_fonts.is_empty(), "{:?}", cell.block_fonts);
+        assert!(
+            cell.warnings
+                .iter()
+                .any(|warning| warning.contains("table cell was not exported")),
+            "{:?}",
+            cell.warnings
+        );
+
+        let unsafe_face = parse_html(r#"<p data-hcd-font-latin="Evil;">Text</p>"#).unwrap();
+        assert!(
+            unsafe_face.block_fonts.is_empty(),
+            "{:?}",
+            unsafe_face.block_fonts
+        );
+    }
+
+    #[test]
+    fn semantic_docx_export_pins_block_faces_onto_runs() {
+        let document = parse_html(
+            r#"<h2 data-hcd-font-latin="Brand Serif">Quarterly numbers</h2><p data-hcd-font-latin="Brand Serif" data-hcd-font-east-asia="Brand Gothic" data-hcd-font-bidi="Brand Naskh">Revenue in yen</p>"#,
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("pinned.docx");
+        let mut pinning = SemanticFontPinning::default();
+        export_docx(&document, &output, &mut pinning).unwrap();
+        assert_eq!(pinning.pinned_paragraphs, 2, "{pinning:?}");
+        assert!(pinning.conflicts.is_empty(), "{:?}", pinning.conflicts);
+        assert!(pinning.missed.is_empty(), "{:?}", pinning.missed);
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), true).unwrap();
+        let xml = package.read_part_xml("word/document.xml").unwrap();
+        assert!(
+            xml.contains(r#"w:ascii="Brand Serif""#) && xml.contains(r#"w:hAnsi="Brand Serif""#),
+            "{xml}"
+        );
+        assert!(xml.contains(r#"w:eastAsia="Brand Gothic""#), "{xml}");
+        assert!(!xml.contains("Brand Naskh"), "{xml}");
+        assert!(validate_output(&output, "docx").is_ok());
+    }
+
+    #[test]
+    fn semantic_pptx_export_pins_block_faces_onto_runs() {
+        let document = parse_html(
+            r#"<p data-hcd-font-latin="Brand Serif">Quarterly numbers</p><p data-hcd-font-latin="Brand Serif" data-hcd-font-east-asia="Brand Gothic">Revenue in yen</p>"#,
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("pinned.pptx");
+        let mut pinning = SemanticFontPinning::default();
+        export_pptx(&document, &output, &mut pinning).unwrap();
+        // The slide writer folds both lines into one paragraph, so the pinning
+        // pass split it into one paragraph per block.
+        assert_eq!(pinning.pinned_paragraphs, 2, "{pinning:?}");
+        assert_eq!(pinning.split_paragraphs, 1, "{pinning:?}");
+        assert!(pinning.missed.is_empty(), "{:?}", pinning.missed);
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), true).unwrap();
+        let xml = package.read_part_xml("ppt/slides/slide1.xml").unwrap();
+        let paragraphs = paragraph_texts(&xml, "a:p", "a:t");
+        assert_eq!(
+            paragraphs,
+            vec![
+                "Quarterly numbers".to_string(),
+                "Revenue in yen".to_string()
+            ]
+        );
+        let first = xml
+            .split("<a:p>")
+            .nth(1)
+            .and_then(|rest| rest.split("</a:p>").next())
+            .unwrap_or_default();
+        assert!(
+            first.contains(r#"<a:latin typeface="Brand Serif""#) && !first.contains("<a:ea"),
+            "{first}"
+        );
+        let second = xml
+            .split("<a:p>")
+            .nth(2)
+            .and_then(|rest| rest.split("</a:p>").next())
+            .unwrap_or_default();
+        assert!(
+            second.contains(r#"<a:latin typeface="Brand Serif""#)
+                && second.contains(r#"<a:ea typeface="Brand Gothic""#),
+            "{second}"
+        );
+        assert!(validate_output(&output, "pptx").is_ok());
+    }
+
+    /// The text of each paragraph of the named kind, in document order.
+    fn paragraph_texts(xml: &str, paragraph: &str, text_element: &str) -> Vec<String> {
+        let mut cursor = 0usize;
+        let mut found = Vec::new();
+        while let Some(found_paragraph) = ElementScan::find(xml, cursor, paragraph) {
+            found.push(face_lookup_key(&element_text(
+                found_paragraph.content(),
+                text_element,
+            )));
+            cursor = found_paragraph.end;
+        }
+        found
+    }
+
+    #[test]
+    fn semantic_export_pins_nothing_when_two_faces_share_one_text() {
+        let document = parse_html(
+            r#"<p data-hcd-font-latin="Brand Serif">Same text</p><p data-hcd-font-latin="Other Serif">Same text</p>"#,
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("conflict.docx");
+        let mut pinning = SemanticFontPinning::default();
+        export_docx(&document, &output, &mut pinning).unwrap();
+        assert_eq!(pinning.pinned_paragraphs, 0, "{pinning:?}");
+        assert_eq!(pinning.conflicts, vec!["Same text".to_string()]);
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), true).unwrap();
+        let xml = package.read_part_xml("word/document.xml").unwrap();
+        assert!(
+            !xml.contains("Brand Serif") && !xml.contains("Other Serif"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn semantic_pptx_export_keeps_existing_run_properties_when_pinning() {
+        let body = r#"<a:p><a:r><a:rPr lang="en-US" dirty="0"><a:b/><a:sym typeface="+mn-lt"/></a:rPr><a:t>Quarterly numbers</a:t></a:r></a:p>"#;
+        let faces = BlockFaces {
+            latin: Some("Brand Serif".to_string()),
+            east_asia: Some("Brand Gothic".to_string()),
+        };
+        let pinned = pin_pptx_runs(body, &faces);
+        assert!(pinned.contains(r#"lang="en-US" dirty="0""#), "{pinned}");
+        assert!(pinned.contains("<a:b/>"), "{pinned}");
+        assert!(
+            pinned.find(r#"<a:latin typeface="Brand Serif""#).unwrap()
+                < pinned.find("<a:sym").unwrap(),
+            "{pinned}"
+        );
+        assert!(
+            pinned.contains(r#"<a:ea typeface="Brand Gothic""#),
+            "{pinned}"
+        );
+    }
+
+    #[test]
+    fn semantic_docx_pinner_drops_theme_attributes_it_overrides() {
+        let faces = BlockFaces {
+            latin: Some("Brand Serif".to_string()),
+            east_asia: None,
+        };
+        let body = r#"<w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:hint="eastAsia"/><w:b/></w:rPr><w:t>Quarterly numbers</w:t></w:r>"#;
+        let pinned = pin_docx_runs(body, &faces);
+        assert!(
+            pinned.contains(r#"w:ascii="Brand Serif""#)
+                && pinned.contains(r#"w:hAnsi="Brand Serif""#),
+            "{pinned}"
+        );
+        for dropped in ["w:asciiTheme", "w:hAnsiTheme", "w:eastAsiaTheme", "w:hint"] {
+            assert!(!pinned.contains(dropped), "{pinned}");
+        }
+        assert!(pinned.contains("<w:b/>"), "{pinned}");
+        assert!(!pinned.contains("w:eastAsia"), "{pinned}");
     }
 
     #[test]

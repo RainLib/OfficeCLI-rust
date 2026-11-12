@@ -1487,6 +1487,16 @@ fn semantic_export(
             "{embedded_image_count} of {image_count} content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
         ));
     }
+    if summary.pinned_font_paragraphs > 0 {
+        let split = match summary.pinned_font_split_paragraphs {
+            0 => String::new(),
+            splits => format!("; {splits} slide paragraph(s) were split by line to carry them"),
+        };
+        preserved.push(format!(
+            "block fonts pinned by text.font on {} generated paragraph(s){split}",
+            summary.pinned_font_paragraphs
+        ));
+    }
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if conversion_engine == "rust-html-css-pdf" {
