@@ -283,10 +283,10 @@ pub enum PatchOperation {
     /// inline `font-family` style onto the node so HCD preview and pure-Rust semantic
     /// export use the chosen face; it does not change the node's extracted text, so
     /// the precondition node hash is the unchanged text hash. Source-backed
-    /// (`--source`) DOCX export writes the slots onto the mapped run's `w:rFonts`.
-    /// Presentation source export (PPTX/XLSX/PDF) still rejects a revision that
-    /// carries this change rather than silently dropping the font, mirroring the
-    /// `node.style` contract.
+    /// (`--source`) DOCX export writes the slots onto the mapped run's `w:rFonts`,
+    /// and PPTX export onto its `a:latin` / `a:ea` / `a:cs`. XLSX and PDF source
+    /// export still reject a revision that carries this change rather than silently
+    /// dropping the font, mirroring the `node.style` contract.
     #[serde(rename = "text.font", rename_all = "camelCase")]
     TextFont {
         node_id: String,

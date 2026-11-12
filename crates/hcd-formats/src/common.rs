@@ -1,10 +1,11 @@
 use hcd_core::{
-    extract_html_text_nodes, hash_bytes, hash_file, node_bloom_might_contain, Bundle,
-    FidelityReport, HcdError, HcdManifest, ImportEvent, SourceDescriptor, TextExtractEntry,
-    DEFAULT_CHUNK_BLOCKS, DEFAULT_CHUNK_SOFT_BYTES, HCD_SCHEMA_VERSION, MAX_REVISION,
+    extract_html_font_nodes, extract_html_text_nodes, hash_bytes, hash_file,
+    node_bloom_might_contain, Bundle, FidelityReport, HcdError, HcdManifest, HtmlFontNode,
+    ImportEvent, SourceDescriptor, TextExtractEntry, DEFAULT_CHUNK_BLOCKS,
+    DEFAULT_CHUNK_SOFT_BYTES, HCD_SCHEMA_VERSION, MAX_REVISION,
 };
 use quick_xml::events::Event;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
@@ -415,10 +416,67 @@ pub(crate) fn collect_dirty_nodes(
     Ok(output)
 }
 
+/// The script faces that a `text.font` patch pinned onto each dirty node, keyed by
+/// node id. Only nodes the patch touched appear here, so a face the source document
+/// already carried is not rewritten by an unrelated revision.
+pub(crate) fn collect_dirty_fonts(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    parts: &HashSet<String>,
+    node_ids: &HashSet<String>,
+) -> Result<HashMap<String, HtmlFontNode>, HcdError> {
+    let mut output = HashMap::new();
+    if node_ids.is_empty() {
+        return Ok(output);
+    }
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in page.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            if !source_map
+                .entries
+                .iter()
+                .any(|entry| node_ids.contains(&entry.node_id))
+            {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            if !html.contains("data-hcd-font-patched=\"true\"") {
+                continue;
+            }
+            let fonts = extract_html_font_nodes(&html)?;
+            if fonts.is_empty() {
+                continue;
+            }
+            for entry in source_map.entries {
+                if !node_ids.contains(&entry.node_id) || !parts.contains(&entry.source.part) {
+                    continue;
+                }
+                if let Some(font) = fonts.get(&entry.node_id) {
+                    output.entry(entry.node_id).or_insert_with(|| font.clone());
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+/// Whether this format's source-backed export can write the faces a `text.font`
+/// patch pinned onto a run. A format that cannot is stopped before writing output
+/// rather than dropping the pinned face silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunFontSupport {
+    /// The export rewrites the pinned faces onto the mapped run.
+    Rewrites,
+    /// The export refuses a revision that carries the patch.
+    Rejects,
+}
+
 pub(crate) fn checked_export_state(
     bundle: &Bundle,
     source: &Path,
     options: &ExportOptions,
+    run_fonts: RunFontSupport,
 ) -> Result<(HcdManifest, u64, HashSet<String>, HashSet<String>), HcdError> {
     let head = bundle.manifest()?;
     if head.revision > MAX_REVISION {
@@ -443,7 +501,7 @@ pub(crate) fn checked_export_state(
     }
     let manifest = manifest_at_revision(bundle, &head, revision)?;
     let (dirty_parts, dirty_nodes) = dirty_state_through(bundle, revision)?;
-    reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes)?;
+    reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes, run_fonts)?;
     reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
     Ok((manifest, revision, dirty_parts, dirty_nodes))
 }
@@ -454,6 +512,7 @@ pub(crate) fn checked_export_state_with_restores(
     bundle: &Bundle,
     source: &Path,
     options: &ExportOptions,
+    run_fonts: RunFontSupport,
 ) -> Result<RestoredExportState, HcdError> {
     let head = bundle.manifest()?;
     if head.revision > MAX_REVISION {
@@ -480,7 +539,7 @@ pub(crate) fn checked_export_state_with_restores(
     let revisions = effective_source_revisions(bundle, revision)?;
     let (dirty_parts, dirty_nodes) =
         dirty_state_for_revisions(bundle, revision, revisions.iter().copied())?;
-    reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes)?;
+    reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes, run_fonts)?;
     reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
     Ok((manifest, dirty_parts, dirty_nodes, revisions))
 }
@@ -511,10 +570,12 @@ fn reject_presentation_style_source_export(
     bundle: &Bundle,
     manifest: &HcdManifest,
     dirty_nodes: &HashSet<String>,
+    run_fonts: RunFontSupport,
 ) -> Result<(), HcdError> {
     if dirty_nodes.is_empty() {
         return Ok(());
     }
+    let rejects_run_fonts = run_fonts == RunFontSupport::Rejects;
     for page_number in 0..manifest.index_page_count {
         let page = bundle.read_index_page(manifest, page_number)?;
         for descriptor in page.chunks {
@@ -533,11 +594,11 @@ fn reject_presentation_style_source_export(
                         .to_string(),
                 ));
             }
-            if html.contains("data-hcd-font-patched=\"true\"") {
-                return Err(HcdError::Unsupported(
-                    "this revision contains text.font selection-font changes; source-backed export does not rewrite run fonts and was stopped before writing output; omit --source to use the pure-Rust semantic export, which applies the face"
-                        .to_string(),
-                ));
+            if rejects_run_fonts && html.contains("data-hcd-font-patched=\"true\"") {
+                return Err(HcdError::Unsupported(format!(
+                    "this revision contains text.font selection-font changes; source-backed {} export does not rewrite run fonts and was stopped before writing output; omit --source to use the pure-Rust semantic export, which applies the face",
+                    manifest.source.format
+                )));
             }
         }
     }

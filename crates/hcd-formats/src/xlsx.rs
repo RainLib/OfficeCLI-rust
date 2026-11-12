@@ -1,7 +1,7 @@
 use crate::common::{
     base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
     emit_started, escape_attribute, escape_text, finish_import, source_identity,
-    write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
+    write_fidelity_report, ExportOptions, ImportOptions, RunFontSupport, XmlBudget,
 };
 use hcd_core::{
     hash_bytes, node_bloom_might_contain, stable_node_id, Bundle, BundleWriter, ChunkSourceMap,
@@ -4716,7 +4716,7 @@ pub(crate) fn export_xlsx(
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
     let (manifest, dirty_parts, dirty_node_ids, revisions) =
-        checked_export_state_with_restores(bundle, source, options)?;
+        checked_export_state_with_restores(bundle, source, options, RunFontSupport::Rejects)?;
     let mut dirty_node_ids = dirty_node_ids;
     let mut deleted_nodes = std::collections::HashSet::new();
     for &revision in &revisions {
@@ -7348,8 +7348,9 @@ fn package_error(error: PackageError) -> HcdError {
 mod tests {
     use super::*;
     use hcd_core::{
-        extract_text_page, validate_bundle, NodePrecondition, PatchBatch, PatchOperation,
-        HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_6,
+        extract_text_page, validate_bundle, FontPatch, NodePrecondition, PatchBatch,
+        PatchOperation, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_37,
+        HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -11968,6 +11969,59 @@ mod tests {
         assert!(attributes.contains("data-hcd-absolute-y-emu=\"571500\""));
         assert!(attributes.contains("data-hcd-extent-width-emu=\"952500\""));
         assert!(attributes.contains("data-hcd-extent-height-emu=\"1905000\""));
+    }
+
+    #[test]
+    fn source_export_still_refuses_a_pinned_cell_font() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("rows.xlsx");
+        let bundle_path = temp.path().join("document.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        create_plain_rows_fixture(&source, 4);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("xlsx-font"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let cell = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .remove(0);
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "pin-cell-font".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextFont {
+                node_id: cell.node_id,
+                font: FontPatch {
+                    latin: Some("Brand Serif".to_string()),
+                    east_asia: None,
+                    bidi: None,
+                },
+                precondition: NodePrecondition {
+                    node_hash: cell.node_hash,
+                },
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        let error =
+            export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("source-backed xlsx export does not rewrite run fonts"),
+            "{error}"
+        );
+        assert!(!exported.exists());
     }
 
     fn create_shared_string_fixture(path: &Path) {

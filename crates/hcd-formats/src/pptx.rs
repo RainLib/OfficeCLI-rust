@@ -1,15 +1,16 @@
 use crate::common::{
-    base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
-    emit_started, escape_attribute, escape_text, finish_import, source_identity,
-    write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
+    base_manifest, checked_export_state_with_restores, collect_dirty_fonts, collect_dirty_nodes,
+    emit_failed, emit_started, escape_attribute, escape_text, finish_import, source_identity,
+    write_fidelity_report, ExportOptions, ImportOptions, RunFontSupport, XmlBudget,
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    PptxShapeGeometry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlFontNode, ImportEvent,
+    NodeMapEntry, PptxShapeGeometry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION,
+    MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
-use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -3021,15 +3022,24 @@ pub(crate) fn export_pptx(
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
     let (manifest, dirty_parts, dirty_node_ids, _) =
-        checked_export_state_with_restores(bundle, source, options)?;
+        checked_export_state_with_restores(bundle, source, options, RunFontSupport::Rewrites)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    let faces = collect_dirty_fonts(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<u64, String>> = HashMap::new();
+    let mut fonts: HashMap<String, BTreeMap<u64, HtmlFontNode>> = HashMap::new();
     let mut insertions: HashMap<String, Vec<InsertedPptxShape>> = HashMap::new();
     for node in nodes {
         if node.source.created_in_hcd {
-            let shape = InsertedPptxShape::from_node(&node)?;
+            let mut shape = InsertedPptxShape::from_node(&node)?;
+            shape.font = faces.get(&node.node_id).cloned();
             insertions.entry(node.source.part).or_default().push(shape);
         } else {
+            if let Some(face) = faces.get(&node.node_id) {
+                fonts
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(node.source.text_ordinal, face.clone());
+            }
             replacements
                 .entry(node.source.part)
                 .or_default()
@@ -3043,21 +3053,39 @@ pub(crate) fn export_pptx(
     let scratch = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let pinned_faces = fonts
+        .values()
+        .map(|part_fonts| part_fonts.len())
+        .sum::<usize>()
+        + insertions
+            .values()
+            .flatten()
+            .filter(|shape| shape.font.is_some())
+            .count();
     for part in replacements
         .keys()
         .chain(insertions.keys())
         .chain(native_geometry.keys())
+        .chain(fonts.keys())
         .collect::<BTreeSet<_>>()
     {
         let values = replacements.get(part).cloned().unwrap_or_default();
         let shapes = insertions.get(part).cloned().unwrap_or_default();
         let geometry = native_geometry.get(part).cloned().unwrap_or_default();
+        let part_fonts = fonts.get(part).cloned().unwrap_or_default();
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
         archive
             .with_part(part, |input| {
-                rewrite_text_part(input, BufWriter::new(output), &values, &shapes, &geometry)
-                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                rewrite_text_part(
+                    input,
+                    BufWriter::new(output),
+                    &values,
+                    &shapes,
+                    &geometry,
+                    &part_fonts,
+                )
+                .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
@@ -3072,10 +3100,18 @@ pub(crate) fn export_pptx(
         } else {
             FidelityLevel::High
         },
-        preserved: vec![
-            "unmodified OOXML entries copied as raw compressed payloads".to_string(),
-            "slide geometry, run formatting, media, charts, notes and animations".to_string(),
-        ],
+        preserved: {
+            let mut preserved = vec![
+                "unmodified OOXML entries copied as raw compressed payloads".to_string(),
+                "slide geometry, run formatting, media, charts, notes and animations".to_string(),
+            ];
+            if pinned_faces > 0 {
+                preserved.push(format!(
+                    "run fonts pinned by text.font on {pinned_faces} mapped node(s)"
+                ));
+            }
+            preserved
+        },
         flattened: Vec::new(),
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
         warnings: manifest.warnings,
@@ -3093,6 +3129,9 @@ struct InsertedPptxShape {
     height_emu: u64,
     font_size_hundredths: u32,
     text: String,
+    /// Script faces a `text.font` patch pinned onto this HCD-created text box. The
+    /// shape is written by this export, so the face lands in its `a:rPr` directly.
+    font: Option<HtmlFontNode>,
 }
 
 impl InsertedPptxShape {
@@ -3136,6 +3175,7 @@ impl InsertedPptxShape {
             height_emu: values[3],
             font_size_hundredths: values[4] as u32,
             text: node.text.clone(),
+            font: None,
         })
     }
 }
@@ -3252,12 +3292,29 @@ fn collect_edited_shape_geometry(
     Ok(result)
 }
 
+/// The most events one run prefix may hold before the rewriter stops instead of
+/// growing its look-ahead buffer without bound.
+const MAX_RUN_EVENTS: usize = 100_000;
+
+/// One `a:r` or `a:fld` held in memory until its first text element arrives:
+/// run properties come *before* `a:t`, so a pinned face has to be written into
+/// properties the stream had already passed.
+struct RunPrefix {
+    events: Vec<Event<'static>>,
+    /// Tree depth at the run's start tag, so its own end tag can be recognised.
+    open_depth: usize,
+    /// Namespace prefix the source uses for DrawingML (`a` in every producer
+    /// PowerPoint writes).
+    namespace: String,
+}
+
 fn rewrite_text_part(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<u64, String>,
     insertions: &[InsertedPptxShape],
     native_geometry: &BTreeMap<u32, PptxShapeGeometry>,
+    fonts: &BTreeMap<u64, HtmlFontNode>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -3276,6 +3333,8 @@ fn rewrite_text_part(
     let mut properties_depth = None;
     let mut transform_depth = None;
     let mut geometry_seen: HashMap<u32, (bool, bool)> = HashMap::new();
+    let mut run: Option<RunPrefix> = None;
+    let mut pinned: BTreeSet<u64> = BTreeSet::new();
     loop {
         let event = reader
             .read_event_into(&mut buffer)
@@ -3287,6 +3346,66 @@ fn rewrite_text_part(
         } else {
             None
         };
+        // A held run prefix swallows its own events: none of them can be a shape,
+        // a transform or the shape-tree end list the bookkeeping below tracks, and
+        // the depth counter still has to follow them.
+        if let Some(mut prefix) = run.take() {
+            if matches!(event, Event::Eof) {
+                return Err(HcdError::InvalidBundle(
+                    "slide XML ends inside an unclosed run".to_string(),
+                ));
+            }
+            let text_element = match &event {
+                Event::Start(start) => local_name(start.name().as_ref()) == "t",
+                Event::Empty(empty) => local_name(empty.name().as_ref()) == "t",
+                _ => false,
+            };
+            if text_element {
+                let next = ordinal + 1;
+                if let Some(face) = fonts.get(&next) {
+                    pin_run_fonts(&mut prefix.events, &prefix.namespace, face)?;
+                    pinned.insert(next);
+                }
+                for held in std::mem::take(&mut prefix.events) {
+                    writer.write_event(held)?;
+                }
+                // the prefix is spent: this `<a:t>` belongs to the ordinary path below
+            } else if closes && depth == prefix.open_depth + 1 {
+                prefix.events.push(event.into_owned());
+                for held in std::mem::take(&mut prefix.events) {
+                    writer.write_event(held)?;
+                }
+                depth = depth.saturating_sub(1);
+                buffer.clear();
+                continue;
+            } else {
+                if prefix.events.len() >= MAX_RUN_EVENTS {
+                    return Err(HcdError::ResourceLimit(format!(
+                        "PPTX run prefix holds more than {MAX_RUN_EVENTS} XML events"
+                    )));
+                }
+                prefix.events.push(event.into_owned());
+                if opens {
+                    depth += 1;
+                } else if closes {
+                    depth = depth.saturating_sub(1);
+                }
+                run = Some(prefix);
+                buffer.clear();
+                continue;
+            }
+        } else if let Event::Start(start) = &event {
+            if let Some(namespace) = run_namespace(start.name().as_ref()) {
+                run = Some(RunPrefix {
+                    events: vec![event.into_owned()],
+                    open_depth: depth,
+                    namespace,
+                });
+                depth += 1;
+                buffer.clear();
+                continue;
+            }
+        }
         if let Event::Start(ref start) = event {
             match local_name(start.name().as_ref()) {
                 "spTree" => {
@@ -3420,6 +3539,16 @@ fn rewrite_text_part(
             "slide source map contains missing text ordinals".to_string(),
         ));
     }
+    let unwritten: Vec<u64> = fonts
+        .keys()
+        .filter(|ordinal| !pinned.contains(ordinal))
+        .copied()
+        .collect();
+    if !unwritten.is_empty() {
+        return Err(HcdError::Unsupported(format!(
+            "text.font pins a face onto slide text ordinals {unwritten:?} that this PPTX source has no writable run for; omit --source to use the pure-Rust semantic export, which applies the face"
+        )));
+    }
     if !insertions.is_empty() && !inserted {
         return Err(HcdError::InvalidBundle(
             "PPTX slide shape tree is missing".to_string(),
@@ -3433,6 +3562,214 @@ fn rewrite_text_part(
         }
     }
     Ok(())
+}
+
+/// The namespace prefix of a DrawingML text run. Both `a:r` and `a:fld` write their
+/// properties before their first `a:t`. A source that spells these elements without
+/// the `a:` prefix stays uncaptured, so its pinned face is reported as having no
+/// writable run rather than being guessed onto another vocabulary's `r`.
+fn run_namespace(name: &[u8]) -> Option<String> {
+    let (prefix, local) = std::str::from_utf8(name).ok()?.rsplit_once(':')?;
+    ((local == "r" || local == "fld") && prefix == "a").then(|| prefix.to_string())
+}
+
+fn qualified(prefix: &str, local: &str) -> String {
+    if prefix.is_empty() {
+        local.to_string()
+    } else {
+        format!("{prefix}:{local}")
+    }
+}
+
+/// The script slots a pinned face writes, in the order `CT_TextCharacterProperties`
+/// declares them: `a:latin`, `a:ea`, `a:cs`.
+fn pinned_slots(face: &HtmlFontNode) -> Vec<(&'static str, String)> {
+    let mut slots = Vec::new();
+    if let Some(latin) = face.latin.clone() {
+        slots.push(("latin", latin));
+    }
+    if let Some(east_asia) = face.east_asia.clone() {
+        slots.push(("ea", east_asia));
+    }
+    if let Some(bidi) = face.bidi.clone() {
+        slots.push(("cs", bidi));
+    }
+    slots
+}
+
+fn pinned_font_children(prefix: &str, face: &HtmlFontNode) -> String {
+    pinned_slots(face)
+        .into_iter()
+        .map(|(name, typeface)| {
+            format!(
+                "<{} typeface=\"{}\"/>",
+                qualified(prefix, name),
+                escape_attribute(&typeface)
+            )
+        })
+        .collect()
+}
+
+fn font_element(namespace: &str, name: &str, typeface: &str) -> Event<'static> {
+    let mut start = BytesStart::new(qualified(namespace, name));
+    start.push_attribute(("typeface", typeface));
+    Event::Empty(start)
+}
+
+/// `CT_TextCharacterProperties` children that have to follow the script slots.
+const AFTER_FONT_SLOTS: [&str; 5] = ["sym", "hlinkClick", "hlinkMouseOver", "rtl", "extLst"];
+
+/// Writes the pinned faces into a captured run's `a:rPr`, creating the element when
+/// the run has none. A pinned slot replaces its old element outright, so a theme
+/// reference (`+mn-lt`), a stale `pitchFamily`, and a stale `charset` all leave with
+/// the typeface they described. Slots the patch left alone are untouched.
+fn pin_run_fonts(
+    events: &mut Vec<Event<'static>>,
+    namespace: &str,
+    face: &HtmlFontNode,
+) -> Result<(), HcdError> {
+    let slots = pinned_slots(face);
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let properties = qualified(namespace, "rPr");
+    let Some(index) = direct_child(events, 0, &properties) else {
+        // run properties must be the run's first child when present
+        let mut inserted = vec![Event::Start(BytesStart::new(properties.clone()))];
+        inserted.extend(
+            slots
+                .into_iter()
+                .map(|(name, typeface)| font_element(namespace, name, &typeface)),
+        );
+        inserted.push(Event::End(BytesEnd::new(properties)));
+        events.splice(1..1, inserted);
+        return Ok(());
+    };
+    if matches!(events[index], Event::Empty(_)) {
+        let existing = match std::mem::replace(&mut events[index], Event::Text(BytesText::new("")))
+        {
+            Event::Empty(empty) => empty,
+            _ => {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX run properties vanished mid-rewrite".to_string(),
+                ))
+            }
+        };
+        let name = String::from_utf8_lossy(existing.name().as_ref()).into_owned();
+        let mut replacement = vec![Event::Start(existing)];
+        replacement.extend(
+            slots
+                .into_iter()
+                .map(|(slot, typeface)| font_element(namespace, slot, &typeface)),
+        );
+        replacement.push(Event::End(BytesEnd::new(name)));
+        events.splice(index..index + 1, replacement);
+        return Ok(());
+    }
+    let (children, end) = children_and_end(events, index);
+    let end = end.ok_or_else(|| {
+        HcdError::InvalidBundle("PPTX run properties are not closed in the run".to_string())
+    })?;
+    let mut dropped: Vec<(usize, usize)> = Vec::new();
+    let mut position = end;
+    for (from, to) in children {
+        let name = element_local_name(&events[from]);
+        if slots.iter().any(|(slot, _)| *slot == name.as_str()) {
+            dropped.push((from, to));
+        } else if position == end && AFTER_FONT_SLOTS.contains(&name.as_str()) {
+            position = from;
+        }
+    }
+    let mut rebuilt: Vec<Event<'static>> = Vec::new();
+    let mut font_events: Vec<Event<'static>> = slots
+        .iter()
+        .map(|(name, typeface)| font_element(namespace, name, typeface))
+        .collect();
+    rebuilt.push(events[index].clone());
+    let mut offset = index + 1;
+    while offset < end {
+        if offset == position {
+            rebuilt.append(&mut font_events);
+        }
+        if let Some((_, to)) = dropped.iter().find(|(from, _)| *from == offset) {
+            offset = to + 1;
+            continue;
+        }
+        rebuilt.push(events[offset].clone());
+        offset += 1;
+    }
+    if position >= end {
+        rebuilt.append(&mut font_events);
+    }
+    rebuilt.push(events[end].clone());
+    events.splice(index..=end, rebuilt);
+    Ok(())
+}
+
+/// The local name of an element event, empty for any other event.
+fn element_local_name(event: &Event<'_>) -> String {
+    match event {
+        Event::Start(start) => local_name(start.name().as_ref()).to_string(),
+        Event::Empty(empty) => local_name(empty.name().as_ref()).to_string(),
+        _ => String::new(),
+    }
+}
+
+/// The index of a parent element's direct child with this element name, if it has one.
+fn direct_child(events: &[Event<'static>], parent: usize, name: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (index, event) in events.iter().enumerate().skip(parent + 1) {
+        match event {
+            Event::Start(start) if depth == 1 && start.name().as_ref() == name.as_bytes() => {
+                return Some(index)
+            }
+            Event::Empty(empty) if depth == 1 && empty.name().as_ref() == name.as_bytes() => {
+                return Some(index)
+            }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return None;
+        }
+    }
+    None
+}
+
+/// The direct children of the element at `parent`, as inclusive event ranges, plus
+/// the index of its own end tag.
+fn children_and_end(
+    events: &[Event<'static>],
+    parent: usize,
+) -> (Vec<(usize, usize)>, Option<usize>) {
+    let mut children: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0usize;
+    let mut open: Option<usize> = None;
+    for (index, event) in events.iter().enumerate().skip(parent + 1) {
+        match event {
+            Event::Start(_) => {
+                if depth == 0 {
+                    open = Some(index);
+                }
+                depth += 1;
+            }
+            Event::Empty(_) if depth == 0 => children.push((index, index)),
+            Event::End(_) => {
+                if depth == 0 {
+                    return (children, Some(index));
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(from) = open.take() {
+                        children.push((from, index));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (children, None)
 }
 
 fn rewrite_shape_transform(
@@ -3490,10 +3827,26 @@ fn write_inserted_shape<W: Write>(
     shape_id: u32,
     shape: &InsertedPptxShape,
 ) -> Result<(), HcdError> {
+    let faces = shape
+        .font
+        .as_ref()
+        .map(|face| pinned_font_children("a", face))
+        .unwrap_or_default();
+    let properties = if faces.is_empty() {
+        format!(
+            "<a:rPr lang=\"en-US\" sz=\"{}\"/>",
+            shape.font_size_hundredths
+        )
+    } else {
+        format!(
+            "<a:rPr lang=\"en-US\" sz=\"{}\">{faces}</a:rPr>",
+            shape.font_size_hundredths
+        )
+    };
     let xml = format!(
-        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"{}\"/><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
+        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/><a:p><a:r>{properties}<a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
         shape.x_emu, shape.y_emu, shape.width_emu, shape.height_emu,
-        shape.font_size_hundredths, escape_text(&shape.text),
+        escape_text(&shape.text),
     );
     writer.get_mut().write_all(xml.as_bytes())?;
     Ok(())
@@ -3604,6 +3957,7 @@ mod tests {
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
         PatchOperation, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
         HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
+        HCD_PATCH_SCHEMA_VERSION_37,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -4022,6 +4376,7 @@ mod tests {
             height_emu: 457_200,
             font_size_hundredths: 1_200,
             text: "new".to_string(),
+            font: None,
         };
         let mut output = Vec::new();
         rewrite_text_part(
@@ -4029,6 +4384,7 @@ mod tests {
             &mut output,
             &BTreeMap::new(),
             &[shape],
+            &BTreeMap::new(),
             &BTreeMap::new(),
         )
         .unwrap();
@@ -4588,5 +4944,288 @@ mod tests {
             zip.write_all(contents.as_bytes()).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    /// One slide whose paragraph carries two runs, then two more runs of their own:
+    /// a run with theme-referenced script fonts plus a `a:sym`, a run with a literal
+    /// face, a run with no run properties at all, and a run with a self-closed one.
+    /// Source-backed export has to pin a patched face onto exactly one of them.
+    fn create_font_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let slide = concat!(
+            r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp>"#,
+            r#"<p:nvSpPr><p:cNvPr id="7" name="Font Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"#,
+            r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="1143000"/></a:xfrm></p:spPr>"#,
+            r#"<p:txBody><a:bodyPr/><a:lstStyle/>"#,
+            r#"<a:p><a:r><a:rPr lang="en-US" sz="1800" b="1"><a:latin typeface="+mn-lt" pitchFamily="34" charset="0"/><a:ea typeface="+mn-ea"/><a:sym typeface="+mn-cs"/></a:rPr><a:t>Latin one</a:t></a:r>"#,
+            r#"<a:r><a:rPr lang="zh-CN" sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>第二 run</a:t></a:r></a:p>"#,
+            r#"<a:p><a:r><a:t>no properties</a:t></a:r></a:p>"#,
+            r#"<a:p><a:r><a:rPr lang="en-US" i="1"/><a:t>empty props</a:t></a:r></a:p>"#,
+            r#"</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/presentation.xml",
+                r#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldSz cx="12192000" cy="6858000"/><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            ("ppt/slides/slide1.xml", slide),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn source_export_pins_a_patched_face_onto_one_slide_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("document.hcd");
+        let exported = temp.path().join("exported.pptx");
+        create_font_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("pptx-font"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| (entry.text.clone(), entry.source.text_ordinal, entry))
+            .collect::<Vec<_>>();
+        // one mapped node per `<a:t>`, so a patch reaches exactly one run
+        let ordinals = entries
+            .iter()
+            .map(|(text, ordinal, _)| (text.as_str(), *ordinal))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordinals,
+            vec![
+                ("Latin one", 1),
+                ("第二 run", 2),
+                ("no properties", 3),
+                ("empty props", 4),
+            ]
+        );
+        let lookup = |wanted: &str| -> hcd_core::TextExtractEntry {
+            entries
+                .iter()
+                .find(|(text, _, _)| text == wanted)
+                .expect("fixture run")
+                .2
+                .clone()
+        };
+        let themed = lookup("Latin one");
+        let literal = lookup("第二 run");
+        let bare = lookup("no properties");
+        let self_closed = lookup("empty props");
+
+        let face = |node: &hcd_core::TextExtractEntry, font: hcd_core::FontPatch| {
+            PatchOperation::TextFont {
+                node_id: node.node_id.clone(),
+                font,
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            }
+        };
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "pptx-font-pin".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![
+                face(
+                    &themed,
+                    pinned(
+                        Some("Brand Serif"),
+                        Some("Brand Gothic"),
+                        Some("Brand Naskh"),
+                    ),
+                ),
+                face(&bare, pinned(Some("Brand Serif"), None, None)),
+                face(&self_closed, pinned(None, Some("Brand Gothic"), None)),
+            ],
+        };
+        assert_eq!(apply_patch(&bundle, &patch, 0).unwrap().revision, 1);
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(
+            report
+                .preserved
+                .iter()
+                .any(|line| line == "run fonts pinned by text.font on 3 mapped node(s)"),
+            "{:?}",
+            report.preserved
+        );
+        let slide = read_zip_entry(&exported, "ppt/slides/slide1.xml");
+        // the theme-referenced slots are replaced where they stood, and the new
+        // `a:cs` lands before `a:sym`, which the patch never named
+        assert!(
+            slide.contains(
+                r#"<a:rPr lang="en-US" sz="1800" b="1"><a:latin typeface="Brand Serif"/><a:ea typeface="Brand Gothic"/><a:cs typeface="Brand Naskh"/><a:sym typeface="+mn-cs"/></a:rPr>"#
+            ),
+            "{slide}"
+        );
+        // a theme reference and the metrics that came with it are gone
+        assert!(!slide.contains("+mn-lt"), "{slide}");
+        assert!(!slide.contains("+mn-ea"), "{slide}");
+        assert!(!slide.contains("pitchFamily"), "{slide}");
+        assert!(!slide.contains("charset"), "{slide}");
+        // the run this patch never touched keeps its literal face
+        assert!(slide.contains(r#"<a:latin typeface="Arial"/>"#), "{slide}");
+        // a run without properties gains them, and a self-closed one keeps its own
+        assert!(
+            slide.contains(r#"<a:r><a:rPr><a:latin typeface="Brand Serif"/></a:rPr><a:t>no properties</a:t></a:r>"#),
+            "{slide}"
+        );
+        assert!(
+            slide.contains(r#"<a:rPr lang="en-US" i="1"><a:ea typeface="Brand Gothic"/></a:rPr><a:t>empty props</a:t>"#),
+            "{slide}"
+        );
+        assert_eq!(slide.matches("<a:latin").count(), 3, "{slide}");
+        assert_eq!(slide.matches("<a:ea ").count(), 2, "{slide}");
+        assert_eq!(slide.matches("<a:cs").count(), 1, "{slide}");
+        // every run still says what it said
+        for text in ["Latin one", "第二 run", "no properties", "empty props"] {
+            assert!(slide.contains(text), "{slide}");
+        }
+        assert!(literal.node_id != themed.node_id);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    fn html_face(latin: Option<&str>, ea: Option<&str>, cs: Option<&str>) -> HtmlFontNode {
+        HtmlFontNode {
+            latin: latin.map(str::to_string),
+            east_asia: ea.map(str::to_string),
+            bidi: cs.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_inserted_box_writes_its_pinned_face_into_the_shape_it_creates() {
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:extLst/></p:spTree></p:cSld></p:sld>"#;
+        let shape = InsertedPptxShape {
+            node_id: "n_00000000000000000000000000000000".to_string(),
+            x_emu: 0,
+            y_emu: 0,
+            width_emu: 914_400,
+            height_emu: 457_200,
+            font_size_hundredths: 1_200,
+            text: "new".to_string(),
+            font: Some(html_face(Some("Brand Serif"), Some("Brand Gothic"), None)),
+        };
+        let mut output = Vec::new();
+        rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[shape],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(
+            xml.contains(
+                r#"<a:rPr lang="en-US" sz="1200"><a:latin typeface="Brand Serif"/><a:ea typeface="Brand Gothic"/></a:rPr>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_face_reaches_a_field_run_and_its_self_closed_properties() {
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:fld id="{AB}" type="slidenum"><a:rPr lang="en-US" sz="1000"/><a:t/></a:fld></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+        let mut output = Vec::new();
+        rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::from([(1, "12".to_string())]),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::from([(1, html_face(None, None, Some("Brand Naskh")))]),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(
+            xml.contains(
+                r#"<a:rPr lang="en-US" sz="1000"><a:cs typeface="Brand Naskh"/></a:rPr><a:t>12</a:t></a:fld>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_face_with_no_writable_run_stops_the_slide_export() {
+        // text the source map points at, but that no `a:r` or `a:fld` owns
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:t>orphan</a:t></a:p></p:sld>"#;
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::from([(1, "orphan".to_string())]),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::from([(1, html_face(Some("Brand Serif"), None, None))]),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no writable run for; omit --source"),
+            "{error}"
+        );
+        assert!(!String::from_utf8_lossy(&output).contains("Brand Serif"));
+    }
+
+    #[test]
+    fn a_run_left_open_at_the_end_of_a_part_is_broken() {
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><a:r><a:rPr lang="en-US"/>"#;
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("ends inside an unclosed run"),
+            "{error}"
+        );
+    }
+
+    fn pinned(latin: Option<&str>, ea: Option<&str>, cs: Option<&str>) -> hcd_core::FontPatch {
+        hcd_core::FontPatch {
+            latin: latin.map(str::to_string),
+            east_asia: ea.map(str::to_string),
+            bidi: cs.map(str::to_string),
+        }
     }
 }
