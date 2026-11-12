@@ -73,7 +73,7 @@ target/debug/officecli hdoc validate /tmp/hcd-42-accept/reimport.hcd
 - deck 只剩一页时拒绝，报 `PPTX presentation must keep one slide`；界面上按钮仍可点，错误进提示条，因为客户端无法只看索引就区分“一页”和“一页被拆成多片”。
 - 分片不在索引里、或那个分片不是页面，拒绝。
 - 一页的表格被拆成多个分片时，行尾按钮删的是整页：补丁会找出指向同一个源部件的全部分片。
-- 源包带自定义放映（`p:custShowLst`）或分节（`p:sectionLst`）时拒绝导出，先去掉再导；源包没有该页部件、或部件名不是幻灯片时也拒绝。
+- 源包带自定义放映（`p:custShowLst`）或分节（`p:sectionLst`）时拒绝导出，先去掉再导；源包没有该页部件、或部件名不是幻灯片时也拒绝。分节那一条不在已有测试里，而且现在也造不出来：导入器读不了分节的 deck（节里的 `<p:sldId>` 不带关系 ID，导入直接报 `presentation slide entry has no relationship id`），导出侧留出的是第二道网。
 - 幻灯片带备注页时拒绝导出：备注的关系列表反向指着这一页，删掉页就留下悬空引用。错误文案点名是哪个 `.rels` 还指着它。
 - 只在本次历史里新增又删除的页互相抵消，导出回到 `EXACT`，三张清单逐字节等于源包。
 - 撤销走的是结构性修订：`hdoc restore --revision 0 --expected-revision 1` 生成修订 2 后，`hdoc export --source` 得到 `EXACT`，包内 27 个条目与源包逐字节一致，被删的页原样回来。删除记录只属于它自己那条修订，撤销不需要额外补偿逻辑。
