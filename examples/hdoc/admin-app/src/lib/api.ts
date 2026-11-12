@@ -87,6 +87,14 @@ function postJson<T>(path: string, payload: unknown): Promise<T> {
   });
 }
 
+function putJson<T>(path: string, payload: unknown): Promise<T> {
+  return json<T>(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 const encode = encodeURIComponent;
 
 export const api = {
@@ -143,6 +151,18 @@ export const api = {
 
   resolveTheme: (themeRevisionId: string) =>
     json<ResolvedTheme>(`/v1/themes/${encode(themeRevisionId)}`),
+
+  /**
+   * Pin a catalog theme onto a document, or clear the pin by passing null. Both
+   * write a content revision of the document: the managed stylesheet region
+   * changes, the text does not. `themeRevisionId` must appear in the body, so the
+   * clear is an explicit null and never an empty object.
+   */
+  pinDocumentTheme: (documentId: string, themeRevisionId: string | null) =>
+    putJson<{ revision: number; themeRevisionId: string }>(
+      `/v1/documents/${encode(documentId)}/theme`,
+      { themeRevisionId },
+    ),
 
   /** A web-preview face, fetched with the same token and turned into a blob URL. */
   faceObjectUrl: async (href: string): Promise<string> => {
