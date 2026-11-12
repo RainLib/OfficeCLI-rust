@@ -4,11 +4,12 @@ use crate::common::{
     write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
 };
 use hcd_core::{
-    hash_bytes, node_bloom_might_contain, rename_formula_sheet_references, sheet_grid_id,
-    sheet_window_chunk_id, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
-    FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError, HcdManifest,
-    ImportEvent, NodeMapEntry, SheetAddition, SheetRename, SourceAnchor, XlsxCellFormatPatch,
-    XlsxCellLayoutPatch, XlsxSheetSection, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    drop_formula_sheet_references, hash_bytes, node_bloom_might_contain,
+    rename_formula_sheet_references, sheet_grid_id, sheet_window_chunk_id, stable_node_id, Bundle,
+    BundleWriter, ChunkSourceMap, FidelityLevel, FidelityReport, FidelityWarning, GridChunkAddress,
+    GridChunkKind, HcdError, HcdManifest, ImportEvent, NodeMapEntry, SheetAddition, SheetRemoval,
+    SheetRename, SourceAnchor, XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxSheetSection,
+    HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -4741,6 +4742,7 @@ pub(crate) fn export_xlsx(
     let mut column_shifts: HashMap<String, Vec<ColumnShift>> = HashMap::new();
     let mut sheet_renames: Vec<SheetRename> = Vec::new();
     let mut sheet_additions: Vec<SheetAddition> = Vec::new();
+    let mut sheet_removals: Vec<SheetRemoval> = Vec::new();
     for &revision in &revisions {
         let record = bundle.revision(revision)?;
         formula_converted_to_value |= !record.converted_formula_node_ids.is_empty();
@@ -4774,6 +4776,7 @@ pub(crate) fn export_xlsx(
         }
         sheet_renames.extend(record.sheet_renames);
         sheet_additions.extend(record.sheet_additions);
+        sheet_removals.extend(record.sheet_removals);
     }
     for node in nodes {
         if node.source.node_kind != "cell" {
@@ -4849,17 +4852,44 @@ pub(crate) fn export_xlsx(
     let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let mut workbook = workbook_info(&mut archive)?;
+    // A deleted tab leaves the workbook completely: its worksheet part, its tab,
+    // the relationship that pointed at it, and its content-type override all go,
+    // and every defined name counted by tab position behind the hole moves up. A
+    // tab HCD created and then deleted inside the same history cancels out
+    // instead — that part never reached the source package, so there is nothing
+    // there to drop, and the workbook never learned its name.
+    let removed_parts: BTreeSet<String> = sheet_removals
+        .iter()
+        .map(|removal| removal.sheet_part.clone())
+        .collect();
+    let cancelled_parts: BTreeSet<String> = sheet_additions
+        .iter()
+        .map(|addition| addition.sheet_part.clone())
+        .filter(|part| removed_parts.contains(part))
+        .collect();
     // A tab HCD created has no entry in the source workbook, so the sheet list
     // is grown from the revision records: every collector that turns an HCD
     // window back into a worksheet part addresses sheets by that position, and
-    // a cell written onto the new tab has to resolve to its part.
+    // a cell written onto the new tab has to resolve to its part. A tab the same
+    // history deleted again never reaches the list.
+    let kept_additions: Vec<SheetAddition> = sheet_additions
+        .iter()
+        .filter(|addition| !cancelled_parts.contains(&addition.sheet_part))
+        .cloned()
+        .collect();
     let added_parts: BTreeSet<String> = sheet_additions
         .iter()
         .map(|addition| addition.sheet_part.clone())
         .collect();
-    if !sheet_additions.is_empty() {
-        let added_names = xlsx_added_sheet_names(bundle, &manifest, &sheet_additions)?;
-        for addition in &sheet_additions {
+    // Only a tab that survives the history needs a worksheet part written for it.
+    let created_parts: BTreeSet<String> = added_parts
+        .iter()
+        .filter(|part| !removed_parts.contains(*part))
+        .cloned()
+        .collect();
+    if !kept_additions.is_empty() {
+        let added_names = xlsx_added_sheet_names(bundle, &manifest, &kept_additions)?;
+        for addition in &kept_additions {
             let position = addition.sheet_index.min(workbook.sheets.len());
             workbook.sheets.insert(
                 position,
@@ -4871,6 +4901,97 @@ pub(crate) fn export_xlsx(
                 },
             );
         }
+        for (position, sheet) in workbook.sheets.iter_mut().enumerate() {
+            sheet.index = position;
+        }
+    }
+    let mut removal_paths: BTreeSet<String> = BTreeSet::new();
+    let mut removed_positions: BTreeSet<usize> = BTreeSet::new();
+    let mut deleted_names: Vec<String> = Vec::new();
+    // Whether any stored part still spelled out a tab this history deleted, which
+    // is what turns a plain deletion into one the fidelity report has to explain.
+    let mut sheet_references_broken = false;
+    if !sheet_removals.is_empty() {
+        let names: Vec<String> = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        if let Some(blocked) = names
+            .iter()
+            .find(|name| xlsx_worksheet_rename_blocked(name))
+        {
+            return Err(HcdError::Unsupported(format!(
+                "XLSX worksheet deletion cannot rewrite the worksheet reference in {blocked}; remove that feature or export without --source"
+            )));
+        }
+        // `localSheetId` counts the tabs the source workbook wrote, so the hole
+        // is measured against that list, before any tab HCD added.
+        let mut source_position = 0usize;
+        for sheet in &workbook.sheets {
+            let position_of_source_sheet = !added_parts.contains(&sheet.part);
+            if position_of_source_sheet {
+                if removed_parts.contains(&sheet.part) && !cancelled_parts.contains(&sheet.part) {
+                    removed_positions.insert(source_position);
+                }
+                source_position += 1;
+            }
+        }
+        for removal in &sheet_removals {
+            let part = removal.sheet_part.as_str();
+            deleted_names.push(removal.name.clone());
+            if cancelled_parts.contains(part) {
+                // A tab the same history created and then deleted never reached
+                // the source package, so there is no part, no relationship, and
+                // no override there to take away — only its name still has to
+                // break wherever a formula spelled it out.
+                continue;
+            }
+            if !names.iter().any(|name| name == part) {
+                return Err(HcdError::InvalidBundle(format!(
+                    "XLSX worksheet deletion target {part} is not in the source workbook"
+                )));
+            }
+            if !workbook.sheets.iter().any(|sheet| sheet.part == part) {
+                return Err(HcdError::InvalidBundle(format!(
+                    "workbook sheet list does not contain deleted worksheet {part}"
+                )));
+            }
+            removal_paths.insert(part.to_string());
+            let rels = worksheet_rels_part(part).ok_or_else(|| {
+                HcdError::InvalidBundle(format!("XLSX worksheet part {part} has no name"))
+            })?;
+            if names.iter().any(|name| name == &rels) {
+                // A worksheet that owns a drawing, table, or comment leaves that
+                // part pointing at a tab that no longer exists, so the deletion
+                // is refused rather than exported half-applied. Hyperlinks are
+                // the one relationship that dies with its sheet harmlessly.
+                let rels_xml = archive
+                    .read_control_part(&rels, MAX_CONTROL_BYTES)
+                    .map_err(package_error)?;
+                if let Some(kind) = xlsx_relationship_owner_of_worksheet(&rels_xml)? {
+                    return Err(HcdError::Unsupported(format!(
+                        "XLSX worksheet deletion cannot drop the {kind} attached to {part}; delete that feature first or export without --source"
+                    )));
+                }
+                removal_paths.insert(rels);
+            }
+        }
+        // Excel rebuilds a calculation chain when the package has none, and its
+        // entries are numbered by tab position, so a deletion loses it instead of
+        // exporting cell references to the wrong sheet.
+        if names.iter().any(|name| name == "xl/calcChain.xml") {
+            removal_paths.insert("xl/calcChain.xml".to_string());
+        }
+        // Cells written on a tab this history later deleted are not exported: the
+        // part is dropped, so rebuilding it would only ask for canonical maps the
+        // index no longer holds.
+        for part in &removed_parts {
+            replacements.remove(part);
+        }
+        workbook
+            .sheets
+            .retain(|sheet| !removed_parts.contains(&sheet.part));
         for (position, sheet) in workbook.sheets.iter_mut().enumerate() {
             sheet.index = position;
         }
@@ -4965,7 +5086,7 @@ pub(crate) fn export_xlsx(
     // cell landed on the new tab, and as the blank file itself otherwise.
     let mut blank_templates: HashMap<String, PathBuf> = HashMap::new();
     let mut addition_paths: HashMap<String, PathBuf> = HashMap::new();
-    for part in &added_parts {
+    for part in &created_parts {
         if archive.contains(part) {
             return Err(HcdError::InvalidBundle(format!(
                 "XLSX worksheet addition {part} is already in the source workbook"
@@ -5110,12 +5231,144 @@ pub(crate) fn export_xlsx(
             }
         }
     }
+    // A deleted tab has to stop being named as well as being written: every
+    // formula or chart reference that pointed into it collapses to `#REF!`, and
+    // the three control parts that described it — the tab in the sheet list, the
+    // relationship that reached the part, the content-type override — lose their
+    // entry. Defined names counted by tab position shift up behind the hole.
+    if !deleted_names.is_empty() {
+        let names: Vec<String> = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        for part in names
+            .iter()
+            .filter(|name| xlsx_part_can_name_a_worksheet(name))
+            .filter(|name| !removal_paths.contains(name.as_str()))
+        {
+            let previous = replacement_paths.remove(part);
+            let path = scratch
+                .path()
+                .join(safe_temp_name(&format!("sheet-drop-{part}")));
+            let output = File::create(&path)?;
+            let broken = match previous {
+                Some(existing) => {
+                    drop_xlsx_sheet_references(File::open(&existing)?, output, &deleted_names)?
+                }
+                None => archive
+                    .with_part(part, |input| {
+                        drop_xlsx_sheet_references(input, output, &deleted_names)
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    })
+                    .map_err(package_error)?,
+            };
+            if broken {
+                replacement_paths.insert(part.clone(), path);
+                sheet_references_broken = true;
+            }
+        }
+        // The three control lists only have to be rewritten when a part actually
+        // leaves the package; a tab that was created and deleted inside one
+        // history never appeared in them.
+        if !removal_paths.is_empty() {
+            let relationships = current_control_part(
+                &mut archive,
+                &replacement_paths,
+                "xl/_rels/workbook.xml.rels",
+            )?;
+            let mut sheet_relationship_ids: BTreeSet<String> = BTreeSet::new();
+            let mut dropped_relationship_ids: BTreeSet<String> = BTreeSet::new();
+            for part in removal_paths
+                .iter()
+                .filter(|part| part.starts_with("xl/worksheets/") && part.ends_with(".xml"))
+            {
+                let ids = xlsx_relationship_ids_for_parts(
+                    &relationships,
+                    &BTreeSet::from([part.clone()]),
+                )?;
+                if ids.len() != 1 {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "workbook relationships name the deleted worksheet {part} {} times",
+                        ids.len()
+                    )));
+                }
+                sheet_relationship_ids.extend(ids.clone());
+                dropped_relationship_ids.extend(ids);
+            }
+            // A calculation chain numbers its cells by tab position, so the part that
+            // lost a sheet is dropped with the sheet; Excel builds a fresh one.
+            dropped_relationship_ids.extend(xlsx_relationship_ids_for_parts(
+                &relationships,
+                &BTreeSet::from(["xl/calcChain.xml".to_string()]),
+            )?);
+            let (relationships, _) = drop_control_elements(
+                &relationships,
+                "Relationships",
+                "Relationship",
+                "Id",
+                &dropped_relationship_ids,
+                "xl/_rels/workbook.xml.rels",
+            )?;
+            let path = scratch
+                .path()
+                .join(safe_temp_name("xl/_rels/workbook.xml.rels"));
+            std::fs::write(&path, relationships)?;
+            replacement_paths.insert("xl/_rels/workbook.xml.rels".to_string(), path);
+
+            let content_types =
+                current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
+            let part_names: BTreeSet<String> = removal_paths
+                .iter()
+                .map(|part| format!("/{part}"))
+                .collect();
+            let (content_types, _) = drop_control_elements(
+                &content_types,
+                "Types",
+                "Override",
+                "PartName",
+                &part_names,
+                "[Content_Types].xml",
+            )?;
+            let path = scratch
+                .path()
+                .join(safe_temp_name("removed-content-types.xml"));
+            std::fs::write(&path, content_types)?;
+            replacement_paths.insert("[Content_Types].xml".to_string(), path);
+
+            let workbook_xml =
+                current_control_part(&mut archive, &replacement_paths, "xl/workbook.xml")?;
+            let (workbook_xml, _) = drop_control_elements(
+                &workbook_xml,
+                "sheets",
+                "sheet",
+                "id",
+                &sheet_relationship_ids,
+                "xl/workbook.xml",
+            )?;
+            let (workbook_xml, _) =
+                drop_local_defined_names(&workbook_xml, &removed_positions, "xl/workbook.xml")?;
+            // References that broke leave their cached answers behind, so the
+            // workbook has to ask for a full recalculation on open — the same
+            // marking an edited formula gets two passes earlier.
+            let workbook_xml = if sheet_references_broken {
+                let mut marked = Vec::new();
+                rewrite_workbook_recalculation(&workbook_xml, &mut marked)?;
+                marked
+            } else {
+                workbook_xml
+            };
+            let path = scratch.path().join(safe_temp_name("removed-workbook.xml"));
+            std::fs::write(&path, workbook_xml)?;
+            replacement_paths.insert("xl/workbook.xml".to_string(), path);
+        }
+    }
     // The package also has to know the worksheet exists: its content type, the
     // workbook relationship that points at it, and its tab. Each control part is
     // rewritten over whatever the export already replaced, so a recalculation
     // flag or a rename is not lost.
-    if !sheet_additions.is_empty() {
-        let mut ordered: Vec<&SheetAddition> = sheet_additions.iter().collect();
+    if !kept_additions.is_empty() {
+        let mut ordered: Vec<&SheetAddition> = kept_additions.iter().collect();
         ordered.sort_by_key(|addition| addition.sheet_index);
         let content_types =
             current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
@@ -5205,11 +5458,13 @@ pub(crate) fn export_xlsx(
             replacement_paths.insert(part.to_string(), path);
         }
     }
-    let changed = StreamingOxmlRewriter::rewrite_with_additions(
+    let removals: HashSet<String> = removal_paths.iter().cloned().collect();
+    let changed = StreamingOxmlRewriter::rewrite_with_changes(
         source,
         target,
         &replacement_paths,
         &addition_paths,
+        &removals,
         "xl/workbook.xml",
     )
     .map_err(package_error)?;
@@ -5252,6 +5507,12 @@ pub(crate) fn export_xlsx(
             if expanded_shared_groups > 0 {
                 items.push(format!("{expanded_shared_groups} edited shared-formula groups were expanded into independent native formulas"));
             }
+            if !removal_paths.is_empty() {
+                items.push("a deleted worksheet leaves the package with its part, its workbook relationship, its tab, and its content-type override".to_string());
+            }
+            if removal_paths.contains("xl/calcChain.xml") {
+                items.push("xl/calcChain.xml was dropped because its entries number cells by tab position; the workbook recalculates the chain when opened".to_string());
+            }
             items
         },
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
@@ -5281,7 +5542,7 @@ pub(crate) fn export_xlsx(
                     source_part: Some(rename.sheet_part.clone()),
                 });
             }
-            for addition in &sheet_additions {
+            for addition in &kept_additions {
                 let name = workbook
                     .sheets
                     .iter()
@@ -5293,6 +5554,33 @@ pub(crate) fn export_xlsx(
                     message: format!("worksheet {name} was created in HCD; the export wrote a blank worksheet part at {}, registered its content type and workbook relationship, and placed its tab at position {}", addition.sheet_part, addition.sheet_index),
                     node_id: None,
                     source_part: Some(addition.sheet_part.clone()),
+                });
+            }
+            for removal in &sheet_removals {
+                let broken = if sheet_references_broken {
+                    "; formulas, defined names, and chart references that named the tab now read #REF!"
+                } else {
+                    ""
+                };
+                let message = if removal_paths.contains(removal.sheet_part.as_str()) {
+                    format!(
+                        "worksheet {} was deleted in HCD; the export dropped {}, its workbook relationship, its tab, and its content-type override{}",
+                        removal.name, removal.sheet_part, broken
+                    )
+                } else {
+                    // A tab this history both created and deleted never reached
+                    // the package, so the report says so instead of naming parts
+                    // the export never wrote.
+                    format!(
+                        "worksheet {} was created and deleted inside this history; the export wrote no worksheet part for it{}",
+                        removal.name, broken
+                    )
+                };
+                warnings.push(FidelityWarning {
+                    code: "XLSX_SHEET_DELETE".to_string(),
+                    message,
+                    node_id: None,
+                    source_part: Some(removal.sheet_part.clone()),
                 });
             }
             if edited_cells.iter().any(|cell| direct_format(&cell.format)) {
@@ -8138,6 +8426,116 @@ fn xlsx_worksheet_rename_blocked(name: &str) -> bool {
     BLOCKED.iter().any(|prefix| name.starts_with(prefix))
 }
 
+/// Relationship part that belongs to a package entry: `xl/worksheets/sheet3.xml`
+/// is answered by `xl/worksheets/_rels/sheet3.xml.rels`.
+fn worksheet_rels_part(part: &str) -> Option<String> {
+    let (parent, file) = part.rsplit_once('/')?;
+    Some(format!("{parent}/_rels/{file}.rels"))
+}
+
+/// Named feature a worksheet's own relationships attach to it, if any. A hyperlink
+/// dies with the tab that held it, so only the other kinds are worth refusing a
+/// deletion over: a drawing, table, or comments part left in the package would
+/// still describe a tab the workbook no longer has.
+fn xlsx_relationship_owner_of_worksheet(rels: &[u8]) -> Result<Option<String>, HcdError> {
+    const HYPERLINK: &str = "hyperlink";
+    let mut reader = Reader::from_reader(rels);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX rels XML: {error}")))?;
+        match event {
+            Event::Empty(ref element) | Event::Start(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let mut kind = None;
+                let mut external = false;
+                for attribute in element.attributes().with_checks(false) {
+                    let attribute = attribute.map_err(|error| {
+                        HcdError::InvalidBundle(format!("invalid XLSX rels attribute: {error}"))
+                    })?;
+                    let value = attribute.unescape_value().map_err(|error| {
+                        HcdError::InvalidBundle(format!("invalid XLSX rels value: {error}"))
+                    })?;
+                    match local_name(attribute.key.as_ref()) {
+                        "Type" => kind = Some(value.to_string()),
+                        "TargetMode" => external = value.eq_ignore_ascii_case("external"),
+                        _ => {}
+                    }
+                }
+                let Some(kind) = kind else {
+                    continue;
+                };
+                let owner = kind.rsplit('/').next().unwrap_or(kind.as_str()).to_string();
+                if external || owner == HYPERLINK {
+                    continue;
+                }
+                return Ok(Some(owner));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(None)
+}
+
+/// Ids of the relationships in `xl/_rels/workbook.xml.rels` that point at one of
+/// these parts, which is how the sheet list names the tab it has to lose. A target
+/// is either relative to the folder of the part that holds it (`xl/`) or an
+/// absolute package path, and only the parts actually deleted are matched.
+fn xlsx_relationship_ids_for_parts(
+    rels: &[u8],
+    parts: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, HcdError> {
+    let mut ids = BTreeSet::new();
+    let mut reader = Reader::from_reader(rels);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX rels XML: {error}")))?;
+        match event {
+            Event::Empty(ref element) | Event::Start(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let mut id = None;
+                let mut target = None;
+                for attribute in element.attributes().with_checks(false) {
+                    let attribute = attribute.map_err(|error| {
+                        HcdError::InvalidBundle(format!("invalid XLSX rels attribute: {error}"))
+                    })?;
+                    let value = attribute.unescape_value().map_err(|error| {
+                        HcdError::InvalidBundle(format!("invalid XLSX rels value: {error}"))
+                    })?;
+                    match local_name(attribute.key.as_ref()) {
+                        "Id" => id = Some(value.to_string()),
+                        "Target" => target = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+                let Some(target) = target else { continue };
+                let resolved = match target.strip_prefix('/') {
+                    Some(absolute) => absolute.to_string(),
+                    None => format!("xl/{target}"),
+                };
+                if parts.contains(&resolved) {
+                    if let Some(id) = id {
+                        ids.insert(id);
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(ids)
+}
+
 fn xlsx_tab_name_attribute(name: &[u8]) -> Option<&'static str> {
     match local_name(name) {
         "sheet" => Some("name"),
@@ -8217,6 +8615,253 @@ fn rename_xlsx_tab_attribute(
         updated.push_attribute((key.as_str(), escaped.as_str()));
     }
     Ok(Some((updated, changed)))
+}
+
+/// Rewrite the references to a deleted worksheet inside one package entry: every
+/// formula and defined name that named the tab collapses to `#REF!`, the way a
+/// cell reads when the sheet behind it is gone. Returns whether the entry changed,
+/// so entries that never named the deleted sheet keep their compressed bytes.
+fn drop_xlsx_sheet_references(
+    source: impl Read,
+    output: impl Write,
+    deleted: &[String],
+) -> Result<bool, HcdError> {
+    let mut reader = Reader::from_reader(BufReader::new(source));
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(output);
+    let mut buffer = Vec::new();
+    let mut changed = false;
+    let mut formula: Option<(String, Vec<Event<'static>>)> = None;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX XML: {error}")))?;
+        match event {
+            Event::Start(ref element)
+                if is_xlsx_formula_element(local_name(element.name().as_ref())) =>
+            {
+                if formula.is_some() {
+                    return Err(HcdError::Unsupported(
+                        "XLSX formula text is nested; worksheet deletion refused".to_string(),
+                    ));
+                }
+                formula = Some((String::new(), Vec::new()));
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Text(ref text) if formula.is_some() => {
+                let decoded = text.unescape().map_err(|error| {
+                    HcdError::InvalidBundle(format!("invalid XLSX formula text: {error}"))
+                })?;
+                let owned = text.clone().into_owned();
+                let slot = formula.as_mut().expect("pending formula text");
+                slot.0.push_str(&decoded);
+                slot.1.push(Event::Text(owned));
+            }
+            Event::End(ref element)
+                if is_xlsx_formula_element(local_name(element.name().as_ref()))
+                    && formula.is_some() =>
+            {
+                let (decoded, originals) = formula.take().expect("pending formula text");
+                let mut dropped = decoded.clone();
+                for name in deleted {
+                    dropped = drop_formula_sheet_references(&dropped, name);
+                }
+                if dropped == decoded {
+                    for original in originals {
+                        writer.write_event(original)?;
+                    }
+                } else {
+                    changed = true;
+                    writer.write_event(Event::Text(BytesText::new(&escape_text(&dropped))))?;
+                }
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Eof => break,
+            _ => writer.write_event(event.into_owned())?,
+        }
+        buffer.clear();
+    }
+    if formula.is_some() {
+        return Err(HcdError::InvalidBundle(
+            "XLSX formula element is not closed".to_string(),
+        ));
+    }
+    Ok(changed)
+}
+
+/// Copy a control list without the empty children whose attribute names a part
+/// this export deletes: the sheet list loses its tab, the workbook relationships
+/// lose their pointer, and `[Content_Types].xml` loses the override. Everything
+/// else is written as the source had it, so a workbook that drops one tab keeps
+/// the XML it wrote for the rest.
+fn drop_control_elements(
+    source: &[u8],
+    parent: &str,
+    element: &str,
+    attribute: &str,
+    values: &BTreeSet<String>,
+    part: &str,
+) -> Result<(Vec<u8>, usize), HcdError> {
+    let mut reader = Reader::from_reader(source);
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut open_depth: Option<usize> = None;
+    let mut depth = 0usize;
+    let mut dropped = 0usize;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("{part} XML: {error}")))?;
+        match event {
+            Event::Start(ref element) => {
+                if open_depth.is_none() && local_name(element.name().as_ref()) == parent {
+                    open_depth = Some(depth);
+                }
+                depth += 1;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if open_depth == Some(depth) {
+                    open_depth = None;
+                }
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Empty(ref candidate)
+                if open_depth.is_some() && local_name(candidate.name().as_ref()) == element =>
+            {
+                if element_attribute(candidate, attribute)?
+                    .is_some_and(|value| values.contains(&value))
+                {
+                    dropped += 1;
+                } else {
+                    writer.write_event(event.into_owned())?;
+                }
+            }
+            Event::Eof => break,
+            other => writer.write_event(other.into_owned())?,
+        }
+        buffer.clear();
+    }
+    Ok((writer.into_inner(), dropped))
+}
+
+/// Drop the workbook defined names that belong to a deleted tab and move the ones
+/// behind it down a place, because `localSheetId` counts positions in the sheet
+/// list the deletion just shortened.
+fn drop_local_defined_names(
+    source: &[u8],
+    removed: &BTreeSet<usize>,
+    part: &str,
+) -> Result<(Vec<u8>, bool), HcdError> {
+    let mut reader = Reader::from_reader(source);
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut changed = false;
+    // Elements still open inside a defined name being thrown away. The counter
+    // swallows the name's formula text and its closing tag along with it.
+    let mut pending = 0usize;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("{part} XML: {error}")))?;
+        if pending > 0 {
+            match event {
+                Event::Start(_) => pending += 1,
+                Event::End(_) => pending -= 1,
+                _ => {}
+            }
+            buffer.clear();
+            continue;
+        }
+        match event {
+            Event::Start(ref candidate) | Event::Empty(ref candidate)
+                if local_name(candidate.name().as_ref()) == "definedName" =>
+            {
+                let empty = matches!(event, Event::Empty(_));
+                let Some(position) = element_attribute(candidate, "localSheetId")?
+                    .and_then(|value| value.parse::<usize>().ok())
+                else {
+                    // A global name outlives any one tab; its own references were
+                    // already collapsed to `#REF!` by the part pass.
+                    writer.write_event(event.into_owned())?;
+                    buffer.clear();
+                    continue;
+                };
+                if removed.contains(&position) {
+                    changed = true;
+                    if !empty {
+                        pending = 1;
+                    }
+                    buffer.clear();
+                    continue;
+                }
+                let shifted = position
+                    - removed
+                        .iter()
+                        .take_while(|previous| **previous < position)
+                        .count();
+                if shifted == position {
+                    writer.write_event(event.into_owned())?;
+                } else {
+                    changed = true;
+                    let updated =
+                        element_with_attribute(candidate, "localSheetId", &shifted.to_string())?;
+                    writer.write_event(if empty {
+                        Event::Empty(updated)
+                    } else {
+                        Event::Start(updated)
+                    })?;
+                }
+            }
+            Event::Eof => break,
+            other => writer.write_event(other.into_owned())?,
+        }
+        buffer.clear();
+    }
+    Ok((writer.into_inner(), changed))
+}
+
+/// One attribute of an element, decoded, or `None` when it is not carried.
+fn element_attribute(element: &BytesStart<'_>, wanted: &str) -> Result<Option<String>, HcdError> {
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX attribute: {error}")))?;
+        if local_name(attribute.key.as_ref()) != wanted {
+            continue;
+        }
+        let value = attribute
+            .unescape_value()
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX value: {error}")))?;
+        return Ok(Some(value.to_string()));
+    }
+    Ok(None)
+}
+
+/// Copy an element with one attribute replaced, keeping every other attribute and
+/// the prefix each was written with.
+fn element_with_attribute(
+    element: &BytesStart<'_>,
+    wanted: &str,
+    value: &str,
+) -> Result<BytesStart<'static>, HcdError> {
+    let mut updated =
+        BytesStart::new(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX attribute: {error}")))?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        if local_name(attribute.key.as_ref()) != wanted {
+            let existing = String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+            updated.push_attribute((key.as_str(), existing.as_str()));
+            continue;
+        }
+        let escaped = escape_attribute(value);
+        updated.push_attribute((key.as_str(), escaped.as_str()));
+    }
+    Ok(updated)
 }
 
 /// Rewrite worksheet tab names inside one package entry: the workbook sheet
@@ -9362,7 +10007,7 @@ mod tests {
         XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch,
         HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_31, HCD_PATCH_SCHEMA_VERSION_32,
         HCD_PATCH_SCHEMA_VERSION_33, HCD_PATCH_SCHEMA_VERSION_34, HCD_PATCH_SCHEMA_VERSION_35,
-        HCD_PATCH_SCHEMA_VERSION_6,
+        HCD_PATCH_SCHEMA_VERSION_36, HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -15123,6 +15768,831 @@ mod tests {
             read_zip_entry(&source, "xl/worksheets/sheet2.xml"),
             "revision zero keeps the worksheet empty"
         );
+    }
+
+    #[test]
+    fn deletes_a_worksheet_and_every_entry_that_named_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("delete.xlsx");
+        create_sheet_delete_fixture(&source);
+        let bundle_path = temp.path().join("delete.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let historical = temp.path().join("historical.xlsx");
+        let reopened_path = temp.path().join("reopened.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sheet-delete"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(manifest.chunk_count, 3);
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunks = bundle.read_index_page(&manifest, 0).unwrap().chunks;
+        let sheet_id = |name: &str| {
+            chunks
+                .iter()
+                .find(|chunk| {
+                    chunk
+                        .grid
+                        .as_ref()
+                        .is_some_and(|grid| grid.sheet_name == name)
+                })
+                .expect("worksheet chunk")
+                .grid
+                .as_ref()
+                .unwrap()
+                .sheet_id
+                .clone()
+        };
+        let data = sheet_id("Data");
+        let delete = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_36.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "delete-data".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetDelete {
+                sheet_id: data.clone(),
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &delete, 0).unwrap().revision,
+            1
+        );
+        let checked = validate_bundle(&bundle).unwrap();
+        assert!(checked.valid, "{:?}", checked.issues);
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(record.sheet_removals.len(), 1);
+        assert_eq!(record.sheet_removals[0].name, "Data");
+        assert_eq!(
+            record.sheet_removals[0].sheet_part,
+            "xl/worksheets/sheet2.xml"
+        );
+        assert_eq!(
+            record.dirty_source_parts,
+            vec!["xl/worksheets/sheet2.xml".to_string()]
+        );
+        assert!(
+            !record.removed_node_ids.is_empty(),
+            "the cells that lived on the deleted tab leave with it"
+        );
+        for node_id in &record.removed_node_ids {
+            assert!(
+                record.dirty_node_ids.contains(node_id),
+                "a removed node is a dirty node: {node_id}"
+            );
+        }
+        // The index shrinks: the chunks behind the hole move up, so the manifest
+        // counts two windows whose sequence numbers are 0 and 1.
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, 2);
+        assert_eq!(head.index_page_count, 1);
+        let head_chunks = bundle.read_index_page(&head, 0).unwrap().chunks;
+        assert_eq!(head_chunks.len(), 2);
+        for (position, chunk) in head_chunks.iter().enumerate() {
+            assert_eq!(chunk.sequence, position, "{}", chunk.chunk_id);
+            let grid = chunk.grid.as_ref().unwrap();
+            assert_ne!(grid.sheet_id, data, "the deleted tab left the index");
+        }
+        assert_eq!(
+            head_chunks
+                .iter()
+                .map(|chunk| chunk.grid.as_ref().unwrap().sheet_name.clone())
+                .collect::<Vec<_>>(),
+            vec!["Plain".to_string(), "Notes".to_string()]
+        );
+        // Notes was the third tab and is the second now: the place a chunk records
+        // is how it reaches its worksheet part, so it moves with the hole.
+        assert_eq!(
+            head_chunks
+                .iter()
+                .map(|chunk| chunk.grid.as_ref().unwrap().sheet_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        // The stored section carries the place as well as the descriptor does, so
+        // a view of the bundle after the deletion names the tab where it now sits.
+        assert!(
+            bundle
+                .read_chunk(&head_chunks[1])
+                .unwrap()
+                .contains("data-hcd-sheet-index=\"1\""),
+            "the kept tab's section moved up a place"
+        );
+        // The kept tab that pointed at the deleted one breaks in the stored
+        // expression too, so the bundle view matches the workbook.
+        let plain = bundle.read_chunk(&head_chunks[0]).unwrap();
+        assert!(
+            plain.contains("data-hcd-formula-expression=\"=#REF!+1\""),
+            "{plain}"
+        );
+        assert!(!plain.contains("Data!"), "{plain}");
+        let notes = bundle.read_chunk(&head_chunks[1]).unwrap();
+        assert!(
+            notes.contains("data-hcd-formula-expression=\"=Plain!A1+#REF!\""),
+            "{notes}"
+        );
+        // A second patch has to find its target in the rebuilt index, which is
+        // only true if the pages the removal rewrote are the ones the bundle reads.
+        let edit = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_7.to_string(),
+            patch_id: "after-delete".into(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxCellSet {
+                sheet_id: sheet_id("Notes"),
+                row: 1,
+                column: 3,
+                text: "Kept".to_string(),
+            }],
+            ..delete.clone()
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &edit, 1).unwrap().revision,
+            2
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_SHEET_DELETE"));
+        let names = zip_entry_names(&exported);
+        assert!(
+            !names.iter().any(|name| name == "xl/worksheets/sheet2.xml"),
+            "the deleted worksheet leaves the package: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "xl/calcChain.xml"),
+            "a chain numbered by tab position cannot survive a hole: {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "xl/worksheets/_rels/sheet3.xml.rels"),
+            "only the deleted tab loses its own relationship part: {names:?}"
+        );
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(!workbook.contains("name=\"Data\""), "{workbook}");
+        assert!(workbook.contains("name=\"Plain\""), "{workbook}");
+        assert!(workbook.contains("name=\"Notes\""), "{workbook}");
+        assert!(!workbook.contains("SheetRange"), "{workbook}");
+        assert!(
+            workbook
+                .contains(r#"<definedName name="Tail" localSheetId="1">Notes!$A$1</definedName>"#),
+            "the name behind the hole moves up a place: {workbook}"
+        );
+        assert!(
+            workbook.contains("<definedName name=\"Report\">Plain!$A$1</definedName>"),
+            "a global name outlives the tab: {workbook}"
+        );
+        assert!(
+            workbook.contains("fullCalcOnLoad=\"1\""),
+            "broken references leave stale caches: {workbook}"
+        );
+        let relationships = read_zip_entry(&exported, "xl/_rels/workbook.xml.rels");
+        assert!(!relationships.contains("rId2"), "{relationships}");
+        assert!(!relationships.contains("calcChain"), "{relationships}");
+        assert!(relationships.contains("rId1"), "{relationships}");
+        assert!(relationships.contains("rId3"), "{relationships}");
+        let content_types = read_zip_entry(&exported, "[Content_Types].xml");
+        assert!(
+            !content_types.contains("/xl/worksheets/sheet2.xml"),
+            "{content_types}"
+        );
+        assert!(
+            !content_types.contains("/xl/calcChain.xml"),
+            "{content_types}"
+        );
+        assert!(
+            content_types.contains("/xl/worksheets/sheet3.xml"),
+            "{content_types}"
+        );
+        let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<f>#REF!+1</f>"), "{sheet}");
+        let notes = read_zip_entry(&exported, "xl/worksheets/sheet3.xml");
+        assert!(notes.contains("<f>Plain!A1+#REF!</f>"), "{notes}");
+        assert_eq!(
+            read_zip_entry(&exported, "xl/worksheets/_rels/sheet3.xml.rels"),
+            read_zip_entry(&source, "xl/worksheets/_rels/sheet3.xml.rels"),
+            "a part the deletion does not touch must stay byte-identical"
+        );
+
+        export_xlsx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&historical, "xl/workbook.xml"),
+            read_zip_entry(&source, "xl/workbook.xml"),
+            "revision zero still lists the three tabs the source wrote"
+        );
+        assert_eq!(
+            read_zip_entry(&historical, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml")
+        );
+
+        let reopened = import_xlsx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("delete-reopen"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        assert!(validate_bundle(&reopened_bundle).unwrap().valid);
+        let head = reopened_bundle.manifest().unwrap();
+        assert_eq!(
+            bundle_names(&reopened_bundle, &head),
+            vec!["Plain".to_string(), "Notes".to_string()],
+            "re-importing the exported workbook recovers the two tabs that survived"
+        );
+        assert_eq!(reopened.revision, 0);
+    }
+
+    #[test]
+    fn deleting_a_worksheet_takes_the_relationship_part_it_owned() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("delete-links.xlsx");
+        create_sheet_delete_fixture(&source);
+        let bundle_path = temp.path().join("delete-links.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sheet-delete-links"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunks = bundle.read_index_page(&manifest, 0).unwrap().chunks;
+        let notes = chunks
+            .iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_name == "Notes")
+            })
+            .expect("worksheet chunk")
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let delete = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_36.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "delete-notes".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetDelete { sheet_id: notes }],
+        };
+        hcd_core::apply_patch(&bundle, &delete, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_SHEET_DELETE"));
+        let names = zip_entry_names(&exported);
+        for part in [
+            "xl/worksheets/sheet3.xml",
+            "xl/worksheets/_rels/sheet3.xml.rels",
+        ] {
+            assert!(
+                !names.iter().any(|name| name == part),
+                "{part} belongs to the deleted tab: {names:?}"
+            );
+        }
+        assert!(
+            names.iter().any(|name| name == "xl/worksheets/sheet2.xml"),
+            "the tab that survived keeps its part: {names:?}"
+        );
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(!workbook.contains("name=\"Notes\""), "{workbook}");
+        assert!(
+            !workbook.contains("Tail"),
+            "the name scoped to the deleted tab is gone: {workbook}"
+        );
+        assert!(
+            workbook.contains(r#"<definedName name="SheetRange" localSheetId="1">"#),
+            "a name in front of the hole keeps its place: {workbook}"
+        );
+        let relationships = read_zip_entry(&exported, "xl/_rels/workbook.xml.rels");
+        assert!(!relationships.contains("rId3"), "{relationships}");
+    }
+
+    #[test]
+    fn a_tab_created_and_deleted_in_one_history_writes_no_worksheet_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("cancel.xlsx");
+        create_sheet_rename_fixture(&source);
+        let bundle_path = temp.path().join("cancel.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sheet-cancel"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let add = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_35.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-notes".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetAdd {
+                name: "Notes".into(),
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &add, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        let added = bundle
+            .read_index_page(&head, 0)
+            .unwrap()
+            .chunks
+            .into_iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_name == "Notes")
+            })
+            .expect("added worksheet window");
+        let sheet_id = added.grid.as_ref().unwrap().sheet_id.clone();
+        let delete = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_36.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "delete-again".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetDelete { sheet_id }],
+        };
+        hcd_core::apply_patch(&bundle, &delete, 1).unwrap();
+        let checked = validate_bundle(&bundle).unwrap();
+        assert!(checked.valid, "{:?}", checked.issues);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            head.chunk_count, manifest.chunk_count,
+            "the index is back to the windows the source wrote"
+        );
+        assert_eq!(
+            bundle_names(&bundle, &head),
+            vec!["Plain".to_string(), "Formula".to_string()]
+        );
+        // A blank tab left no cell behind, so the revision names no source part:
+        // an empty node set and an empty part set are what validation accepts.
+        let record = bundle.revision(2).unwrap();
+        assert_eq!(record.sheet_removals.len(), 1);
+        assert!(record.dirty_node_ids.is_empty());
+        assert!(record.dirty_source_parts.is_empty());
+        assert!(!record.dirty_chunk_ids.is_empty());
+
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let names = zip_entry_names(&exported);
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.starts_with("xl/worksheets/sheet3")),
+            "a tab that never reached the package leaves nothing behind: {names:?}"
+        );
+        for part in [
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "[Content_Types].xml",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part} must be untouched when the tab it never knew is cancelled"
+            );
+        }
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_SHEET_DELETE"
+                && warning
+                    .message
+                    .contains("created and deleted inside this history")));
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "XLSX_SHEET_ADD"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn the_last_visible_worksheet_cannot_be_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("only.xlsx");
+        create_sheet_rename_fixture(&source);
+        let bundle_path = temp.path().join("only.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sheet-only"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunks = bundle.read_index_page(&manifest, 0).unwrap().chunks;
+        let sheet_id = |name: &str| {
+            chunks
+                .iter()
+                .find(|chunk| {
+                    chunk
+                        .grid
+                        .as_ref()
+                        .is_some_and(|grid| grid.sheet_name == name)
+                })
+                .expect("worksheet chunk")
+                .grid
+                .as_ref()
+                .unwrap()
+                .sheet_id
+                .clone()
+        };
+        let plain = sheet_id("Plain");
+        // Delete one tab, then try the other: a workbook with no visible tab is
+        // not a file Excel opens.
+        let first = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_36.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "delete-formula".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetDelete {
+                sheet_id: sheet_id("Formula"),
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &first, 0).unwrap();
+        let last = PatchBatch {
+            patch_id: "delete-plain".into(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxSheetDelete {
+                sheet_id: plain.clone(),
+            }],
+            ..first.clone()
+        };
+        let error = hcd_core::apply_patch(&bundle, &last, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("XLSX workbook must keep one visible worksheet"),
+            "{error}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn a_hidden_worksheet_can_be_deleted_but_an_unknown_one_cannot() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("hidden.xlsx");
+        create_hidden_sheet_fixture(&source);
+        let bundle_path = temp.path().join("hidden.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("sheet-hidden"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunks = bundle.read_index_page(&manifest, 0).unwrap().chunks;
+        let grid_of = |name: &str| {
+            chunks
+                .iter()
+                .find(|chunk| {
+                    chunk
+                        .grid
+                        .as_ref()
+                        .is_some_and(|grid| grid.sheet_name == name)
+                })
+                .expect("worksheet chunk")
+                .grid
+                .as_ref()
+                .unwrap()
+                .clone()
+        };
+        let visible = grid_of("Visible");
+        let hidden = grid_of("Hidden");
+        assert_eq!(visible.sheet_state, "visible");
+        assert_eq!(hidden.sheet_state, "hidden");
+        let batch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_36.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "delete-hidden".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetDelete {
+                sheet_id: hidden.sheet_id.clone(),
+            }],
+        };
+        let error = hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                patch_id: "delete-visible".into(),
+                operations: vec![PatchOperation::XlsxSheetDelete {
+                    sheet_id: visible.sheet_id.clone(),
+                }],
+                ..batch.clone()
+            },
+            0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("XLSX workbook must keep one visible worksheet"),
+            "{error}"
+        );
+        hcd_core::apply_patch(&bundle, &batch, 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            bundle_names(&bundle, &head),
+            vec!["Visible".to_string()],
+            "the tab that stayed hidden is the one the document loses"
+        );
+        let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "XLSX_SHEET_DELETE"));
+        let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+        assert!(!workbook.contains("name=\"Hidden\""), "{workbook}");
+        assert!(workbook.contains("name=\"Visible\""), "{workbook}");
+        let names = zip_entry_names(&exported);
+        assert!(
+            !names.iter().any(|name| name == "xl/worksheets/sheet2.xml"),
+            "{names:?}"
+        );
+        // A sheet id that is not in the grid, and one that is not an id at all.
+        let unknown = PatchBatch {
+            patch_id: "delete-unknown".into(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxSheetDelete {
+                sheet_id: "s_00000000000000000000000000000000".into(),
+            }],
+            ..batch.clone()
+        };
+        let error = hcd_core::apply_patch(&bundle, &unknown, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("XLSX worksheet is not in the HCD grid"),
+            "{error}"
+        );
+        let malformed = PatchBatch {
+            patch_id: "delete-malformed".into(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxSheetDelete {
+                sheet_id: "Plain".into(),
+            }],
+            ..batch.clone()
+        };
+        let error = hcd_core::apply_patch(&bundle, &malformed, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid XLSX worksheet deletion target"),
+            "{error}"
+        );
+        let two = PatchBatch {
+            patch_id: "delete-two".into(),
+            base_revision: 1,
+            operations: vec![
+                PatchOperation::XlsxSheetDelete {
+                    sheet_id: hidden.sheet_id.clone(),
+                },
+                PatchOperation::XlsxSheetDelete {
+                    sheet_id: visible.sheet_id.clone(),
+                },
+            ],
+            ..batch.clone()
+        };
+        let error = hcd_core::apply_patch(&bundle, &two, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("hcd-patch/36 accepts one XLSX worksheet deletion operation only"),
+            "{error}"
+        );
+        let wrong_schema = PatchBatch {
+            patch_id: "delete-wrong-schema".into(),
+            schema_version: HCD_PATCH_SCHEMA_VERSION_35.to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxSheetDelete {
+                sheet_id: visible.sheet_id.clone(),
+            }],
+            ..batch.clone()
+        };
+        let error = hcd_core::apply_patch(&bundle, &wrong_schema, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("hcd-patch/35 accepts one XLSX worksheet addition operation only"),
+            "{error}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn only_a_feature_that_survives_its_tab_refuses_the_deletion() {
+        let hyperlink = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/></Relationships>"#;
+        assert_eq!(
+            xlsx_relationship_owner_of_worksheet(hyperlink).unwrap(),
+            None
+        );
+        let drawing = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
+        assert_eq!(
+            xlsx_relationship_owner_of_worksheet(drawing)
+                .unwrap()
+                .as_deref(),
+            Some("drawing"),
+            "a drawing part would outlive the tab that owned it"
+        );
+        assert_eq!(
+            worksheet_rels_part("xl/worksheets/sheet3.xml").as_deref(),
+            Some("xl/worksheets/_rels/sheet3.xml.rels")
+        );
+    }
+
+    #[test]
+    fn control_lists_lose_exactly_the_entry_that_named_the_deleted_tab() {
+        let workbook = br#"<?xml version="1.0"?><x:workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheets><x:sheet name="Plain" sheetId="1" r:id="rId1"/><x:sheet name="Data" sheetId="2" r:id="rId2"/><x:sheet name="Notes" sheetId="3" r:id="rId3"/></x:sheets><x:definedNames><x:definedName name="Mine" localSheetId="0">Plain!$A$1</x:definedName><x:definedName name="Ours" localSheetId="1">Data!$A$1</x:definedName><x:definedName name="Tail" localSheetId="2">Notes!$A$1</x:definedName><x:definedName name="Report">Plain!$A$1</x:definedName></x:definedNames></x:workbook>"#;
+        let (dropped, removed) = drop_control_elements(
+            workbook,
+            "sheets",
+            "sheet",
+            "id",
+            &BTreeSet::from(["rId2".to_string()]),
+            "xl/workbook.xml",
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        let text = String::from_utf8(dropped).unwrap();
+        assert!(!text.contains("name=\"Data\""), "{text}");
+        assert!(
+            text.contains(r#"<x:sheet name="Plain" sheetId="1" r:id="rId1"/>"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"<x:sheet name="Notes" sheetId="3" r:id="rId3"/>"#),
+            "{text}"
+        );
+        // The middle tab is gone, so a name scoped to it dies, a name behind it
+        // moves up a place, and the two in front of the hole keep their numbers.
+        let (shifted, changed) = drop_local_defined_names(
+            text.as_bytes(),
+            &BTreeSet::from([1usize]),
+            "xl/workbook.xml",
+        )
+        .unwrap();
+        assert!(changed);
+        let shifted = String::from_utf8(shifted).unwrap();
+        assert!(!shifted.contains("Ours"), "{shifted}");
+        assert!(
+            shifted.contains(
+                r#"<x:definedName name="Tail" localSheetId="1">Notes!$A$1</x:definedName>"#
+            ),
+            "{shifted}"
+        );
+        assert!(
+            shifted.contains(
+                r#"<x:definedName name="Mine" localSheetId="0">Plain!$A$1</x:definedName>"#
+            ),
+            "{shifted}"
+        );
+        assert!(
+            shifted.contains(r#"<x:definedName name="Report">Plain!$A$1</x:definedName>"#),
+            "{shifted}"
+        );
+    }
+
+    /// Three worksheets whose tabs are named by a formula, a scoped defined name,
+    /// a calculation chain, and a hyperlink that only its own tab can follow.
+    fn create_sheet_delete_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Data" sheetId="2" r:id="rId2"/><sheet name="Notes" sheetId="3" r:id="rId3"/></sheets><definedNames><definedName name="Report">Plain!$A$1</definedName><definedName name="SheetRange" localSheetId="1">Data!$A$1:$B$1</definedName><definedName name="Tail" localSheetId="2">Notes!$A$1</definedName></definedNames><calcPr calcId="144525"/></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>7</v></c><c r="B1"><f>Data!A1+1</f><v>6</v></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>5</v></c><c r="B1"><v>6</v></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet3.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:D1"/><sheetData><row r="1"><c r="A1"><f>Plain!A1+Data!A1</f><v>12</v></c><c r="B1"><v>3</v></c></row></sheetData><hyperlinks><hyperlink ref="B1" r:id="rId1" display="site"/></hyperlinks></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/_rels/sheet3.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/></Relationships>"#,
+            ),
+            (
+                "xl/calcChain.xml",
+                r#"<?xml version="1.0"?><calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="B1" i="0"/><c r="A1" i="2"/></calcChain>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// One tab the user sees and one the workbook keeps hidden behind it, so a
+    /// deletion has a visible tab to lose and must refuse to lose the last one.
+    fn create_hidden_sheet_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Visible" sheetId="1" r:id="rId1"/><sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// The tab names a bundle holds at one revision, in index order.
+    fn bundle_names(bundle: &Bundle, manifest: &hcd_core::HcdManifest) -> Vec<String> {
+        (0..manifest.index_page_count)
+            .flat_map(|page| bundle.read_index_page(manifest, page).unwrap().chunks)
+            .filter_map(|chunk| chunk.grid.map(|grid| grid.sheet_name))
+            .collect()
+    }
+
+    fn zip_entry_names(path: &Path) -> Vec<String> {
+        let file = File::open(path).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        archive.file_names().map(|name| name.to_string()).collect()
     }
 
     fn create_shared_string_fixture(path: &Path) {

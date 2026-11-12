@@ -419,6 +419,61 @@ export class HcdUniverAdapter {
     await this.ensureVisible(sheet);
   }
 
+  /**
+   * Take away the Univer tab for a worksheet HCD already deleted. The tab goes
+   * before the index is reloaded, because `refreshFromServer` works out which
+   * windows to fetch from the active sheet and that sheet has to be one the
+   * document still has.
+   */
+  removeSheet(sheetId: string): void {
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    if (!sheet) throw new Error(`工作表不存在: ${sheetId}`);
+    if (this.workbook.getSheets().length <= 1) {
+      throw new Error('工作簿必须保留一个工作表');
+    }
+    // Same reason as inserting: the mutation is HCD's, replayed here, so it runs
+    // while `applying` and the read-only guard leaves it alone.
+    this.withApplying(() => {
+      if (!this.workbook.deleteSheet(sheetId)) {
+        throw new Error(`Univer 没有删除工作表 ${sheetId}`);
+      }
+    });
+    if (this.workbook.getSheetBySheetId(sheetId)) {
+      throw new Error(`Univer 保留了工作表 ${sheetId}`);
+    }
+    this.forgetSheet(sheetId);
+  }
+
+  /** Let go of every window, cell link, and dimension cached for a sheet that is gone. */
+  private forgetSheet(sheetId: string): void {
+    this.dimensions.delete(sheetId);
+    this.rangeGeneration.delete(sheetId);
+    for (const [chunkId, runtime] of [...this.runtimes]) {
+      if (runtime.sheetId !== sheetId) continue;
+      for (const cell of runtime.cells) {
+        if (cell.link) {
+          this.linksByNode.delete(cell.link.nodeId);
+          this.recalculatedFormulas.delete(cell.link.nodeId);
+        }
+      }
+      this.runtimes.delete(chunkId);
+      this.loaded.delete(chunkId);
+      this.loadedVersions.delete(chunkId);
+    }
+    const prefix = `${sheetId}:`;
+    for (const [key, link] of [...this.linksByCell]) {
+      if (!key.startsWith(prefix)) continue;
+      this.linksByCell.delete(key);
+      this.linksByNode.delete(link.nodeId);
+    }
+    for (const key of [...this.blankCells]) if (key.startsWith(prefix)) this.blankCells.delete(key);
+    for (const key of [...this.editInputs.keys()]) if (key.startsWith(prefix)) this.editInputs.delete(key);
+    for (const key of [...this.loadedRowCeilings.keys()]) {
+      if (key.startsWith(prefix)) this.loadedRowCeilings.delete(key);
+    }
+    for (const key of [...this.appliedDimensions]) if (key.startsWith(prefix)) this.appliedDimensions.delete(key);
+  }
+
   /** Reload the visible HCD windows after another editor commits a revision. */
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;

@@ -547,6 +547,12 @@ pub enum PatchOperation {
     /// tab is editable straight away.
     #[serde(rename = "xlsx.sheet.add", rename_all = "camelCase")]
     XlsxSheetAdd { name: String },
+    /// Delete a worksheet tab. Every chunk of that worksheet leaves the index,
+    /// and a formula that named the tab breaks the way Excel breaks it: the
+    /// reference collapses to `#REF!`. A workbook is never left without a
+    /// visible worksheet.
+    #[serde(rename = "xlsx.sheet.delete", rename_all = "camelCase")]
+    XlsxSheetDelete { sheet_id: String },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -616,7 +622,8 @@ impl PatchOperation {
             | Self::XlsxColumnWidth { .. }
             | Self::XlsxRowHeight { .. }
             | Self::XlsxSheetRename { .. }
-            | Self::XlsxSheetAdd { .. } => None,
+            | Self::XlsxSheetAdd { .. }
+            | Self::XlsxSheetDelete { .. } => None,
         }
     }
 
@@ -654,6 +661,7 @@ impl PatchOperation {
                 | Self::XlsxRowHeight { .. }
                 | Self::XlsxSheetRename { .. }
                 | Self::XlsxSheetAdd { .. }
+                | Self::XlsxSheetDelete { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -826,6 +834,10 @@ pub struct RevisionRecord {
     /// workbook, so a source-backed export has to add it rather than rewrite it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheet_additions: Vec<SheetAddition>,
+    /// Worksheets this revision deleted. A source-backed export drops the part
+    /// they carried and rewrites whatever named them in the same pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheet_removals: Vec<SheetRemoval>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
 }
@@ -855,6 +867,17 @@ pub struct SheetRename {
 pub struct SheetAddition {
     pub sheet_part: String,
     pub sheet_index: usize,
+}
+
+/// Worksheet deleted at one revision, named by the part its tab pointed at and
+/// by the tab name references still carry. A worksheet HCD created and later
+/// deleted has no part in the source workbook at all, so the export drops the
+/// addition rather than removing anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SheetRemoval {
+    pub sheet_part: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -917,10 +917,14 @@ fn validate_patch_revision(
     // A worksheet rename rewrites index chunks and the workbook sheet list, not a
     // cell and not the worksheet part itself, so it is content without dirty sets.
     // Creating a worksheet is the same shape: one new window chunk, no cell.
+    // Deleting one is the same shape turned around: chunks leave the index and
+    // their cells go with them, so the revision is content without a source part
+    // rewritten in place.
     let content_changed = !record.dirty_node_ids.is_empty()
         || !record.dirty_grid_parts.is_empty()
         || !record.sheet_renames.is_empty()
-        || !record.sheet_additions.is_empty();
+        || !record.sheet_additions.is_empty()
+        || !record.sheet_removals.is_empty();
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
             || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())

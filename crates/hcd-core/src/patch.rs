@@ -3,26 +3,26 @@ use crate::bundle::{
 };
 use crate::hash::{hash_bytes, node_bloom, node_bloom_might_contain, stable_node_id};
 use crate::html::{escape_attribute, escape_text};
-use crate::rename_formula_sheet_references;
 use crate::xlsx_grid::{sheet_grid_id, sheet_window_chunk_id, XlsxSheetSection};
 #[cfg(test)]
 use crate::HCD_SCHEMA_VERSION;
+use crate::{drop_formula_sheet_references, rename_formula_sheet_references};
 use crate::{
     extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, AnnotationSet,
     ApplyResult, AssetDescriptor, FidelityWarning, GridColumnDeletion, GridColumnInsertion,
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
-    RevisionRecord, SheetAddition, SheetRename, SourceAnchor, TextExtractEntry, TextExtractPage,
-    TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch,
-    XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
-    HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
-    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
-    HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19,
-    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3,
-    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
-    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
-    MAX_PATCH_JSON_BYTES,
+    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SourceAnchor, TextExtractEntry,
+    TextExtractPage, TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch,
+    XlsxCellNumberFormatPatch, XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION,
+    HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
+    HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
+    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
+    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -203,6 +203,19 @@ struct XlsxSheetRenameTarget {
     sheet_part: String,
 }
 
+/// Worksheet a patch deletes: the tab the bundle already knows, its grid identity,
+/// its place in the tab list, and the worksheet part the package will lose. HCD
+/// drops every chunk that carried cells for this tab, so the index shrinks instead
+/// of growing, and every tab behind the hole moves up one place because the place
+/// a chunk records is how it reaches its worksheet part in the source workbook.
+#[derive(Clone)]
+struct XlsxSheetRemovalTarget {
+    sheet_id: String,
+    name: String,
+    sheet_part: String,
+    sheet_index: usize,
+}
+
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
@@ -259,6 +272,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxRowHeight { .. }
                         | PatchOperation::XlsxSheetRename { .. }
                         | PatchOperation::XlsxSheetAdd { .. }
+                        | PatchOperation::XlsxSheetDelete { .. }
                         | PatchOperation::XlsxRowInsert { .. }
                         | PatchOperation::XlsxRowDelete { .. }
                         | PatchOperation::XlsxColumnInsert { .. }
@@ -388,6 +402,10 @@ pub fn apply_patch(
         .as_ref()
         .map(|name| resolve_xlsx_sheet_add(bundle, &manifest, name))
         .transpose()?;
+    let xlsx_sheet_removal = collect_xlsx_sheet_removal(patch)
+        .as_ref()
+        .map(|removal| resolve_xlsx_sheet_removal(bundle, &manifest, removal))
+        .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -445,7 +463,8 @@ pub fn apply_patch(
         || xlsx_column_width.is_some()
         || xlsx_row_height.is_some()
         || xlsx_sheet_rename.is_some()
-        || xlsx_sheet_add.is_some();
+        || xlsx_sheet_add.is_some()
+        || xlsx_sheet_removal.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -470,6 +489,13 @@ pub fn apply_patch(
     let mut changed_xlsx_column = false;
     let mut changed_xlsx_row_height = false;
     let mut renamed_xlsx_sheet = false;
+    // A worksheet removal takes whole chunks out of the index, so the patch
+    // collects the chunks that survive instead of editing a page in place: the
+    // hole renumbers every chunk behind it, which rewrites every page after it.
+    let mut removed_xlsx_sheet = false;
+    let mut dropped_sheet_chunks = 0usize;
+    let mut removed_sheet_node_ids: Vec<String> = Vec::new();
+    let mut kept_sheet_descriptors: Vec<crate::ChunkDescriptor> = Vec::new();
     let mut added_sheet_chunk = xlsx_sheet_add
         .as_ref()
         .map(|addition| mint_xlsx_sheet_chunk(bundle, &manifest, addition))
@@ -605,6 +631,24 @@ pub fn apply_patch(
                     .as_ref()
                     .is_some_and(|grid| grid.sheet_id == rename.sheet_id)
             });
+            let delete_here = xlsx_sheet_removal.as_ref().is_some_and(|removal| {
+                descriptor
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_id == removal.sheet_id)
+            });
+            if delete_here {
+                // Every chunk of the deleted tab leaves the index, and the cells
+                // it mapped leave with it. The rebuild behind this loop puts the
+                // chunks that survive back on pages and renumbers them.
+                for entry in bundle.read_map(descriptor)?.entries {
+                    removed_sheet_node_ids.push(entry.node_id);
+                }
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+                dropped_sheet_chunks += 1;
+                removed_xlsx_sheet = true;
+                continue;
+            }
             let cell_insertions: Vec<&XlsxCellInsertion> = descriptor
                 .grid
                 .as_ref()
@@ -654,6 +698,9 @@ pub fn apply_patch(
                 // A rename can touch a formula in any worksheet, so every chunk
                 // is inspected for references to the old tab name.
                 && xlsx_sheet_rename.is_none()
+                // A removal rebuilds the whole index, so every surviving chunk
+                // has to be collected, not just the ones this patch edits.
+                && xlsx_sheet_removal.is_none()
             {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
@@ -1607,6 +1654,18 @@ pub fn apply_patch(
                 }
                 chunk_changed |= sheet_changed_here;
             }
+            if let Some(removal) = xlsx_sheet_removal.as_ref() {
+                // A kept tab whose formula named the deleted tab breaks in the
+                // stored expression too, so the bundle view matches the workbook.
+                if drop_xlsx_formula_references(&mut html, &removal.name)? {
+                    chunk_changed = true;
+                }
+                // And a tab behind the hole moves up one place in the section it
+                // stores, the same way its descriptor does below.
+                if shift_xlsx_sheet_sections(&mut html, removal.sheet_index)? {
+                    chunk_changed = true;
+                }
+            }
 
             if chunk_changed {
                 page_changed = true;
@@ -1619,6 +1678,9 @@ pub fn apply_patch(
                 descriptor.byte_length = html.len() as u64;
                 descriptor.text_chars = html_nodes.values().map(|text| text.chars().count()).sum();
                 dirty_chunks.insert(descriptor.chunk_id.clone());
+            }
+            if xlsx_sheet_removal.is_some() {
+                kept_sheet_descriptors.push(descriptor.clone());
             }
             hash_descriptor(&mut root_hasher, descriptor);
         }
@@ -1650,7 +1712,12 @@ pub fn apply_patch(
             }
         }
 
-        if content_changed && (index_root_href.is_none() || page_changed) {
+        // A removal rewrites the index from the chunks it left behind, so pages
+        // are not written while their chunk lists still contain the hole.
+        if xlsx_sheet_removal.is_none()
+            && content_changed
+            && (index_root_href.is_none() || page_changed)
+        {
             page.revision = new_revision;
             if let Some(root) = &index_root_href {
                 index_root_href = Some(bundle.replace_index_page(root, page_number, &page)?);
@@ -1794,6 +1861,79 @@ pub fn apply_patch(
             "XLSX worksheet rename target disappeared".to_string(),
         ));
     }
+    if let Some(removal) = xlsx_sheet_removal.as_ref() {
+        if !removed_xlsx_sheet {
+            return Err(HcdError::InvalidBundle(
+                "XLSX worksheet deletion target disappeared".to_string(),
+            ));
+        }
+        if kept_sheet_descriptors.len() + dropped_sheet_chunks != manifest.chunk_count {
+            return Err(HcdError::InvalidBundle(format!(
+                "index pages cover {} chunks, manifest says {}",
+                kept_sheet_descriptors.len() + dropped_sheet_chunks,
+                manifest.chunk_count
+            )));
+        }
+        // The tab is gone from the package as well as from the index, and its
+        // cells are gone with it, so the revision records them as removed nodes.
+        for node_id in &removed_sheet_node_ids {
+            dirty_nodes.insert(node_id.clone());
+            removed_nodes.insert(node_id.clone());
+        }
+        // Naming the source part belongs to that node set: a tab nobody typed into
+        // leaves no cell behind, and a revision whose nodes changed must name the
+        // parts that held them, so an empty tab keeps both sets empty.
+        if !removed_sheet_node_ids.is_empty() {
+            dirty_parts.insert(removal.sheet_part.clone());
+        }
+        // Chunks behind the hole move up one slot each, so every one of them is
+        // renumbered and lands on a different page. The digest is folded again
+        // over the list the index ends up holding, and the pages are rewritten
+        // from it: the sequence a descriptor carries is part of that digest.
+        let mut rebuilt: Vec<crate::ChunkIndexPage> = Vec::new();
+        let mut rebuilt_hasher = Sha256::new();
+        for (sequence, mut descriptor) in kept_sheet_descriptors.into_iter().enumerate() {
+            descriptor.sequence = sequence;
+            // The tab list lost one place, so every tab behind it is one place
+            // nearer the front: a chunk finds its worksheet part by that number.
+            if let Some(grid) = descriptor.grid.as_mut() {
+                if grid.sheet_index > removal.sheet_index {
+                    grid.sheet_index -= 1;
+                }
+            }
+            hash_descriptor(&mut rebuilt_hasher, &descriptor);
+            let page_number = sequence / INDEX_PAGE_SIZE;
+            if rebuilt.len() <= page_number {
+                rebuilt.push(crate::ChunkIndexPage {
+                    schema_version: manifest.schema_version.clone(),
+                    revision: new_revision,
+                    page: page_number,
+                    chunks: Vec::new(),
+                });
+            }
+            rebuilt[page_number].chunks.push(descriptor);
+        }
+        if let Some(root) = index_root_href.as_ref() {
+            index_root_href = Some(bundle.replace_index_pages(root, &rebuilt)?);
+        } else {
+            for page in &rebuilt {
+                crate::bundle::atomic_write_json_encoded(
+                    &new_index_root.join(format!(
+                        "{:06}.json{}",
+                        page.page,
+                        manifest.storage_codec.suffix()
+                    )),
+                    page,
+                )?;
+            }
+        }
+        // The index tree keeps the shape it has, so a tail page the removal
+        // emptied is simply no longer counted; the manifest walks the pages that
+        // still describe the document.
+        manifest.index_page_count = rebuilt.len();
+        manifest.chunk_count = rebuilt.iter().map(|page| page.chunks.len()).sum();
+        root_hasher = rebuilt_hasher;
+    }
 
     validate_annotation_ranges(patch, &found_nodes)?;
     let (annotation_href, annotation_root_hash) =
@@ -1887,6 +2027,12 @@ pub fn apply_patch(
                 message: "new worksheet tab is blank in HCD; source-backed export writes it as a worksheet part the source workbook never had".to_string(),
                 node_id: None,
                 source_part: Some(addition.sheet_part.clone()),
+            }))
+            .chain(xlsx_sheet_removal.iter().map(|removal| FidelityWarning {
+                code: "XLSX_WORKSHEET_REMOVED".to_string(),
+                message: "worksheet tab is deleted: its cells leave the document, formulas that named it read #REF!, and source-backed export drops the worksheet part with the workbook entry that pointed at it".to_string(),
+                node_id: None,
+                source_part: Some(removal.sheet_part.clone()),
             }))
             .chain(xlsx_number_formats.keys().map(|node_id| FidelityWarning {
                 code: "XLSX_DIRECT_CELL_NUMBER_FORMAT".to_string(),
@@ -2012,6 +2158,14 @@ pub fn apply_patch(
             .map(|addition| SheetAddition {
                 sheet_part: addition.sheet_part.clone(),
                 sheet_index: addition.sheet_index,
+            })
+            .collect(),
+        sheet_removals: xlsx_sheet_removal
+            .as_ref()
+            .into_iter()
+            .map(|removal| SheetRemoval {
+                sheet_part: removal.sheet_part.clone(),
+                name: removal.name.clone(),
             })
             .collect(),
         structural_change: false,
@@ -2319,6 +2473,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_33
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_34
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_35
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_36
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2595,6 +2750,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/35 accepts one XLSX worksheet addition operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_36
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxSheetDelete { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/36 accepts one XLSX worksheet deletion operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -2923,6 +3090,27 @@ fn validate_patch_identity(
                     ));
                 }
                 validate_xlsx_sheet_name(name)?;
+            }
+            PatchOperation::XlsxSheetDelete { sheet_id } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_36
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.sheet.delete requires one XLSX operation with hcd-patch/36"
+                            .to_string(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX worksheet deletion target".to_string(),
+                    ));
+                }
             }
             PatchOperation::XlsxMerge {
                 node_id,
@@ -4794,6 +4982,89 @@ fn mint_xlsx_sheet_chunk(
     })
 }
 
+/// Worksheet a patch asks to delete.
+fn collect_xlsx_sheet_removal(patch: &PatchBatch) -> Option<XlsxSheetRemovalTarget> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxSheetDelete { sheet_id } = operation else {
+            return None;
+        };
+        Some(XlsxSheetRemovalTarget {
+            sheet_id: sheet_id.clone(),
+            name: String::new(),
+            sheet_part: String::new(),
+            sheet_index: 0,
+        })
+    })
+}
+
+/// Work out what a deletion names: the tab formulas point at, the worksheet part
+/// the package loses, and whether any visible tab survives it. A workbook with no
+/// visible worksheet is not a file Excel opens, so the last visible tab cannot be
+/// deleted even though HCD would drop it from its own index without complaint.
+fn resolve_xlsx_sheet_removal(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    removal: &XlsxSheetRemovalTarget,
+) -> Result<XlsxSheetRemovalTarget, HcdError> {
+    let mut resolved = removal.clone();
+    let mut part: Option<String> = None;
+    let mut sheets: HashSet<String> = HashSet::new();
+    let mut visible: HashSet<String> = HashSet::new();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            sheets.insert(grid.sheet_id.clone());
+            if grid.sheet_state == "visible" {
+                visible.insert(grid.sheet_id.clone());
+            }
+            if grid.sheet_id != removal.sheet_id {
+                continue;
+            }
+            if resolved.name.is_empty() {
+                resolved.name = grid.sheet_name.clone();
+                resolved.sheet_index = grid.sheet_index;
+            } else if resolved.name != grid.sheet_name {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX worksheet chunks disagree on the sheet name".to_string(),
+                ));
+            } else if resolved.sheet_index != grid.sheet_index {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX worksheet chunks disagree on the sheet position".to_string(),
+                ));
+            }
+            if part.is_none() && grid.kind == crate::GridChunkKind::Cells {
+                part = match grid.sheet_part.clone() {
+                    Some(part) => Some(part),
+                    None => bundle
+                        .read_map(&descriptor)?
+                        .entries
+                        .iter()
+                        .find(|entry| entry.source.node_kind == "cell")
+                        .map(|entry| entry.source.part.clone()),
+                };
+            }
+        }
+    }
+    if !sheets.contains(&removal.sheet_id) {
+        return Err(HcdError::Unsupported(
+            "XLSX worksheet is not in the HCD grid".to_string(),
+        ));
+    }
+    if visible.contains(&removal.sheet_id) && visible.len() == 1 {
+        return Err(HcdError::InvalidPatch(
+            "XLSX workbook must keep one visible worksheet".to_string(),
+        ));
+    }
+    resolved.sheet_part = part.ok_or_else(|| {
+        HcdError::Unsupported(
+            "XLSX worksheet deletion requires a worksheet with a known source part".to_string(),
+        )
+    })?;
+    Ok(resolved)
+}
+
 fn rename_xlsx_sheet_sections(
     html: &mut String,
     old_name: &str,
@@ -4823,6 +5094,39 @@ fn rename_xlsx_sheet_sections(
     Ok(changed)
 }
 
+/// Move the tab place every surviving worksheet section names. A deletion takes
+/// one place out of the list, so each tab behind it is one place nearer the front,
+/// and that number is how a chunk reaches its worksheet part in the source
+/// workbook — which is why it changes in the stored HTML as well as in the
+/// descriptor.
+fn shift_xlsx_sheet_sections(html: &mut String, deleted_index: usize) -> Result<bool, HcdError> {
+    const MARKER: &str = "data-hcd-sheet-index=\"";
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while let Some(offset) = html[cursor..].find(MARKER) {
+        let start = cursor + offset + MARKER.len();
+        let Some(value_end) = html[start..].find('"') else {
+            return Err(HcdError::InvalidBundle(
+                "XLSX sheet section index is not closed".to_string(),
+            ));
+        };
+        let end = start + value_end;
+        let moved = html[start..end]
+            .parse::<usize>()
+            .ok()
+            .filter(|position| *position > deleted_index)
+            .map(|position| (position - 1).to_string());
+        let Some(moved) = moved else {
+            cursor = end;
+            continue;
+        };
+        html.replace_range(start..end, &moved);
+        changed = true;
+        cursor = start + moved.len();
+    }
+    Ok(changed)
+}
+
 /// Rewrite cross-worksheet references inside stored formula expressions so an
 /// edited cell keeps naming the worksheet it pointed at.
 fn rename_xlsx_formula_references(
@@ -4845,6 +5149,35 @@ fn rename_xlsx_formula_references(
         let renamed = rename_formula_sheet_references(&expression, &[(old_name, new_name)]);
         if renamed != expression {
             let escaped = escape_attribute(&renamed);
+            html.replace_range(start..end, &escaped);
+            changed = true;
+            cursor = start + escaped.len();
+        } else {
+            cursor = end;
+        }
+    }
+    Ok(changed)
+}
+
+/// Collapse the cross-worksheet references in stored formula expressions that
+/// named a worksheet this patch deletes, the way Excel collapses an address whose
+/// sheet is gone: the reference becomes `#REF!` and stays in the cell.
+fn drop_xlsx_formula_references(html: &mut String, deleted_name: &str) -> Result<bool, HcdError> {
+    const MARKER: &str = "data-hcd-formula-expression=\"";
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while let Some(offset) = html[cursor..].find(MARKER) {
+        let start = cursor + offset + MARKER.len();
+        let Some(value_end) = html[start..].find('"') else {
+            return Err(HcdError::InvalidBundle(
+                "XLSX formula expression is not closed".to_string(),
+            ));
+        };
+        let end = start + value_end;
+        let expression = unescape_attribute(&html[start..end]);
+        let dropped = drop_formula_sheet_references(&expression, deleted_name);
+        if dropped != expression {
+            let escaped = escape_attribute(&dropped);
             html.replace_range(start..end, &escaped);
             changed = true;
             cursor = start + escaped.len();
@@ -8949,6 +9282,7 @@ fn apply_annotations(
             | PatchOperation::XlsxRowHeight { .. }
             | PatchOperation::XlsxSheetRename { .. }
             | PatchOperation::XlsxSheetAdd { .. }
+            | PatchOperation::XlsxSheetDelete { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}

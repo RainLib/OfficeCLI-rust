@@ -39,6 +39,8 @@ const sourceEn: Record<string, string> = {
   '新增工作表名': 'New sheet name', '新增工作表名 ': 'New sheet name ',
   '新增工作表': 'Insert sheet',
   '在工作簿末尾新增一个空白工作表': 'Add a blank worksheet at the end of the workbook',
+  '删除工作表': 'Delete sheet',
+  '删除当前工作表，它的单元格一并删除，引用它的公式变为 #REF!': 'Delete the active sheet. Its cells go with it, and formulas that named it read #REF!',
   '点击文字原位编辑 · 选中后可设置加粗、斜体、下划线、字号和颜色，并拖动调整位置': 'Click text to edit it in place. Select it to set bold, italic, underline, size, and color, then drag to move it',
   '重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）': 'Redo (⌘/Ctrl+Shift+Z or Ctrl+Y)',
   '显示页面目录': 'Show page outline', '步': ' steps',

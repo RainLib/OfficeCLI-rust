@@ -841,6 +841,7 @@ impl BundleWriter {
             grid_column_deletions: Vec::new(),
             sheet_renames: Vec::new(),
             sheet_additions: Vec::new(),
+            sheet_removals: Vec::new(),
             structural_change: false,
         };
         atomic_write_json(
