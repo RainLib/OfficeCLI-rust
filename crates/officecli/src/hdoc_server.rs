@@ -38,6 +38,8 @@ struct ServerState {
     catalog: DiskCatalog,
     secret: Arc<Vec<u8>>,
     remote: Option<RemoteStore>,
+    /// Theme pinned onto newly imported documents; `None` keeps today's unpinned behavior.
+    default_theme: Option<String>,
     collaboration_lock: Arc<Mutex<()>>,
     downloads: Arc<Mutex<HashMap<String, DownloadTicket>>>,
 }
@@ -133,11 +135,13 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         Some(path) => path.clone(),
         None => root.join("catalog"),
     })?;
+    let default_theme = configured_default_theme(command.default_theme.clone())?;
     let state = ServerState {
         root,
         catalog,
         secret,
         remote,
+        default_theme,
         collaboration_lock: Arc::new(Mutex::new(())),
         downloads: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -256,6 +260,48 @@ fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiE
     Ok(())
 }
 
+/// `--default-theme` names a catalog theme revision, so it must be a 64-character lowercase digest.
+fn configured_default_theme(value: Option<String>) -> Result<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(id) if valid_digest_hex(&id) => Ok(Some(id)),
+        Some(_) => Err(anyhow!(
+            "--default-theme must be a 64-character lowercase theme revision id"
+        )),
+    }
+}
+
+/// Pin the service default theme onto a freshly imported bundle.
+///
+/// A bundle that already carries a pin — an HCD archive re-imported with its own brand —
+/// keeps it, because the default only fills in for documents that have no theme yet.
+/// A stale, retired, or unreadable theme must not strand the document an operator just
+/// uploaded, so the failure becomes a job warning instead of a failed import.
+fn pin_default_theme(
+    catalog: &DiskCatalog,
+    default_theme: Option<&str>,
+    destination: &std::path::Path,
+) -> Option<String> {
+    let theme_id = default_theme?;
+    let bundle = match Bundle::open(destination) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return Some(format!("default theme {theme_id} was not pinned: {error}"));
+        }
+    };
+    if bundle
+        .manifest()
+        .map(|manifest| manifest.theme_revision_id.is_some())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    match pin_document_theme(catalog, &bundle, theme_id) {
+        Ok(_) => None,
+        Err(error) => Some(format!("default theme {theme_id} was not pinned: {error}")),
+    }
+}
+
 #[derive(Deserialize)]
 struct ImportQuery {
     filename: String,
@@ -356,6 +402,8 @@ async fn import_document(
     let job_document_id = document_id.clone();
     let spawned_job_id = job_id.clone();
     let remote = state.remote.clone();
+    let catalog = state.catalog.clone();
+    let default_theme = state.default_theme.clone();
     tokio::spawn(async move {
         let run = async {
             write_job(
@@ -381,20 +429,26 @@ async fn import_document(
                     String::from_utf8_lossy(&output.stderr)
                 ));
             }
+            let mut warnings = Vec::new();
+            if let Some(warning) =
+                pin_default_theme(&catalog, default_theme.as_deref(), &destination)
+            {
+                warnings.push(warning);
+            }
             if let Some(remote) = &remote {
                 remote
                     .publish(&job_document_id, &destination, Some(&source), None)
                     .await?;
             }
-            Result::<()>::Ok(())
+            Result::<Vec<String>>::Ok(warnings)
         }
         .await;
-        let (status, error) = match run {
-            Ok(()) => ("completed", None),
-            Err(error) => ("failed", Some(error.to_string())),
+        let (status, error, warnings) = match run {
+            Ok(warnings) => ("completed", None, warnings),
+            Err(error) => ("failed", Some(error.to_string()), Vec::new()),
         };
         let _ = write_job(&job_path, remote.as_ref(), &spawned_job_id,
-            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error})).await;
+            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error, "warnings": warnings})).await;
     });
     Ok(Json(
         json!({"jobId": job_id, "documentId": document_id, "state": "queued"}),
@@ -440,6 +494,8 @@ async fn import_hcd_archive(
     let remote = state.remote.clone();
     let spawned_job_id = job_id.clone();
     let job_document_id = document_id.clone();
+    let catalog = state.catalog.clone();
+    let default_theme = state.default_theme.clone();
     tokio::spawn(async move {
         let run = async {
             write_job(
@@ -463,21 +519,27 @@ async fn import_hcd_archive(
                     String::from_utf8_lossy(&output.stderr)
                 ));
             }
+            let mut warnings = Vec::new();
+            if let Some(warning) =
+                pin_default_theme(&catalog, default_theme.as_deref(), &destination)
+            {
+                warnings.push(warning);
+            }
             if let Some(remote) = &remote {
                 remote
                     .publish(&job_document_id, &destination, None, None)
                     .await?;
             }
-            Result::<()>::Ok(())
+            Result::<Vec<String>>::Ok(warnings)
         }
         .await;
         let _ = tokio::fs::remove_file(&archive).await;
-        let (status, error) = match run {
-            Ok(()) => ("completed", None),
-            Err(error) => ("failed", Some(error.to_string())),
+        let (status, error, warnings) = match run {
+            Ok(warnings) => ("completed", None, warnings),
+            Err(error) => ("failed", Some(error.to_string()), Vec::new()),
         };
         let _ = write_job(&job_path, remote.as_ref(), &spawned_job_id,
-            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error})).await;
+            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error, "warnings": warnings})).await;
     });
     Ok(Json(
         json!({"jobId": job_id, "documentId": document_id, "state": "queued"}),
@@ -2191,6 +2253,7 @@ mod tests {
             catalog: DiskCatalog::open(root.join("catalog")).unwrap(),
             secret: Arc::new(secret.to_vec()),
             remote: None,
+            default_theme: None,
             collaboration_lock: Arc::new(Mutex::new(())),
             downloads: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -2916,5 +2979,241 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(again.0.revision, 1);
+    }
+
+    /// Seed a font revision and a theme through the same admin write surface the console uses.
+    async fn seed_theme(state: &ServerState, secret: &[u8], font_id: &str) -> String {
+        let admin = bearer(secret, "*", "admin");
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin,
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: font_id.to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        theme.0.theme_revision_id
+    }
+
+    /// Write a bundle the way a finished import leaves it: revision zero, its own pin or none.
+    fn imported_bundle(path: &std::path::Path, id: &str, theme_revision_id: Option<String>) {
+        let writer = hcd_core::BundleWriter::create(path).unwrap();
+        writer.write_styles("article { color: #222222; }").unwrap();
+        writer
+            .finish(hcd_core::HcdManifest {
+                schema_version: String::new(),
+                storage_codec: hcd_core::StorageCodec::None,
+                document_id: id.to_string(),
+                profile: "semantic-flow".to_string(),
+                revision: 0,
+                source: hcd_core::SourceDescriptor {
+                    format: "docx".to_string(),
+                    sha256: "ab".repeat(32),
+                    size_bytes: 1,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                theme_revision_id,
+                capabilities: hcd_core::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn configured_default_theme_requires_a_theme_revision_digest() {
+        assert_eq!(configured_default_theme(None).unwrap(), None);
+        let id = "a".repeat(64);
+        assert_eq!(
+            configured_default_theme(Some(id.clone())).unwrap(),
+            Some(id.clone())
+        );
+        for rejected in ["", "abc", &"A".repeat(64), &"g".repeat(64), &"a".repeat(63)] {
+            assert!(
+                configured_default_theme(Some(rejected.to_string())).is_err(),
+                "accepted {rejected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn default_theme_pins_a_freshly_imported_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(theme.clone());
+        let destination = temp.path().join("doc-new.hcd");
+        imported_bundle(&destination, "doc-new", None);
+
+        assert_eq!(
+            pin_default_theme(&state.catalog, state.default_theme.as_deref(), &destination),
+            None
+        );
+
+        let bundle = Bundle::open(&destination).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.revision, 1);
+        assert_eq!(manifest.theme_revision_id.as_deref(), Some(theme.as_str()));
+        assert!(manifest.styles_href.starts_with("styles/rev-"));
+        let styles = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(styles.contains("article { color: #222222; }"));
+        assert!(styles.contains("--hcd-major-latin:'Demo Serif',serif"));
+    }
+
+    #[tokio::test]
+    async fn without_a_configured_default_theme_imports_stay_unpinned() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let destination = temp.path().join("doc-none.hcd");
+        imported_bundle(&destination, "doc-none", None);
+
+        assert_eq!(
+            pin_default_theme(&state.catalog, state.default_theme.as_deref(), &destination),
+            None
+        );
+
+        let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id, None);
+        // The catalog does hold a usable theme; only the missing config kept the document plain.
+        let themes = state.catalog.list_themes().unwrap();
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].theme_revision_id, theme);
+    }
+
+    #[tokio::test]
+    async fn a_reimported_archive_keeps_its_own_theme_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let default = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(default.clone());
+        let own = "cd".repeat(32);
+        let destination = temp.path().join("doc-brand.hcd");
+        imported_bundle(&destination, "doc-brand", Some(own.clone()));
+
+        assert_eq!(
+            pin_default_theme(&state.catalog, state.default_theme.as_deref(), &destination),
+            None
+        );
+
+        let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id.as_deref(), Some(own.as_str()));
+        assert_ne!(default, own);
+    }
+
+    #[tokio::test]
+    async fn a_stale_or_retired_default_theme_warns_instead_of_failing_the_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        let unknown = "f".repeat(64);
+        let stale = temp.path().join("doc-stale.hcd");
+        imported_bundle(&stale, "doc-stale", None);
+        let warning = pin_default_theme(&state.catalog, Some(&unknown), &stale).unwrap();
+        assert!(warning.contains("was not pinned"), "{warning}");
+        let manifest = Bundle::open(&stale).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id, None);
+
+        state.catalog.retire_theme(&theme).unwrap();
+        let retired = temp.path().join("doc-retired.hcd");
+        imported_bundle(&retired, "doc-retired", None);
+        let warning = pin_default_theme(&state.catalog, Some(&theme), &retired).unwrap();
+        assert!(warning.contains("retired"), "{warning}");
+        assert_eq!(
+            Bundle::open(&retired)
+                .unwrap()
+                .manifest()
+                .unwrap()
+                .theme_revision_id,
+            None
+        );
+
+        let warning =
+            pin_default_theme(&state.catalog, Some(&theme), &temp.path().join("gone.hcd")).unwrap();
+        assert!(warning.contains("was not pinned"), "{warning}");
+    }
+
+    #[tokio::test]
+    async fn importing_a_document_that_already_exists_does_not_repin_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let default = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(default.clone());
+
+        let body: &[u8] = b"brand new text";
+        let hash = hcd_core::hash_bytes(body);
+        let id = format!("doc-{}", &hash[..32]);
+        let own = "cd".repeat(32);
+        let destination = state.root.join(format!("{id}.hcd"));
+        imported_bundle(&destination, &id, Some(own.clone()));
+
+        let response = import_document(
+            State(state.clone()),
+            Query(ImportQuery {
+                filename: "note.txt".to_string(),
+            }),
+            bearer(secret, "*", "upload"),
+            Body::from(body.to_vec()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["state"], "completed");
+        assert!(response.0.get("warnings").is_none(), "{}", response.0);
+
+        let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id.as_deref(), Some(own.as_str()));
     }
 }

@@ -330,6 +330,9 @@ pub struct HdocServeCommand {
     /// Font catalog directory. Defaults to <root>/catalog on the same machine.
     #[arg(long)]
     pub catalog: Option<PathBuf>,
+    /// Theme revision id pinned onto newly imported documents. Unset leaves imports unpinned.
+    #[arg(long, value_name = "themeRevisionId")]
+    pub default_theme: Option<String>,
 }
 
 #[derive(Args)]
