@@ -14,10 +14,10 @@ use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, detect_font_format, editor_projection, hash_file,
     list_documents, manifest_at_revision, pin_document_theme, project_editor,
-    resolve_document_theme, restore_revision, search_bundle, theme_documents, BlockPrecondition,
-    Bundle, DiskCatalog, DocumentSummary, EditorBlockContent, EditorInline, FontDeleteReport,
-    FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch, FontStyle,
-    HcdError, PatchBatch, StructureOperation, StructurePatchBatch, ThemeDocumentRef,
+    resolve_document_theme, restore_revision, search_bundle, theme_documents, unpin_document_theme,
+    BlockPrecondition, Bundle, DiskCatalog, DocumentSummary, EditorBlockContent, EditorInline,
+    FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch,
+    FontStyle, HcdError, PatchBatch, StructureOperation, StructurePatchBatch, ThemeDocumentRef,
     ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES,
     MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
@@ -695,6 +695,21 @@ fn authorize(
         ));
     }
     Ok(())
+}
+
+/// Which token may change the theme a document pins.
+///
+/// A theme pin is a brand decision about the document rather than an edit of its
+/// text: it commits managed stylesheet lines and touches no node, so the
+/// management console has to be able to retarget documents with the operator
+/// token it already holds instead of minting a short-lived write token per
+/// document. Every route that changes content still requires a token written for
+/// that document, so this is the one place the admin token reaches a document.
+fn authorize_theme(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<(), ApiError> {
+    if authorize_admin(state, headers).is_ok() {
+        return Ok(());
+    }
+    authorize(state, headers, id, true)
 }
 
 fn authorize_catalog(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -1552,7 +1567,21 @@ async fn document_theme(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PinThemeBody {
-    theme_revision_id: String,
+    /// The catalog theme to pin. `null` removes the current pin and leaves the
+    /// document on the faces it carries itself. The field must be present: an empty
+    /// `{}` body silently unpinning a document would make a typo destructive.
+    #[serde(deserialize_with = "explicit_theme_pin")]
+    theme_revision_id: Option<String>,
+}
+
+/// Reads `themeRevisionId` so that a string pins, an explicit `null` unpins, and an
+/// absent field is a bad request. Plain `Option<String>` would treat absent and
+/// null alike, and the two mean opposite things here.
+fn explicit_theme_pin<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 async fn pin_theme(
@@ -1561,15 +1590,38 @@ async fn pin_theme(
     headers: HeaderMap,
     Json(body): Json<PinThemeBody>,
 ) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
-    authorize(&state, &headers, &id, true)?;
+    authorize_theme(&state, &headers, &id)?;
     let bundle = open(&state, &id)?;
-    state
-        .catalog
-        .resolve(&body.theme_revision_id, |font_id, revision, sha| {
-            theme_font_href(&body.theme_revision_id, font_id, revision, sha)
-        })
-        .map_err(hcd_error)?;
-    pin_document_theme(&state.catalog, &bundle, &body.theme_revision_id).map_err(hcd_error)?;
+    let manifest = match body.theme_revision_id.as_deref() {
+        Some(theme_revision_id) => {
+            state
+                .catalog
+                .resolve(theme_revision_id, |font_id, revision, sha| {
+                    theme_font_href(theme_revision_id, font_id, revision, sha)
+                })
+                .map_err(hcd_error)?;
+            pin_document_theme(&state.catalog, &bundle, theme_revision_id).map_err(hcd_error)?
+        }
+        None => unpin_document_theme(&state.catalog, &bundle).map_err(hcd_error)?,
+    };
+    if body.theme_revision_id.is_none() {
+        // An unpin leaves nothing to resolve: resolve_document_theme reports a
+        // missing pin as 404, and answering a successful call with that would
+        // make the console show an error for work that is done. Report the new
+        // revision with an empty theme instead.
+        return Ok(Json(hcd_core::DocumentThemeResolution {
+            document_id: manifest.document_id,
+            revision: manifest.revision,
+            theme_revision_id: String::new(),
+            theme: hcd_core::ResolvedTheme {
+                theme_revision_id: String::new(),
+                name: String::new(),
+                css: String::new(),
+                faces: Vec::new(),
+                warnings: Vec::new(),
+            },
+        }));
+    }
     let resolved =
         resolve_document_theme(&state.catalog, &bundle, None, |font_id, revision, sha| {
             document_font_href(&id, font_id, revision, sha)
@@ -3042,13 +3094,23 @@ mod tests {
             })
             .unwrap();
 
+        // A body has to say what it means: an absent field is refused rather than
+        // read as an unpin, so a typo cannot strip a document's theme.
+        assert!(serde_json::from_str::<PinThemeBody>("{}").is_err());
+        assert!(
+            serde_json::from_str::<PinThemeBody>("{\"themeRevisionId\":null}")
+                .unwrap()
+                .theme_revision_id
+                .is_none()
+        );
+
         // A read token cannot pin.
         let error = pin_theme(
             State(state.clone()),
             Path(id.to_string()),
             bearer(secret, id, "read"),
             Json(PinThemeBody {
-                theme_revision_id: theme_revision_id.clone(),
+                theme_revision_id: Some(theme_revision_id.clone()),
             }),
         )
         .await
@@ -3061,7 +3123,7 @@ mod tests {
             Path(id.to_string()),
             bearer(secret, id, "write"),
             Json(PinThemeBody {
-                theme_revision_id: theme_revision_id.clone(),
+                theme_revision_id: Some(theme_revision_id.clone()),
             }),
         )
         .await
@@ -3079,14 +3141,92 @@ mod tests {
 
         // Re-pinning the same theme is idempotent and does not add a revision.
         let again = pin_theme(
-            State(state),
+            State(state.clone()),
             Path(id.to_string()),
             bearer(secret, id, "write"),
-            Json(PinThemeBody { theme_revision_id }),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme_revision_id.clone()),
+            }),
         )
         .await
         .unwrap();
         assert_eq!(again.0.revision, 1);
+
+        // The console's operator token may retarget a document's theme, because a
+        // pin commits managed stylesheet lines and no node content.
+        let retarget = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, "*", "admin"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme_revision_id.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retarget.0.revision, 1, "the same theme is still a no-op");
+
+        // A read token cannot unpin either, and the admin token can.
+        let error = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "read"),
+            Json(PinThemeBody {
+                theme_revision_id: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        let cleared = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, "*", "admin"),
+            Json(PinThemeBody {
+                theme_revision_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared.0.revision, 2);
+        assert!(
+            cleared.0.theme_revision_id.is_empty(),
+            "an unpin reports no theme"
+        );
+        assert!(cleared.0.theme.css.is_empty());
+        let styles = bundle
+            .read_styles_part(&bundle.manifest().unwrap().styles_href)
+            .unwrap();
+        assert_eq!(styles.trim(), "article { color: #123456; }");
+        assert!(!styles.contains("hcd-theme-begin"));
+
+        // Content routes still demand a token written for this document: the admin
+        // token that retargets the theme cannot splice text.
+        let error = node_patch(
+            State(state),
+            Path(id.to_string()),
+            bearer(secret, "*", "admin"),
+            Json(hcd_core::PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: id.to_string(),
+                patch_id: "admin-must-not-edit".to_string(),
+                base_revision: 2,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![hcd_core::PatchOperation::TextSplice {
+                    node_id: "n_00000000000000000000000000000001".to_string(),
+                    start: 0,
+                    delete_count: 0,
+                    insert_text: "x".to_string(),
+                    precondition: hcd_core::NodePrecondition {
+                        node_hash: "0".repeat(64),
+                    },
+                }],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
     /// Seed a font revision and a theme through the same admin write surface the console uses.
@@ -3660,7 +3800,7 @@ mod tests {
             Path(id.to_string()),
             bearer(secret, id, "write"),
             Json(PinThemeBody {
-                theme_revision_id: theme,
+                theme_revision_id: Some(theme),
             }),
         )
         .await

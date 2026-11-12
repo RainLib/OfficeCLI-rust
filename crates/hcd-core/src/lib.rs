@@ -18,11 +18,12 @@ pub use archive::{inspect_archive, pack_archive, unpack_archive, ArchiveReport};
 pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
 pub use catalog::{
     detect_font_format, list_documents, pin_document_theme, resolve_document_theme,
-    theme_document_css, theme_documents, theme_font_plan, theme_presentation_css, DiskCatalog,
-    DocumentSummary, DocumentThemeResolution, FontDeleteReport, FontFace, FontFileFormat,
-    FontLicense, FontRef, FontRevision, FontScript, FontStretch, FontStyle, ResolvedFace,
-    ResolvedTheme, ThemeDocumentRef, ThemeEmbedKind, ThemeFontAction, ThemeFontDecision,
-    ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA, MAX_FONT_BYTES, THEME_SCHEMA,
+    theme_document_css, theme_documents, theme_font_plan, theme_presentation_css,
+    unpin_document_theme, DiskCatalog, DocumentSummary, DocumentThemeResolution, FontDeleteReport,
+    FontFace, FontFileFormat, FontLicense, FontRef, FontRevision, FontScript, FontStretch,
+    FontStyle, ResolvedFace, ResolvedTheme, ThemeDocumentRef, ThemeEmbedKind, ThemeFontAction,
+    ThemeFontDecision, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA, MAX_FONT_BYTES,
+    THEME_SCHEMA,
 };
 pub use error::HcdError;
 pub use hash::{

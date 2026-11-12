@@ -1309,12 +1309,44 @@ pub fn pin_document_theme(
     theme_revision_id: &str,
 ) -> Result<crate::HcdManifest, HcdError> {
     require_sha256(theme_revision_id)?;
+    let block = theme_document_css(catalog, theme_revision_id)?;
+    commit_document_theme(catalog, bundle, Some(theme_revision_id), &block)
+}
+
+/// Drop the theme pinned on the document, as a content revision of its own.
+///
+/// The managed region leaves a new stylesheet and `themeRevisionId` clears on the
+/// head record, so preview and export fall back to the faces the document itself
+/// carries: the same result removing one selection face has for a text node, one
+/// level up. A document that carries no pin and no managed region comes back
+/// unchanged, so repeating the call is safe. The catalog entry the document
+/// pointed at is untouched; retiring or deleting it stays a separate decision.
+pub fn unpin_document_theme(
+    catalog: &DiskCatalog,
+    bundle: &Bundle,
+) -> Result<crate::HcdManifest, HcdError> {
+    commit_document_theme(catalog, bundle, None, "")
+}
+
+/// Writes `block` as the document's managed theme region and advances the head
+/// revision. `theme_revision_id` is the theme being pinned, or `None` for an
+/// unpin, and is recorded on the new revision so history shows what the document
+/// pointed at. The retired-theme guard runs only for a real change, so a document
+/// that already pins a retired theme can keep re-asserting it.
+fn commit_document_theme(
+    catalog: &DiskCatalog,
+    bundle: &Bundle,
+    theme_revision_id: Option<&str>,
+    block: &str,
+) -> Result<crate::HcdManifest, HcdError> {
     let _guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
     if manifest.state != "COMPLETE" {
-        return Err(HcdError::InvalidBundle(
-            "only a complete document can pin a theme".to_string(),
-        ));
+        return Err(HcdError::InvalidBundle(if theme_revision_id.is_some() {
+            "only a complete document can pin a theme".to_string()
+        } else {
+            "only a complete document can unpin a theme".to_string()
+        }));
     }
     let head_record = bundle.revision(manifest.revision)?;
     if head_record.document_id != manifest.document_id || head_record.revision != manifest.revision
@@ -1323,20 +1355,20 @@ pub fn pin_document_theme(
             "head revision record does not match the manifest".to_string(),
         ));
     }
-    let block = theme_document_css(catalog, theme_revision_id)?;
     let base_styles = bundle.read_styles_part(&manifest.styles_href)?;
-    let new_styles = with_theme_region(&base_styles, &block);
-    if manifest.theme_revision_id.as_deref() == Some(theme_revision_id) && new_styles == base_styles
-    {
+    let new_styles = with_theme_region(&base_styles, block);
+    if manifest.theme_revision_id.as_deref() == theme_revision_id && new_styles == base_styles {
         return Ok(manifest);
     }
     // A retired theme stays resolvable for documents that already pin it, but
     // cannot be newly pinned. The idempotent no-op above already covers
     // re-asserting the current pin, so only a real change reaches this guard.
-    if catalog.is_theme_retired(theme_revision_id)? {
-        return Err(HcdError::Unsupported(format!(
-            "theme {theme_revision_id} is retired and cannot be newly pinned"
-        )));
+    if let Some(theme_revision_id) = theme_revision_id {
+        if catalog.is_theme_retired(theme_revision_id)? {
+            return Err(HcdError::Unsupported(format!(
+                "theme {theme_revision_id} is retired and cannot be newly pinned"
+            )));
+        }
     }
     if manifest.revision >= crate::MAX_REVISION {
         return Err(HcdError::ResourceLimit(
@@ -1366,14 +1398,25 @@ pub fn pin_document_theme(
         document_id: manifest.document_id.clone(),
         revision: new_revision,
         parent_revision: Some(manifest.revision),
-        patch_id: Some(format!("theme-{new_revision}")),
+        // A pin keeps the identifiers it has always used, so history written
+        // before an unpin exists still hashes the same way.
+        patch_id: Some(match theme_revision_id {
+            Some(_) => format!("theme-{new_revision}"),
+            None => format!("theme-clear-{new_revision}"),
+        }),
         patch_hash: Some(hash_bytes(
-            format!("theme:{theme_revision_id}:{new_revision}").as_bytes(),
+            match theme_revision_id {
+                Some(theme_revision_id) => {
+                    format!("theme:{theme_revision_id}:{new_revision}")
+                }
+                None => format!("theme-clear:{new_revision}"),
+            }
+            .as_bytes(),
         )),
         patch_base_revision: Some(manifest.revision),
         author_id: None,
         author_name: None,
-        theme_revision_id: Some(theme_revision_id.to_string()),
+        theme_revision_id: theme_revision_id.map(str::to_string),
         root_hash: root_hash.clone(),
         annotation_root_hash: manifest.annotation_root_hash.clone(),
         index_prefix: manifest.index_prefix.clone(),
@@ -1398,7 +1441,7 @@ pub fn pin_document_theme(
     manifest.revision = new_revision;
     manifest.root_hash = root_hash;
     manifest.styles_href = new_styles_href;
-    manifest.theme_revision_id = Some(theme_revision_id.to_string());
+    manifest.theme_revision_id = theme_revision_id.map(str::to_string);
     bundle.write_revision(&record)?;
     bundle.write_manifest(&manifest)?;
     Ok(manifest)
@@ -2240,6 +2283,72 @@ mod tests {
         assert_eq!(rev0.styles_href, "styles.css");
         let report = crate::validate_bundle(&bundle).unwrap();
         assert!(report.valid, "{:?}", report.issues);
+    }
+
+    #[test]
+    fn unpin_drops_the_theme_region_and_keeps_the_document_styles() {
+        let (_temp, catalog, _font_revision_id, theme_id) = install();
+        let bundle_dir = tempfile::tempdir().unwrap();
+        let bundle = complete_bundle(&bundle_dir, "article { color: #123456; }");
+        let pinned = pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        assert_eq!(pinned.revision, 1);
+
+        let cleared = unpin_document_theme(&catalog, &bundle).unwrap();
+        assert_eq!(cleared.revision, 2, "an unpin is a revision of its own");
+        assert!(cleared.theme_revision_id.is_none());
+        assert_ne!(cleared.styles_href, pinned.styles_href);
+
+        // The managed region is gone and nothing else moved: the document is left
+        // with exactly the stylesheet it was imported with.
+        let cleared_css = bundle.read_styles_part(&cleared.styles_href).unwrap();
+        assert_eq!(cleared_css.trim(), "article { color: #123456; }");
+        assert!(!cleared_css.contains("hcd-theme-begin"));
+        assert!(!cleared_css.contains("--hcd-major-latin"));
+        assert!(!bundle.revision(2).unwrap().structural_change);
+
+        // History keeps what each revision pointed at.
+        assert_eq!(
+            bundle.revision(1).unwrap().theme_revision_id.as_deref(),
+            Some(theme_id.as_str())
+        );
+        assert!(bundle.revision(2).unwrap().theme_revision_id.is_none());
+        assert_ne!(
+            bundle.revision(1).unwrap().root_hash,
+            bundle.revision(2).unwrap().root_hash
+        );
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+
+        // Repeating the unpin changes nothing, so no empty revision piles up.
+        let again = unpin_document_theme(&catalog, &bundle).unwrap();
+        assert_eq!(again.revision, 2);
+        assert_eq!(again.styles_href, cleared.styles_href);
+
+        // Pinning after an unpin advances the head again.
+        let repinned = pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        assert_eq!(repinned.revision, 3);
+        assert_eq!(
+            repinned.theme_revision_id.as_deref(),
+            Some(theme_id.as_str())
+        );
+    }
+
+    #[test]
+    fn unpin_never_advances_a_document_that_carries_no_theme() {
+        let (_temp, catalog, _font_revision_id, _theme_id) = install();
+        let bundle_dir = tempfile::tempdir().unwrap();
+        let bundle = complete_bundle(&bundle_dir, "p { color: #111111; }");
+        let before = bundle.manifest().unwrap();
+
+        let manifest = unpin_document_theme(&catalog, &bundle).unwrap();
+        assert_eq!(manifest.revision, before.revision);
+        assert_eq!(manifest.styles_href, "styles.css");
+        assert!(manifest.theme_revision_id.is_none());
+        // The untouched stylesheet still reads as it was written.
+        assert_eq!(
+            bundle.read_styles_part(&manifest.styles_href).unwrap(),
+            "p { color: #111111; }"
+        );
     }
 
     #[test]
