@@ -7500,7 +7500,10 @@ fn rewrite_worksheet(
     let mut column_group_seen = false;
     let mut column_group_open = false;
     let mut last_source_column = 0u32;
-    let mut in_conditional_formula = false;
+    let mut in_grid_formula = false;
+    // The range the filter this worksheet carries covers, which is what the
+    // criteria sitting on its columns count from.
+    let mut filter_range: Option<String> = None;
     let canonical_last_row = canonical_rows.last().copied().unwrap_or(0);
     let canonical_last_column = replacements
         .keys()
@@ -7581,23 +7584,36 @@ fn rewrite_worksheet(
                 )?))?;
             }
             Event::Start(ref start)
-                if local_name(start.name().as_ref()) == "formula"
-                    && (!row_insertions.is_empty() || !column_shifts.is_empty()) =>
+                if matches!(
+                    local_name(start.name().as_ref()),
+                    "formula" | "formula1" | "formula2"
+                ) && (!row_insertions.is_empty() || !column_shifts.is_empty()) =>
             {
-                in_conditional_formula = true;
+                in_grid_formula = true;
                 writer.write_event(event.into_owned())?;
             }
-            Event::Text(ref value) if in_conditional_formula => {
+            Event::Text(ref value) if in_grid_formula => {
                 let expression = value.unescape().map_err(|error| {
                     HcdError::InvalidBundle(format!("XLSX conditional formula: {error}"))
                 })?;
                 let rewritten = rewrite_grid_formula(&expression, row_insertions, column_shifts)?;
-                writer.write_event(Event::Text(BytesText::new(&rewritten)))?;
+                if rewritten == expression {
+                    // Nothing in the formula moved, so nothing about its spelling
+                    // changes either: the bytes the workbook wrote carry along,
+                    // character references included.
+                    let raw = String::from_utf8_lossy(value.as_ref()).into_owned();
+                    writer.write_event(Event::Text(BytesText::from_escaped(raw)))?;
+                } else {
+                    writer.write_event(Event::Text(BytesText::new(&rewritten)))?;
+                }
             }
             Event::End(ref end)
-                if local_name(end.name().as_ref()) == "formula" && in_conditional_formula =>
+                if matches!(
+                    local_name(end.name().as_ref()),
+                    "formula" | "formula1" | "formula2"
+                ) && in_grid_formula =>
             {
-                in_conditional_formula = false;
+                in_grid_formula = false;
                 writer.write_event(event.into_owned())?;
             }
             Event::Start(ref start)
@@ -7930,6 +7946,64 @@ fn rewrite_worksheet(
                     row_insertions,
                     column_shifts,
                 )?))?;
+            }
+            Event::Start(ref start)
+                if (!row_insertions.is_empty() || !column_shifts.is_empty())
+                    && matches!(
+                        local_name(start.name().as_ref()),
+                        "autoFilter"
+                            | "sortState"
+                            | "sortCondition"
+                            | "filterColumn"
+                            | "dataValidation"
+                    ) =>
+            {
+                // A filter's range covers cells and a column's criteria sit on one,
+                // so both move with the grid; the cells a validation rule applies to
+                // are a range of the same kind. What either selects *by* — a value, a
+                // colour, an icon, a written-out list — names no cell and is copied
+                // along untouched.
+                let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+                writer.write_event(Event::Start(rewrite_xlsx_area_attributes(
+                    start,
+                    row_insertions,
+                    column_shifts,
+                    filter_range.as_deref(),
+                    xlsx_area_label(&name),
+                )?))?;
+                if name == "autoFilter" {
+                    filter_range = attribute(start, "ref");
+                }
+            }
+            Event::Empty(ref empty)
+                if (!row_insertions.is_empty() || !column_shifts.is_empty())
+                    && matches!(
+                        local_name(empty.name().as_ref()),
+                        "autoFilter"
+                            | "sortState"
+                            | "sortCondition"
+                            | "filterColumn"
+                            | "dataValidation"
+                    ) =>
+            {
+                let name = String::from_utf8_lossy(empty.name().as_ref()).into_owned();
+                writer.write_event(Event::Empty(rewrite_xlsx_area_attributes(
+                    empty,
+                    row_insertions,
+                    column_shifts,
+                    filter_range.as_deref(),
+                    xlsx_area_label(&name),
+                )?))?;
+            }
+            Event::End(ref end)
+                if local_name(end.name().as_ref()) == "autoFilter"
+                    && (!row_insertions.is_empty() || !column_shifts.is_empty()) =>
+            {
+                // The range a filter covers is read only while the filter is open;
+                // nothing after it counts cells through it.
+                let name = String::from_utf8_lossy(end.name().as_ref()).into_owned();
+                filter_range = None;
+                writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "mergeCells" => {
                 if !merge_written {
@@ -9142,7 +9216,10 @@ fn verify_grid_shift_source(
                 reader.config_mut().check_end_names = true;
                 let mut buffer = Vec::new();
                 let mut in_other_sheet_formula = false;
-                let mut in_conditional_formula = false;
+                let mut in_grid_formula = false;
+                // The range the filter this worksheet carries covers, which is what
+                // the criteria on its columns count from.
+                let mut filter_range: Option<String> = None;
                 loop {
                     let event = reader.read_event_into(&mut buffer).map_err(|error| {
                         PackageError::ReadPartError(format!("{}: {error}", sheet.part))
@@ -9154,20 +9231,14 @@ fn verify_grid_shift_source(
                             if !target && tag == "f" && matches!(event, Event::Start(_)) {
                                 in_other_sheet_formula = true;
                             }
-                            if target && tag == "formula" && matches!(event, Event::Start(_)) {
-                                in_conditional_formula = true;
+                            if target
+                                && matches!(tag, "formula" | "formula1" | "formula2")
+                                && matches!(event, Event::Start(_))
+                            {
+                                in_grid_formula = true;
                             }
                             if target
-                                && matches!(
-                                    tag,
-                                    "dataValidation"
-                                        | "dataValidations"
-                                        | "autoFilter"
-                                        | "tableParts"
-                                        | "hyperlinks"
-                                        | "legacyDrawing"
-                                        | "extLst"
-                                )
+                                && matches!(tag, "tableParts" | "hyperlinks" | "legacyDrawing")
                             {
                                 return Err(PackageError::ReadPartError(format!(
                                     "grid shift cannot update worksheet element {tag}"
@@ -9201,6 +9272,37 @@ fn verify_grid_shift_source(
                                         | "conditionalFormatting"
                                         | "cfRule"
                                         | "formula"
+                                        // A filter's range moves, and so does the column
+                                        // its criteria sit on; what it filters *by* — a
+                                        // value, a colour, an icon, the top ten — names no
+                                        // cell, so those carry along untouched. An extension
+                                        // list is only this far when it holds nothing: the
+                                        // first element inside it is refused below.
+                                        | "autoFilter"
+                                        | "sortState"
+                                        | "sortCondition"
+                                        | "filterColumn"
+                                        | "filters"
+                                        | "filter"
+                                        | "customFilters"
+                                        | "customFilter"
+                                        | "top10"
+                                        | "dynamicFilter"
+                                        | "colorFilter"
+                                        | "iconFilter"
+                                        // The cells a validation rule covers move, and
+                                        // so does an address its formula names on this
+                                        // tab; a rule that picks from a written-out
+                                        // list names no cell at all. Anything else it
+                                        // could hold — a cross-sheet source, an icon
+                                        // set, another tab's range — is refused, the
+                                        // same way a cell formula that reaches across
+                                        // tabs is refused further up.
+                                        | "dataValidations"
+                                        | "dataValidation"
+                                        | "formula1"
+                                        | "formula2"
+                                        | "extLst"
                                         | "drawing"
                                         | "headerFooter"
                                         | "oddHeader"
@@ -9255,6 +9357,39 @@ fn verify_grid_shift_source(
                             if target
                                 && matches!(
                                     tag,
+                                    "autoFilter"
+                                        | "sortState"
+                                        | "sortCondition"
+                                        | "filterColumn"
+                                        | "dataValidation"
+                                )
+                            {
+                                // The very rewrite the export runs, thrown away here: a
+                                // filter range the shift cannot count, criteria sitting
+                                // on a column the shift deletes, or a validated range
+                                // the shift cannot follow, stops the revision before a
+                                // byte of the package is written.
+                                rewrite_xlsx_area_attributes(
+                                    element,
+                                    row_insertions
+                                        .get(&sheet.part)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
+                                    column_shifts
+                                        .get(&sheet.part)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
+                                    filter_range.as_deref(),
+                                    xlsx_area_label(tag),
+                                )
+                                .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                                if tag == "autoFilter" {
+                                    filter_range = attribute(element, "ref");
+                                }
+                            }
+                            if target
+                                && matches!(
+                                    tag,
                                     "sheetView" | "selection" | "conditionalFormatting"
                                 )
                             {
@@ -9284,7 +9419,7 @@ fn verify_grid_shift_source(
                                 "grid shift cannot update a cross-sheet formula".to_string(),
                             ));
                         }
-                        Event::Text(ref text) if in_conditional_formula => {
+                        Event::Text(ref text) if in_grid_formula => {
                             let expression = text.unescape().map_err(|error| {
                                 PackageError::ReadPartError(format!("conditional formula: {error}"))
                             })?;
@@ -9301,13 +9436,21 @@ fn verify_grid_shift_source(
                             )
                             .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
                         }
+                        Event::End(ref element)
+                            if local_name(element.name().as_ref()) == "autoFilter" =>
+                        {
+                            filter_range = None;
+                        }
                         Event::End(ref element) if local_name(element.name().as_ref()) == "f" => {
                             in_other_sheet_formula = false;
                         }
                         Event::End(ref element)
-                            if local_name(element.name().as_ref()) == "formula" =>
+                            if matches!(
+                                local_name(element.name().as_ref()),
+                                "formula" | "formula1" | "formula2"
+                            ) =>
                         {
-                            in_conditional_formula = false;
+                            in_grid_formula = false;
                         }
                         Event::Eof => break,
                         _ => {}
@@ -9436,6 +9579,24 @@ fn parse_xlsx_view_cell(reference: &str) -> Option<(u32, u32, bool, bool)> {
     Some((row, column, column_absolute, row_absolute))
 }
 
+/// One column number after the shift, counting `A` as the first: a column
+/// inserted at or before it moves right, a column deleted after it moves left, and
+/// a column deleted at its own address leaves its successor standing there. `None`
+/// when the run walks off the 16 384 columns a worksheet has.
+fn xlsx_column_after_shift(column: u32, shifts: &[ColumnShift]) -> Option<u32> {
+    let mut column = column;
+    for shift in shifts {
+        match *shift {
+            ColumnShift::Insert(before) if column >= before => column = column.checked_add(1)?,
+            ColumnShift::Delete(at) if column > at => column -= 1,
+            // The selected column was removed. Its successor now occupies the same address.
+            ColumnShift::Delete(_) => {}
+            _ => {}
+        }
+    }
+    (column <= 16_384).then_some(column)
+}
+
 /// One column of a view address after the shift, spelled the way it arrived: a
 /// column that was written absolute stays absolute.
 fn shifted_xlsx_view_column(
@@ -9443,25 +9604,9 @@ fn shifted_xlsx_view_column(
     absolute: bool,
     shifts: &[ColumnShift],
 ) -> Result<String, HcdError> {
-    let mut column = column;
-    for shift in shifts {
-        match *shift {
-            ColumnShift::Insert(before) if column >= before => {
-                column = column
-                    .checked_add(1)
-                    .filter(|column| *column <= 16_384)
-                    .ok_or_else(|| {
-                        HcdError::Unsupported(
-                            "XLSX view column exceeds the worksheet limit".to_string(),
-                        )
-                    })?;
-            }
-            ColumnShift::Delete(at) if column > at => column -= 1,
-            // The selected column was removed. Its successor now occupies the same address.
-            ColumnShift::Delete(_) => {}
-            _ => {}
-        }
-    }
+    let column = xlsx_column_after_shift(column, shifts).ok_or_else(|| {
+        HcdError::Unsupported("XLSX view column exceeds the worksheet limit".to_string())
+    })?;
     Ok(format!(
         "{}{}",
         if absolute { "$" } else { "" },
@@ -9542,6 +9687,94 @@ fn shifted_xlsx_view_reference(
         )));
     }
     Ok(rewritten.join(" "))
+}
+
+/// The areas a worksheet element spells in a range of its own — a filter's `ref`,
+/// a sort range, a validation's `sqref`. Unlike a workbook defined name these never
+/// name a tab: the element belongs to the worksheet its ranges cover, so a spelling
+/// that carries one is refused rather than attributed. Whole-row and whole-column
+/// areas move on their endpoints the way a defined name does, and everything the
+/// shift says nothing about — the separators, the `$` markers — is copied.
+/// `Ok(None)` means no endpoint moved, which is what lets a range the shift never
+/// reaches keep the bytes the workbook wrote.
+fn shifted_xlsx_area_list(
+    value: &str,
+    row_shifts: &[RowShift],
+    column_shifts: &[ColumnShift],
+    label: &str,
+) -> Result<Option<String>, HcdError> {
+    if row_shifts.is_empty() && column_shifts.is_empty() {
+        return Ok(None);
+    }
+    let Some(areas) = parse_defined_name_areas(value) else {
+        return Err(HcdError::Unsupported(format!(
+            "grid shift cannot update the {label} range {value}"
+        )));
+    };
+    let mut rewritten = String::new();
+    let mut cursor = 0usize;
+    let mut changed = false;
+    for area in &areas {
+        if area.sheet.is_some() {
+            return Err(HcdError::Unsupported(format!(
+                "grid shift cannot update the {label} range {value} that names a worksheet"
+            )));
+        }
+        for span in [Some(area.first), area.second].into_iter().flatten() {
+            let text = &value[span.0..span.1];
+            let moved = shift_defined_name_endpoint(text, area.axis, row_shifts, column_shifts)?;
+            rewritten.push_str(&value[cursor..span.0]);
+            rewritten.push_str(&moved);
+            cursor = span.1;
+            changed |= moved != text;
+        }
+    }
+    rewritten.push_str(&value[cursor..]);
+    Ok(changed.then_some(rewritten))
+}
+
+/// The first column a range attribute covers, which is what a filter's `colId`
+/// counts from. `None` for a range that cannot be read, one that names a worksheet,
+/// or a whole-row range with no column to start from.
+fn xlsx_area_first_column(value: &str) -> Option<u32> {
+    let areas = parse_defined_name_areas(value)?;
+    let area = areas.first()?;
+    if area.sheet.is_some() {
+        return None;
+    }
+    let text = &value[area.first.0..area.first.1];
+    match area.axis {
+        DefinedNameAxis::Cells => Some(parse_xlsx_view_cell(text)?.1),
+        DefinedNameAxis::Columns => xlsx_column_index(text.trim_start_matches('$')),
+        DefinedNameAxis::Rows => None,
+    }
+}
+
+/// Which column the column a filter is set on lands in. `colId` counts from the
+/// filter's first column, so the absolute column is what moves and the range start
+/// is what it is measured against afterwards. A deleted column that *is* the
+/// filtered one is refused: the criteria describe cells that no longer exist, and
+/// letting them fall onto the successor guesses which column was meant.
+fn shifted_filter_column(column: u32, shifts: &[ColumnShift]) -> Result<u32, HcdError> {
+    let mut column = column;
+    for shift in shifts {
+        match *shift {
+            ColumnShift::Insert(before) if column >= before => column += 1,
+            ColumnShift::Delete(at) if column > at => column -= 1,
+            ColumnShift::Delete(at) if column == at => {
+                return Err(HcdError::Unsupported(
+                    "grid shift deletes the column a worksheet filter is set on".to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if column > 16_384 {
+        return Err(HcdError::Unsupported(
+            "grid shift moves a worksheet filter past the last column".to_string(),
+        ));
+    }
+    Ok(column)
 }
 
 /// Half of an address a workbook defined name spells out. A cell moves on both
@@ -10270,6 +10503,102 @@ fn write_shifted_xlsx_pane(
         writer.write_event(Event::Start(rewritten))?;
     }
     Ok(())
+}
+
+/// Where a filter's column criteria land. `<filterColumn colId="n">` counts from
+/// the first column of the filter's own range, so both the criteria column and that
+/// start are shifted and the difference is what gets written. `Ok(None)` leaves the
+/// number the workbook wrote — a shift that only moved rows never moves a column.
+fn shifted_filter_column_id(
+    range: Option<&str>,
+    value: &str,
+    column_shifts: &[ColumnShift],
+) -> Result<Option<String>, HcdError> {
+    if column_shifts.is_empty() {
+        return Ok(None);
+    }
+    let refused = |reason: &str| {
+        HcdError::Unsupported(format!(
+            "grid shift cannot update a worksheet filter {reason}"
+        ))
+    };
+    let Some(first) = range.and_then(xlsx_area_first_column) else {
+        return Err(refused("whose range it cannot read a column from"));
+    };
+    let offset: u32 = value.trim().parse().map_err(|_| {
+        HcdError::Unsupported(
+            "grid shift cannot update a worksheet filter whose column is not a whole column \
+             count"
+                .to_string(),
+        )
+    })?;
+    let column = first
+        .checked_add(offset)
+        .ok_or_else(|| refused("past the last column of the worksheet"))?;
+    let shifted_first = xlsx_column_after_shift(first, column_shifts)
+        .ok_or_else(|| refused("off the worksheet"))?;
+    let shifted = shifted_filter_column(column, column_shifts)?;
+    let column_id = shifted
+        .checked_sub(shifted_first)
+        .ok_or_else(|| refused("moves a column's criteria ahead of the filter's own range"))?;
+    Ok(Some(column_id.to_string()))
+}
+
+/// What a worksheet element that carries a range of its own is called in the error
+/// a shift raises when it cannot count one of its endpoints.
+fn xlsx_area_label(tag: &str) -> &'static str {
+    match tag {
+        "filterColumn" => "worksheet filter column",
+        "autoFilter" => "worksheet filter",
+        "dataValidation" => "worksheet data validation",
+        _ => "worksheet sort range",
+    }
+}
+
+/// Write a worksheet element that carries a range of its own, shifting what the grid
+/// moved and copying everything else the workbook spelled — the namespace
+/// declaration a filter carries its producer's own options under included. A range
+/// no endpoint of which moved is written back as the bytes that arrived, so a filter
+/// the shift never reaches is not re-spelled.
+fn rewrite_xlsx_area_attributes(
+    original: &BytesStart<'_>,
+    row_shifts: &[RowShift],
+    column_shifts: &[ColumnShift],
+    filter_range: Option<&str>,
+    label: &str,
+) -> Result<BytesStart<'static>, HcdError> {
+    let name = String::from_utf8_lossy(original.name().as_ref()).into_owned();
+    let mut rewritten = BytesStart::new(name);
+    for attribute in original.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX {label} attribute: {error}"))
+        })?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        let field = local_name(attribute.key.as_ref());
+        if matches!(field, "ref" | "sqref" | "colId") {
+            let value = attribute.unescape_value().map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid XLSX {label} {field}: {error}"))
+            })?;
+            let shifted = if field == "colId" {
+                shifted_filter_column_id(filter_range, &value, column_shifts)?
+            } else {
+                shifted_xlsx_area_list(&value, row_shifts, column_shifts, label)?
+            };
+            match shifted {
+                Some(shifted) => rewritten.push_attribute((key.as_str(), shifted.as_str())),
+                None => {
+                    rewritten.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()))
+                }
+            }
+        } else {
+            // Untouched attributes carry along as the bytes that arrived: a value
+            // the workbook escaped is re-escaped if it is handed over as text, and
+            // the prompt a validation rule shows the user would gain a second
+            // `&amp;` on every export.
+            rewritten.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+        }
+    }
+    Ok(rewritten)
 }
 
 fn rewrite_xlsx_view_attributes(
@@ -14190,6 +14519,391 @@ mod tests {
                 .contains("XLSX grid shift cannot update the defined name Total"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_filter_range_and_the_column_it_filters_on_move_with_the_grid() {
+        let shift = named_range_shift();
+        let part = "xl/worksheets/sheet2.xml".to_string();
+        let rows = shift.rows.get(&part).unwrap();
+        let columns = shift.columns.get(&part).unwrap();
+        let area = |value: &str| {
+            shifted_xlsx_area_list(value, rows, columns, "worksheet filter")
+                .map(|moved| moved.unwrap_or_else(|| value.to_string()))
+        };
+        // An inserted row or column is counted as coming before the row or column
+        // named, so the corner a filter was opened on keeps its address and the
+        // other corner steps one. Separators and `$` markers are the workbook's own.
+        assert_eq!(area("A1:C12").unwrap(), "A1:D13");
+        assert_eq!(area("A2:C12").unwrap(), "A2:D13");
+        assert_eq!(area("B2:B100").unwrap(), "C2:C101");
+        assert_eq!(area("A2 A5:A6").unwrap(), "A2 A6:A7");
+        assert_eq!(area("$A$1:$D$10").unwrap(), "$A$1:$E$11");
+        // A whole column only moves sideways, a whole row only up or down.
+        assert_eq!(area("A:C").unwrap(), "A:D");
+        assert_eq!(area("3:9").unwrap(), "4:10");
+        // A range no endpoint of which the shift reaches is not re-spelled at all.
+        assert_eq!(
+            shifted_xlsx_area_list("A1:A2", rows, columns, "worksheet filter").unwrap(),
+            None
+        );
+        assert_eq!(
+            shifted_xlsx_area_list("A1:C12", &[], &[], "worksheet filter").unwrap(),
+            None
+        );
+        // A worksheet element never names a tab: a range that does is read as a
+        // workbook address, not as this sheet's own, and a formula is not a range.
+        // An absolute marker is the workbook's own spelling; it is kept while the
+        // coordinate under it still moves.
+        assert_eq!(area("B2:$D$12").unwrap(), "C2:$E$13");
+        for refused in ["Data!$A$1:$C$12", "SUM(A1:A5)", "42"] {
+            assert!(
+                shifted_xlsx_area_list(refused, rows, columns, "worksheet filter").is_err(),
+                "{refused}"
+            );
+        }
+        assert!(
+            shifted_xlsx_area_list("$XFD$1:$XFD$2", rows, columns, "worksheet filter")
+                .unwrap_err()
+                .to_string()
+                .contains("XLSX view column exceeds the worksheet limit")
+        );
+        // A criteria column counts from the filter's own first column, so an
+        // insertion between the two widens the offset by one and an insertion
+        // outside both leaves it exactly as the workbook wrote it.
+        let column_id = |range: Option<&str>, value: &str| {
+            shifted_filter_column_id(range, value, columns)
+                .map(|moved| moved.unwrap_or_else(|| value.to_string()))
+        };
+        assert_eq!(column_id(Some("A1:C12"), "0").unwrap(), "0");
+        assert_eq!(column_id(Some("A1:C12"), "1").unwrap(), "2");
+        assert_eq!(column_id(Some("A1:C12"), "2").unwrap(), "3");
+        assert_eq!(column_id(Some("B1:D12"), "1").unwrap(), "1");
+        // Rows move nothing sideways: a row-only shift leaves the column count alone.
+        assert_eq!(
+            shifted_filter_column_id(Some("A1:C12"), "1", &[]).unwrap(),
+            None
+        );
+        // What the counter cannot read still stops the export.
+        assert!(shifted_filter_column_id(None, "1", columns).is_err());
+        assert!(shifted_filter_column_id(Some("A1:C12"), "first", columns).is_err());
+        assert!(shifted_filter_column_id(Some("1:12"), "1", columns).is_err());
+        let deleted: Vec<ColumnShift> = vec![ColumnShift::Delete(2)];
+        assert!(shifted_filter_column_id(Some("A1:C12"), "1", &deleted)
+            .unwrap_err()
+            .to_string()
+            .contains("deletes the column a worksheet filter is set on"));
+        // Deleting a column the filter starts on narrows every criteria offset by
+        // one, because the successor now holds that address.
+        assert_eq!(
+            column_id_shifted(Some("A1:C12"), "2", &[ColumnShift::Delete(1)]).unwrap(),
+            "1"
+        );
+    }
+
+    /// Which criteria offset a column shift leaves for a filter range.
+    fn column_id_shifted(
+        range: Option<&str>,
+        value: &str,
+        columns: &[ColumnShift],
+    ) -> Result<String, hcd_core::HcdError> {
+        shifted_filter_column_id(range, value, columns)
+            .map(|moved| moved.unwrap_or_else(|| value.to_string()))
+    }
+
+    #[test]
+    fn a_grid_shift_moves_a_filter_and_the_ranges_it_validates() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("filtered.xlsx");
+        let bundle_path = temp.path().join("filtered.hcd");
+        create_filter_validation_fixture(&source, WORKBOOK_FILTER_BLOCK);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("filtered-grid-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle
+            .read_index_page(&imported, 0)
+            .unwrap()
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_name == "Data")
+            })
+            .and_then(|chunk| chunk.grid.as_ref())
+            .map(|grid| grid.sheet_id.clone())
+            .unwrap();
+        // A revision that moves no grid leaves the filter's part alone entirely.
+        let head = temp.path().join("filtered-head.xlsx");
+        export_xlsx(&bundle, &source, &head, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&head, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml")
+        );
+        // Each revision is exported on its own so a filter reads what the whole
+        // history of shifts adds up to, not one shift at a time.
+        let history = [
+            (
+                "row",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 3,
+                },
+                [
+                    "<autoFilter ref=\"A1:C13\"",
+                    "colId=\"1\"",
+                    "<sortState ref=\"A2:C13\"",
+                    "ref=\"C2:C13\"",
+                    "sqref=\"B2:B101\"",
+                    "sqref=\"A2 A6:A7\"",
+                    "<formula1>$C$6</formula1>",
+                    "<formula1>&quot;Engineering,Marketing,R&amp;D&quot;</formula1>",
+                ],
+            ),
+            (
+                "column",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
+                PatchOperation::XlsxColumnInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_column: 2,
+                },
+                [
+                    "<autoFilter ref=\"A1:D13\"",
+                    "colId=\"2\"",
+                    "<sortState ref=\"A2:D13\"",
+                    "ref=\"D2:D13\"",
+                    "sqref=\"C2:C101\"",
+                    "sqref=\"A2 A6:A7\"",
+                    "<formula1>$D$6</formula1>",
+                    "<formula1>&quot;Engineering,Marketing,R&amp;D&quot;</formula1>",
+                ],
+            ),
+            (
+                "undo",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 3,
+                },
+                // Deleting the inserted row takes the rows back to where the
+                // workbook put them, and leaves the one inserted column moved.
+                [
+                    "<autoFilter ref=\"A1:D12\"",
+                    "colId=\"2\"",
+                    "<sortState ref=\"A2:D12\"",
+                    "ref=\"D2:D12\"",
+                    "sqref=\"C2:C100\"",
+                    "sqref=\"A2 A5:A6\"",
+                    "<formula1>$D$5</formula1>",
+                    "<formula1>&quot;Engineering,Marketing,R&amp;D&quot;</formula1>",
+                ],
+            ),
+        ];
+        for (index, (kind, schema, operation, expectations)) in history.into_iter().enumerate() {
+            let revision = index as u64;
+            assert_eq!(
+                hcd_core::apply_patch(
+                    &bundle,
+                    &PatchBatch {
+                        schema_version: schema.to_string(),
+                        document_id: "filtered-grid-doc".to_string(),
+                        patch_id: format!("filtered-shift-{kind}"),
+                        base_revision: revision,
+                        actor: BTreeMap::new(),
+                        operations: vec![operation],
+                        metadata: BTreeMap::new(),
+                    },
+                    revision,
+                )
+                .unwrap()
+                .revision,
+                revision + 1
+            );
+            let exported = temp.path().join(format!("filtered-{kind}.xlsx"));
+            export_xlsx(
+                &bundle,
+                &source,
+                &exported,
+                &ExportOptions {
+                    revision: Some(revision + 1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let sheet = read_zip_entry(&exported, "xl/worksheets/sheet2.xml");
+            for expected in expectations {
+                assert!(sheet.contains(expected), "{kind}: {expected}\n{sheet}");
+            }
+            // The producer's own namespace and options ride on the filter element
+            // itself, and an empty extension list is still an extension list.
+            assert!(
+                sheet.contains(
+                    "xmlns:etc=\"http://www.wps.cn/officeDocument/2017/etCustomData\" etc:filterBottomFollowUsedRange=\"0\">"
+                ),
+                "{kind}:\n{sheet}"
+            );
+            assert!(sheet.contains("<extLst/></autoFilter>"), "{kind}:\n{sheet}");
+            // What a rule is picky about is not an address: the list it spells out
+            // and the text it shows the user carry along untouched, entities
+            // included.
+            assert!(
+                sheet.contains("promptTitle=\"Dept &amp; Cat\" prompt=\"Pick a &quot;list&quot;\""),
+                "{kind}:\n{sheet}"
+            );
+            assert!(
+                sheet.contains("<dataValidations count=\"2\">"),
+                "{kind}:\n{sheet}"
+            );
+            // Only the tab that carries them moves: the ones that do not keep every
+            // byte the workbook wrote.
+            for kept in [
+                "xl/worksheets/sheet1.xml",
+                "xl/worksheets/sheet3.xml",
+                "[Content_Types].xml",
+                "xl/_rels/workbook.xml.rels",
+            ] {
+                assert_eq!(
+                    read_zip_entry(&exported, kept),
+                    read_zip_entry(&source, kept),
+                    "{kind}: {kept}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_filter_the_shift_cannot_count_still_stops_the_export() {
+        let temp = tempfile::tempdir().unwrap();
+        // One worksheet block a workbook might carry, the shift to ask of it, and
+        // the message the shift must answer with.
+        struct BlockedFilter {
+            kind: &'static str,
+            schema: &'static str,
+            shift: fn(&str) -> PatchOperation,
+            block: &'static str,
+            refusal: &'static str,
+        }
+        let row = |sheet_id: &str| PatchOperation::XlsxRowInsert {
+            sheet_id: sheet_id.to_string(),
+            before_row: 3,
+        };
+        let column = |sheet_id: &str| PatchOperation::XlsxColumnDelete {
+            sheet_id: sheet_id.to_string(),
+            column: 2,
+        };
+        let cases = [
+            BlockedFilter {
+                kind: "extension",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                shift: row,
+                // A filter extension holds a second copy of the criteria, spelled
+                // the way only that producer reads it. Nothing here counts it.
+                block: r#"<autoFilter ref="A1:C12"><extLst><ext uri="{C468456B-3D87-47f4-A099-9BFE88C816B5}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:filterColumn colId="1"/></ext></extLst></autoFilter>"#,
+                refusal: "grid shift cannot update worksheet element ext",
+            },
+            BlockedFilter {
+                kind: "qualified",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                shift: row,
+                // A worksheet element does not name a tab; a range that does is not
+                // this sheet's own range and cannot be moved as one.
+                block: r#"<autoFilter ref="Data!$A$1:$C$12"/>"#,
+                refusal: "grid shift cannot update the worksheet filter range",
+            },
+            BlockedFilter {
+                kind: "criteria",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_15,
+                shift: column,
+                // The criteria on the deleted column describe cells that no longer
+                // exist; letting them fall onto the successor guesses.
+                block: r#"<autoFilter ref="A1:C12"><filterColumn colId="1"><filters><filter val="Sales"/></filters></filterColumn></autoFilter>"#,
+                refusal: "grid shift deletes the column a worksheet filter is set on",
+            },
+            BlockedFilter {
+                kind: "validation",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                shift: row,
+                // A validated range an expression parser reads as something other
+                // than an address is not a range this shift can move.
+                block: r#"<dataValidations count="1"><dataValidation type="custom" sqref="SUM(A1:A5)"><formula1>3</formula1></dataValidation></dataValidations>"#,
+                refusal: "grid shift cannot update the worksheet data validation range",
+            },
+        ];
+        for case in cases {
+            let BlockedFilter {
+                kind,
+                schema,
+                shift,
+                block,
+                refusal,
+            } = case;
+            let source = temp.path().join(format!("{kind}.xlsx"));
+            let bundle_path = temp.path().join(format!("{kind}.hcd"));
+            create_filter_validation_fixture(&source, block);
+            let imported = import_xlsx(
+                &source,
+                &bundle_path,
+                &ImportOptions::new("filtered-blocked-doc"),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let bundle = Bundle::open(&bundle_path).unwrap();
+            let sheet_id = bundle
+                .read_index_page(&imported, 0)
+                .unwrap()
+                .chunks
+                .iter()
+                .find(|chunk| {
+                    chunk
+                        .grid
+                        .as_ref()
+                        .is_some_and(|grid| grid.sheet_name == "Data")
+                })
+                .and_then(|chunk| chunk.grid.as_ref())
+                .map(|grid| grid.sheet_id.clone())
+                .unwrap();
+            // Nothing moved is nothing guessed: the workbook exports whole until
+            // the shift asks the counter to move a range it cannot read.
+            let head = temp.path().join(format!("{kind}-head.xlsx"));
+            export_xlsx(&bundle, &source, &head, &ExportOptions::default()).unwrap();
+            assert_eq!(
+                read_zip_entry(&head, "xl/worksheets/sheet2.xml"),
+                read_zip_entry(&source, "xl/worksheets/sheet2.xml"),
+                "{kind}"
+            );
+            // The revision itself is a row the grid can insert; the workbook only
+            // stops when the shift asks what the part it carries means.
+            hcd_core::apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: schema.to_string(),
+                    document_id: "filtered-blocked-doc".to_string(),
+                    patch_id: format!("filtered-blocked-{kind}"),
+                    base_revision: 0,
+                    actor: BTreeMap::new(),
+                    operations: vec![shift(&sheet_id)],
+                    metadata: BTreeMap::new(),
+                },
+                0,
+            )
+            .unwrap();
+            let blocked = temp.path().join(format!("{kind}-blocked.xlsx"));
+            let error = export_xlsx(&bundle, &source, &blocked, &ExportOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refusal), "{kind}: {error}");
+            assert!(
+                !blocked.exists(),
+                "{kind}: a refused shift still wrote a file"
+            );
+        }
     }
 
     #[test]
@@ -18651,6 +19365,69 @@ mod tests {
                 r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
             ),
             ("xl/workbook.xml", workbook.as_str()),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Left</t></is></c><c r="B1"><v>4</v></c></row><row r="2"><c r="A2"><v>7</v></c><c r="B2"><v>9</v></c></row></sheetData></worksheet>"#,
+            ),
+            ("xl/worksheets/sheet2.xml", data.as_str()),
+            (
+                "xl/worksheets/sheet3.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Tail</t></is></c></row></sheetData></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// The block a filtered, validated tab carries between its rows and its page
+    /// setup, written the way the workbook that produced `budget-tracker.xlsx`
+    /// writes it: a producer namespace and its option on the `autoFilter` element
+    /// itself over an empty `extLst`, one criteria column, a sort range, and two
+    /// validation rules — one picking from a list spelled out in the formula, one
+    /// comparing against a cell of its own tab.
+    const WORKBOOK_FILTER_BLOCK: &str = r#"<autoFilter ref="A1:C12" xmlns:etc="http://www.wps.cn/officeDocument/2017/etCustomData" etc:filterBottomFollowUsedRange="0"><filterColumn colId="1"><filters><filter val="Sales"/></filters></filterColumn><extLst/></autoFilter><sortState ref="A2:C12"><sortCondition ref="C2:C12"/></sortState><dataValidations count="2"><dataValidation type="list" allowBlank="1" promptTitle="Dept &amp; Cat" prompt="Pick a &quot;list&quot;" sqref="B2:B100"><formula1>&quot;Engineering,Marketing,R&amp;D&quot;</formula1></dataValidation><dataValidation type="whole" operator="greaterThan" sqref="A2 A5:A6"><formula1>$C$5</formula1></dataValidation></dataValidations>"#;
+
+    /// Three worksheets, the middle one holding twelve rows across three columns
+    /// and whatever the caller puts after them. The first and the third carry no
+    /// filter at all, so a shift that moves the middle one can be shown to leave
+    /// them exactly as they were.
+    fn create_filter_validation_fixture(path: &Path, after_rows: &str) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let rows = (1..=12)
+            .map(|row| {
+                format!(
+                    "<row r=\"{row}\"><c r=\"A{row}\"><v>{row}</v></c><c r=\"C{row}\"><v>{}</v></c></row>",
+                    row * 2
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("");
+        let data = format!(
+            r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C12"/><sheetData>{rows}</sheetData>{after_rows}</worksheet>"#
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Data" sheetId="2" r:id="rId2"/><sheet name="Sales Notes" sheetId="3" r:id="rId3"/></sheets></workbook>"#,
+            ),
             (
                 "xl/_rels/workbook.xml.rels",
                 r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#,
