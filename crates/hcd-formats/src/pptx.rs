@@ -2,13 +2,14 @@ use crate::common::{
     append_control_children, attribute, base_manifest, checked_attribute,
     checked_export_state_with_restores, collect_dirty_nodes, current_control_part,
     drop_control_elements, emit_failed, emit_started, escape_attribute, escape_text, finish_import,
-    highest_control_id, local_name, package_error, source_identity, write_fidelity_report,
-    AddedElement, ExportOptions, ImportOptions, XmlBudget, MAX_CONTROL_BYTES,
+    highest_control_id, local_name, package_error, reorder_control_children, source_identity,
+    write_fidelity_report, AddedElement, ExportOptions, ImportOptions, XmlBudget,
+    MAX_CONTROL_BYTES,
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    PptxRunFormat, PptxShapeGeometry, SlideAddition, SlideRemoval, SourceAnchor,
+    PptxRunFormat, PptxShapeGeometry, SlideAddition, SlideRemoval, SlideReorder, SourceAnchor,
     DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
@@ -3103,14 +3104,16 @@ pub(crate) fn export_pptx(
     // does every control entry that addressed it.
     let mut added_slides: Vec<SlideAddition> = Vec::new();
     let mut removed_slides: Vec<SlideRemoval> = Vec::new();
+    let mut reordered_slides: Vec<SlideReorder> = Vec::new();
     for &revision in &revisions {
         let record = bundle.revision(revision)?;
         added_slides.extend(record.slide_additions);
         removed_slides.extend(record.slide_removals);
+        reordered_slides.extend(record.slide_reorders);
     }
-    // Undoing either revision is not one of these records: a restore is a
+    // Undoing any of these is not one of these records: a restore is a
     // structural revision, so the walk above never reaches it and the page is
-    // simply back in the deck or gone from it.
+    // simply back in the deck, gone from it, or in the place it moved from.
     let removed_parts: BTreeSet<String> = removed_slides
         .iter()
         .map(|removal| removal.slide_part.clone())
@@ -3469,6 +3472,105 @@ pub(crate) fn export_pptx(
             replacement_paths.insert(part.to_string(), path);
         }
     }
+    // A page HCD moved left no trace in the package: its part, its relationship
+    // and its entry all keep the names they had, and only the order the entries
+    // stand in changed. HCD holds that order on the index, so the export reads it
+    // back out of this revision's index and writes the presentation's own list to
+    // match. The list is read after the additions and deletions above, which is
+    // what lets a page HCD created move through a deck it now belongs to.
+    let mut moved_pages: Vec<(String, usize)> = Vec::new();
+    if !reordered_slides.is_empty() {
+        let deck_order = pptx_deck_page_order(bundle, &manifest)?;
+        let presentation =
+            current_control_part(&mut archive, &replacement_paths, "ppt/presentation.xml")?;
+        let list = read_pptx_slide_list(&presentation)?;
+        if list.sections {
+            return Err(HcdError::Unsupported(
+                "PPTX slide move cannot reorder a presentation that groups its slides in sections; a section lists its own pages, so remove the sections first or export without --source".to_string(),
+            ));
+        }
+        // A custom show is left alone on purpose. A show names pages by their list
+        // id, and a move keeps every id the deck holds while changing only the
+        // order they are listed in — which is why a deletion refuses one and a move
+        // does not.
+        let relationships = current_control_part(
+            &mut archive,
+            &replacement_paths,
+            "ppt/_rels/presentation.xml.rels",
+        )?;
+        let mut addressed: BTreeMap<String, String> = BTreeMap::new();
+        for relationship in read_pptx_relationships(
+            &relationships,
+            "ppt/presentation.xml",
+            "ppt/_rels/presentation.xml.rels",
+        )? {
+            let Some(target) = relationship
+                .target
+                .filter(|target| target.starts_with("ppt/slides/"))
+            else {
+                continue;
+            };
+            if addressed.insert(target, relationship.id).is_some() {
+                return Err(HcdError::InvalidBundle(
+                    "the presentation addresses one slide page twice".to_string(),
+                ));
+            }
+        }
+        // The order is written as relationship ids, because that is how the list
+        // names its pages. Every page the index holds has to be one the
+        // presentation both addresses and shows, and the two lists have to be the
+        // same length: a page one of them is missing would leave the deck with a
+        // hole the export could not account for.
+        let mut wanted: Vec<String> = Vec::new();
+        for part in &deck_order {
+            let id = addressed.get(part).cloned().ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "PPTX slide {part} is not addressed by the presentation's relationships"
+                ))
+            })?;
+            if !list.entries.iter().any(|(_, entry)| *entry == id) {
+                return Err(HcdError::InvalidBundle(format!(
+                    "PPTX slide {part} is not in the presentation's slide list"
+                )));
+            }
+            wanted.push(id);
+        }
+        if wanted.len() != list.entries.len() {
+            return Err(HcdError::InvalidBundle(format!(
+                "the HCD index holds {} slides, the presentation's slide list shows {}",
+                wanted.len(),
+                list.entries.len()
+            )));
+        }
+        let (rewritten, moved) = reorder_control_children(
+            &presentation,
+            "sldIdLst",
+            "sldId",
+            "r:id",
+            &wanted,
+            "ppt/presentation.xml",
+        )?;
+        // Two moves that cancel each other leave the list as the source wrote it,
+        // so the export writes nothing at all for them and the package stays
+        // byte-identical.
+        if moved != 0 {
+            let path = scratch
+                .path()
+                .join(safe_temp_name("reordered-presentation.xml"));
+            std::fs::write(&path, rewritten)?;
+            replacement_paths.insert("ppt/presentation.xml".to_string(), path);
+            for reorder in &reordered_slides {
+                if let Some(place) = deck_order
+                    .iter()
+                    .position(|part| *part == reorder.slide_part)
+                {
+                    moved_pages.push((reorder.slide_part.clone(), place + 1));
+                }
+            }
+            moved_pages.sort_by(|left, right| left.0.cmp(&right.0));
+            moved_pages.dedup();
+        }
+    }
     let removals: HashSet<String> = removal_paths.iter().cloned().collect();
     let changed = StreamingOxmlRewriter::rewrite_with_changes(
         source,
@@ -3496,12 +3598,25 @@ pub(crate) fn export_pptx(
             source_part: Some(part.clone()),
         });
     }
+    for (part, place) in &moved_pages {
+        warnings.push(FidelityWarning {
+            code: "PPTX_SLIDE_REORDER".to_string(),
+            message: format!(
+                "slide {part} was moved in HCD; the export rewrote the presentation's slide list to the order the HCD index holds, which puts this page at position {place}"
+            ),
+            node_id: None,
+            source_part: Some(part.clone()),
+        });
+    }
     let mut flattened = Vec::new();
     if !addition_paths.is_empty() {
         flattened.push("a slide created in HCD is written as a slide part the source package never had, on the layout the last existing slide draws from".to_string());
     }
     if !removal_paths.is_empty() {
         flattened.push("a slide deleted in HCD leaves the package with its page entry, its relationship and its content-type override; media, layouts and charts that only that page used stay in the package unreferenced".to_string());
+    }
+    if !moved_pages.is_empty() {
+        flattened.push("a slide moved in HCD changes only the order the presentation's slide list holds its entries in; a section that grouped the old order has to be removed before a move exports, and a custom show keeps naming the pages it named".to_string());
     }
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
@@ -4722,6 +4837,44 @@ fn read_pptx_slide_list(xml: &[u8]) -> Result<PptxSlideList, HcdError> {
     Ok(list)
 }
 
+/// The pages of the deck in the order the HCD index holds them, named by the
+/// slide part each one carries — the order a source-backed export writes the
+/// presentation's own list in after a page moved.
+///
+/// A page whose table the importer split repeats its section in every chunk it
+/// spans, and the deck shows that page once, so chunks that name the same part
+/// one after the other are one page. A part that comes back after a different page
+/// has been named is refused: the export would have no honest way to say which of
+/// the two the deck shows first.
+fn pptx_deck_page_order(bundle: &Bundle, manifest: &HcdManifest) -> Result<Vec<String>, HcdError> {
+    let mut parts: Vec<String> = Vec::new();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            if descriptor.region != "slide" {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            let section_end = html.find('>').ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX slide section is not closed".to_string())
+            })?;
+            let part =
+                html_attribute(&html[..=section_end], "data-hcd-source-part").ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX slide page names no source part".to_string())
+                })?;
+            if parts.last().map(String::as_str) == Some(part) {
+                continue;
+            }
+            if parts.iter().any(|seen| seen == part) {
+                return Err(HcdError::Unsupported(format!(
+                    "the HCD index lists slide {part} in two places; a source-backed export cannot say which page the deck shows first, so export without --source"
+                )));
+            }
+            parts.push(part.to_string());
+        }
+    }
+    Ok(parts)
+}
+
 /// The part a `.rels` entry describes. Relationship targets are written relative
 /// to that part rather than to the relationship file, so a deletion has to know
 /// whose folder `../slides/slide2.xml` climbs out of. The package's own list
@@ -4816,6 +4969,7 @@ mod tests {
         PatchOperation, PptxRunFormat, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
         HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
         HCD_PATCH_SCHEMA_VERSION_30, HCD_PATCH_SCHEMA_VERSION_41, HCD_PATCH_SCHEMA_VERSION_42,
+        HCD_PATCH_SCHEMA_VERSION_43,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -5485,6 +5639,406 @@ mod tests {
             slide_page_chunk(&reopened_bundle, &reopened, "ppt/slides/slide1.xml"),
             slide_page_chunk(&bundle, &head, "ppt/slides/slide1.xml")
         );
+    }
+
+    /// The patch that asks one page to move one place through the deck.
+    fn move_slide_patch(
+        document_id: &str,
+        chunk_id: &str,
+        direction: &str,
+        base: u64,
+    ) -> PatchBatch {
+        PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_43.to_string(),
+            document_id: document_id.to_string(),
+            patch_id: format!("move-{direction}-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideReorder {
+                chunk_id: chunk_id.to_string(),
+                direction: direction.to_string(),
+            }],
+        }
+    }
+
+    /// The pages the index shows, in the order the deck shows them, named by the
+    /// slide part each page carries.
+    fn index_slide_order(bundle: &Bundle, manifest: &HcdManifest) -> Vec<String> {
+        let mut parts: Vec<String> = Vec::new();
+        for page_number in 0..manifest.index_page_count {
+            for descriptor in bundle
+                .read_index_page(manifest, page_number)
+                .unwrap()
+                .chunks
+            {
+                if descriptor.region != "slide" {
+                    continue;
+                }
+                let html = bundle.read_chunk(&descriptor).unwrap();
+                let end = html.find('>').unwrap();
+                let part = html_attribute(&html[..=end], "data-hcd-source-part")
+                    .unwrap()
+                    .to_string();
+                // Chunks of one split page name the same part one after another.
+                if parts.last().map(String::as_str) != Some(part.as_str()) {
+                    parts.push(part);
+                }
+            }
+        }
+        parts
+    }
+
+    /// The relationship ids a presentation's own page list holds, in the order it
+    /// holds them — the order the deck shows its pages in.
+    fn slide_list_order(presentation: &str) -> Vec<String> {
+        presentation
+            .split("<p:sldId ")
+            .skip(1)
+            .map(|entry| {
+                entry
+                    .split("r:id=\"")
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("a slide entry with no relationship: {entry}"))
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The pages a written deck shows, in the order its own list shows them, with
+    /// each entry resolved through the package's relationships to the part it
+    /// names. A history that deleted a page and created another one can hand the
+    /// created page the relationship id the deleted page let go, so this reads the
+    /// package rather than assuming which id the export minted.
+    fn deck_shows(pptx: &Path) -> Vec<String> {
+        let presentation = read_zip_entry(pptx, "ppt/presentation.xml");
+        let relationships = read_zip_entry(pptx, "ppt/_rels/presentation.xml.rels");
+        presentation
+            .split("<p:sldId ")
+            .skip(1)
+            .map(|entry| {
+                let id = entry
+                    .split("r:id=\"")
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("a slide entry with no relationship: {entry}"))
+                    .split('"')
+                    .next()
+                    .unwrap();
+                let target = relationships
+                    .split(&format!("Id=\"{id}\""))
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("the list names {id}, no relationship carries it"))
+                    .split("Target=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap();
+                format!(
+                    "ppt/slides/{}",
+                    target.strip_prefix("slides/").unwrap_or(target)
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn moving_a_page_writes_the_slide_list_in_the_decks_new_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("moved.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("move-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        // The fixture lists its pages as slide2 then slide1 while its
+        // relationships name slide1 first, so the order the export writes has to
+        // come off the list and not off the workbook of relationships.
+        assert_eq!(
+            index_slide_order(&bundle, &manifest),
+            ["ppt/slides/slide2.xml", "ppt/slides/slide1.xml"]
+        );
+        assert_eq!(
+            slide_list_order(&read_zip_entry(&source, "ppt/presentation.xml")),
+            ["rId2", "rId1"]
+        );
+
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide1.xml");
+        let result = apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &chunk_id, "up", 0),
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_MOVED"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count);
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml"]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("changes only the order")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "PPTX_SLIDE_REORDER"
+                    && warning
+                        .source_part
+                        .as_deref()
+                        .is_some_and(|part| part == "ppt/slides/slide1.xml")
+                    && warning.message.contains("position 1")),
+            "{:?}",
+            report.warnings
+        );
+
+        // The two entries traded places and every other byte of the part stayed
+        // where it was. The ids come along with the entries they were written
+        // with: a slide's id is not its position in the deck.
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml").replace(
+                "<p:sldId id=\"256\" r:id=\"rId2\"/><p:sldId id=\"257\" r:id=\"rId1\"/>",
+                "<p:sldId id=\"257\" r:id=\"rId1\"/><p:sldId id=\"256\" r:id=\"rId2\"/>",
+            )
+        );
+        // Nothing else in the package moved: not a page, not a relationship, not a
+        // content type.
+        for part in [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+            "ppt/slides/_rels/slide2.xml.rels",
+            "ppt/_rels/presentation.xml.rels",
+            "[Content_Types].xml",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/media/image1.png",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+
+        // Re-importing the export shows the deck in the order the editor moved it
+        // to, so the move is a fact about the package and not only about the index.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("move-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        assert_eq!(
+            index_slide_order(&reopened_bundle, &reopened),
+            ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml"]
+        );
+    }
+
+    #[test]
+    fn a_page_moved_and_moved_back_writes_the_package_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("cancelled.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("move-back"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let first = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide1.xml");
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &first, "up", 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        // The page that moved up is the deck's first now, so the way back is down.
+        let again = slide_page_chunk(&bundle, &head, "ppt/slides/slide1.xml");
+        assert_eq!(again, first);
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &again, "down", 1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &bundle.manifest().unwrap()),
+            ["ppt/slides/slide2.xml", "ppt/slides/slide1.xml"]
+        );
+
+        // Two moves that cancel are no order for the export to write, so the deck
+        // leaves as the source had it and the report says nothing about a move.
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert!(report
+            .warnings
+            .iter()
+            .all(|warning| warning.code != "PPTX_SLIDE_REORDER"));
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml")
+        );
+    }
+
+    #[test]
+    fn a_page_hcd_created_moves_through_the_deck_it_joined() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("moved-added.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("move-added"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let added_part = "ppt/slides/slide3.xml";
+        let added = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        apply_patch(&bundle, &added, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            ["ppt/slides/slide2.xml", "ppt/slides/slide1.xml", added_part]
+        );
+
+        // The new page joins at the end of both the index and the presentation's
+        // list; one move up takes it past the page in front of it.
+        let chunk_id = slide_page_chunk(&bundle, &head, added_part);
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &chunk_id, "up", 1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &bundle.manifest().unwrap()),
+            ["ppt/slides/slide2.xml", added_part, "ppt/slides/slide1.xml"]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        let presentation = read_zip_entry(&exported, "ppt/presentation.xml");
+        assert_eq!(slide_list_order(&presentation), ["rId2", "rId3", "rId1"]);
+        assert!(
+            presentation.contains("<p:sldId id=\"258\" r:id=\"rId3\"/>"),
+            "{presentation}"
+        );
+        // The page the history created is still a page the package carries.
+        assert!(has_zip_entry(&exported, added_part));
+        assert!(has_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_REORDER"
+                && warning
+                    .source_part
+                    .as_deref()
+                    .is_some_and(|part| part == added_part)));
+    }
+
+    #[test]
+    fn a_deck_that_grew_moved_and_lost_a_page_exports_all_three() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("all-three.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("all-three"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let added_part = "ppt/slides/slide3.xml";
+        let added = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        apply_patch(&bundle, &added, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        let created = slide_page_chunk(&bundle, &head, added_part);
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &created, "up", 1),
+            1,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        // Dropping the page that shows first leaves the created page in front.
+        let second = slide_page_chunk(&bundle, &head, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &second, 2),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &bundle.manifest().unwrap()),
+            [added_part, "ppt/slides/slide1.xml"]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        // The list the export writes is the deck the history ended on: the page
+        // that was deleted is gone from it, and the page that was created stands
+        // where the move left it, in front of the page the deck kept.
+        assert_eq!(deck_shows(&exported), [added_part, "ppt/slides/slide1.xml"]);
+        assert!(has_zip_entry(&exported, added_part));
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide2.xml"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_DELETE"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_REORDER"));
     }
 
     #[test]
