@@ -32,6 +32,12 @@ export function DocumentsView() {
   const [filter, setFilter] = React.useState<Filter>("all");
   const [choice, setChoice] = React.useState<Record<string, string>>({});
   const [busy, setBusy] = React.useState<string | null>(null);
+  const [bulkTarget, setBulkTarget] = React.useState("");
+  const [bulkRunning, setBulkRunning] = React.useState(false);
+  const [bulkResult, setBulkResult] = React.useState<{
+    themeRevisionId: string;
+    statuses: Record<string, string>;
+  } | null>(null);
 
   const retiredSet = React.useMemo(() => new Set(retired), [retired]);
 
@@ -62,6 +68,74 @@ export function DocumentsView() {
   }, [documents, query, filter]);
 
   const pinnedCount = (documents ?? []).filter((doc) => doc.themeRevisionId).length;
+
+  // Onboarding an existing pile of documents to a brand is the same pin repeated, so
+  // the batch follows the search and filter the operator is looking at. Only a
+  // complete bundle can take a pin, so anything still importing is reported instead
+  // of being pushed against a refusal the server is right to give.
+  const bulkTargets = React.useMemo(
+    () =>
+      rows.filter((document) => !document.themeRevisionId && document.state === "COMPLETE"),
+    [rows],
+  );
+  const bulkSkipped = React.useMemo(
+    () =>
+      rows.filter((document) => !document.themeRevisionId && document.state !== "COMPLETE"),
+    [rows],
+  );
+
+  const runBulk = () => {
+    const theme = pinnable.find((item) => item.themeRevisionId === bulkTarget);
+    if (!theme || bulkTargets.length === 0) return;
+    confirm({
+      title: "批量钉上主题",
+      confirmLabel: `把 ${bulkTargets.length} 个文档钉上 ${theme.name}`,
+      description: (
+        <p>
+          每个文档写一次自己的内容修订，正文和节点不变；已经钉着主题的文档不在名单里。
+          {bulkSkipped.length
+            ? `另有 ${bulkSkipped.length} 个文档还没导入完成，这一轮跳过。`
+            : ""}
+        </p>
+      ),
+      onConfirm: async () => {
+        setBulkRunning(true);
+        const statuses: Record<string, string> = {};
+        for (const document of bulkTargets) {
+          statuses[document.documentId] = "排队中";
+        }
+        setBulkResult({ themeRevisionId: theme.themeRevisionId, statuses: { ...statuses } });
+        let ok = 0;
+        for (const document of bulkTargets) {
+          try {
+            const result = await api.pinDocumentTheme(document.documentId, theme.themeRevisionId);
+            ok += 1;
+            statuses[document.documentId] = `已钉上 r${result.revision}`;
+          } catch (cause) {
+            statuses[document.documentId] =
+              cause instanceof Error ? cause.message : "失败";
+          }
+          setBulkResult({
+            themeRevisionId: theme.themeRevisionId,
+            statuses: { ...statuses },
+          });
+        }
+        setBulkRunning(false);
+        toast.push(
+          ok === bulkTargets.length
+            ? `${ok} 个文档已钉上 ${theme.name}`
+            : `${ok} / ${bulkTargets.length} 个文档钉成功，失败的点名在结果列里`,
+          ok === bulkTargets.length ? "ok" : "warn",
+        );
+        setBulkTarget("");
+        try {
+          await refresh();
+        } catch {
+          toast.push("批量钉版已完成，但重新扫描失败：点「重新扫描」再看一次。", "warn");
+        }
+      },
+    });
+  };
 
   const commitTheme = (
     document: DocumentSummary,
@@ -141,6 +215,35 @@ export function DocumentsView() {
           <option value="pinned">已钉主题</option>
           <option value="unpinned">未钉主题</option>
         </Select>
+        <Select
+          aria-label="批量钉上的主题"
+          value={bulkTarget}
+          disabled={bulkRunning || pinnable.length === 0}
+          onChange={(event) => setBulkTarget(event.target.value)}
+          className="h-7 w-44 text-xs"
+        >
+          <option value="" disabled>
+            {pinnable.length ? "批量钉上的主题" : "没有可钉的主题"}
+          </option>
+          {pinnable.map((theme) => (
+            <option key={theme.themeRevisionId} value={theme.themeRevisionId}>
+              {theme.name}
+            </option>
+          ))}
+        </Select>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={bulkRunning || bulkTarget === "" || bulkTargets.length === 0}
+          title={
+            bulkSkipped.length
+              ? `${bulkSkipped.length} 个文档还没导入完成，这一轮跳过`
+              : "把当前列表里没有钉主题的文档逐个钉上"
+          }
+          onClick={runBulk}
+        >
+          {bulkRunning ? "批量钉版中…" : `钉上 ${bulkTargets.length} 个未钉文档`}
+        </Button>
         <span className="tabular ml-auto text-xs text-muted-foreground">
           {loaded
             ? documents === null
@@ -194,6 +297,7 @@ export function DocumentsView() {
                 <TableHead className="text-right">head 修订</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>钉住的主题</TableHead>
+                {bulkResult ? <TableHead>批量结果</TableHead> : null}
                 <TableHead className="text-right">钉版操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -218,7 +322,16 @@ export function DocumentsView() {
                       r{document.revision}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={document.state === "active" ? "success" : "muted"}>
+                      {/* The bundle manifest answers COMPLETE / IMPORTING, not a
+                          normalized word, so the badge reads the state as stored. */}
+                      <Badge
+                        variant={document.state === "COMPLETE" ? "success" : "muted"}
+                        title={
+                          document.state === "COMPLETE"
+                            ? "导入完成，可以钉版"
+                            : "还没导入完成，钉版会被服务端拒绝"
+                        }
+                      >
                         {document.state}
                       </Badge>
                     </TableCell>
@@ -235,6 +348,11 @@ export function DocumentsView() {
                         <span className="text-xs text-muted-foreground">未钉主题</span>
                       )}
                     </TableCell>
+                    {bulkResult ? (
+                      <TableCell className="whitespace-normal text-xs">
+                        {bulkResult.statuses[document.documentId] ?? "—"}
+                      </TableCell>
+                    ) : null}
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
                         <Select
@@ -327,6 +445,11 @@ curl -X PUT ".../theme" -H "Authorization: Bearer <管理令牌>" \\
             因此推进 head 修订号（补丁记录形如 <code className="font-mono">{"theme-{rev}"}</code> /{" "}
             <code className="font-mono">{"theme-clear-{rev}"}</code>）；正文、节点 id 与内容哈希不变，
             历史修订仍指向当时钉的主题。已退役的主题不能再钉上，但已钉住它的文档仍可正常解析。
+          </p>
+          <p>
+            「批量钉上」只碰当前搜索和筛选里<span className="text-foreground">还没钉主题</span>的文档，
+            一个一个写；已经钉着主题的不会被覆盖，那要在行上单独换。还在导入的文档会被跳过，
+            因为服务端本来就拒绝给未完成的 bundle 钉版。
           </p>
         </CardContent>
       </Card>
