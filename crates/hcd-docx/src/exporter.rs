@@ -1014,7 +1014,9 @@ mod tests {
                         east_asia: None,
                         bidi: None,
                     },
-                    precondition: hcd_core::NodePrecondition { node_hash },
+                    precondition: hcd_core::NodePrecondition {
+                        node_hash: node_hash.clone(),
+                    },
                 }],
             },
             0,
@@ -1035,6 +1037,34 @@ mod tests {
         assert_eq!(font.latin.as_deref(), Some("Demo Serif"));
         assert_eq!(font.east_asia, None);
         assert_eq!(font.bidi, None);
+
+        // Clearing the pin in the next revision leaves the collector with no face
+        // for the node, which is what lets the source run keep its own font.
+        hcd_core::apply_patch(
+            &bundle,
+            &hcd_core::PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "test-document".to_string(),
+                patch_id: "font-clear-1".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![hcd_core::PatchOperation::TextFontClear {
+                    node_id: node_id.to_string(),
+                    precondition: hcd_core::NodePrecondition { node_hash },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let cleared = bundle.manifest().unwrap();
+        let collected =
+            collect_text_by_part(&bundle, &cleared, &dirty_parts, &dirty_nodes).unwrap();
+        assert!(
+            collected["word/document.xml"][&1].font.is_none(),
+            "{:?}",
+            collected["word/document.xml"][&1]
+        );
     }
 
     fn test_anchor(part: &str, ordinal: u64) -> SourceAnchor {

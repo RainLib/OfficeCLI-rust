@@ -46,9 +46,12 @@ struct StyleChange {
     node_hash: String,
 }
 
+/// What one `text.font` or `text.font.clear` operation asks for on a node.
+/// `font: None` is the clear: drop the pin the patch wrote, which a pin can never
+/// do by leaving slots out, because a pin requires at least one face.
 #[derive(Clone)]
 struct FontChange {
-    font: crate::FontPatch,
+    font: Option<crate::FontPatch>,
     node_hash: String,
 }
 
@@ -820,7 +823,10 @@ pub fn apply_patch(
                     chunk_changed = true;
                 }
                 if let Some(change) = font_change {
-                    apply_node_font(&mut html, &entry.node_id, &change.font)?;
+                    match change.font {
+                        Some(ref font) => apply_node_font(&mut html, &entry.node_id, font)?,
+                        None => clear_node_font(&mut html, &entry.node_id)?,
+                    }
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -1652,7 +1658,11 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             })
-            .chain(fonts.keys().map(|node_id| FidelityWarning {
+            // A clear leaves nothing behind for a source-backed export to refuse,
+            // so only the pins are reported.
+            .chain(fonts.iter().filter_map(|(node_id, change)| {
+                change.font.is_some().then_some(node_id)
+            }).map(|node_id| FidelityWarning {
                 code: "HCD_FONT_PATCH_SEMANTIC_EXPORT".to_string(),
                 message: "text.font is canonical in HCD HTML and applied by the pure-Rust semantic export and preview; source-backed Office/PDF export rejects revisions carrying it instead of silently dropping the face".to_string(),
                 node_id: Some(node_id.clone()),
@@ -2340,6 +2350,18 @@ fn validate_patch_identity(
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_font_patch(font)?;
+            }
+            PatchOperation::TextFontClear {
+                node_id,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_37 {
+                    return Err(HcdError::InvalidPatch(
+                        "text.font.clear requires schemaVersion hcd-patch/37".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
             }
             PatchOperation::PdfTextInsert {
                 page,
@@ -6726,26 +6748,27 @@ fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, H
 fn collect_fonts(patch: &PatchBatch) -> Result<BTreeMap<String, FontChange>, HcdError> {
     let mut fonts = BTreeMap::new();
     for operation in &patch.operations {
-        if let PatchOperation::TextFont {
-            node_id,
-            font,
-            precondition,
-        } = operation
+        // One node gets one font outcome per patch: pinning and clearing the same
+        // node in a single revision would leave the last write to decide.
+        let (node_id, font, node_hash) = match operation {
+            PatchOperation::TextFont {
+                node_id,
+                font,
+                precondition,
+            } => (node_id, Some(font.clone()), precondition.node_hash.clone()),
+            PatchOperation::TextFontClear {
+                node_id,
+                precondition,
+            } => (node_id, None, precondition.node_hash.clone()),
+            _ => continue,
+        };
+        if fonts
+            .insert(node_id.clone(), FontChange { font, node_hash })
+            .is_some()
         {
-            if fonts
-                .insert(
-                    node_id.clone(),
-                    FontChange {
-                        font: font.clone(),
-                        node_hash: precondition.node_hash.clone(),
-                    },
-                )
-                .is_some()
-            {
-                return Err(HcdError::InvalidPatch(format!(
-                    "patch contains more than one text.font for {node_id}"
-                )));
-            }
+            return Err(HcdError::InvalidPatch(format!(
+                "patch contains more than one text.font operation for {node_id}"
+            )));
         }
     }
     Ok(fonts)
@@ -6886,6 +6909,92 @@ fn apply_node_font(
     // is absent, so re-applying the same font is idempotent.
     for (name, value) in presentation.attributes {
         set_element_attribute(html, node_id, name, &value)?;
+    }
+    Ok(())
+}
+
+/// Removes the pin a `text.font` operation wrote: the `font-family` declaration it
+/// put in the style, the `data-hcd-font*` slots, and the `data-hcd-font-patched`
+/// marker, so preview, read-back, and every export stop seeing a pin at all.
+/// Declarations the node owned before the pin stay, except a `font-family` the
+/// imported HTML carried and this pin replaced: the patch keeps no journal of the
+/// value it overwrote, so clearing drops it too and the node falls back to the
+/// style sheet or theme, which is what a clear is for. A node without the marker is
+/// refused, which is what keeps a face that came from the source document (it
+/// carries `data-hcd-font*` without the marker) out of reach.
+fn clear_node_font(html: &mut String, node_id: &str) -> Result<(), HcdError> {
+    let (start, end) = element_start_tag_range(html, node_id)?;
+    let tag = &html[start..=end];
+    if !tag.contains(" data-hcd-font-patched=\"true\"") {
+        return Err(HcdError::InvalidPatch(format!(
+            "node {node_id} carries no text.font pin to clear"
+        )));
+    }
+    let mut replacement = tag.to_string();
+    drop_style_property(&mut replacement, "font-family")?;
+    for name in [
+        "data-hcd-font",
+        "data-hcd-font-latin",
+        "data-hcd-font-east-asia",
+        "data-hcd-font-bidi",
+        "data-hcd-font-patched",
+    ] {
+        remove_attribute(&mut replacement, name);
+    }
+    html.replace_range(start..=end, &replacement);
+    Ok(())
+}
+
+/// Drops one attribute from a start tag, leaving the tag itself alone.
+fn remove_attribute(tag: &mut String, name: &str) {
+    let marker = format!(" {name}=\"");
+    let Some(start) = tag.find(&marker) else {
+        return;
+    };
+    let value_start = start + marker.len();
+    let Some(offset) = tag[value_start..].find('"') else {
+        return;
+    };
+    tag.replace_range(start..value_start + offset + 1, "");
+}
+
+/// Drops one declaration from the tag's `style` attribute, taking the attribute
+/// with it once nothing is left. The rest is rebuilt the way
+/// `update_start_tag_style` writes it — sorted, lower-cased properties — so
+/// clearing a font cannot restyle or reorder the declarations that stay.
+fn drop_style_property(tag: &mut String, property: &str) -> Result<(), HcdError> {
+    let marker = " style=\"";
+    let Some(start) = tag.find(marker) else {
+        return Ok(());
+    };
+    let value_start = start + marker.len();
+    let Some(offset) = tag[value_start..].find('"') else {
+        return Err(HcdError::InvalidBundle(
+            "style attribute is not closed".to_string(),
+        ));
+    };
+    let value_end = value_start + offset;
+    let mut declarations = BTreeMap::new();
+    for declaration in tag[value_start..value_end].split(';') {
+        let Some((name, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if name == property {
+            continue;
+        }
+        declarations.insert(name, value.trim().to_string());
+    }
+    let style_value = declarations
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    crate::html::validate_inline_style(&style_value)?;
+    if style_value.is_empty() {
+        tag.replace_range(start..value_end + 1, "");
+    } else {
+        tag.replace_range(value_start..value_end, &style_value);
     }
     Ok(())
 }
@@ -7406,6 +7515,7 @@ fn apply_annotations(
             }
             PatchOperation::TextSplice { .. }
             | PatchOperation::TextFont { .. }
+            | PatchOperation::TextFontClear { .. }
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::PptxTextInsert { .. }
             | PatchOperation::PptxShapeGeometry { .. }
@@ -7958,6 +8068,200 @@ mod tests {
             bidi: None,
         })
         .is_err());
+    }
+
+    /// Pin in one revision, clear in the next: the node ends up with the exact tag
+    /// the import wrote, so preview, read-back, and every export stop seeing a pin.
+    #[test]
+    fn text_font_clear_gives_the_node_back_the_tag_the_import_wrote() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node_id = "n_00000000000000000000000000000000";
+        let chunk_at = |bundle: &crate::Bundle| -> String {
+            let manifest = bundle.manifest().unwrap();
+            let descriptor = bundle.read_index_page(&manifest, 0).unwrap().chunks[0].clone();
+            bundle.read_chunk(&descriptor).unwrap()
+        };
+        let imported = chunk_at(&bundle);
+        let node = get_text_node(&bundle, node_id).unwrap();
+        let pin = crate::PatchOperation::TextFont {
+            node_id: node_id.to_string(),
+            font: crate::FontPatch {
+                latin: Some("Demo Serif".to_string()),
+                east_asia: None,
+                bidi: None,
+            },
+            precondition: crate::NodePrecondition {
+                node_hash: node.node.node_hash.clone(),
+            },
+        };
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-pin".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![pin],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        let pinned = chunk_at(&bundle);
+        assert!(
+            pinned != imported && pinned.contains("data-hcd-font-patched"),
+            "{pinned}"
+        );
+
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-clear".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFontClear {
+                    node_id: node_id.to_string(),
+                    // The pin did not change the text, so the same hash still guards it.
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash,
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert_eq!(chunk_at(&bundle), imported);
+    }
+
+    /// A clear is not a no-op: a node that carries no pin is refused, so a revision
+    /// cannot be spent erasing a face the document never pinned.
+    #[test]
+    fn text_font_clear_refuses_a_node_that_carries_no_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        let rejected = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-clear-none".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFontClear {
+                    node_id: node.node.node_id.clone(),
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        );
+        assert!(
+            matches!(&rejected, Err(HcdError::InvalidPatch(message)) if message.contains("no text.font pin")),
+            "{rejected:?}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+    }
+
+    /// A face that arrived with the source carries `data-hcd-font*` without the
+    /// patch marker, and is left alone.
+    #[test]
+    fn clearing_a_font_leaves_a_source_face_alone() {
+        let node_id = "n_00000000000000000000000000000000";
+        let html = format!(
+            "<p><span data-hcd-id=\"{node_id}\" data-hcd-font=\"Source Serif\">Text</span></p>"
+        );
+        let mut target = html.clone();
+        assert!(matches!(
+            clear_node_font(&mut target, node_id),
+            Err(HcdError::InvalidPatch(_))
+        ));
+        assert_eq!(target, html);
+    }
+
+    /// Only the pin goes: the declarations the node already had stay, in the form
+    /// the pin wrote them, and a `font-family` the import brought is not restored.
+    #[test]
+    fn clearing_a_font_keeps_the_rest_of_the_style() {
+        let node_id = "n_00000000000000000000000000000000";
+        let font = crate::FontPatch {
+            latin: Some("Demo Serif".to_string()),
+            east_asia: Some("Demo Sans".to_string()),
+            bidi: None,
+        };
+        let mut html = format!(
+            "<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"h\" style=\"color:#ff0000;font-family:'Imported Serif'\">Text</span></p>"
+        );
+        apply_node_font(&mut html, node_id, &font).unwrap();
+        assert!(
+            html.contains("style=\"color:#ff0000;font-family:'Demo Serif'\""),
+            "{html}"
+        );
+        clear_node_font(&mut html, node_id).unwrap();
+        assert!(html.contains("style=\"color:#ff0000\""), "{html}");
+        assert!(!html.contains("font-family"), "{html}");
+        assert!(!html.contains("data-hcd-font"), "{html}");
+        assert!(html.contains("data-hcd-node-hash=\"h\""), "{html}");
+        assert!(
+            !html.contains("Imported Serif"),
+            "the overwritten family is not restored, and is not left behind either"
+        );
+    }
+
+    /// Pinning and clearing the same node in one batch would let the last write
+    /// decide, so the batch is refused before anything is rewritten.
+    #[test]
+    fn one_patch_may_not_both_pin_and_clear_a_node() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node_id = "n_00000000000000000000000000000000";
+        let node = get_text_node(&bundle, node_id).unwrap();
+        let precondition = crate::NodePrecondition {
+            node_hash: node.node.node_hash.clone(),
+        };
+        let rejected = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-both".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![
+                    crate::PatchOperation::TextFont {
+                        node_id: node_id.to_string(),
+                        font: crate::FontPatch {
+                            latin: Some("Demo Serif".to_string()),
+                            east_asia: None,
+                            bidi: None,
+                        },
+                        precondition: precondition.clone(),
+                    },
+                    crate::PatchOperation::TextFontClear {
+                        node_id: node_id.to_string(),
+                        precondition,
+                    },
+                ],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        );
+        assert!(
+            matches!(&rejected, Err(HcdError::InvalidPatch(message)) if message.contains("more than one text.font operation")),
+            "{rejected:?}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
     }
 
     #[test]

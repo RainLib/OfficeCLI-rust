@@ -11990,6 +11990,7 @@ mod tests {
             .unwrap()
             .entries
             .remove(0);
+        let node_id = cell.node_id.clone();
         let patch = PatchBatch {
             schema_version: HCD_PATCH_SCHEMA_VERSION_37.to_string(),
             document_id: manifest.document_id.clone(),
@@ -11998,14 +11999,14 @@ mod tests {
             actor: BTreeMap::new(),
             metadata: BTreeMap::new(),
             operations: vec![PatchOperation::TextFont {
-                node_id: cell.node_id,
+                node_id: node_id.clone(),
                 font: FontPatch {
                     latin: Some("Brand Serif".to_string()),
                     east_asia: None,
                     bidi: None,
                 },
                 precondition: NodePrecondition {
-                    node_hash: cell.node_hash,
+                    node_hash: cell.node_hash.clone(),
                 },
             }],
         };
@@ -12022,6 +12023,31 @@ mod tests {
             "{error}"
         );
         assert!(!exported.exists());
+
+        // Clearing the pin drops the patch marker, so no face is collected for the
+        // cell and the refusal lifts: the workbook exports with the font it already had.
+        let cleared = hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "clear-cell-font".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextFontClear {
+                    node_id,
+                    precondition: NodePrecondition {
+                        node_hash: cell.node_hash,
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(cleared.revision, 2);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(exported.exists());
     }
 
     fn create_shared_string_fixture(path: &Path) {

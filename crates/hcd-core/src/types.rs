@@ -293,6 +293,18 @@ pub enum PatchOperation {
         font: FontPatch,
         precondition: NodePrecondition,
     },
+    /// Remove a `text.font` pin from one canonical text node. Omitting a slot in
+    /// `text.font` cannot do this, because that operation always pins at least one
+    /// face; this one drops the whole pin, so the node falls back to the face it
+    /// had before: its source run font on a `--source` export, the theme slots
+    /// otherwise. Only a node carrying `data-hcd-font-patched` can be cleared, so
+    /// a face that came from the source document is never rewritten. The node's
+    /// text is unchanged, so the precondition stays the unchanged text hash.
+    #[serde(rename = "text.font.clear", rename_all = "camelCase")]
+    TextFontClear {
+        node_id: String,
+        precondition: NodePrecondition,
+    },
     /// Add a positioned editable text box to a raster-backed PDF page.
     /// The stable node ID is assigned from the patch ID and operation index.
     #[serde(rename = "pdf.text.insert", rename_all = "camelCase")]
@@ -504,6 +516,7 @@ impl PatchOperation {
         match self {
             Self::TextSplice { node_id, .. }
             | Self::TextFont { node_id, .. }
+            | Self::TextFontClear { node_id, .. }
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
@@ -541,6 +554,7 @@ impl PatchOperation {
             self,
             Self::TextSplice { .. }
                 | Self::TextFont { .. }
+                | Self::TextFontClear { .. }
                 | Self::PdfTextInsert { .. }
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
