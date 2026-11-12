@@ -1,7 +1,9 @@
 use crate::common::{
-    base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
-    emit_started, escape_attribute, escape_text, finish_import, source_identity,
-    write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
+    append_control_children, attribute, base_manifest, checked_export_state_with_restores,
+    collect_dirty_nodes, current_control_part, emit_failed, emit_started, escape_attribute,
+    escape_text, finish_import, highest_control_id, local_name, package_error, source_identity,
+    write_fidelity_report, AddedElement, ExportOptions, ImportOptions, XmlBudget,
+    MAX_CONTROL_BYTES,
 };
 use hcd_core::{
     drop_formula_sheet_references, hash_bytes, node_bloom_might_contain,
@@ -22,7 +24,6 @@ use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use time::{Date, Duration, Month};
 
-const MAX_CONTROL_BYTES: u64 = 16 * 1024 * 1024;
 /// Worksheet a source-backed export writes for a tab HCD created. It matches
 /// the blank worksheet `officecli` adds to a workbook, and its `<sheetData/>`
 /// is the anchor `rewrite_worksheet` opens when a cell lands on the new tab.
@@ -5622,236 +5623,6 @@ pub(crate) fn export_xlsx(
     Ok(report)
 }
 
-/// One empty child element to append inside a control part's container.
-struct AddedElement {
-    name: &'static str,
-    attributes: Vec<(String, String)>,
-}
-
-/// The bytes a control part will carry in the export: the file the export has
-/// already rewritten for it, or the source entry when nothing else touched it.
-/// A worksheet addition and a rename both edit `xl/workbook.xml`, so the second
-/// rewrite has to start from the first one's result.
-fn current_control_part(
-    archive: &mut StreamingOxmlArchive,
-    replacement_paths: &HashMap<String, PathBuf>,
-    name: &str,
-) -> Result<Vec<u8>, HcdError> {
-    match replacement_paths.get(name) {
-        Some(path) => Ok(std::fs::read(path)?),
-        None => archive
-            .read_control_part(name, MAX_CONTROL_BYTES)
-            .map_err(package_error),
-    }
-}
-
-/// Highest number an identity attribute carries in a control part, so a new
-/// entry never reuses one the workbook already knows. A value such as `rId12`
-/// counts by its trailing digits; a value without digits is ignored.
-fn highest_control_id(source: &[u8], element: &str, wanted: &str) -> Result<u64, HcdError> {
-    let mut reader = Reader::from_reader(source);
-    let mut buffer = Vec::new();
-    let mut highest = 0u64;
-    loop {
-        let event = reader
-            .read_event_into(&mut buffer)
-            .map_err(|error| HcdError::InvalidBundle(format!("XLSX control part XML: {error}")))?;
-        match event {
-            Event::Start(ref start) | Event::Empty(ref start)
-                if local_name(start.name().as_ref()) == element =>
-            {
-                if let Some(value) = attribute(start, wanted) {
-                    let digits =
-                        value.trim_start_matches(|character: char| !character.is_ascii_digit());
-                    if let Ok(number) = digits.parse::<u64>() {
-                        highest = highest.max(number);
-                    }
-                }
-            }
-            Event::Eof => {
-                break;
-            }
-            _ => {}
-        }
-        buffer.clear();
-    }
-    Ok(highest)
-}
-
-/// Appends empty child elements just before the end tag of `parent`, keeping
-/// every other byte of the control part exactly as it was read.
-///
-/// An appended child is written the way the elements it joins are written. A
-/// workbook may bind spreadsheetml to a prefix (`<x:sheets><x:sheet …/>`)
-/// instead of to the default namespace, and an unprefixed `<sheet>` inside that
-/// list is not a worksheet at all: Excel hides the tab it cannot read.
-fn append_control_children(
-    source: &[u8],
-    parent: &str,
-    children: &[AddedElement],
-    part: &str,
-) -> Result<Vec<u8>, HcdError> {
-    let mut reader = Reader::from_reader(source);
-    reader.config_mut().check_end_names = true;
-    let mut writer = Writer::new(Vec::new());
-    let mut buffer = Vec::new();
-    let mut appended = false;
-    let mut parent_scope: Option<ControlScope> = None;
-    let mut sibling_scope: Option<ControlScope> = None;
-    let mut root_declarations: Option<Vec<(String, String)>> = None;
-    loop {
-        let event = reader
-            .read_event_into(&mut buffer)
-            .map_err(|error| HcdError::InvalidBundle(format!("{part} XML: {error}")))?;
-        // The first element of the part is its root, and what the root declares
-        // is already in scope for everything written below it.
-        if root_declarations.is_none() {
-            if let Event::Start(ref start) | Event::Empty(ref start) = event {
-                root_declarations = Some(element_scope(start).1);
-            }
-        }
-        match event {
-            Event::End(ref end) if !appended && local_name(end.name().as_ref()) == parent => {
-                appended = true;
-                let scope = child_scope(
-                    &parent_scope,
-                    &sibling_scope,
-                    root_declarations.as_deref().unwrap_or_default(),
-                );
-                write_control_children(&mut writer, children, &scope)?;
-                writer.write_event(event.into_owned())?;
-            }
-            Event::Start(ref start)
-                if !appended
-                    && parent_scope.is_none()
-                    && local_name(start.name().as_ref()) == parent =>
-            {
-                parent_scope = Some(element_scope(start));
-                writer.write_event(event.into_owned())?;
-            }
-            Event::Empty(ref element)
-                if !appended
-                    && parent_scope.is_none()
-                    && local_name(element.name().as_ref()) == parent =>
-            {
-                // A list that closes itself still has to gain its children, so
-                // it is opened, filled, and closed again in place. Its own
-                // declarations already cover what is written inside it.
-                appended = true;
-                let prefix = element_scope(element).0;
-                writer.write_event(Event::Start(element.clone()))?;
-                write_control_children(&mut writer, children, &(prefix, Vec::new()))?;
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-                writer.write_event(Event::End(BytesEnd::new(name)))?;
-            }
-            Event::Start(ref start)
-                if !appended && parent_scope.is_some() && sibling_scope.is_none() =>
-            {
-                sibling_scope = Some(element_scope(start));
-                writer.write_event(event.into_owned())?;
-            }
-            Event::Empty(ref element)
-                if !appended && parent_scope.is_some() && sibling_scope.is_none() =>
-            {
-                sibling_scope = Some(element_scope(element));
-                writer.write_event(event.into_owned())?;
-            }
-            Event::Eof => {
-                break;
-            }
-            other => writer.write_event(other.into_owned())?,
-        }
-        buffer.clear();
-    }
-    if !appended {
-        return Err(HcdError::InvalidBundle(format!(
-            "{part} is missing its {parent} list"
-        )));
-    }
-    Ok(writer.into_inner())
-}
-
-/// The prefix an element is written with and the namespace declarations it
-/// carries, which is everything a child appended inside it needs to resolve.
-type ControlScope = (Option<String>, Vec<(String, String)>);
-
-fn element_scope(element: &BytesStart<'_>) -> ControlScope {
-    let prefix = name_prefix(element.name().as_ref()).map(str::to_string);
-    let declarations = element
-        .attributes()
-        .with_checks(false)
-        .flatten()
-        .filter(|attribute| {
-            let key = attribute.key.as_ref();
-            key == b"xmlns" || key.starts_with(b"xmlns:")
-        })
-        .filter_map(|attribute| {
-            let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
-            attribute
-                .unescape_value()
-                .ok()
-                .map(|value| (key, value.into_owned()))
-        })
-        .collect();
-    (prefix, declarations)
-}
-
-fn name_prefix(name: &[u8]) -> Option<&str> {
-    let (prefix, _) = std::str::from_utf8(name).ok()?.split_once(':')?;
-    (!prefix.is_empty()).then_some(prefix)
-}
-
-/// How an appended child has to be written: like the first element already in
-/// the list, keeping only the declarations the list and the document root do not
-/// already make for it.
-fn child_scope(
-    parent: &Option<ControlScope>,
-    sibling: &Option<ControlScope>,
-    root: &[(String, String)],
-) -> ControlScope {
-    match sibling {
-        Some((prefix, declarations)) => (
-            prefix.clone(),
-            declarations
-                .iter()
-                .filter(|(key, _)| {
-                    !root.iter().any(|(name, _)| name == key)
-                        && !parent.as_ref().is_some_and(|(_, declared)| {
-                            declared.iter().any(|(name, _)| name == key)
-                        })
-                })
-                .cloned()
-                .collect(),
-        ),
-        None => (
-            parent.as_ref().and_then(|(prefix, _)| prefix.clone()),
-            Vec::new(),
-        ),
-    }
-}
-
-fn write_control_children(
-    writer: &mut Writer<Vec<u8>>,
-    children: &[AddedElement],
-    scope: &ControlScope,
-) -> Result<(), HcdError> {
-    for child in children {
-        let name = match scope.0.as_deref() {
-            Some(prefix) => format!("{prefix}:{}", child.name),
-            None => child.name.to_string(),
-        };
-        let mut element = BytesStart::new(name);
-        for (key, value) in &scope.1 {
-            element.push_attribute((key.as_str(), value.as_str()));
-        }
-        for (key, value) in &child.attributes {
-            element.push_attribute((key.as_str(), value.as_str()));
-        }
-        writer.write_event(Event::Empty(element))?;
-    }
-    Ok(())
-}
-
 /// The name each HCD-created worksheet tab carries now, read back from the
 /// window it was given. A rename after the addition lands on those descriptors,
 /// so the export writes the live name and not the one the patch asked for.
@@ -9957,29 +9728,6 @@ fn resolve_part(source_part: &str, target: &str) -> Result<String, HcdError> {
     Ok(output.to_string_lossy().replace('\\', "/"))
 }
 
-fn attribute(element: &BytesStart<'_>, wanted: &str) -> Option<String> {
-    element
-        .attributes()
-        .with_checks(false)
-        .flatten()
-        .find(|attribute| local_name(attribute.key.as_ref()) == wanted)
-        .and_then(|attribute| {
-            attribute
-                .unescape_value()
-                .ok()
-                .map(|value| value.into_owned())
-        })
-}
-
-fn local_name(name: &[u8]) -> &str {
-    let local = name
-        .iter()
-        .rposition(|byte| *byte == b':')
-        .map(|index| &name[index + 1..])
-        .unwrap_or(name);
-    std::str::from_utf8(local).unwrap_or("")
-}
-
 fn safe_temp_name(part: &str) -> String {
     part.chars()
         .map(|character| {
@@ -9990,13 +9738,6 @@ fn safe_temp_name(part: &str) -> String {
             }
         })
         .collect()
-}
-
-fn package_error(error: PackageError) -> HcdError {
-    match error {
-        PackageError::ResourceLimit(message) => HcdError::ResourceLimit(message),
-        other => HcdError::InvalidBundle(other.to_string()),
-    }
 }
 
 #[cfg(test)]
@@ -15454,35 +15195,6 @@ mod tests {
             .collect::<HashSet<_>>(),
             "all three tabs survive the export, revision {}",
             reopened.revision
-        );
-    }
-
-    #[test]
-    fn an_appended_child_repeats_only_the_namespace_its_siblings_need() {
-        let relationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-        let parent = Some((Some("x".to_string()), Vec::new()));
-        let sibling = Some((
-            Some("x".to_string()),
-            vec![("xmlns:r".to_string(), relationships.to_string())],
-        ));
-        // A workbook whose root already binds `r` must not repeat the
-        // declaration on the tab it appends, so the tab reads like the rest.
-        let bound = child_scope(
-            &parent,
-            &sibling,
-            &[("xmlns:r".to_string(), relationships.to_string())],
-        );
-        assert_eq!(bound.0.as_deref(), Some("x"));
-        assert!(bound.1.is_empty(), "{bound:?}");
-        // A workbook that binds `r` only on its sheets has to hand that binding
-        // to the appended tab, or the tab's relationship id resolves to nothing.
-        let copied = child_scope(&parent, &sibling, &[]);
-        assert_eq!(
-            copied,
-            (
-                Some("x".to_string()),
-                vec![("xmlns:r".to_string(), relationships.to_string())]
-            )
         );
     }
 
