@@ -16,8 +16,11 @@ type Manifest = { chunkCount: number; indexPageCount: number; revision: number; 
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
 type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
 type PdfGeometry = { xPt: number; yPt: number; widthPt: number; heightPt: number }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; runBold?: boolean; runItalic?: boolean; runUnderline?: boolean; runFontSizePt?: number; runColor?: string }
+type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; runBold?: boolean; runItalic?: boolean; runUnderline?: boolean; runFontSizePt?: number; runColor?: string; shapeHorizontal?: PptxHorizontalAlign; shapeVertical?: PptxVerticalAlign }
 type PptxRunFormat = { bold?: boolean; italic?: boolean; underline?: boolean; fontSizePt?: number; color?: string }
+type PptxHorizontalAlign = 'left' | 'center' | 'right' | 'justify' | 'distributed'
+type PptxVerticalAlign = 'top' | 'center' | 'bottom'
+type PptxShapeAlign = { horizontal?: PptxHorizontalAlign; vertical?: PptxVerticalAlign }
 type ShapeDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PptxGeometry; current: PptxGeometry; shape: HTMLElement }
 type PdfDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PdfGeometry; current: PdfGeometry; shape: HTMLElement; pointsPerPixel: number }
 function cssDeclaration(style: string, property: string): string | undefined {
@@ -46,6 +49,31 @@ function pptxRunStyle(element: Element | undefined): Pick<TextNode, 'runBold' | 
     runUnderline: flag('data-hcd-underline', (cssDeclaration(style, 'text-decoration') || '').includes('underline')),
     runFontSizePt: Number.isFinite(size) && size >= 1 && size <= 256 ? size : undefined,
     runColor: color,
+  }
+}
+const pptxHorizontalTokens: PptxHorizontalAlign[] = ['left', 'center', 'right', 'justify', 'distributed']
+const pptxVerticalTokens: PptxVerticalAlign[] = ['top', 'center', 'bottom']
+const cssToPptxHorizontal: Record<string, PptxHorizontalAlign> = { left: 'left', center: 'center', right: 'right', justify: 'justify' }
+const cssToPptxVertical: Record<string, PptxVerticalAlign> = { 'flex-start': 'top', center: 'center', 'flex-end': 'bottom' }
+function pptxShapeAlign(element: Element | undefined): Pick<TextNode, 'shapeHorizontal' | 'shapeVertical'> {
+  const shape = element?.closest('.hcd-slide-shape')
+  if (!shape) return {}
+  // Alignment lives on the frame, not on the run under the cursor, so the box names
+  // its own axes once this editor touched it.
+  const token = <T extends string>(name: string, allowed: T[]): T | undefined =>
+    allowed.find(value => value === shape.getAttribute(name))
+  if (shape.getAttribute('data-hcd-align-edited') === 'true') {
+    return { shapeHorizontal: token('data-hcd-horizontal', pptxHorizontalTokens), shapeVertical: token('data-hcd-vertical', pptxVerticalTokens) }
+  }
+  // Before that the only record is the CSS the importer drew from the source shape,
+  // which folds distributed into justify and shows nothing when one box holds
+  // paragraphs that disagree.
+  const paragraphs = new Set(Array.from(shape.querySelectorAll('.hcd-slide-text'),
+    paragraph => cssDeclaration(paragraph.getAttribute('style') || '', 'text-align')))
+  const horizontal = paragraphs.size === 1 ? Array.from(paragraphs)[0] : undefined
+  return {
+    shapeHorizontal: horizontal ? cssToPptxHorizontal[horizontal] : undefined,
+    shapeVertical: cssToPptxVertical[cssDeclaration(shape.getAttribute('style') || '', 'justify-content') || ''],
   }
 }
 function pptxGeometry(element: Element | null): PptxGeometry | undefined {
@@ -92,6 +120,31 @@ function PptxRunFormatBar({ node, disabled, onApply }: { node: TextNode; disable
     <button disabled={disabled || !node.editable || !sizeValid || parsedSize === node.runFontSizePt} onClick={() => onApply({ fontSizePt: parsedSize })}><LocalText source={"应用字号"} /></button>
     <label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={color} disabled={disabled || !node.editable} onChange={event => setColor(event.target.value)} /></label>
     <button disabled={disabled || !node.editable || color.toLowerCase() === (node.runColor || '').toLowerCase()} onClick={() => onApply({ color })}><LocalText source={"应用颜色"} /></button>
+  </div>
+}
+
+function PptxShapeAlignBar({ node, disabled, onApply }: { node: TextNode; disabled: boolean; onApply: (align: PptxShapeAlign) => void }) {
+  const { locale } = useI18n()
+  // The whole box moves, so the button that already reads this value is greyed out
+  // rather than left to be refused by the patch.
+  const keys: Array<{ axis: 'horizontal' | 'vertical'; value: string; label: string }> = [
+    { axis: 'horizontal', value: 'left', label: '左对齐' },
+    { axis: 'horizontal', value: 'center', label: '居中' },
+    { axis: 'horizontal', value: 'right', label: '右对齐' },
+    { axis: 'horizontal', value: 'justify', label: '两端对齐' },
+    { axis: 'horizontal', value: 'distributed', label: '分散对齐' },
+    { axis: 'vertical', value: 'top', label: '顶端对齐' },
+    { axis: 'vertical', value: 'center', label: '垂直居中' },
+    { axis: 'vertical', value: 'bottom', label: '底端对齐' },
+  ]
+  const active = (key: { axis: 'horizontal' | 'vertical'; value: string }) =>
+    (key.axis === 'horizontal' ? node.shapeHorizontal : node.shapeVertical) === key.value
+  return <div className="tool-group" aria-label={localizeSource(locale, '形状对齐')}>
+    {keys.map(key => <button key={`${key.axis}-${key.value}`} className={active(key) ? 'primary' : ''}
+      disabled={disabled || !node.editable || active(key)} aria-pressed={active(key)}
+      onClick={() => onApply(key.axis === 'horizontal'
+        ? { horizontal: key.value as PptxHorizontalAlign }
+        : { vertical: key.value as PptxVerticalAlign })}><LocalText source={key.label} /></button>)}
   </div>
 }
 
@@ -390,6 +443,29 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(`${String(cause)}。请重新选择文字后重试。`); return null }
     finally { setSaving(false) }
   }
+  async function saveShapeAlign(node: TextNode, align: PptxShapeAlign): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || !node.editable || draft !== node.text) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/46', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.shape.align', nodeId: node.nodeId, align,
+            precondition: { nodeHash: node.nodeHash } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '设置形状对齐')
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setSelected(null)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字框后重试。`); return null }
+    finally { setSaving(false) }
+  }
   async function savePdfGeometry(node: TextNode, geometry: PdfGeometry): Promise<number | null> {
     if (session.format !== 'pdf' || readOnly || historical || saving || historyBusy || !node.pdfGeometry || draft !== node.text) return null
     setSaving(true)
@@ -686,7 +762,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => setRightPanel('settings')}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={displayedRevision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div>{session.format === 'pptx' && selected && <PptxRunFormatBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={format => void saveRunFormat(selected.node, format)} />}<span className="ribbon-note">{localizeDynamic(locale, session.format === 'pptx' ? '点击文字原位编辑 · 选中后可设置加粗、斜体、下划线、字号和颜色，并拖动调整位置' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消')}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div>{session.format === 'pptx' && selected && <PptxRunFormatBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={format => void saveRunFormat(selected.node, format)} />}{session.format === 'pptx' && selected && <PptxShapeAlignBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={align => void saveShapeAlign(selected.node, align)} />}<span className="ribbon-note">{localizeDynamic(locale, session.format === 'pptx' ? '点击文字原位编辑 · 选中后可设置加粗、斜体、下划线、字号、颜色和整个文字框的对齐，并拖动调整位置' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消')}</span></>}
       {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button>{session.format === 'pptx' && <button disabled={readOnly || historical || saving || historyBusy} onClick={() => void addSlide()}><LocalText source={"新增幻灯片"} /></button>}<span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : session.format === 'pptx' ? '新增幻灯片排在最后，放好后可以直接在上面新增文字框' : '新增文字框保留页面布局'}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示页面目录"} /></label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><button disabled={historyLocked || !canUndoSaved} onClick={() => travel('undo')}><LocalText source={"撤销 "} />{editHistory.past.length} <LocalText source={" 步"} /></button><button disabled={historyLocked || !canRedoSaved} onClick={() => travel('redo')}><LocalText source={"重做 "} />{editHistory.future.length} <LocalText source={" 步"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{manifest?.revision ?? '…'} · {editHistory.past.length ? `下一步可撤销：${editHistory.past.at(-1)?.label}` : '当前会话无已保存的可撤销步骤'}</span></>}
@@ -842,7 +918,7 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           pdfGeometry: session.format === 'pdf' ? pdfGeometry(anchor) : undefined,
           fontSize: position?.fontSize, fontFamily: position?.fontFamily, fontWeight: position?.fontWeight,
           fontStyle: position?.fontStyle, color: position?.color, lineHeight: position?.lineHeight,
-          ...(session.format === 'pptx' ? pptxRunStyle(element) : {}),
+          ...(session.format === 'pptx' ? { ...pptxRunStyle(element), ...pptxShapeAlign(element) } : {}),
         }
       })
       const hashes = Array.from(new Set(Array.from(chunk.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1])))

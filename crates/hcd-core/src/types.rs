@@ -262,6 +262,18 @@ pub struct PptxRunFormat {
     pub color: Option<String>,
 }
 
+/// Paragraph alignment of one slide text shape and how its text sits in it.
+/// Absent fields keep the shape's current value; a shape is aligned as a whole
+/// the way selecting its frame does in a desktop editor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PptxShapeAlignPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<String>,
+}
+
 /// Direct spreadsheet cell formatting. Absent fields keep the cell's current value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -390,6 +402,13 @@ pub enum PatchOperation {
     PptxRunFormat {
         node_id: String,
         format: PptxRunFormat,
+        precondition: NodePrecondition,
+    },
+    /// Align every paragraph of one slide text shape and anchor its text body.
+    #[serde(rename = "pptx.shape.align", rename_all = "camelCase")]
+    PptxShapeAlign {
+        node_id: String,
+        align: PptxShapeAlignPatch,
         precondition: NodePrecondition,
     },
     /// Set direct font and solid fill formatting on one worksheet cell.
@@ -628,6 +647,7 @@ impl PatchOperation {
             | Self::PptxShapeGeometry { node_id, .. }
             | Self::PptxTextDelete { node_id, .. }
             | Self::PptxRunFormat { node_id, .. }
+            | Self::PptxShapeAlign { node_id, .. }
             | Self::XlsxCellFormat { node_id, .. }
             | Self::XlsxCellLayout { node_id, .. }
             | Self::XlsxCellNumberFormat { node_id, .. }
@@ -675,6 +695,7 @@ impl PatchOperation {
                 | Self::PptxShapeGeometry { .. }
                 | Self::PptxTextDelete { .. }
                 | Self::PptxRunFormat { .. }
+                | Self::PptxShapeAlign { .. }
                 | Self::XlsxCellFormat { .. }
                 | Self::XlsxCellLayout { .. }
                 | Self::XlsxCellNumberFormat { .. }

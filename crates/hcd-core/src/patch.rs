@@ -12,18 +12,18 @@ use crate::{
     ApplyResult, AssetDescriptor, FidelityWarning, GridColumnDeletion, GridColumnInsertion,
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
-    NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
-    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SlideAddition, SlideCopy,
-    SlideRemoval, SlideReorder, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
-    XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch, XlsxGridAction,
-    XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
-    HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
-    HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16,
-    HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19,
-    HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3,
-    HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7,
-    HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES,
-    MAX_PATCH_JSON_BYTES,
+    NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat,
+    PptxShapeAlignPatch, PptxShapeGeometry, RevisionRecord, SheetAddition, SheetRemoval,
+    SheetRename, SlideAddition, SlideCopy, SlideRemoval, SlideReorder, SourceAnchor,
+    TextExtractEntry, TextExtractPage, TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch,
+    XlsxCellNumberFormatPatch, XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION,
+    HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
+    HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
+    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
+    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -422,6 +422,7 @@ pub fn apply_patch(
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::PptxTextDelete { .. }
                         | PatchOperation::PptxRunFormat { .. }
+                        | PatchOperation::PptxShapeAlign { .. }
                         | PatchOperation::XlsxCellFormat { .. }
                         | PatchOperation::XlsxCellLayout { .. }
                         | PatchOperation::XlsxCellNumberFormat { .. }
@@ -487,6 +488,7 @@ pub fn apply_patch(
     let pptx_geometry = collect_pptx_geometry(patch);
     let pptx_deletions = collect_pptx_deletions(patch);
     let pptx_formats = collect_pptx_formats(patch);
+    let pptx_aligns = collect_pptx_aligns(patch);
     let xlsx_formats = collect_xlsx_formats(patch);
     let xlsx_layouts = collect_xlsx_layouts(patch);
     let xlsx_number_formats = collect_xlsx_number_formats(patch);
@@ -636,6 +638,7 @@ pub fn apply_patch(
         .chain(pptx_geometry.keys().cloned())
         .chain(pptx_deletions.keys().cloned())
         .chain(pptx_formats.keys().cloned())
+        .chain(pptx_aligns.keys().cloned())
         .chain(xlsx_formats.keys().cloned())
         .chain(xlsx_layouts.keys().cloned())
         .chain(xlsx_number_formats.keys().cloned())
@@ -657,6 +660,7 @@ pub fn apply_patch(
         || !pptx_geometry.is_empty()
         || !pptx_deletions.is_empty()
         || !pptx_formats.is_empty()
+        || !pptx_aligns.is_empty()
         || !xlsx_formats.is_empty()
         || !xlsx_layouts.is_empty()
         || !xlsx_number_formats.is_empty()
@@ -1218,6 +1222,26 @@ pub fn apply_patch(
                         )));
                     }
                     update_pptx_run_format(&mut html, entry, &change.format)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = pptx_aligns.get(&entry.node_id) {
+                    // Alignment is a shape's, not a run's: the request lands on a
+                    // text node because that is what the editor selects, and the
+                    // shape that holds it is what moves.
+                    if entry.source.node_kind != "slide-text" || !entry.source.editable {
+                        return Err(HcdError::Unsupported(
+                            "PPTX shape alignment requires an editable slide text node".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PPTX text node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_pptx_shape_align(&mut html, &entry.node_id, &change.align)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -2436,6 +2460,12 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             }))
+            .chain(pptx_aligns.keys().map(|node_id| FidelityWarning {
+                code: "PPTX_DIRECT_SHAPE_ALIGN".to_string(),
+                message: "slide shape alignment writes a:pPr@algn on every paragraph of the shape and a:bodyPr@anchor on its text body; indents, spacing, and autofit stay on the source shape".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .chain(xlsx_formats.keys().map(|node_id| FidelityWarning {
                 code: "XLSX_DIRECT_CELL_FORMAT".to_string(),
                 message: "cell formatting clones the source style and writes direct bold, italic, underline, size, sRGB font color, and solid fill; borders and number formats stay on the source style".to_string(),
@@ -2958,6 +2988,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_43
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_44
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_45
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_46
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -3308,6 +3339,18 @@ fn validate_patch_identity(
             "hcd-patch/45 accepts one XLSX worksheet freeze operation only".to_string(),
         ));
     }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_46
+        && (manifest.source.format != "pptx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PptxShapeAlign { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/46 accepts one PPTX shape alignment operation only".to_string(),
+        ));
+    }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
     validate_string_map(
         "metadata",
@@ -3547,6 +3590,24 @@ fn validate_patch_identity(
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_pptx_run_format(format)?;
+            }
+            PatchOperation::PptxShapeAlign {
+                node_id,
+                align,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_46
+                    || manifest.source.format != "pptx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.shape.align requires one PPTX operation with hcd-patch/46"
+                            .to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                validate_pptx_shape_align(align)?;
             }
             PatchOperation::XlsxCellFormat {
                 node_id,
@@ -4756,6 +4817,36 @@ fn collect_pptx_formats(patch: &PatchBatch) -> HashMap<String, PptxFormatChange>
 }
 
 #[derive(Clone)]
+struct PptxAlignChange {
+    align: PptxShapeAlignPatch,
+    node_hash: String,
+}
+
+fn collect_pptx_aligns(patch: &PatchBatch) -> HashMap<String, PptxAlignChange> {
+    patch
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let PatchOperation::PptxShapeAlign {
+                node_id,
+                align,
+                precondition,
+            } = operation
+            else {
+                return None;
+            };
+            Some((
+                node_id.clone(),
+                PptxAlignChange {
+                    align: align.clone(),
+                    node_hash: precondition.node_hash.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+#[derive(Clone)]
 struct XlsxFormatChange {
     format: XlsxCellFormatPatch,
     node_hash: String,
@@ -4939,6 +5030,33 @@ fn validate_pptx_run_format(format: &PptxRunFormat) -> Result<(), HcdError> {
     }
     if let Some(color) = &format.color {
         validate_hex_color("color", color)?;
+    }
+    Ok(())
+}
+
+fn validate_pptx_shape_align(align: &PptxShapeAlignPatch) -> Result<(), HcdError> {
+    if align.horizontal.is_none() && align.vertical.is_none() {
+        return Err(HcdError::InvalidPatch(
+            "PPTX shape alignment must set a horizontal or a vertical value".to_string(),
+        ));
+    }
+    if let Some(value) = &align.horizontal {
+        if !matches!(
+            value.as_str(),
+            "left" | "center" | "right" | "justify" | "distributed"
+        ) {
+            return Err(HcdError::InvalidPatch(
+                "PPTX horizontal alignment must be left, center, right, justify, or distributed"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(value) = &align.vertical {
+        if !matches!(value.as_str(), "top" | "center" | "bottom") {
+            return Err(HcdError::InvalidPatch(
+                "PPTX vertical alignment must be top, center, or bottom".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -10141,6 +10259,51 @@ fn update_created_pptx_font(entry: &mut NodeMapEntry, font_size_pt: f32) -> Resu
     Ok(())
 }
 
+/// The positioned shape div that holds one slide text node: the frame a desktop
+/// editor selects and aligns as a whole, found by walking the tags that open
+/// ahead of the node and keeping the nearest enclosing shape.
+fn enclosing_pptx_shape(
+    html: &str,
+    node_id: &str,
+    search_from: usize,
+) -> Result<(usize, usize), HcdError> {
+    let marker = format!("data-hcd-id=\"{node_id}\"");
+    let node_offset = html
+        .find(&marker)
+        .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX text node {node_id} is missing")))?;
+    let mut open_divs = Vec::new();
+    let mut cursor = search_from;
+    while cursor < node_offset {
+        let opening = html[cursor..node_offset]
+            .find("<div")
+            .map(|offset| cursor + offset);
+        let closing = html[cursor..node_offset]
+            .find("</div>")
+            .map(|offset| cursor + offset);
+        if closing.is_some_and(|close| opening.is_none_or(|open| close < open)) {
+            cursor = closing.expect("checked above") + "</div>".len();
+            open_divs.pop().ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX slide has an unmatched closing div".to_string())
+            })?;
+            continue;
+        }
+        let Some(opening) = opening else { break };
+        let end = html[opening..]
+            .find('>')
+            .map(|offset| opening + offset)
+            .ok_or_else(|| HcdError::InvalidBundle("PPTX shape tag is not closed".to_string()))?;
+        open_divs.push((opening, end));
+        cursor = end + 1;
+    }
+    open_divs
+        .into_iter()
+        .rev()
+        .find(|(start, end)| html[*start..=*end].starts_with("<div class=\"hcd-slide-shape\""))
+        .ok_or_else(|| {
+            HcdError::Unsupported("PPTX text is not inside a positioned shape".to_string())
+        })
+}
+
 fn update_pptx_shape_geometry(
     html: &mut String,
     entry: &mut NodeMapEntry,
@@ -10180,41 +10343,7 @@ fn update_pptx_shape_geometry(
         ));
     }
 
-    let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
-    let node_offset = html.find(&marker).ok_or_else(|| {
-        HcdError::InvalidBundle(format!("PPTX text node {} is missing", entry.node_id))
-    })?;
-    let mut open_divs = Vec::new();
-    let mut cursor = slide_end + 1;
-    while cursor < node_offset {
-        let opening = html[cursor..node_offset]
-            .find("<div")
-            .map(|offset| cursor + offset);
-        let closing = html[cursor..node_offset]
-            .find("</div>")
-            .map(|offset| cursor + offset);
-        if closing.is_some_and(|close| opening.is_none_or(|open| close < open)) {
-            cursor = closing.expect("checked above") + "</div>".len();
-            open_divs.pop().ok_or_else(|| {
-                HcdError::InvalidBundle("PPTX slide has an unmatched closing div".to_string())
-            })?;
-            continue;
-        }
-        let Some(opening) = opening else { break };
-        let end = html[opening..]
-            .find('>')
-            .map(|offset| opening + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("PPTX shape tag is not closed".to_string()))?;
-        open_divs.push((opening, end));
-        cursor = end + 1;
-    }
-    let (start, end) = open_divs
-        .into_iter()
-        .rev()
-        .find(|(start, end)| html[*start..=*end].starts_with("<div class=\"hcd-slide-shape\""))
-        .ok_or_else(|| {
-            HcdError::Unsupported("PPTX text is not inside a positioned shape".to_string())
-        })?;
+    let (start, end) = enclosing_pptx_shape(html, &entry.node_id, slide_end + 1)?;
     let mut tag = html[start..=end].to_string();
     let number = |name: &str| -> Result<u64, HcdError> {
         xlsx_attribute(&tag, name)
@@ -10307,6 +10436,136 @@ fn update_pptx_shape_geometry(
     let tag_end = tag.len() - 1;
     set_attribute_in_range(&mut tag, 0, tag_end, "data-hcd-geometry-edited", "true")?;
     html.replace_range(start..=end, &tag);
+    Ok(())
+}
+
+/// Align one slide text shape. A request lands on a text node because that is
+/// what the editor selects, but the box is what moves: every paragraph the shape
+/// holds takes the horizontal value and the text body takes the vertical anchor,
+/// the way selecting a frame restyles the whole box rather than the run under
+/// the cursor.
+fn update_pptx_shape_align(
+    html: &mut String,
+    node_id: &str,
+    align: &PptxShapeAlignPatch,
+) -> Result<(), HcdError> {
+    let slide_end = html
+        .find('>')
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX slide section is not closed".to_string()))?;
+    if !html.starts_with("<section class=\"hcd-slide\"") {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide section is missing".to_string(),
+        ));
+    }
+    let (start, end) = enclosing_pptx_shape(html, node_id, slide_end + 1)?;
+    let close = matching_html_close(html, end, "div")?;
+    let stored = stored_pptx_shape_align(&html[start..=end])?;
+    let merged = PptxShapeAlignPatch {
+        horizontal: align.horizontal.clone().or(stored.horizontal.clone()),
+        vertical: align.vertical.clone().or(stored.vertical.clone()),
+    };
+    // A field the request leaves out keeps the value the shape already carries, so
+    // what decides a no-op is the band the shape ends up naming, not the request.
+    if merged == stored {
+        return Err(HcdError::InvalidPatch(
+            "PPTX shape alignment is unchanged".to_string(),
+        ));
+    }
+    let mut tag = html[start..=end].to_string();
+    let mut interior = html[end + 1..close].to_string();
+    if let Some(horizontal) = &merged.horizontal {
+        set_pptx_paragraph_align(&mut interior, horizontal)?;
+    }
+    if let Some(vertical) = &merged.vertical {
+        // The marker has to sit inside the tag being rewritten, and it has to be
+        // one every shape div carries: a box the editor drew has no node id of its
+        // own on its frame, only the class both kinds share.
+        let updates = BTreeMap::from([
+            ("display".to_string(), "flex".to_string()),
+            ("flex-direction".to_string(), "column".to_string()),
+            (
+                "justify-content".to_string(),
+                pptx_vertical_css(vertical).to_string(),
+            ),
+        ]);
+        update_start_tag_style(&mut tag, "class=\"hcd-slide-shape\"", &updates, false)?;
+    }
+    for (name, value) in [
+        ("data-hcd-align-edited", Some("true".to_string())),
+        ("data-hcd-horizontal", merged.horizontal.clone()),
+        ("data-hcd-vertical", merged.vertical.clone()),
+    ] {
+        let Some(value) = value else { continue };
+        let tag_end = tag.len() - 1;
+        set_attribute_in_range(&mut tag, 0, tag_end, name, &value)?;
+    }
+    html.replace_range(start..close, &format!("{tag}{interior}"));
+    Ok(())
+}
+
+fn stored_pptx_shape_align(tag: &str) -> Result<PptxShapeAlignPatch, HcdError> {
+    if xlsx_attribute(tag, "data-hcd-align-edited") != Some("true") {
+        return Ok(PptxShapeAlignPatch::default());
+    }
+    let read = |name: &str, allowed: &[&str]| -> Result<Option<String>, HcdError> {
+        match xlsx_attribute(tag, name) {
+            Some(value) if allowed.contains(&value) => Ok(Some(value.to_string())),
+            Some(_) => Err(HcdError::InvalidBundle(format!(
+                "PPTX stored {name} is invalid"
+            ))),
+            None => Ok(None),
+        }
+    };
+    Ok(PptxShapeAlignPatch {
+        horizontal: read(
+            "data-hcd-horizontal",
+            &["left", "center", "right", "justify", "distributed"],
+        )?,
+        vertical: read("data-hcd-vertical", &["top", "center", "bottom"])?,
+    })
+}
+
+fn pptx_horizontal_css(horizontal: &str) -> &'static str {
+    match horizontal {
+        "left" => "left",
+        "center" => "center",
+        "right" => "right",
+        _ => "justify",
+    }
+}
+
+fn pptx_vertical_css(vertical: &str) -> &'static str {
+    match vertical {
+        "top" => "flex-start",
+        "bottom" => "flex-end",
+        _ => "center",
+    }
+}
+
+fn set_pptx_paragraph_align(interior: &mut String, horizontal: &str) -> Result<(), HcdError> {
+    const MARKER: &str = "<p class=\"hcd-slide-text\"";
+    let updates = BTreeMap::from([(
+        "text-align".to_string(),
+        pptx_horizontal_css(horizontal).to_string(),
+    )]);
+    let mut output = String::with_capacity(interior.len());
+    let mut cursor = 0usize;
+    while let Some(offset) = interior[cursor..].find(MARKER) {
+        let start = cursor + offset;
+        let gap = interior[start..].find('>').ok_or_else(|| {
+            HcdError::InvalidBundle("PPTX paragraph tag is not closed".to_string())
+        })?;
+        let end = start + gap;
+        output.push_str(&interior[cursor..start]);
+        let mut paragraph = interior[start..=end].to_string();
+        // The helper looks for the tag that holds the marker, so it is handed a
+        // name from inside the tag rather than the tag's own opening.
+        update_start_tag_style(&mut paragraph, "class=\"hcd-slide-text\"", &updates, false)?;
+        output.push_str(&paragraph);
+        cursor = end + 1;
+    }
+    output.push_str(&interior[cursor..]);
+    *interior = output;
     Ok(())
 }
 
@@ -10858,6 +11117,7 @@ fn apply_annotations(
             | PatchOperation::PptxShapeGeometry { .. }
             | PatchOperation::PptxTextDelete { .. }
             | PatchOperation::PptxRunFormat { .. }
+            | PatchOperation::PptxShapeAlign { .. }
             | PatchOperation::XlsxCellFormat { .. }
             | PatchOperation::XlsxCellLayout { .. }
             | PatchOperation::XlsxCellNumberFormat { .. }
@@ -12589,5 +12849,156 @@ mod tests {
                               data-hcd-split-y-twips=\"4400\"></section>"
             .to_string();
         assert!(!shift_xlsx_pane_band(&mut split_only, XlsxPaneBandShift::InsertRow(1)).unwrap());
+    }
+
+    fn pptx_align(horizontal: Option<&str>, vertical: Option<&str>) -> PptxShapeAlignPatch {
+        PptxShapeAlignPatch {
+            horizontal: horizontal.map(str::to_string),
+            vertical: vertical.map(str::to_string),
+        }
+    }
+
+    /// One slide with two text shapes: the first holds two paragraphs, the second
+    /// carries the anchor the source workbook wrote for itself.
+    fn two_shape_slide() -> String {
+        concat!(
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"ppt/slides/slide1.xml\" ",
+            "data-hcd-width-emu=\"9144000\" data-hcd-height-emu=\"6858000\">",
+            "<div class=\"hcd-slide-shape\" data-hcd-id=\"n_9001\" data-hcd-shape-id=\"4\" ",
+            "data-hcd-x-emu=\"914400\" data-hcd-y-emu=\"914400\" data-hcd-width-emu=\"1828800\" ",
+            "data-hcd-height-emu=\"1828800\" style=\"position:absolute;left:9.60px;top:9.60px;",
+            "width:19.20px;height:19.20px;overflow:hidden\">",
+            "<p class=\"hcd-slide-text\"><span data-hcd-id=\"n_0001\" data-hcd-node-hash=\"a\">First",
+            "</span></p>",
+            "<p class=\"hcd-slide-text\" style=\"text-align:right\"><span data-hcd-id=\"n_0002\" ",
+            "data-hcd-node-hash=\"b\">Second</span></p>",
+            "</div>",
+            "<div class=\"hcd-slide-shape\" data-hcd-id=\"n_9002\" data-hcd-shape-id=\"5\" ",
+            "data-hcd-x-emu=\"914400\" data-hcd-y-emu=\"914400\" data-hcd-width-emu=\"1828800\" ",
+            "data-hcd-height-emu=\"1828800\" style=\"position:absolute;left:9.60px;top:9.60px;",
+            "width:19.20px;height:19.20px;overflow:hidden;display:flex;flex-direction:column;",
+            "justify-content:flex-start\"><p class=\"hcd-slide-text\"><span data-hcd-id=\"n_0003\" ",
+            "data-hcd-node-hash=\"c\">Other</span></p></div>",
+            "</section>",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn aligning_a_slide_text_shape_moves_every_paragraph_and_the_body_anchor() {
+        // The request reaches the shape through one of its text nodes, but what it
+        // restyles is the box: both paragraphs move to the middle and the shape's
+        // own source anchor is replaced by the requested one.
+        let mut html = two_shape_slide();
+        update_pptx_shape_align(
+            &mut html,
+            "n_0002",
+            &pptx_align(Some("center"), Some("center")),
+        )
+        .unwrap();
+        assert_eq!(html.matches("data-hcd-align-edited=\"true\"").count(), 1);
+        assert!(html.contains("data-hcd-horizontal=\"center\""));
+        assert!(html.contains("data-hcd-vertical=\"center\""));
+        assert_eq!(html.matches("text-align:center").count(), 2);
+        assert!(!html.contains("text-align:right"));
+        // The other shape keeps its own anchor and its paragraph keeps no alignment.
+        assert_eq!(html.matches("justify-content:flex-start").count(), 1);
+        assert_eq!(
+            html.matches("<p class=\"hcd-slide-text\">").count(),
+            1,
+            "only the aligned shape's paragraphs speak"
+        );
+        let aligned_shape = html
+            .split("<div class=\"hcd-slide-shape\" data-hcd-id=\"n_9002\"")
+            .next()
+            .expect("both shapes")
+            .to_string();
+        assert!(aligned_shape.contains("display:flex"));
+        assert!(aligned_shape.contains("flex-direction:column"));
+        assert!(aligned_shape.contains("justify-content:center"));
+
+        // A second request naming one axis keeps the other where the shape left it.
+        update_pptx_shape_align(&mut html, "n_0001", &pptx_align(Some("left"), None)).unwrap();
+        assert!(html.contains("data-hcd-horizontal=\"left\""));
+        assert!(html.contains("data-hcd-vertical=\"center\""));
+        assert_eq!(html.matches("text-align:left").count(), 2);
+        assert_eq!(html.matches("data-hcd-align-edited=\"true\"").count(), 1);
+
+        // Asking for what the box already holds would record a revision that says
+        // nothing, so the patch refuses it instead.
+        let error = update_pptx_shape_align(&mut html, "n_0001", &pptx_align(Some("left"), None))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX shape alignment is unchanged"),
+            "{error}"
+        );
+        assert!(
+            update_pptx_shape_align(&mut html, "n_0001", &pptx_align(None, Some("bottom"))).is_ok()
+        );
+        assert!(html.contains("data-hcd-horizontal=\"left\""));
+        assert!(html.contains("justify-content:flex-end"));
+    }
+
+    #[test]
+    fn a_shape_alignment_that_finds_no_box_or_reads_junk_is_refused() {
+        // Distributed alignment writes the value the package names, even though
+        // the page shows the same block as justified text.
+        let mut html = two_shape_slide();
+        update_pptx_shape_align(&mut html, "n_0001", &pptx_align(Some("distributed"), None))
+            .unwrap();
+        assert!(html.contains("data-hcd-horizontal=\"distributed\""));
+        assert_eq!(html.matches("text-align:justify").count(), 2);
+
+        // A shape whose stored value is not one this op can write is not guessed
+        // at: the bundle is the problem, and saying so beats writing a third value.
+        let mut junk = String::from(
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"ppt/slides/slide1.xml\"><div \
+             class=\"hcd-slide-shape\" data-hcd-id=\"n_9001\" data-hcd-align-edited=\"true\" \
+             data-hcd-horizontal=\"sideways\"><p class=\"hcd-slide-text\"><span \
+             data-hcd-id=\"n_0001\">First</span></p></div></section>",
+        );
+        let error = update_pptx_shape_align(&mut junk, "n_0001", &pptx_align(None, Some("top")))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX stored data-hcd-horizontal is invalid"),
+            "{error}"
+        );
+
+        // Text that stands outside a positioned shape has no box to align.
+        let mut loose = String::from(
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"ppt/slides/slide1.xml\"><p \
+             class=\"hcd-slide-text\"><span data-hcd-id=\"n_0001\">First</span></p></section>",
+        );
+        let error =
+            update_pptx_shape_align(&mut loose, "n_0001", &pptx_align(Some("center"), None))
+                .unwrap_err();
+        assert!(matches!(error, HcdError::Unsupported(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX text is not inside a positioned shape"),
+            "{error}"
+        );
+
+        // The request itself has to name an axis, and only the axes it knows.
+        assert!(validate_pptx_shape_align(&pptx_align(None, None)).is_err());
+        let error = validate_pptx_shape_align(&pptx_align(Some("middle"), None)).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "PPTX horizontal alignment must be left, center, right, justify, or distributed"
+            ),
+            "{error}"
+        );
+        let error = validate_pptx_shape_align(&pptx_align(None, Some("left"))).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX vertical alignment must be top, center, or bottom"),
+            "{error}"
+        );
     }
 }

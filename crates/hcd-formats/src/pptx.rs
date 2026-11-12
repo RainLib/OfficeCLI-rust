@@ -9,8 +9,8 @@ use crate::common::{
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    PptxRunFormat, PptxShapeGeometry, SlideAddition, SlideCopy, SlideRemoval, SlideReorder,
-    SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    PptxRunFormat, PptxShapeAlignPatch, PptxShapeGeometry, SlideAddition, SlideCopy, SlideRemoval,
+    SlideReorder, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -3067,9 +3067,16 @@ pub(crate) fn export_pptx(
     let mut replacements: HashMap<String, BTreeMap<u64, String>> = HashMap::new();
     let mut insertions: HashMap<String, Vec<InsertedPptxShape>> = HashMap::new();
     let mut source_formats: HashMap<String, BTreeMap<u64, PptxRunFormat>> = HashMap::new();
+    let ShapeAlignRequests {
+        native: mut shape_alignments,
+        created: mut created_aligns,
+    } = collect_edited_shape_aligns(bundle, &manifest, &dirty_parts)?;
     for node in &nodes {
         if node.source.created_in_hcd {
             let mut shape = InsertedPptxShape::from_node(node)?;
+            if let Some(align) = created_aligns.remove(&node.node_id) {
+                shape.align = align;
+            }
             if let Some(format) = edited_formats.get(&node.node_id) {
                 if let Some(size) = format.font_size_pt {
                     let hundredths = (size * 100.0).round() as u32;
@@ -3107,6 +3114,14 @@ pub(crate) fn export_pptx(
     }
     for shapes in insertions.values_mut() {
         shapes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    }
+    if let Some(node_id) = created_aligns.keys().min() {
+        // The chunk says a box this history aligned is on the slide, yet no shape
+        // is being written for it. Losing the alignment quietly would leave the
+        // page disagreeing with the chunks that describe it.
+        return Err(HcdError::InvalidBundle(format!(
+            "PPTX aligned text box {node_id} has no shape to write"
+        )));
     }
     let mut native_geometry = collect_edited_shape_geometry(bundle, &manifest, &dirty_parts)?;
     // A slide HCD created is not in the source package, so the export writes it
@@ -3167,6 +3182,7 @@ pub(crate) fn export_pptx(
             insertions.remove(part);
             native_geometry.remove(part);
             source_formats.remove(part);
+            shape_alignments.remove(part);
         }
         for removal in &removed_slides {
             let part = removal.slide_part.as_str();
@@ -3389,12 +3405,14 @@ pub(crate) fn export_pptx(
         .chain(insertions.keys())
         .chain(native_geometry.keys())
         .chain(source_formats.keys())
+        .chain(shape_alignments.keys())
         .collect::<BTreeSet<_>>()
     {
         let values = replacements.get(part).cloned().unwrap_or_default();
         let shapes = insertions.get(part).cloned().unwrap_or_default();
         let geometry = native_geometry.get(part).cloned().unwrap_or_default();
         let formats = source_formats.get(part).cloned().unwrap_or_default();
+        let aligns = shape_alignments.get(part).cloned().unwrap_or_default();
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
         let rewrite = |input: &mut dyn Read, output: File| {
@@ -3405,6 +3423,7 @@ pub(crate) fn export_pptx(
                 &shapes,
                 &geometry,
                 &formats,
+                &aligns,
             )
         };
         if let Some(source_part) = copy_parts.get(part) {
@@ -4002,6 +4021,7 @@ struct InsertedPptxShape {
     font_size_hundredths: u32,
     text: String,
     format: PptxRunFormat,
+    align: PptxShapeAlignPatch,
 }
 
 impl InsertedPptxShape {
@@ -4046,6 +4066,7 @@ impl InsertedPptxShape {
             font_size_hundredths: values[4] as u32,
             text: node.text.clone(),
             format: PptxRunFormat::default(),
+            align: PptxShapeAlignPatch::default(),
         })
     }
 }
@@ -4162,6 +4183,202 @@ fn collect_edited_shape_geometry(
     Ok(result)
 }
 
+/// The alignments this history moved, split the way the export writes them: a
+/// shape the presentation already had is found in the part by its ID, while a
+/// text box HCD made has no ID yet and is only known by the node that holds its
+/// text — so it travels with the shape the exporter builds for that node.
+struct ShapeAlignRequests {
+    native: HashMap<String, BTreeMap<u32, PptxShapeAlignPatch>>,
+    created: HashMap<String, PptxShapeAlignPatch>,
+}
+
+fn collect_edited_shape_aligns(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_parts: &HashSet<String>,
+) -> Result<ShapeAlignRequests, HcdError> {
+    let mut requests = ShapeAlignRequests {
+        native: HashMap::new(),
+        created: HashMap::new(),
+    };
+    if dirty_parts.is_empty() {
+        return Ok(requests);
+    }
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            let Some(part) = source_map
+                .entries
+                .iter()
+                .map(|entry| entry.source.part.as_str())
+                .find(|part| dirty_parts.contains(*part))
+            else {
+                continue;
+            };
+            let html = bundle.read_chunk(&descriptor)?;
+            if !html.starts_with("<section class=\"hcd-slide\"") {
+                continue;
+            }
+            if html_attribute(&html, "data-hcd-source-part") != Some(part) {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX slide part differs from its source map".to_string(),
+                ));
+            }
+            let mut cursor = 0usize;
+            while let Some(relative) = html[cursor..].find("data-hcd-align-edited=\"true\"") {
+                let at = cursor + relative;
+                let start = html[..at]
+                    .rfind("<div class=\"hcd-slide-shape\"")
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX aligned shape tag is missing".to_string())
+                    })?;
+                let end = html[at..]
+                    .find('>')
+                    .map(|offset| at + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX aligned shape tag is not closed".to_string())
+                    })?;
+                let tag = &html[start..=end];
+                cursor = end + 1;
+                let align = html_shape_align(tag)?;
+                if let Some(shape_id) = html_attribute(tag, "data-hcd-shape-id") {
+                    let shape_id = shape_id
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|id| *id > 0)
+                        .ok_or_else(|| {
+                            HcdError::InvalidBundle(
+                                "PPTX aligned source shape ID is invalid".to_string(),
+                            )
+                        })?;
+                    let shapes = requests.native.entry(part.to_string()).or_default();
+                    if shapes.insert(shape_id, align).is_some() {
+                        return Err(HcdError::InvalidBundle(
+                            "PPTX aligned shape ID is duplicated".to_string(),
+                        ));
+                    }
+                    continue;
+                }
+                // A box the editor drew has no shape ID to look the part up by, so
+                // the node inside it is what ties this request to a written shape.
+                let interior = &html[end + 1..];
+                let marker = interior.find("data-hcd-id=\"").ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX aligned shape has no text node".to_string())
+                })?;
+                let node_id = interior
+                    .get(marker + "data-hcd-id=\"".len()..)
+                    .and_then(|rest| rest.split('"').next())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX aligned shape node ID is invalid".to_string())
+                    })?;
+                if requests
+                    .created
+                    .insert(node_id.to_string(), align)
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX aligned text node is duplicated".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(requests)
+}
+
+/// Reads one alignment back off a shape's tag. The chunk stores the axes the
+/// patch settled on, so a value the part could not write is damage in the
+/// bundle rather than something the export may guess at.
+fn html_shape_align(tag: &str) -> Result<PptxShapeAlignPatch, HcdError> {
+    let axis =
+        |name: &str, token: fn(&str) -> Option<&'static str>| -> Result<Option<String>, HcdError> {
+            match html_attribute(tag, name) {
+                Some(value) if token(value).is_some() => Ok(Some(value.to_string())),
+                Some(_) => Err(HcdError::InvalidBundle(format!(
+                    "PPTX stored {name} is invalid"
+                ))),
+                None => Ok(None),
+            }
+        };
+    let align = PptxShapeAlignPatch {
+        horizontal: axis("data-hcd-horizontal", pptx_alignment_token)?,
+        vertical: axis("data-hcd-vertical", pptx_anchor_token)?,
+    };
+    if align.horizontal.is_none() && align.vertical.is_none() {
+        return Err(HcdError::InvalidBundle(
+            "PPTX aligned shape names no alignment".to_string(),
+        ));
+    }
+    Ok(align)
+}
+
+/// The drawingml token `a:pPr@algn` takes for one horizontal alignment.
+fn pptx_alignment_token(horizontal: &str) -> Option<&'static str> {
+    match horizontal {
+        "left" => Some("l"),
+        "center" => Some("ctr"),
+        "right" => Some("r"),
+        "justify" => Some("just"),
+        "distributed" => Some("dist"),
+        _ => None,
+    }
+}
+
+/// The drawingml token `a:bodyPr@anchor` takes for one vertical alignment.
+fn pptx_anchor_token(vertical: &str) -> Option<&'static str> {
+    match vertical {
+        "top" => Some("t"),
+        "center" => Some("ctr"),
+        "bottom" => Some("b"),
+        _ => None,
+    }
+}
+
+/// The paragraph waiting for its alignment. `a:pPr` has to be the paragraph's
+/// first child, and the run that carries the text is taken by the run buffer
+/// before the arms below ever see it, so the request is held here and written on
+/// the way into whatever element comes next — with the namespace prefix the
+/// paragraph itself was spelled with, since a synthesized element has to be in
+/// the same one.
+struct PendingParagraph {
+    shape_id: u32,
+    alignment: &'static str,
+    prefix: String,
+}
+
+fn paragraph_align(
+    shape_id: Option<u32>,
+    alignments: &BTreeMap<u32, PptxShapeAlignPatch>,
+) -> Option<(u32, &'static str)> {
+    let id = shape_id?;
+    let horizontal = alignments.get(&id)?.horizontal.as_deref()?;
+    Some((id, pptx_alignment_token(horizontal)?))
+}
+
+fn body_anchor(
+    shape_id: Option<u32>,
+    alignments: &BTreeMap<u32, PptxShapeAlignPatch>,
+) -> Option<(u32, &'static str)> {
+    let id = shape_id?;
+    let vertical = alignments.get(&id)?.vertical.as_deref()?;
+    Some((id, pptx_anchor_token(vertical)?))
+}
+
+/// One attribute of an element, set to what the edit asked for, with everything
+/// else the source element carried left where it was.
+fn set_element_attribute(element: &BytesStart<'_>, name: &str, value: &str) -> BytesStart<'static> {
+    let mut rewritten = element.to_owned();
+    rewritten.clear_attributes();
+    for attribute in element.attributes().with_checks(false).flatten() {
+        if local_name(attribute.key.as_ref()) != name {
+            rewritten.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+        }
+    }
+    rewritten.push_attribute((name, value));
+    rewritten
+}
+
 fn rewrite_text_part(
     source: &mut dyn Read,
     output: impl Write,
@@ -4169,6 +4386,7 @@ fn rewrite_text_part(
     insertions: &[InsertedPptxShape],
     native_geometry: &BTreeMap<u32, PptxShapeGeometry>,
     formats: &BTreeMap<u64, PptxRunFormat>,
+    alignments: &BTreeMap<u32, PptxShapeAlignPatch>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -4190,6 +4408,10 @@ fn rewrite_text_part(
     let mut run_events: Vec<Event<'static>> = Vec::new();
     let mut run_depth: Option<usize> = None;
     let mut applied_formats = BTreeSet::new();
+    // Per aligned shape: whether its body was anchored and how many of its
+    // paragraphs were. Both halves are checked against the request at the end.
+    let mut align_seen: HashMap<u32, (bool, usize)> = HashMap::new();
+    let mut pending_paragraph: Option<PendingParagraph> = None;
     loop {
         let event = reader
             .read_event_into(&mut buffer)
@@ -4208,6 +4430,32 @@ fn rewrite_text_part(
             Event::End(end) => Some(local_name(end.name().as_ref()).to_string()),
             _ => None,
         };
+        if let Some(pending) = pending_paragraph.take() {
+            // Text and other non-element events are left for later: whitespace
+            // between the paragraph and its first element carries no alignment,
+            // and the properties still have to precede the first element.
+            if matches!(&event, Event::Start(_) | Event::Empty(_) | Event::End(_)) {
+                let name = event_name.as_deref().unwrap_or_default();
+                if !closes && name == "pPr" {
+                    // The paragraph opens with its own properties: the arm below
+                    // folds the alignment into them instead of adding a second set.
+                    pending_paragraph = Some(pending);
+                } else if !closes && name == "p" {
+                    // A paragraph inside a paragraph is damage in the source, and
+                    // the shape that asked for an alignment is reported at the end.
+                } else {
+                    let PendingParagraph {
+                        shape_id,
+                        alignment,
+                        prefix,
+                    } = pending;
+                    write_paragraph_properties(&mut writer, &prefix, alignment)?;
+                    align_seen.entry(shape_id).or_default().1 += 1;
+                }
+            } else {
+                pending_paragraph = Some(pending);
+            }
+        }
         let entering_run = run_depth.is_none() && opens && event_name.as_deref() == Some("r");
         if entering_run || run_depth.is_some() {
             if entering_run {
@@ -4254,6 +4502,15 @@ fn rewrite_text_part(
                 }
                 "spPr" if shape_depth == Some(depth) => properties_depth = Some(depth + 1),
                 "xfrm" if properties_depth == Some(depth) => transform_depth = Some(depth + 1),
+                "p" => {
+                    if let Some((id, alignment)) = paragraph_align(shape_id, alignments) {
+                        pending_paragraph = Some(PendingParagraph {
+                            shape_id: id,
+                            alignment,
+                            prefix: element_prefix(start.name().as_ref()),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -4278,6 +4535,48 @@ fn rewrite_text_part(
                     }
                 }
                 writer.write_event(event.into_owned())?;
+            }
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "bodyPr"
+                    && body_anchor(shape_id, alignments).is_some() =>
+            {
+                // Every text body of the shape takes the anchor. A page that
+                // spells one shape twice — a choice and its fallback — is aligned
+                // the same way in both, rather than left disagreeing with itself.
+                let (id, anchor) = body_anchor(shape_id, alignments).expect("checked above");
+                let rewritten = set_element_attribute(element, "anchor", anchor);
+                align_seen.entry(id).or_default().0 = true;
+                if opens {
+                    writer.write_event(Event::Start(rewritten))?;
+                } else {
+                    writer.write_event(Event::Empty(rewritten))?;
+                }
+            }
+            Event::Start(ref element) | Event::Empty(ref element)
+                if pending_paragraph.is_some() && local_name(element.name().as_ref()) == "pPr" =>
+            {
+                let pending = pending_paragraph.take().expect("checked above");
+                let rewritten = set_element_attribute(element, "algn", pending.alignment);
+                align_seen.entry(pending.shape_id).or_default().1 += 1;
+                if opens {
+                    writer.write_event(Event::Start(rewritten))?;
+                } else {
+                    writer.write_event(Event::Empty(rewritten))?;
+                }
+            }
+            Event::Empty(ref element) if local_name(element.name().as_ref()) == "p" => {
+                // An empty paragraph is still a line the shape aligned, and it
+                // cannot be grown later: its properties go in here, first.
+                match paragraph_align(shape_id, alignments) {
+                    Some((id, alignment)) => {
+                        let prefix = element_prefix(element.name().as_ref());
+                        writer.write_event(Event::Start(element.to_owned()))?;
+                        write_paragraph_properties(&mut writer, &prefix, alignment)?;
+                        writer.write_event(Event::End(BytesEnd::new(format!("{prefix}p"))))?;
+                        align_seen.entry(id).or_default().1 += 1;
+                    }
+                    None => writer.write_event(Event::Empty(element.to_owned()))?,
+                }
             }
             Event::Start(ref element) | Event::Empty(ref element)
                 if transform_depth == Some(depth)
@@ -4387,6 +4686,32 @@ fn rewrite_text_part(
             )));
         }
     }
+    for (id, align) in alignments {
+        let seen = align_seen.get(id).copied().unwrap_or_default();
+        if align.vertical.is_some() && !seen.0 {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX source shape {id} has no text body to anchor"
+            )));
+        }
+        if align.horizontal.is_some() && seen.1 == 0 {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX source shape {id} has no paragraph to align"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// An alignment written where the paragraph schema wants it: `a:pPr` as the first
+/// child, spelled with the paragraph's own namespace prefix.
+fn write_paragraph_properties<W: Write>(
+    writer: &mut Writer<W>,
+    prefix: &str,
+    alignment: &str,
+) -> Result<(), HcdError> {
+    let mut element = BytesStart::new(format!("{prefix}pPr"));
+    element.push_attribute(("algn", alignment));
+    writer.write_event(Event::Empty(element))?;
     Ok(())
 }
 
@@ -4923,8 +5248,23 @@ fn write_inserted_shape<W: Write>(
     } else {
         format!("<a:rPr {properties}>{color}</a:rPr>")
     };
+    // A box the editor drew starts from nothing, so both axes are written the
+    // way a source shape would have carried them: the body anchored, the
+    // paragraph's properties ahead of the run that holds its text.
+    let anchor = shape
+        .align
+        .vertical
+        .as_deref()
+        .and_then(pptx_anchor_token)
+        .map_or(String::new(), |token| format!(" anchor=\"{token}\""));
+    let paragraph_properties = shape
+        .align
+        .horizontal
+        .as_deref()
+        .and_then(pptx_alignment_token)
+        .map_or(String::new(), |token| format!("<a:pPr algn=\"{token}\"/>"));
     let xml = format!(
-        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/><a:p><a:r>{run_properties}<a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
+        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"{anchor}/><a:lstStyle/><a:p>{paragraph_properties}<a:r>{run_properties}<a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
         shape.x_emu, shape.y_emu, shape.width_emu, shape.height_emu,
         escape_text(&shape.text),
     );
@@ -5192,7 +5532,7 @@ mod tests {
         PatchOperation, PptxRunFormat, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
         HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
         HCD_PATCH_SCHEMA_VERSION_30, HCD_PATCH_SCHEMA_VERSION_41, HCD_PATCH_SCHEMA_VERSION_42,
-        HCD_PATCH_SCHEMA_VERSION_43, HCD_PATCH_SCHEMA_VERSION_44,
+        HCD_PATCH_SCHEMA_VERSION_43, HCD_PATCH_SCHEMA_VERSION_44, HCD_PATCH_SCHEMA_VERSION_46,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -5733,6 +6073,21 @@ mod tests {
             .into_iter()
             .next()
             .unwrap_or_else(|| panic!("no page chunk names {part}"))
+    }
+
+    /// The section a slide page is rendered into, so a test can read the markup a
+    /// patch wrote rather than guess which index page the bundle put it on.
+    fn slide_chunk_html(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> String {
+        (0..manifest.index_page_count)
+            .flat_map(|page_number| {
+                bundle
+                    .read_index_page(manifest, page_number)
+                    .unwrap()
+                    .chunks
+            })
+            .map(|descriptor| bundle.read_chunk(&descriptor).unwrap())
+            .find(|html| html.starts_with("<section class=\"hcd-slide\"") && html.contains(part))
+            .unwrap_or_else(|| panic!("no slide chunk carries {part}"))
     }
 
     fn drop_slide_patch(document_id: &str, chunk_id: &str, base: u64) -> PatchBatch {
@@ -6651,6 +7006,7 @@ mod tests {
             font_size_hundredths: 1_200,
             text: "new".to_string(),
             format: PptxRunFormat::default(),
+            align: PptxShapeAlignPatch::default(),
         };
         let mut output = Vec::new();
         rewrite_text_part(
@@ -6660,10 +7016,353 @@ mod tests {
             &[shape],
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();
         assert!(xml.find("HCD Text 5").unwrap() < xml.find("<p:extLst").unwrap());
+    }
+
+    /// `styled_fixture_parts` with the first page's single shape grown into the
+    /// shapes an alignment edit has to reach: one text body with three paragraphs
+    /// — a bare one, one whose properties already name an indent, a direction and
+    /// an alignment of their own, and an empty line — written beside a second shape
+    /// that must keep exactly what it was made with.
+    const ALIGNED_SLIDE1_XML: &str = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
+        r#"<p:cSld><p:spTree>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="Second"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"#,
+        r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="1828800"/></a:xfrm></p:spPr>"#,
+        r#"<p:txBody><a:bodyPr/><a:lstStyle/>"#,
+        r#"<a:p><a:r><a:t>第二页</a:t></a:r></a:p>"#,
+        r#"<a:p><a:pPr marL="45720" algn="l" rtl="0"><a:lnSpc><a:spcPct val="100000"/></a:lnSpc></a:pPr><a:r><a:t>缩进行</a:t></a:r></a:p>"#,
+        r#"<a:p/>"#,
+        r#"</p:txBody></p:sp>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="7" name="Kept"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"#,
+        r#"<p:spPr><a:xfrm><a:off x="457200" y="457200"/><a:ext cx="1828800" cy="914400"/></a:xfrm></p:spPr>"#,
+        r#"<p:txBody><a:bodyPr anchor="t"/><a:lstStyle/>"#,
+        r#"<a:p><a:pPr algn="r"/><a:r><a:t>保持原样</a:t></a:r></a:p>"#,
+        r#"</p:txBody></p:sp>"#,
+        r#"</p:spTree></p:cSld></p:sld>"#,
+    );
+
+    fn create_aligned_fixture(path: &Path) {
+        let parts = styled_fixture_parts()
+            .into_iter()
+            .map(|part| {
+                if part.0 == "ppt/slides/slide1.xml" {
+                    (part.0, ALIGNED_SLIDE1_XML)
+                } else {
+                    part
+                }
+            })
+            .collect::<Vec<_>>();
+        write_zip_fixture(path, &parts);
+    }
+
+    fn shape_align(
+        document_id: &str,
+        node_id: String,
+        node_hash: String,
+        horizontal: Option<&str>,
+        vertical: Option<&str>,
+        base: u64,
+    ) -> PatchBatch {
+        PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_46.to_string(),
+            document_id: document_id.to_string(),
+            patch_id: format!("align-{node_id}-r{}", base + 1),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxShapeAlign {
+                node_id,
+                align: PptxShapeAlignPatch {
+                    horizontal: horizontal.map(str::to_string),
+                    vertical: vertical.map(str::to_string),
+                },
+                precondition: NodePrecondition { node_hash },
+            }],
+        }
+    }
+
+    #[test]
+    fn aligning_a_slide_shape_writes_every_paragraph_and_the_body_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("aligned.pptx");
+        let historical = temp.path().join("revision-zero.pptx");
+        create_aligned_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("align-shape"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let bare = entries.iter().find(|entry| entry.text == "第二页").unwrap();
+        let patch = shape_align(
+            &manifest.document_id,
+            bare.node_id.clone(),
+            bare.node_hash.clone(),
+            Some("center"),
+            Some("bottom"),
+            0,
+        );
+        let result = apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_DIRECT_SHAPE_ALIGN"));
+        let head = bundle.manifest().unwrap();
+        let html = slide_chunk_html(&bundle, &head, "ppt/slides/slide1.xml");
+        assert!(html.contains("data-hcd-align-edited=\"true\""), "{html}");
+        assert!(html.contains("data-hcd-horizontal=\"center\""));
+        assert!(html.contains("data-hcd-vertical=\"bottom\""));
+        assert!(html.contains("justify-content:flex-end"));
+        assert!(html.contains("text-align:center"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, "ppt/slides/slide1.xml");
+        // The body takes the anchor, and every paragraph of the shape takes the
+        // alignment: the bare one gets properties written first, the one that
+        // already had them keeps its indent and direction, and the empty line is
+        // grown a paragraph-properties element of its own.
+        assert!(slide.contains("<a:bodyPr anchor=\"b\"/>"));
+        assert!(slide.contains("<a:p><a:pPr algn=\"ctr\"/><a:r>"));
+        assert!(slide.contains("marL=\"45720\" rtl=\"0\" algn=\"ctr\""));
+        assert!(slide.contains("<a:lnSpc><a:spcPct val=\"100000\"/></a:lnSpc>"));
+        assert!(slide.contains("<a:p><a:pPr algn=\"ctr\"/></a:p>"));
+        assert!(slide.contains("第二页"));
+        assert!(slide.contains("缩进行"));
+        // The shape nobody aligned is written the way the source had it.
+        assert!(slide.contains("<a:bodyPr anchor=\"t\"/>"));
+        assert!(slide.contains("<a:pPr algn=\"r\"/>"));
+        assert!(!slide.contains("anchor=\"ctr\""));
+        assert!(!slide.contains("algn=\"l\""));
+        let other = read_zip_entry(&exported, "ppt/slides/slide2.xml");
+        assert_eq!(other, read_zip_entry(&source, "ppt/slides/slide2.xml"));
+
+        let report = export_pptx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert_eq!(
+            read_zip_entry(&historical, "ppt/slides/slide1.xml"),
+            read_zip_entry(&source, "ppt/slides/slide1.xml")
+        );
+    }
+
+    #[test]
+    fn a_second_paragraph_alignment_only_moves_the_axis_it_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("moved.pptx");
+        create_aligned_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("align-one-axis"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let indented = entries.iter().find(|entry| entry.text == "缩进行").unwrap();
+        let first = shape_align(
+            &manifest.document_id,
+            indented.node_id.clone(),
+            indented.node_hash.clone(),
+            Some("right"),
+            Some("top"),
+            0,
+        );
+        assert_eq!(apply_patch(&bundle, &first, 0).unwrap().revision, 1);
+        // The next request names only the horizontal axis, and the vertical one it
+        // already settled on stays where it was — the way typing a new alignment
+        // into a desktop editor leaves the body anchor alone.
+        let second = shape_align(
+            &manifest.document_id,
+            indented.node_id.clone(),
+            indented.node_hash.clone(),
+            Some("distributed"),
+            None,
+            1,
+        );
+        assert_eq!(apply_patch(&bundle, &second, 1).unwrap().revision, 2);
+        let head = bundle.manifest().unwrap();
+        let html = slide_chunk_html(&bundle, &head, "ppt/slides/slide1.xml");
+        assert!(html.contains("data-hcd-horizontal=\"distributed\""));
+        assert!(html.contains("data-hcd-vertical=\"top\""));
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, "ppt/slides/slide1.xml");
+        assert!(slide.contains("algn=\"dist\""));
+        assert!(slide.contains("<a:bodyPr anchor=\"t\"/>"));
+        assert!(!slide.contains("algn=\"ctr\""));
+        assert!(!slide.contains("anchor=\"b\""));
+    }
+
+    #[test]
+    fn an_alignment_the_part_has_no_shape_or_no_paragraph_for_is_refused() {
+        // A text body written without its properties and without a single
+        // paragraph: neither half of an alignment has anywhere to go here.
+        let body = b"<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"4\" name=\"Body\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:txBody><a:lstStyle/></p:txBody></p:sp></p:spTree></p:cSld></p:sld>";
+        let mut missing = BTreeMap::new();
+        missing.insert(
+            9u32,
+            PptxShapeAlignPatch {
+                horizontal: Some("center".to_string()),
+                vertical: Some("bottom".to_string()),
+            },
+        );
+        let mut without_paragraphs = BTreeMap::new();
+        without_paragraphs.insert(
+            4u32,
+            PptxShapeAlignPatch {
+                horizontal: Some("center".to_string()),
+                vertical: None,
+            },
+        );
+        let mut without_body = BTreeMap::new();
+        without_body.insert(
+            4u32,
+            PptxShapeAlignPatch {
+                horizontal: None,
+                vertical: Some("top".to_string()),
+            },
+        );
+
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut body.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &missing,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("PPTX source shape 9 has no text body to anchor"),
+            "{error}"
+        );
+
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut body.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &without_paragraphs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("PPTX source shape 4 has no paragraph to align"),
+            "{error}"
+        );
+
+        // The shape the request names is in the page, but its body carries no
+        // properties element to put an anchor on.
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut body.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &without_body,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("PPTX source shape 4 has no text body to anchor"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_text_box_hcd_created_keeps_the_alignment_it_was_drawn_with() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("aligned-box.pptx");
+        create_aligned_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("align-created-box"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let chunk_id = descriptor.chunk_id.clone();
+        let slide_part = bundle.read_map(descriptor).unwrap().entries[0]
+            .source
+            .part
+            .clone();
+        let inserted = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_16.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "insert-then-align".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxTextInsert {
+                chunk_id,
+                slide_part: slide_part.clone(),
+                x_emu: 914_400,
+                y_emu: 5_000_000,
+                width_emu: 2_000_000,
+                height_emu: 457_200,
+                font_size_pt: 18.0,
+                text: "新框".to_string(),
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &inserted, 0).unwrap().revision, 1);
+        let box_node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "新框")
+            .unwrap();
+        let align = shape_align(
+            &manifest.document_id,
+            box_node.node_id.clone(),
+            box_node.node_hash.clone(),
+            Some("center"),
+            Some("bottom"),
+            1,
+        );
+        assert_eq!(apply_patch(&bundle, &align, 1).unwrap().revision, 2);
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, &slide_part);
+        assert!(
+            slide.contains("<a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" anchor=\"b\"/>"),
+            "{slide}"
+        );
+        assert!(slide.contains("<a:p><a:pPr algn=\"ctr\"/><a:r>"));
+        assert!(slide.contains("新框"));
     }
 
     struct EofTrackingReader {
