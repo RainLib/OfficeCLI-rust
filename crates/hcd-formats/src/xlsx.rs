@@ -5230,6 +5230,30 @@ pub(crate) fn export_xlsx(
         rewrite_workbook_recalculation(&source_workbook, File::create(&path)?)?;
         replacement_paths.insert("xl/workbook.xml".to_string(), path);
     }
+    let mut defined_names_shifted = false;
+    if !row_insertions.is_empty() || !column_shifts.is_empty() {
+        // A defined name that ranged over a worksheet the shift moved keeps naming
+        // the address it named, which no longer holds what the name says. The same
+        // count the revision check ran already proved every name in this workbook
+        // can follow the grid, so this only writes the ones that moved. It runs on
+        // whatever the workbook has become so far, and the tab renames that follow
+        // rewrite the names this pass just moved.
+        let names = GridShiftNames::new(
+            &workbook.sheets,
+            &added_parts,
+            &row_insertions,
+            &column_shifts,
+        );
+        let source_workbook =
+            current_control_part(&mut archive, &replacement_paths, "xl/workbook.xml")?;
+        let (shifted_workbook, shifted) = shift_grid_defined_names(&source_workbook, &names)?;
+        if shifted {
+            defined_names_shifted = true;
+            let path = scratch.path().join(safe_temp_name("shifted-workbook.xml"));
+            std::fs::write(&path, shifted_workbook)?;
+            replacement_paths.insert("xl/workbook.xml".to_string(), path);
+        }
+    }
     if !sheet_renames.is_empty() {
         let names: Vec<String> = archive
             .entries()
@@ -5554,6 +5578,9 @@ pub(crate) fn export_xlsx(
             }
             if removal_paths.contains("xl/calcChain.xml") {
                 items.push("xl/calcChain.xml was dropped because its entries number cells by tab position; the workbook recalculates the chain when opened".to_string());
+            }
+            if defined_names_shifted {
+                items.push("workbook defined names that addressed a shifted worksheet moved with it; a whole-row or whole-column address moves its endpoints instead of absorbing the inserted row or column, and the name keeps the tab spelling the source wrote".to_string());
             }
             items
         },
@@ -9088,47 +9115,14 @@ fn verify_grid_shift_source(
     let workbook_xml = archive
         .read_control_part("xl/workbook.xml", MAX_CONTROL_BYTES)
         .map_err(package_error)?;
-    let mut workbook_reader = Reader::from_reader(workbook_xml.as_slice());
-    let mut workbook_buffer = Vec::new();
-    let mut in_defined_name = false;
-    loop {
-        let event = workbook_reader
-            .read_event_into(&mut workbook_buffer)
-            .map_err(|error| {
-                HcdError::InvalidBundle(format!("invalid XLSX workbook XML: {error}"))
-            })?;
-        match event {
-            Event::Start(ref element) if local_name(element.name().as_ref()) == "definedName" => {
-                in_defined_name = true;
-            }
-            Event::Text(ref value) if in_defined_name => {
-                let reference = value.unescape().map_err(|error| {
-                    HcdError::InvalidBundle(format!("XLSX defined name: {error}"))
-                })?;
-                let target_names = workbook.sheets.iter().filter(|sheet| {
-                    row_insertions.contains_key(&sheet.part)
-                        || column_shifts.contains_key(&sheet.part)
-                });
-                if !reference.contains('!')
-                    || target_names.into_iter().any(|sheet| {
-                        reference.contains(&format!("{}!", sheet.name))
-                            || reference.contains(&format!("'{}'!", sheet.name.replace('\'', "''")))
-                    })
-                {
-                    return Err(HcdError::Unsupported(
-                        "XLSX grid shift cannot update a defined name on the edited sheet"
-                            .to_string(),
-                    ));
-                }
-            }
-            Event::End(ref element) if local_name(element.name().as_ref()) == "definedName" => {
-                in_defined_name = false;
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        workbook_buffer.clear();
-    }
+    // Reading the defined names is what says whether the shift can count them: the
+    // very pass the export runs, thrown away here so a name that cannot follow the
+    // grid stops the revision before a byte of the package is written. Names whose
+    // addresses the shift does move are rewritten by that pass; a name that belongs
+    // to another tab, or that holds no address at all, is left as the source wrote
+    // it and gets no further look.
+    let names = GridShiftNames::new(&workbook.sheets, added_parts, row_insertions, column_shifts);
+    shift_grid_defined_names(&workbook_xml, &names)?;
     for sheet in &workbook.sheets {
         let target =
             row_insertions.contains_key(&sheet.part) || column_shifts.contains_key(&sheet.part);
@@ -9442,34 +9436,15 @@ fn parse_xlsx_view_cell(reference: &str) -> Option<(u32, u32, bool, bool)> {
     Some((row, column, column_absolute, row_absolute))
 }
 
-fn shifted_xlsx_view_cell(
-    reference: &str,
-    row_shifts: &[RowShift],
-    column_shifts: &[ColumnShift],
+/// One column of a view address after the shift, spelled the way it arrived: a
+/// column that was written absolute stays absolute.
+fn shifted_xlsx_view_column(
+    column: u32,
+    absolute: bool,
+    shifts: &[ColumnShift],
 ) -> Result<String, HcdError> {
-    let (mut row, mut column, column_absolute, row_absolute) = parse_xlsx_view_cell(reference)
-        .ok_or_else(|| {
-            HcdError::Unsupported(format!("unsupported XLSX view reference {reference}"))
-        })?;
-    for shift in row_shifts {
-        match *shift {
-            RowShift::Insert(before) if row >= before => {
-                row = row
-                    .checked_add(1)
-                    .filter(|row| *row <= 1_048_576)
-                    .ok_or_else(|| {
-                        HcdError::Unsupported(
-                            "XLSX view row exceeds the worksheet limit".to_string(),
-                        )
-                    })?;
-            }
-            RowShift::Delete(at) if row > at => row -= 1,
-            // The selected row was removed. Its successor now occupies the same address.
-            RowShift::Delete(_) => {}
-            _ => {}
-        }
-    }
-    for shift in column_shifts {
+    let mut column = column;
+    for shift in shifts {
         match *shift {
             ColumnShift::Insert(before) if column >= before => {
                 column = column
@@ -9488,11 +9463,53 @@ fn shifted_xlsx_view_cell(
         }
     }
     Ok(format!(
-        "{}{}{}{}",
-        if column_absolute { "$" } else { "" },
-        column_name(column),
-        if row_absolute { "$" } else { "" },
-        row
+        "{}{}",
+        if absolute { "$" } else { "" },
+        column_name(column)
+    ))
+}
+
+/// One row of a view address after the shift, spelled the way it arrived.
+fn shifted_xlsx_view_row(
+    row: u32,
+    absolute: bool,
+    shifts: &[RowShift],
+) -> Result<String, HcdError> {
+    let mut row = row;
+    for shift in shifts {
+        match *shift {
+            RowShift::Insert(before) if row >= before => {
+                row = row
+                    .checked_add(1)
+                    .filter(|row| *row <= 1_048_576)
+                    .ok_or_else(|| {
+                        HcdError::Unsupported(
+                            "XLSX view row exceeds the worksheet limit".to_string(),
+                        )
+                    })?;
+            }
+            RowShift::Delete(at) if row > at => row -= 1,
+            // The selected row was removed. Its successor now occupies the same address.
+            RowShift::Delete(_) => {}
+            _ => {}
+        }
+    }
+    Ok(format!("{}{}", if absolute { "$" } else { "" }, row))
+}
+
+fn shifted_xlsx_view_cell(
+    reference: &str,
+    row_shifts: &[RowShift],
+    column_shifts: &[ColumnShift],
+) -> Result<String, HcdError> {
+    let (row, column, column_absolute, row_absolute) =
+        parse_xlsx_view_cell(reference).ok_or_else(|| {
+            HcdError::Unsupported(format!("unsupported XLSX view reference {reference}"))
+        })?;
+    Ok(format!(
+        "{}{}",
+        shifted_xlsx_view_column(column, column_absolute, column_shifts)?,
+        shifted_xlsx_view_row(row, row_absolute, row_shifts)?
     ))
 }
 
@@ -9525,6 +9542,457 @@ fn shifted_xlsx_view_reference(
         )));
     }
     Ok(rewritten.join(" "))
+}
+
+/// Half of an address a workbook defined name spells out. A cell moves on both
+/// axes of the worksheet it names, a whole column only sideways, a whole row only
+/// up or down.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefinedNameAxis {
+    Cells,
+    Columns,
+    Rows,
+}
+
+/// One address inside a defined name, kept as the byte spans of its endpoints so
+/// everything else the workbook wrote for it — the tab spelling, the separators,
+/// the `$` markers — is copied rather than re-invented.
+struct DefinedNameArea {
+    /// Tab the address names, with the quotes taken off. `None` when the name
+    /// leaves the address to the worksheet the name itself is scoped to.
+    sheet: Option<String>,
+    /// Byte spans of the endpoints in the value. Everything between them and after
+    /// the last of them is copied rather than re-spelled.
+    first: (usize, usize),
+    second: Option<(usize, usize)>,
+    axis: DefinedNameAxis,
+}
+
+/// Column number a defined name spells with letters alone, `A` being the first.
+fn xlsx_column_index(letters: &str) -> Option<u32> {
+    let mut column = 0u32;
+    for letter in letters.chars() {
+        if !letter.is_ascii_alphabetic() {
+            return None;
+        }
+        let digit = letter.to_ascii_uppercase() as u32 - 'A' as u32 + 1;
+        column = column.checked_mul(26)?.checked_add(digit)?;
+    }
+    (!letters.is_empty() && column <= 16_384).then_some(column)
+}
+
+/// Skip what separates two addresses in a defined name.
+fn skip_defined_name_separators(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while matches!(
+        bytes.get(index),
+        Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b',')
+    ) {
+        index += 1;
+    }
+    index
+}
+
+/// One endpoint of an address: `$?C$?R`, `$?C`, or `$?R`. Gives back the axis it
+/// addresses and where its text stops.
+fn parse_defined_name_endpoint(value: &[u8], start: usize) -> Option<(DefinedNameAxis, usize)> {
+    let mut index = if value.get(start) == Some(&b'$') {
+        start + 1
+    } else {
+        start
+    };
+    let letters_start = index;
+    while value
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_alphabetic())
+    {
+        index += 1;
+    }
+    if index > letters_start {
+        xlsx_column_index(std::str::from_utf8(&value[letters_start..index]).ok()?)?;
+        let mut cursor = index;
+        if value.get(cursor) == Some(&b'$') {
+            cursor += 1;
+        }
+        let digits_start = cursor;
+        while value.get(cursor).is_some_and(|byte| byte.is_ascii_digit()) {
+            cursor += 1;
+        }
+        if cursor == digits_start {
+            return Some((DefinedNameAxis::Columns, index));
+        }
+        let row: u32 = std::str::from_utf8(&value[digits_start..cursor])
+            .ok()?
+            .parse()
+            .ok()?;
+        if row == 0 || row > 1_048_576 {
+            return None;
+        }
+        return Some((DefinedNameAxis::Cells, cursor));
+    }
+    let digits_start = index;
+    while value.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+        index += 1;
+    }
+    if index == digits_start {
+        return None;
+    }
+    let row: u32 = std::str::from_utf8(&value[digits_start..index])
+        .ok()?
+        .parse()
+        .ok()?;
+    if row == 0 || row > 1_048_576 {
+        return None;
+    }
+    Some((DefinedNameAxis::Rows, index))
+}
+
+/// The addresses of a defined name written as a plain list: one area, or several
+/// separated by spaces or commas, each optionally named by a tab and each either
+/// one cell or two endpoints of the same axis. `None` when the value is anything
+/// else — a formula, a function, a reference into another workbook, a lone number
+/// the name holds as a constant — because those cannot be counted endpoint by
+/// endpoint without reading the expression.
+fn parse_defined_name_areas(value: &str) -> Option<Vec<DefinedNameArea>> {
+    let bytes = value.as_bytes();
+    let mut areas = Vec::new();
+    let mut index = skip_defined_name_separators(bytes, 0);
+    if index >= bytes.len() {
+        return None;
+    }
+    loop {
+        let mut sheet = None;
+        if bytes.get(index) == Some(&b'\'') {
+            let mut cursor = index + 1;
+            let mut spelling = Vec::new();
+            loop {
+                let byte = *bytes.get(cursor)?;
+                cursor += 1;
+                if byte == b'\'' {
+                    if bytes.get(cursor) == Some(&b'\'') {
+                        spelling.push(b'\'');
+                        cursor += 1;
+                        continue;
+                    }
+                    break;
+                }
+                spelling.push(byte);
+            }
+            if bytes.get(cursor) != Some(&b'!') {
+                return None;
+            }
+            sheet = Some(String::from_utf8(spelling).ok()?);
+            index = cursor + 1;
+        } else {
+            let start = index;
+            while bytes.get(index).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'.' || *byte >= 0x80
+            }) {
+                index += 1;
+            }
+            if index > start && bytes.get(index) == Some(&b'!') {
+                sheet = Some(value[start..index].to_string());
+                index += 1;
+            } else {
+                // Not a tab after all: the run was the address itself, or the start
+                // of something this list does not hold.
+                index = start;
+            }
+        }
+        let (axis, stop) = parse_defined_name_endpoint(bytes, index)?;
+        let first = (index, stop);
+        index = stop;
+        let mut second = None;
+        if bytes.get(index) == Some(&b':') {
+            let (second_axis, second_stop) = parse_defined_name_endpoint(bytes, index + 1)?;
+            if second_axis != axis {
+                return None;
+            }
+            second = Some((index + 1, second_stop));
+            index = second_stop;
+        }
+        // A row or a column written on its own reads the same as a number the name
+        // holds, so only a cell is trusted standing alone.
+        if axis != DefinedNameAxis::Cells && second.is_none() {
+            return None;
+        }
+        let end = index;
+        areas.push(DefinedNameArea {
+            sheet,
+            first,
+            second,
+            axis,
+        });
+        index = skip_defined_name_separators(bytes, end);
+        if index >= bytes.len() {
+            break;
+        }
+    }
+    (!areas.is_empty()).then_some(areas)
+}
+
+/// Move one endpoint of a defined-name address along with the worksheet it names,
+/// keeping the `$` markers the workbook spelled.
+fn shift_defined_name_endpoint(
+    text: &str,
+    axis: DefinedNameAxis,
+    rows: &[RowShift],
+    columns: &[ColumnShift],
+) -> Result<String, HcdError> {
+    if rows.is_empty() && columns.is_empty() {
+        return Ok(text.to_string());
+    }
+    match axis {
+        DefinedNameAxis::Cells => shifted_xlsx_view_cell(text, rows, columns),
+        DefinedNameAxis::Columns => {
+            let absolute = text.starts_with('$');
+            let column = xlsx_column_index(text.trim_start_matches('$')).ok_or_else(|| {
+                HcdError::Unsupported(format!("unsupported XLSX defined name column {text}"))
+            })?;
+            shifted_xlsx_view_column(column, absolute, columns)
+        }
+        DefinedNameAxis::Rows => {
+            let absolute = text.starts_with('$');
+            let row: u32 = text.trim_start_matches('$').parse().map_err(|_| {
+                HcdError::Unsupported(format!("unsupported XLSX defined name row {text}"))
+            })?;
+            shifted_xlsx_view_row(row, absolute, rows)
+        }
+    }
+}
+
+/// The worksheets a grid shift moves, spelled the way the workbook spells them.
+struct GridShiftNames<'a> {
+    /// The tabs the source workbook wrote, in that order: `localSheetId` counts
+    /// these, and a tab HCD created is not one of them.
+    sheets: Vec<&'a SheetPart>,
+    row_insertions: &'a HashMap<String, Vec<RowShift>>,
+    column_shifts: &'a HashMap<String, Vec<ColumnShift>>,
+}
+
+impl<'a> GridShiftNames<'a> {
+    fn new(
+        sheets: &'a [SheetPart],
+        added_parts: &BTreeSet<String>,
+        row_insertions: &'a HashMap<String, Vec<RowShift>>,
+        column_shifts: &'a HashMap<String, Vec<ColumnShift>>,
+    ) -> Self {
+        Self {
+            sheets: sheets
+                .iter()
+                .filter(|sheet| !added_parts.contains(&sheet.part))
+                .collect(),
+            row_insertions,
+            column_shifts,
+        }
+    }
+
+    /// The worksheet a tab spelling names, first by the workbook's own spelling and
+    /// then case-insensitively the way a formula reads tab names.
+    fn by_tab_name(&self, spelling: &str) -> Option<&'a SheetPart> {
+        self.sheets
+            .iter()
+            .find(|sheet| sheet.name == spelling)
+            .or_else(|| {
+                self.sheets
+                    .iter()
+                    .find(|sheet| sheet.name.to_lowercase() == spelling.to_lowercase())
+            })
+            .copied()
+    }
+
+    fn shifts(&self, part: &str) -> (&'a [RowShift], &'a [ColumnShift]) {
+        (
+            self.row_insertions
+                .get(part)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+            self.column_shifts
+                .get(part)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )
+    }
+
+    fn moves(&self, part: &str) -> bool {
+        let (rows, columns) = self.shifts(part);
+        !rows.is_empty() || !columns.is_empty()
+    }
+
+    /// Whether the workbook's own tab names appear in a value this counter could not
+    /// read, which is what used to stop the whole export on any name at all.
+    fn names_a_moved_sheet(&self, value: &str) -> bool {
+        self.sheets.iter().any(|sheet| {
+            self.moves(&sheet.part)
+                && (value.contains(&format!("{}!", sheet.name))
+                    || value.contains(&format!("'{}'!", sheet.name.replace('\'', "''"))))
+        })
+    }
+}
+
+/// What a defined name holds before its closing tag is seen: the decoded text, the
+/// events the workbook wrote for it, and the scope its address falls back to.
+struct PendingDefinedName {
+    label: String,
+    scoped: Option<usize>,
+    text: String,
+    originals: Vec<Event<'static>>,
+    nested: bool,
+}
+
+fn refused_defined_name(label: &str) -> HcdError {
+    HcdError::Unsupported(format!(
+        "XLSX grid shift cannot update the defined name {label}"
+    ))
+}
+
+/// Move the addresses one defined name spells out along with the grid they point
+/// at. `Ok(Some(_))` carries the rewritten value, `Ok(None)` leaves the name as the
+/// workbook wrote it, and `Err` stops the export on a name whose addresses a shift
+/// would move in a shape this counter cannot read — the same refusal the whole list
+/// used to be, narrowed to the names that really cannot follow.
+fn shift_defined_name_value(
+    value: &str,
+    scoped: Option<&SheetPart>,
+    names: &GridShiftNames<'_>,
+    label: &str,
+) -> Result<Option<String>, HcdError> {
+    let Some(areas) = parse_defined_name_areas(value) else {
+        if !value.contains('!') || names.names_a_moved_sheet(value) {
+            return Err(refused_defined_name(label));
+        }
+        return Ok(None);
+    };
+    let mut rewritten = String::new();
+    let mut cursor = 0usize;
+    let mut changed = false;
+    for area in &areas {
+        let owner = match area.sheet.as_deref() {
+            Some(spelling) => names.by_tab_name(spelling),
+            None => scoped,
+        };
+        let (rows, columns) = match owner {
+            Some(sheet) => names.shifts(&sheet.part),
+            // A tab the workbook never named — one this history deleted, one an
+            // add-in carries — is not a worksheet the shift moves.
+            None if area.sheet.is_some() => (&[][..], &[][..]),
+            // An address with no tab and no scope belongs to whichever sheet reads
+            // it, so no single worksheet's grid can be counted against it.
+            None => return Err(refused_defined_name(label)),
+        };
+        for span in [Some(area.first), area.second].into_iter().flatten() {
+            let text = &value[span.0..span.1];
+            let moved = shift_defined_name_endpoint(text, area.axis, rows, columns)?;
+            rewritten.push_str(&value[cursor..span.0]);
+            rewritten.push_str(&moved);
+            cursor = span.1;
+            changed |= moved != text;
+        }
+    }
+    rewritten.push_str(&value[cursor..]);
+    Ok(changed.then_some(rewritten))
+}
+
+/// Rewrite `xl/workbook.xml` so the defined names that ranged over a worksheet the
+/// grid shift moved carry the addresses that moved with it. Returns the new bytes
+/// and whether any name changed, so a workbook whose names the shift never touches
+/// keeps the bytes the source wrote.
+fn shift_grid_defined_names(
+    source: &[u8],
+    names: &GridShiftNames<'_>,
+) -> Result<(Vec<u8>, bool), HcdError> {
+    let mut reader = Reader::from_reader(source);
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut changed = false;
+    let mut pending: Option<PendingDefinedName> = None;
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX workbook XML: {error}"))
+        })?;
+        match event {
+            Event::Start(ref element) if local_name(element.name().as_ref()) == "definedName" => {
+                if pending.is_some() {
+                    return Err(HcdError::Unsupported(
+                        "XLSX grid shift cannot update a defined name written inside another"
+                            .to_string(),
+                    ));
+                }
+                let label = attribute(element, "name").unwrap_or_else(|| "unnamed".to_string());
+                let scoped = checked_attribute(element, "localSheetId")?
+                    .and_then(|value| value.parse::<usize>().ok());
+                pending = Some(PendingDefinedName {
+                    label,
+                    scoped,
+                    text: String::new(),
+                    originals: Vec::new(),
+                    nested: false,
+                });
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Text(ref text) if pending.is_some() => {
+                let decoded = text.unescape().map_err(|error| {
+                    HcdError::InvalidBundle(format!("XLSX defined name: {error}"))
+                })?;
+                let name = pending.as_mut().expect("pending defined name");
+                name.text.push_str(&decoded);
+                let owned = text.clone().into_owned();
+                name.originals.push(Event::Text(owned));
+            }
+            Event::Start(_) | Event::Empty(_) if pending.is_some() => {
+                // A defined name writes its value as text. Something nested inside
+                // it is a shape this counter will not read.
+                pending.as_mut().expect("pending defined name").nested = true;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::End(ref element)
+                if local_name(element.name().as_ref()) == "definedName" && pending.is_some() =>
+            {
+                let name = pending.take().expect("pending defined name");
+                let shifted = if name.nested {
+                    if !name.text.contains('!') || names.names_a_moved_sheet(&name.text) {
+                        return Err(refused_defined_name(&name.label));
+                    }
+                    None
+                } else {
+                    let scoped = name
+                        .scoped
+                        .and_then(|position| names.sheets.get(position))
+                        .copied();
+                    shift_defined_name_value(&name.text, scoped, names, &name.label)?
+                };
+                match shifted {
+                    Some(value) => {
+                        changed = true;
+                        // The value arrives unescaped, so only the characters an
+                        // element cannot hold raw are put back. A name's tab
+                        // spelling keeps its own apostrophes, the way the
+                        // spreadsheet wrote them.
+                        writer.write_event(Event::Text(BytesText::from_escaped(escape_text(
+                            &value,
+                        ))))?;
+                    }
+                    None => {
+                        for original in name.originals {
+                            writer.write_event(original)?;
+                        }
+                    }
+                }
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Eof => break,
+            other => writer.write_event(other.into_owned())?,
+        }
+        buffer.clear();
+    }
+    if let Some(name) = pending {
+        return Err(HcdError::InvalidBundle(format!(
+            "XLSX defined name {} is not closed",
+            name.label
+        )));
+    }
+    Ok((writer.into_inner(), changed))
 }
 
 /// Elements that must follow a worksheet's window list, so the first of them is
@@ -13327,6 +13795,401 @@ mod tests {
             &[]
         )
         .is_err());
+    }
+
+    /// Three tabs, the middle one the grid shift moves by a row and a column.
+    struct NamedRangeShift {
+        sheets: Vec<SheetPart>,
+        rows: HashMap<String, Vec<RowShift>>,
+        columns: HashMap<String, Vec<ColumnShift>>,
+    }
+
+    fn named_range_shift() -> NamedRangeShift {
+        NamedRangeShift {
+            sheets: vec![
+                SheetPart {
+                    name: "Plain".to_string(),
+                    part: "xl/worksheets/sheet1.xml".to_string(),
+                    index: 0,
+                    state: "visible",
+                },
+                SheetPart {
+                    name: "Data".to_string(),
+                    part: "xl/worksheets/sheet2.xml".to_string(),
+                    index: 1,
+                    state: "visible",
+                },
+                SheetPart {
+                    name: "Sales Notes".to_string(),
+                    part: "xl/worksheets/sheet3.xml".to_string(),
+                    index: 2,
+                    state: "hidden",
+                },
+            ],
+            rows: HashMap::from([(
+                "xl/worksheets/sheet2.xml".to_string(),
+                vec![RowShift::Insert(3)],
+            )]),
+            columns: HashMap::from([(
+                "xl/worksheets/sheet2.xml".to_string(),
+                vec![ColumnShift::Insert(2)],
+            )]),
+        }
+    }
+
+    #[test]
+    fn a_defined_name_address_moves_with_the_grid_its_tab_shifts() {
+        let shift = named_range_shift();
+        let (sheets, rows, columns) = (&shift.sheets, &shift.rows, &shift.columns);
+        let names = GridShiftNames::new(sheets, &BTreeSet::new(), rows, columns);
+        let data = sheets.get(1);
+        let moved = |value: &str, scoped: Option<&SheetPart>| {
+            shift_defined_name_value(value, scoped, &names, "Probe")
+                .map(|changed| changed.unwrap_or_else(|| value.to_string()))
+        };
+        // The tab spelling, the separators and the `$` markers are the workbook's
+        // own; only the counted endpoints change.
+        assert_eq!(moved("Data!$A$1:$D$10", None).unwrap(), "Data!$A$1:$E$11");
+        assert_eq!(
+            moved("'Data'!$A$1:$D$10", None).unwrap(),
+            "'Data'!$A$1:$E$11"
+        );
+        assert_eq!(moved("data!$B$2", None).unwrap(), "data!$C$2");
+        assert_eq!(
+            moved("Data!$A$1 'Data'!$E$5", None).unwrap(),
+            "Data!$A$1 'Data'!$F$6"
+        );
+        // A list can spell its tab once and leave the rest to the scope the name
+        // carries, so each area is resolved on its own.
+        assert_eq!(moved("Data!$A$1,$B$2", data).unwrap(), "Data!$A$1,$C$2");
+        // A whole column moves sideways and a whole row moves up or down, each on
+        // its own axis: neither picks up the other half of the shift.
+        assert_eq!(moved("Data!$A:$B", None).unwrap(), "Data!$A:$C");
+        assert_eq!(moved("'Data'!$3:$9", None).unwrap(), "'Data'!$4:$10");
+        assert_eq!(moved("'Data'!$1:$2", None).unwrap(), "'Data'!$1:$2");
+        // An address with no tab belongs to the sheet the name is scoped to.
+        assert_eq!(moved("$B$4:$C$4", data).unwrap(), "$C$5:$D$5");
+        assert_eq!(moved("$B$4:$C$4", sheets.first()).unwrap(), "$B$4:$C$4");
+        // Nothing else in the workbook is rewritten: a tab the shift leaves alone,
+        // and a tab the workbook never named, keep the bytes they arrived with.
+        for untouched in [
+            "Plain!$A$1:$D$10",
+            "'Sales Notes'!$A$1",
+            "Missing!$A$1:$D$10",
+            "'[1]Data'!$A$1:$D$10",
+        ] {
+            assert_eq!(moved(untouched, None).unwrap(), untouched);
+            assert_eq!(
+                shift_defined_name_value(untouched, None, &names, "Probe").unwrap(),
+                None
+            );
+        }
+        // What the counter cannot read still stops the export, and says which name.
+        for refused in ["SUM(Data!$A$1:$A$5)", "$B$4:$C$4", "42", "Data!$XFD$1"] {
+            assert!(
+                shift_defined_name_value(refused, None, &names, "Total").is_err(),
+                "{refused}"
+            );
+        }
+        assert!(
+            shift_defined_name_value("$B$4:$C$4", None, &names, "Global")
+                .unwrap_err()
+                .to_string()
+                .contains("XLSX grid shift cannot update the defined name Global")
+        );
+        assert!(
+            shift_defined_name_value("SUM(Data!$A$1:$A$5)", None, &names, "Total")
+                .unwrap_err()
+                .to_string()
+                .contains("the defined name Total")
+        );
+        assert!(
+            shift_defined_name_value("Data!$XFD$1", None, &names, "Wide")
+                .unwrap_err()
+                .to_string()
+                .contains("XLSX view column exceeds the worksheet limit")
+        );
+        // A formula that names only a worksheet the shift leaves alone is none of
+        // its business, exactly as before the counter existed.
+        assert_eq!(
+            shift_defined_name_value("SUM(Plain!$A$1:$A$5)", None, &names, "Other").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_workbook_keeps_the_names_a_grid_shift_never_moves() {
+        let shift = named_range_shift();
+        let (sheets, rows, columns) = (&shift.sheets, &shift.rows, &shift.columns);
+        let names = GridShiftNames::new(sheets, &BTreeSet::new(), rows, columns);
+        let workbook = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Data" sheetId="2" r:id="rId2"/><sheet name="Sales Notes" sheetId="3" r:id="rId3"/></sheets><definedNames><definedName name="Report">Plain!$A$1</definedName><definedName name="_xlnm.Print_Area" localSheetId="1">'Data'!$A$1:$D$10</definedName><definedName name="Gap" localSheetId="1">$B$4:$C$4</definedName><definedName name="Other">SUM(Notes!$A$1)</definedName><definedName name="Tail" localSheetId="2">'Sales Notes'!$A$1</definedName></definedNames></workbook>"#;
+        let (rewritten, changed) = shift_grid_defined_names(workbook.as_bytes(), &names).unwrap();
+        let rewritten = String::from_utf8(rewritten).unwrap();
+        assert!(changed);
+        assert!(
+            rewritten
+                .contains(r#"<definedName name="_xlnm.Print_Area" localSheetId="1">'Data'!$A$1:$E$11</definedName>"#),
+            "{rewritten}"
+        );
+        assert!(rewritten
+            .contains(r#"<definedName name="Gap" localSheetId="1">$C$5:$D$5</definedName>"#));
+        for kept in [
+            r#"<definedName name="Report">Plain!$A$1</definedName>"#,
+            r#"<definedName name="Other">SUM(Notes!$A$1)</definedName>"#,
+            r#"<definedName name="Tail" localSheetId="2">'Sales Notes'!$A$1</definedName>"#,
+            r#"<sheet name="Plain" sheetId="1" r:id="rId1"/>"#,
+        ] {
+            assert!(rewritten.contains(kept), "{kept}\n{rewritten}");
+        }
+        // A shift that moves no name leaves the control part exactly as it arrived:
+        // the one tab it does move holds no address here, and `added` is a tab the
+        // source workbook never wrote, so its `localSheetId` still counts the rest.
+        let no_rows: HashMap<String, Vec<RowShift>> = HashMap::new();
+        let idle_columns = HashMap::from([(
+            "xl/worksheets/sheet1.xml".to_string(),
+            vec![ColumnShift::Insert(9)],
+        )]);
+        let added = BTreeSet::from(["xl/worksheets/sheet4.xml".to_string()]);
+        let idle = GridShiftNames::new(sheets, &added, &no_rows, &idle_columns);
+        let (copied, changed) = shift_grid_defined_names(workbook.as_bytes(), &idle).unwrap();
+        assert!(!changed);
+        assert_eq!(copied, workbook.as_bytes());
+        // A name the counter cannot read is refused while the workbook is still
+        // only being read, with its own name in the message.
+        let blocked = workbook.replace(
+            "<definedName name=\"Report\">Plain!$A$1</definedName>",
+            "<definedName name=\"Total\">SUM(Data!$A$1:$A$2)</definedName>",
+        );
+        assert!(shift_grid_defined_names(blocked.as_bytes(), &names)
+            .unwrap_err()
+            .to_string()
+            .contains("the defined name Total"));
+    }
+
+    #[test]
+    fn a_grid_shift_moves_the_defined_names_that_ranged_over_the_sheet() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("named.xlsx");
+        let bundle_path = temp.path().join("named.hcd");
+        create_defined_name_fixture(&source, "");
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("named-grid-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle
+            .read_index_page(&imported, 0)
+            .unwrap()
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_name == "Data")
+            })
+            .and_then(|chunk| chunk.grid.as_ref())
+            .map(|grid| grid.sheet_id.clone())
+            .unwrap();
+        // A revision that moves no grid writes no name: the control part leaves the
+        // export exactly as the workbook wrote it.
+        let head = temp.path().join("named-head.xlsx");
+        export_xlsx(&bundle, &source, &head, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&head, "xl/workbook.xml"),
+            read_zip_entry(&source, "xl/workbook.xml")
+        );
+        // Each revision is exported on its own so the names read what the whole
+        // history of shifts adds up to, not one shift at a time.
+        let history = [
+            (
+                "row",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 3,
+                },
+                [
+                    ("_xlnm.Print_Area", "'Data'!$A$1:$D$11"),
+                    ("_xlnm.Print_Titles", "'Data'!$1:$2"),
+                    ("Gap", "$B$5:$C$5"),
+                    ("Wide", "'Data'!$A:$B 'Data'!$E$6"),
+                ]
+                .into_iter(),
+            ),
+            (
+                "column",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
+                PatchOperation::XlsxColumnInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_column: 2,
+                },
+                [
+                    ("_xlnm.Print_Area", "'Data'!$A$1:$E$11"),
+                    ("_xlnm.Print_Titles", "'Data'!$1:$2"),
+                    ("Gap", "$C$5:$D$5"),
+                    ("Wide", "'Data'!$A:$C 'Data'!$F$6"),
+                ]
+                .into_iter(),
+            ),
+            (
+                "undo",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 3,
+                },
+                [
+                    ("_xlnm.Print_Area", "'Data'!$A$1:$E$10"),
+                    ("_xlnm.Print_Titles", "'Data'!$1:$2"),
+                    ("Gap", "$C$4:$D$4"),
+                    ("Wide", "'Data'!$A:$C 'Data'!$F$5"),
+                ]
+                .into_iter(),
+            ),
+        ];
+        for (index, (kind, schema, operation, expectations)) in history.into_iter().enumerate() {
+            let revision = index as u64;
+            assert_eq!(
+                hcd_core::apply_patch(
+                    &bundle,
+                    &PatchBatch {
+                        schema_version: schema.to_string(),
+                        document_id: "named-grid-doc".to_string(),
+                        patch_id: format!("named-shift-{kind}"),
+                        base_revision: revision,
+                        actor: BTreeMap::new(),
+                        operations: vec![operation],
+                        metadata: BTreeMap::new(),
+                    },
+                    revision,
+                )
+                .unwrap()
+                .revision,
+                revision + 1
+            );
+            let exported = temp.path().join(format!("named-{kind}.xlsx"));
+            let report = export_xlsx(
+                &bundle,
+                &source,
+                &exported,
+                &ExportOptions {
+                    revision: Some(revision + 1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let workbook = read_zip_entry(&exported, "xl/workbook.xml");
+            for (label, address) in expectations {
+                assert!(
+                    workbook.contains(&format!("name=\"{label}\" localSheetId=\"1\">{address}<")),
+                    "{kind}: {label} -> {address}\n{workbook}"
+                );
+            }
+            // Names that range over tabs the shift never touches keep the address
+            // the workbook wrote, quotes and all.
+            for kept in [
+                r#"<definedName name="Report">Plain!$A$1</definedName>"#,
+                r#"<definedName name="Other">SUM(Plain!$A$1:$A$2)</definedName>"#,
+                r#"<definedName name="Tail" localSheetId="2">'Sales Notes'!$A$1</definedName>"#,
+            ] {
+                assert!(workbook.contains(kept), "{kind}: {kept}\n{workbook}");
+            }
+            // The workbook is the only part this touches: the tab the names stand on
+            // moves, the untouched one does not.
+            assert_eq!(
+                read_zip_entry(&exported, "xl/worksheets/sheet1.xml"),
+                read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+            );
+            assert_eq!(
+                read_zip_entry(&exported, "[Content_Types].xml"),
+                read_zip_entry(&source, "[Content_Types].xml")
+            );
+            assert!(
+                report.flattened.iter().any(|item| item.contains(
+                    "workbook defined names that addressed a shifted worksheet moved with it"
+                )),
+                "{kind}: {:?}",
+                report.flattened
+            );
+        }
+    }
+
+    #[test]
+    fn a_defined_name_the_shift_cannot_count_still_stops_the_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("named-blocked.xlsx");
+        let bundle_path = temp.path().join("named-blocked.hcd");
+        create_defined_name_fixture(
+            &source,
+            "<definedName name=\"Total\">SUM(Data!$A$1:$A$2)</definedName>",
+        );
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("named-blocked-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle
+            .read_index_page(&imported, 0)
+            .unwrap()
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_name == "Data")
+            })
+            .and_then(|chunk| chunk.grid.as_ref())
+            .map(|grid| grid.sheet_id.clone())
+            .unwrap();
+        // Nothing moved is nothing guessed: the workbook exports whole until the
+        // shift asks the counter to move a name it cannot read.
+        let head = temp.path().join("blocked-head.xlsx");
+        export_xlsx(&bundle, &source, &head, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&head, "xl/workbook.xml"),
+            read_zip_entry(&source, "xl/workbook.xml")
+        );
+        assert_eq!(
+            hcd_core::apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+                    document_id: "named-blocked-doc".to_string(),
+                    patch_id: "blocked-shift".to_string(),
+                    base_revision: 0,
+                    actor: BTreeMap::new(),
+                    operations: vec![PatchOperation::XlsxRowInsert {
+                        sheet_id,
+                        before_row: 3,
+                    }],
+                    metadata: BTreeMap::new(),
+                },
+                0,
+            )
+            .unwrap()
+            .revision,
+            1
+        );
+        let blocked = temp.path().join("blocked-shifted.xlsx");
+        let error = export_xlsx(&bundle, &source, &blocked, &ExportOptions::default()).unwrap_err();
+        assert!(
+            matches!(error, hcd_core::HcdError::Unsupported(_)),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("XLSX grid shift cannot update the defined name Total"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -17749,6 +18612,57 @@ mod tests {
             (
                 "xl/worksheets/sheet2.xml",
                 r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>Plain!A1+1</f><v>3</v></c></row></sheetData><hyperlinks><hyperlink ref="B1" location="Plain!A1" display="Jump"/></hyperlinks></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Three worksheets whose tabs are addressed by the names a real workbook
+    /// carries: a print area and print titles scoped to the shifted tab, a named
+    /// range that leaves its tab unquoted, a two-area name, and names that belong to
+    /// the other two tabs. `extra` appends one more name, used to hold a shape the
+    /// counter cannot read.
+    fn create_defined_name_fixture(path: &Path, extra: &str) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let rows = (1..=12)
+            .map(|row| format!("<row r=\"{row}\"><c r=\"A{row}\"><v>{row}</v></c></row>"))
+            .collect::<Vec<String>>()
+            .join("");
+        let data = format!(
+            r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D12"/><sheetData>{rows}</sheetData><mergeCells count="1"><mergeCell ref="B4:C4"/></mergeCells></worksheet>"#
+        );
+        let workbook = format!(
+            r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plain" sheetId="1" r:id="rId1"/><sheet name="Data" sheetId="2" r:id="rId2"/><sheet name="Sales Notes" sheetId="3" r:id="rId3"/></sheets><definedNames><definedName name="Report">Plain!$A$1</definedName><definedName name="_xlnm.Print_Area" localSheetId="1">'Data'!$A$1:$D$10</definedName><definedName name="_xlnm.Print_Titles" localSheetId="1">'Data'!$1:$2</definedName><definedName name="Gap" localSheetId="1">$B$4:$C$4</definedName><definedName name="Wide" localSheetId="1">'Data'!$A:$B 'Data'!$E$5</definedName><definedName name="Other">SUM(Plain!$A$1:$A$2)</definedName><definedName name="Tail" localSheetId="2">'Sales Notes'!$A$1</definedName>{extra}</definedNames></workbook>"#
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            ("xl/workbook.xml", workbook.as_str()),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Left</t></is></c><c r="B1"><v>4</v></c></row><row r="2"><c r="A2"><v>7</v></c><c r="B2"><v>9</v></c></row></sheetData></worksheet>"#,
+            ),
+            ("xl/worksheets/sheet2.xml", data.as_str()),
+            (
+                "xl/worksheets/sheet3.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Tail</t></is></c></row></sheetData></worksheet>"#,
             ),
         ];
         for (name, contents) in parts {
