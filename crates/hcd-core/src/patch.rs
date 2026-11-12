@@ -10425,7 +10425,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn an_added_slide_never_takes_a_part_name_the_deck_already_spent() {
         let temp = tempfile::tempdir().unwrap();
         let bundle = slide_deck(&temp.path().join("bundle"), 3);
@@ -10483,6 +10482,7 @@ mod tests {
         assert!(crate::validate_bundle(&bundle).unwrap().valid);
     }
 
+    #[test]
     fn pptx_slide_deletion_needs_the_page_version_it_addresses() {
         let temp = tempfile::tempdir().unwrap();
         let bundle = slide_deck(&temp.path().join("bundle"), 2);
