@@ -57,6 +57,9 @@ export function ThemesView({ onNavigate }: { onNavigate: (route: string) => void
     refs: ThemeDocumentRef[];
   } | null>(null);
   const [reachBusy, setReachBusy] = React.useState(false);
+  const [target, setTarget] = React.useState("");
+  const [moved, setMoved] = React.useState<{ documentId: string; status: string }[]>([]);
+  const [moving, setMoving] = React.useState(false);
 
   const retiredSet = React.useMemo(() => new Set(retired), [retired]);
 
@@ -77,6 +80,8 @@ export function ThemesView({ onNavigate }: { onNavigate: (route: string) => void
 
   const showReachability = async (theme: ThemeRevision) => {
     setReachBusy(true);
+    setMoved([]);
+    setTarget("");
     try {
       const refs = await api.themeDocuments(theme.themeRevisionId);
       setReach({ theme, refs });
@@ -85,6 +90,85 @@ export function ThemesView({ onNavigate }: { onNavigate: (route: string) => void
     } finally {
       setReachBusy(false);
     }
+  };
+
+  // Only a document whose head pins this theme can move off it. One that shows up
+  // through a historical revision is on something else now, and "retarget" would
+  // quietly pin a theme it had walked away from.
+  const movable = React.useMemo(
+    () => (reach?.refs ?? []).filter((ref) => ref.headPinned),
+    [reach],
+  );
+
+  const retargetable = React.useMemo(
+    () =>
+      themes.filter(
+        (theme) =>
+          theme.themeRevisionId !== reach?.theme.themeRevisionId &&
+          !retiredSet.has(theme.themeRevisionId),
+      ),
+    [themes, retiredSet, reach],
+  );
+
+  const runRetarget = () => {
+    if (!reach || !target || movable.length === 0) return;
+    const chosen = retargetable.find((theme) => theme.themeRevisionId === target);
+    confirm({
+      title: `批量换主题`,
+      destructive: true,
+      confirmLabel: `把 ${movable.length} 个文档换到 ${chosen?.name ?? target}`,
+      description: (
+        <p>
+          逐个文档调用 <code className="font-mono">PUT /v1/documents/&lt;id&gt;/theme</code>，
+          每个文档写一次自己的内容修订：{movable.length} 个文档就是 {movable.length} 次修订。
+          中途失败只影响那一个文档，结果按文档列出来，可以只重试它。
+        </p>
+      ),
+      onConfirm: async () => {
+        setMoving(true);
+        // The whole list is written up front, so the operator sees what is still
+        // queued while the run works through it one document at a time.
+        const results = movable.map((ref) => ({
+          documentId: ref.documentId,
+          status: "排队中",
+        }));
+        setMoved([...results]);
+        let ok = 0;
+        for (let index = 0; index < movable.length; index += 1) {
+          const ref = movable[index];
+          try {
+            const result = await api.pinDocumentTheme(ref.documentId, target);
+            ok += 1;
+            results[index] = { documentId: ref.documentId, status: `已换到 r${result.revision}` };
+          } catch (cause) {
+            results[index] = {
+              documentId: ref.documentId,
+              status: cause instanceof Error ? cause.message : "失败",
+            };
+          }
+          setMoved([...results]);
+        }
+        setMoving(false);
+        toast.push(
+          ok === results.length
+            ? `${ok} 个文档已换到 ${chosen?.name ?? target}`
+            : `${ok} / ${results.length} 个文档换成功，失败的点名在列表里`,
+          ok === results.length ? "ok" : "warn",
+        );
+        try {
+          // Re-scan the source theme: the documents that moved stay in the list as
+          // history-only references, which is what tells the operator the old theme
+          // can now be retired. A failed re-scan must not hide the run's own result.
+          setReach({
+            theme: reach.theme,
+            refs: await api.themeDocuments(reach.theme.themeRevisionId),
+          });
+          await refresh();
+        } catch {
+          toast.push("换版已完成，但重新扫描引用失败：点「刷新」再看一次。", "warn");
+        }
+      },
+    });
   };
 
   return (
@@ -333,44 +417,89 @@ export function ThemesView({ onNavigate }: { onNavigate: (route: string) => void
             </p>
           ) : null}
           {reach && reach.refs.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>documentId</TableHead>
-                  <TableHead>当前钉住</TableHead>
-                  <TableHead>钉住它的修订</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {reach.refs.map((ref) => (
-                  <TableRow key={ref.documentId}>
-                    <TableCell>
-                      <code className="text-xs">{ref.documentId}</code>
-                    </TableCell>
-                    <TableCell>
-                      {ref.headPinned ? (
-                        <Badge variant="success">是</Badge>
-                      ) : (
-                        <Badge variant="muted">仅历史</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell className="whitespace-normal">
-                      {ref.pinnedRevisions.length ? (
-                        <div className="flex flex-wrap gap-1">
-                          {ref.pinnedRevisions.map((revision) => (
-                            <Badge key={revision} variant="outline">
-                              r{revision}
-                            </Badge>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>documentId</TableHead>
+                    <TableHead>当前钉住</TableHead>
+                    <TableHead>钉住它的修订</TableHead>
+                    {moved.length ? <TableHead>换版结果</TableHead> : null}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {reach.refs.map((ref) => {
+                    const result = moved.find((item) => item.documentId === ref.documentId);
+                    return (
+                      <TableRow key={ref.documentId}>
+                        <TableCell>
+                          <code className="text-xs">{ref.documentId}</code>
+                        </TableCell>
+                        <TableCell>
+                          {ref.headPinned ? (
+                            <Badge variant="success">是</Badge>
+                          ) : (
+                            <Badge variant="muted">仅历史</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="whitespace-normal">
+                          {ref.pinnedRevisions.length ? (
+                            <div className="flex flex-wrap gap-1">
+                              {ref.pinnedRevisions.map((revision) => (
+                                <Badge key={revision} variant="outline">
+                                  r{revision}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        {moved.length ? (
+                          <TableCell className="whitespace-normal text-xs">
+                            {result?.status ?? "—"}
+                          </TableCell>
+                        ) : null}
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+
+              <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+                <Select
+                  aria-label="换到的目标主题"
+                  value={target}
+                  disabled={moving || retargetable.length === 0}
+                  onChange={(event) => setTarget(event.target.value)}
+                  className="h-7 w-48 text-xs"
+                >
+                  <option value="" disabled>
+                    {retargetable.length ? "换到的主题" : "目录里没有可钉的目标主题"}
+                  </option>
+                  {retargetable.map((theme) => (
+                    <option key={theme.themeRevisionId} value={theme.themeRevisionId}>
+                      {theme.name}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={moving || target === "" || movable.length === 0}
+                  onClick={runRetarget}
+                >
+                  {moving ? "换版中…" : `把 ${movable.length} 个在用的文档换过去`}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {movable.length === 0
+                    ? "没有文档在当前 head 上钉着这个主题，只有历史记录提到它。"
+                    : reach.refs.length > movable.length
+                      ? `其中 ${reach.refs.length - movable.length} 个只在历史修订里钉过，当前用的是别的主题或没有钉，批量换版不会碰它们。`
+                      : "逐个文档写一次内容修订，正文和节点不变。"}
+                </span>
+              </div>
+            </>
           ) : null}
           <DialogFooter>
             <span className="mr-auto text-xs text-muted-foreground">
