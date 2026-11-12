@@ -14,10 +14,10 @@ use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, detect_font_format, editor_projection, hash_file,
     manifest_at_revision, pin_document_theme, project_editor, resolve_document_theme,
-    restore_revision, search_bundle, BlockPrecondition, Bundle, DiskCatalog, EditorBlockContent,
-    EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRevision,
-    FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
-    StructurePatchBatch, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
+    restore_revision, search_bundle, theme_documents, BlockPrecondition, Bundle, DiskCatalog,
+    EditorBlockContent, EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense,
+    FontRevision, FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
+    StructurePatchBatch, ThemeDocumentRef, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
     HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -202,6 +202,14 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route(
             "/v1/catalog/themes/{theme_revision_id}/retire",
             post(catalog_retire_theme).delete(catalog_unretire_theme),
+        )
+        .route(
+            "/v1/catalog/themes/{theme_revision_id}/documents",
+            get(catalog_theme_documents),
+        )
+        .route(
+            "/v1/catalog/themes/{theme_revision_id}",
+            delete(catalog_delete_theme),
         )
         .route("/v1/documents/{id}/export/{format}", get(export_document))
         .route(
@@ -1939,6 +1947,45 @@ async fn catalog_unretire_theme(
     })))
 }
 
+/// Which documents pin this theme. The scan covers this service's own document
+/// root only — head pins and revision history both count — so an empty answer
+/// means "unreachable from the documents stored here", not "unused everywhere".
+async fn catalog_theme_documents(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ThemeDocumentRef>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    Ok(Json(
+        theme_documents(&state.root, &theme_revision_id).map_err(hcd_error)?,
+    ))
+}
+
+/// Drop a theme revision outright. Retirement only stops new pins; this is the
+/// step that removes the theme, and it is refused with 422 while any document
+/// here still reaches it, naming those documents.
+async fn catalog_delete_theme(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    state
+        .catalog
+        .delete_theme(&theme_revision_id, &state.root)
+        .map_err(hcd_error)?;
+    Ok(Json(json!({
+        "themeRevisionId": theme_revision_id,
+        "deleted": true,
+    })))
+}
+
 #[derive(Clone, Copy, Deserialize)]
 struct ExportQuery {
     revision: Option<u64>,
@@ -3215,5 +3262,163 @@ mod tests {
         let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
         assert_eq!(manifest.revision, 0);
         assert_eq!(manifest.theme_revision_id.as_deref(), Some(own.as_str()));
+    }
+
+    #[tokio::test]
+    async fn catalog_theme_documents_name_the_pinning_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        imported_bundle(
+            &temp.path().join("doc-own.hcd"),
+            "doc-own",
+            Some(theme.clone()),
+        );
+        imported_bundle(&temp.path().join("doc-plain.hcd"), "doc-plain", None);
+
+        let found =
+            catalog_theme_documents(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap()
+                .0;
+        assert_eq!(found.len(), 1, "only the pinned document is reachable");
+        assert_eq!(found[0].document_id, "doc-own");
+        assert!(found[0].head_pinned);
+        // An import lands on revision 0 already carrying its pin.
+        assert_eq!(found[0].pinned_revisions, vec![0]);
+        let body = serde_json::to_value(&found).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!([{
+                "documentId": "doc-own",
+                "headPinned": true,
+                "pinnedRevisions": [0],
+            }])
+        );
+
+        // The catalog lives in the same root as the documents and is not one.
+        assert!(temp.path().join("catalog").is_dir());
+        // A theme nothing pins has no documents to name.
+        assert!(catalog_theme_documents(
+            State(state.clone()),
+            Path("ef".repeat(32)),
+            admin.clone()
+        )
+        .await
+        .unwrap()
+        .0
+        .is_empty());
+
+        let error = catalog_theme_documents(State(state), Path("nope".to_string()), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn catalog_delete_theme_refuses_then_removes_an_unpinned_theme() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        imported_bundle(
+            &temp.path().join("doc-own.hcd"),
+            "doc-own",
+            Some(theme.clone()),
+        );
+
+        let error = catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.1.contains("doc-own"), "{error:?}");
+        assert_eq!(state.catalog.list_themes().unwrap().len(), 1);
+
+        // Retirement stops new pins but frees nothing, so it does not unlock deletion.
+        let _ = catalog_retire_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        std::fs::remove_dir_all(temp.path().join("doc-own.hcd")).unwrap();
+        let deleted =
+            catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap();
+        assert_eq!(deleted.0["deleted"], serde_json::json!(true));
+        assert!(state.catalog.list_themes().unwrap().is_empty());
+        assert!(state.catalog.list_retired_theme_ids().unwrap().is_empty());
+        assert!(!state
+            .catalog
+            .root()
+            .join("themes")
+            .join(format!("{theme}.json"))
+            .exists());
+        // A theme is only slots: the font it cited stays for the next theme to reuse.
+        assert_eq!(
+            state.catalog.list_font_ids().unwrap(),
+            vec!["demo-serif".to_string()]
+        );
+
+        let error = catalog_delete_theme(State(state), Path(theme), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn catalog_theme_reachability_and_delete_require_admin() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let unknown = "ab".repeat(32);
+
+        // A non-admin token cannot read the reachability view or delete.
+        let reader = bearer(secret, "*", "read");
+        assert_eq!(
+            catalog_theme_documents(State(state.clone()), Path(unknown.clone()), reader.clone())
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            catalog_delete_theme(State(state.clone()), Path(unknown.clone()), reader)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // An unknown theme revision id is refused outright: no scan, no delete.
+        assert_eq!(
+            catalog_delete_theme(
+                State(state.clone()),
+                Path("nope".to_string()),
+                admin.clone()
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            catalog_delete_theme(State(state), Path(unknown), admin)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
     }
 }

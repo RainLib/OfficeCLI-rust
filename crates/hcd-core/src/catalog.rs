@@ -222,6 +222,124 @@ pub struct FontDeleteReport {
     pub removed_blobs: Vec<String>,
 }
 
+/// One document that reaches a theme revision, and where the pin lives.
+///
+/// A pin is a content revision, so it is recorded both on the head manifest and
+/// on the revision record written when it took effect. History matters: an old
+/// revision still resolves its theme's fonts, so a theme is only unreachable
+/// when *neither* place cites it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeDocumentRef {
+    pub document_id: String,
+    /// True when the current head pins the theme.
+    pub head_pinned: bool,
+    /// Revision records carrying the pin, oldest first.
+    pub pinned_revisions: Vec<u64>,
+}
+
+impl ThemeDocumentRef {
+    /// Whether this document cites the theme anywhere.
+    pub fn pinned(&self) -> bool {
+        self.head_pinned || !self.pinned_revisions.is_empty()
+    }
+}
+
+/// Scan `{docs_root}/*.hcd` for documents pinning `theme_revision_id`, on the
+/// head or anywhere in revision history. Documents are named by their bundle
+/// stem, which is the `documentId` the HTTP layer uses.
+///
+/// The scan is the reference check that makes theme deletion safe. It is honest
+/// about its own scope: it can only see bundles under this document root, so a
+/// copy of the document elsewhere is out of reach. An unreadable bundle is an
+/// error rather than a skip, because "no references" must never rest on a
+/// document we failed to read.
+pub fn theme_documents(
+    docs_root: &Path,
+    theme_revision_id: &str,
+) -> Result<Vec<ThemeDocumentRef>, HcdError> {
+    require_sha256(theme_revision_id)?;
+    let entries = match fs::read_dir(docs_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(HcdError::Io(error)),
+    };
+    let mut documents = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let document_id = match bundle_document_id(&path) {
+            Some(document_id) => document_id,
+            None => continue,
+        };
+        let bundle = Bundle::open(&path)
+            .map_err(|error| note_unreadable(&document_id, "manifest", error))?;
+        let manifest = bundle
+            .manifest()
+            .map_err(|error| note_unreadable(&document_id, "manifest", error))?;
+        let mut references = ThemeDocumentRef {
+            document_id: document_id.clone(),
+            head_pinned: manifest.theme_revision_id.as_deref() == Some(theme_revision_id),
+            pinned_revisions: Vec::new(),
+        };
+        if manifest.revision > crate::MAX_REVISION {
+            return Err(HcdError::InvalidBundle(format!(
+                "document {document_id} claims revision {}, above the maximum {}",
+                manifest.revision,
+                crate::MAX_REVISION
+            )));
+        }
+        for revision in 0..=manifest.revision {
+            let record = bundle
+                .revision(revision)
+                .map_err(|error| note_unreadable(&document_id, "revision record", error))?;
+            if record.theme_revision_id.as_deref() == Some(theme_revision_id) {
+                references.pinned_revisions.push(revision);
+            }
+        }
+        if references.pinned() {
+            documents.push(references);
+        }
+    }
+    documents.sort_by(|left, right| left.document_id.cmp(&right.document_id));
+    Ok(documents)
+}
+
+/// The `documentId` for a `{docs_root}/{id}.hcd` bundle directory, `None` for
+/// anything else in the root (the catalog directory, scratch files, locks).
+fn bundle_document_id(path: &Path) -> Option<String> {
+    if !path.is_dir() {
+        return None;
+    }
+    if path.extension().and_then(|value| value.to_str()) != Some("hcd") {
+        return None;
+    }
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+}
+
+fn note_unreadable(document_id: &str, what: &str, error: HcdError) -> HcdError {
+    HcdError::InvalidBundle(format!(
+        "document {document_id} could not be scanned ({what}): {error}"
+    ))
+}
+
+/// Document ids to quote in a deletion refusal, capped so one message stays
+/// readable. The reachability view carries the full list.
+fn named_documents(references: &[ThemeDocumentRef]) -> String {
+    const MAX_NAMED: usize = 10;
+    let mut names: Vec<String> = references
+        .iter()
+        .map(|reference| reference.document_id.clone())
+        .collect();
+    let overflow = names.len().saturating_sub(MAX_NAMED);
+    names.truncate(MAX_NAMED);
+    if overflow > 0 {
+        names.push(format!("(+{overflow} more)"));
+    }
+    names.join(", ")
+}
+
 impl DiskCatalog {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, HcdError> {
         let root = root.as_ref();
@@ -658,6 +776,30 @@ impl DiskCatalog {
             .root
             .join("themes")
             .join(format!("{theme_revision_id}.retired")))
+    }
+
+    /// Delete a theme revision outright. Retirement only stops *new* pins, so
+    /// this is the step that actually drops the theme file, and it is refused
+    /// while any document under `docs_root` still reaches it — through its head
+    /// or through revision history — naming those documents.
+    ///
+    /// Font revisions and blobs survive: a theme is only a set of slots that
+    /// cite them, so freeing storage is the font delete path's job.
+    pub fn delete_theme(&self, theme_revision_id: &str, docs_root: &Path) -> Result<(), HcdError> {
+        let _ = self.theme(theme_revision_id)?;
+        let referenced = theme_documents(docs_root, theme_revision_id)?;
+        if !referenced.is_empty() {
+            let named = named_documents(&referenced);
+            return Err(HcdError::Unsupported(format!(
+                "theme {theme_revision_id} is still pinned by {} document(s): {named}",
+                referenced.len()
+            )));
+        }
+        fs::remove_file(self.theme_path(theme_revision_id)?)?;
+        // A retirement marker is only bookkeeping for a theme that no longer
+        // exists, so drop it with the theme instead of orphaning it.
+        let _ = fs::remove_file(self.retirement_marker_path(theme_revision_id)?);
+        Ok(())
     }
 
     fn read_blob(&self, sha256: &str, format: FontFileFormat) -> Result<Vec<u8>, HcdError> {
@@ -1878,14 +2020,20 @@ mod tests {
     }
 
     fn complete_bundle(root_dir: &tempfile::TempDir, styles: &str) -> Bundle {
-        let root = root_dir.path().join("demo.hcd");
+        bundle_at(root_dir.path(), "demo", styles)
+    }
+
+    /// A finished bundle at `{docs_root}/{name}.hcd`, which is how the document
+    /// store lays out every service-visible document.
+    fn bundle_at(docs_root: &Path, name: &str, styles: &str) -> Bundle {
+        let root = docs_root.join(format!("{name}.hcd"));
         let writer = BundleWriter::create(&root).unwrap();
         writer.write_styles(styles).unwrap();
         writer
             .finish(HcdManifest {
                 schema_version: String::new(),
                 storage_codec: StorageCodec::None,
-                document_id: "demo".to_string(),
+                document_id: name.to_string(),
                 profile: "semantic-flow".to_string(),
                 revision: 0,
                 source: SourceDescriptor {
@@ -2126,5 +2274,158 @@ mod tests {
         assert_eq!(report.removed_revisions.len(), 1);
         assert!(blob_names(&catalog).is_empty());
         assert!(catalog.list_font_ids().unwrap().is_empty());
+    }
+
+    /// A theme with only the major latin slot, so a test can hold two themes
+    /// that differ by content and therefore by id.
+    fn latin_theme(catalog: &DiskCatalog, font_revision_id: &str, name: &str) -> String {
+        catalog
+            .put_theme(&ThemeRevision {
+                schema_version: THEME_SCHEMA.to_string(),
+                theme_revision_id: String::new(),
+                name: name.to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "source-han-sans".to_string(),
+                        font_revision_id: font_revision_id.to_string(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn reachability_names_the_head_and_the_revision_that_pinned() {
+        let (_temp, catalog, _font_revision_id, theme_id) = install();
+        let docs = tempfile::tempdir().unwrap();
+        let bundle = bundle_at(docs.path(), "demo", "article { color: #123456; }");
+        assert!(theme_documents(docs.path(), &theme_id).unwrap().is_empty());
+
+        pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        let found = theme_documents(docs.path(), &theme_id).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].document_id, "demo");
+        assert!(found[0].head_pinned);
+        // Revision 0 predates the pin, so only the pinning revision cites it.
+        assert_eq!(found[0].pinned_revisions, vec![1]);
+    }
+
+    #[test]
+    fn a_theme_that_only_survives_in_history_is_still_reachable() {
+        let (_temp, catalog, font_revision_id, first) = install();
+        let second = latin_theme(&catalog, &font_revision_id, "Serif default");
+        let docs = tempfile::tempdir().unwrap();
+        let bundle = bundle_at(docs.path(), "demo", "article { color: #123456; }");
+        pin_document_theme(&catalog, &bundle, &first).unwrap();
+        pin_document_theme(&catalog, &bundle, &second).unwrap();
+
+        let history = theme_documents(docs.path(), &first).unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].head_pinned);
+        assert_eq!(history[0].pinned_revisions, vec![1]);
+        // The head theme is reachable in both places.
+        let head = theme_documents(docs.path(), &second).unwrap();
+        assert!(head[0].head_pinned);
+        assert_eq!(head[0].pinned_revisions, vec![2]);
+
+        // Old revisions can still be viewed and re-resolved, so deletion refuses
+        // and names the document that keeps the theme alive.
+        let error = catalog.delete_theme(&first, docs.path()).unwrap_err();
+        assert!(matches!(
+            &error,
+            HcdError::Unsupported(message) if message.contains("demo")
+        ));
+        assert!(catalog.get_theme(&first).is_ok());
+    }
+
+    #[test]
+    fn documents_pinning_another_theme_are_not_reported() {
+        let (_temp, catalog, font_revision_id, theme_a) = install();
+        let theme_b = latin_theme(&catalog, &font_revision_id, "Serif default");
+        let docs = tempfile::tempdir().unwrap();
+        let alpha = bundle_at(docs.path(), "alpha", "article { color: #123456; }");
+        let beta = bundle_at(docs.path(), "beta", "article { color: #222222; }");
+        pin_document_theme(&catalog, &alpha, &theme_a).unwrap();
+        pin_document_theme(&catalog, &beta, &theme_b).unwrap();
+
+        let names = |id: &str| -> Vec<String> {
+            theme_documents(docs.path(), id)
+                .unwrap()
+                .into_iter()
+                .map(|reference| reference.document_id)
+                .collect()
+        };
+        assert_eq!(names(&theme_a), vec!["alpha".to_string()]);
+        assert_eq!(names(&theme_b), vec!["beta".to_string()]);
+        // A theme nobody pinned.
+        assert!(names(&"cd".repeat(32)).is_empty());
+    }
+
+    #[test]
+    fn deleting_an_unpinned_theme_keeps_the_fonts_and_drops_the_marker() {
+        let (_temp, catalog, font_revision_id, _theme_id) = install();
+        let theme = latin_theme(&catalog, &font_revision_id, "Retired spare");
+        let docs = tempfile::tempdir().unwrap();
+        catalog.retire_theme(&theme).unwrap();
+        assert!(catalog.is_theme_retired(&theme).unwrap());
+
+        catalog.delete_theme(&theme, docs.path()).unwrap();
+
+        assert!(catalog.get_theme(&theme).is_err());
+        assert!(!catalog.theme_path(&theme).unwrap().exists());
+        // The retirement marker belonged to this theme, so it went with it.
+        assert!(!catalog.is_theme_retired(&theme).unwrap());
+        assert_eq!(catalog.list_themes().unwrap().len(), 1);
+        // A theme is only slots: the fonts and blobs it cited stay for reuse.
+        assert_eq!(
+            catalog.font_revisions("source-han-sans").unwrap()[0].font_revision_id,
+            font_revision_id
+        );
+        assert!(!blob_names(&catalog).is_empty());
+
+        // Deleting twice is not silently fine.
+        assert!(matches!(
+            catalog.delete_theme(&theme, docs.path()),
+            Err(HcdError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn the_scan_skips_non_bundles_and_a_missing_document_root() {
+        let (_temp, _catalog, _font_revision_id, theme_id) = install();
+        let docs = tempfile::tempdir().unwrap();
+        // The catalog directory and loose files live in the same root as the
+        // documents in production; neither may stop the scan.
+        DiskCatalog::open(docs.path().join("catalog")).unwrap();
+        fs::write(docs.path().join("notes.txt"), b"not a bundle").unwrap();
+        bundle_at(docs.path(), "spare", "article { color: #123456; }");
+        assert!(theme_documents(docs.path(), &theme_id).unwrap().is_empty());
+
+        assert!(theme_documents(&docs.path().join("absent"), &theme_id)
+            .unwrap()
+            .is_empty());
+        assert!(theme_documents(docs.path(), "not-a-digest").is_err());
+    }
+
+    #[test]
+    fn theme_document_refs_serialize_with_http_names() {
+        let value = serde_json::to_value(ThemeDocumentRef {
+            document_id: "demo".to_string(),
+            head_pinned: true,
+            pinned_revisions: vec![1, 4],
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "documentId": "demo",
+                "headPinned": true,
+                "pinnedRevisions": [1, 4],
+            })
+        );
     }
 }

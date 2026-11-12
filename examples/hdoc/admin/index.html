@@ -99,6 +99,7 @@
 <div class="panel">
   <h2>主题</h2>
   <div id="themeList" class="sub">未加载。</div>
+  <div id="themeDocs" class="sub"></div>
 </div>
 
 <div class="panel">
@@ -319,6 +320,8 @@ async function refresh() {
     const themes = await themesResponse.json();
     const retiredIds = new Set(await (await api("/v1/catalog/themes/retired")).json());
     themeIds = themes.map((theme) => theme.themeRevisionId);
+    // Reachability is a per-theme scan, so the previous answer is dropped here.
+    $("themeDocs").innerHTML = "";
     $("themeList").innerHTML = themes.length
       ? "<table><tr><th>themeRevisionId</th><th>名称</th><th>槽位</th><th>回退</th><th>操作</th></tr>" +
         themes.map((theme) => {
@@ -333,10 +336,14 @@ async function refresh() {
           const toggle = retired
             ? `<button data-action="unretire" data-theme="${esc(theme.themeRevisionId)}">取消退役</button>`
             : `<button class="danger" data-action="retire" data-theme="${esc(theme.themeRevisionId)}">退役</button>`;
+          const reachability =
+            `<button data-action="documents" data-theme="${esc(theme.themeRevisionId)}" title="扫描本服务的文档目录，列出钉住该主题的文档，含只看得到历史修订的文档">引用文档</button>`;
+          const hardDelete =
+            `<button class="danger" data-action="deleteTheme" data-theme="${esc(theme.themeRevisionId)}" title="删除主题本体；只要有文档钉住它就会失败并点名文档">彻底删除</button>`;
           return `<tr><td><code title="${esc(theme.themeRevisionId)}">${esc(theme.themeRevisionId.slice(0, 12))}…</code></td>` +
             `<td>${esc(theme.name)}${retired ? ' <span class="warn">已退役</span>' : ""}</td>` +
             `<td>${slots.join(" ")}</td><td>${esc((theme.fallbackFamilies || []).join(", "))}</td>` +
-            `<td>${toggle}</td></tr>`;
+            `<td>${toggle} ${reachability} ${hardDelete}</td></tr>`;
         }).join("") + "</table>"
       : '<span class="sub">暂无主题。</span>';
 
@@ -415,12 +422,45 @@ $("fontList").addEventListener("click", async (event) => {
   }
 });
 
+function themeDocsHtml(id, refs) {
+  const short = esc(id.slice(0, 12)) + "…";
+  if (!refs.length) {
+    return `<div>主题 <code>${short}</code> 没有被本服务文档目录里的任何文档钉住，可以彻底删除。</div>`;
+  }
+  return `<div>钉住主题 <code>${short}</code> 的文档（只扫描本服务的文档目录，不含其它机器上的副本）：</div>` +
+    `<table><tr><th>documentId</th><th>当前钉住</th><th>钉住它的修订</th></tr>` +
+    refs.map((ref) => `<tr><td><code>${esc(ref.documentId)}</code></td>` +
+      `<td>${ref.headPinned ? '<span class="yes">是</span>' : '<span class="no">仅历史</span>'}</td>` +
+      `<td>${(ref.pinnedRevisions || []).map((revision) => `<span class="pill">r${revision}</span>`).join("") || "—"}</td></tr>`).join("") +
+    `</table>`;
+}
+
 $("themeList").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
   const action = button.dataset.action;
-  if (action !== "retire" && action !== "unretire") return;
   const id = button.dataset.theme;
+  if (action === "documents") {
+    try {
+      const refs = await (await api(`/v1/catalog/themes/${encodeURIComponent(id)}/documents`)).json();
+      $("themeDocs").innerHTML = themeDocsHtml(id, refs);
+      setStatus(refs.length
+        ? `该主题被 ${refs.length} 个文档钉住，暂时不能删除。`
+        : "没有文档钉住该主题。", refs.length ? "warn" : "ok");
+    } catch (error) { setStatus(String(error.message || error), "err"); }
+    return;
+  }
+  if (action === "deleteTheme") {
+    if (!confirm(`彻底删除主题 ${id.slice(0, 12)}…？退役不会释放主题，只要有文档钉住它（含历史修订）这一步就会失败并点名文档。`)) return;
+    try {
+      await api(`/v1/catalog/themes/${encodeURIComponent(id)}`, { method: "DELETE" });
+      $("themeDocs").innerHTML = "";
+      setStatus(`已删除主题 ${id.slice(0, 12)}…，它引用的字体与字库保持不变。`, "ok");
+      refresh();
+    } catch (error) { setStatus(String(error.message || error), "err"); }
+    return;
+  }
+  if (action !== "retire" && action !== "unretire") return;
   const verb = action === "retire" ? "退役" : "取消退役";
   if (!confirm(`确认${verb}主题 ${id.slice(0, 12)}…？退役后不能新钉到文档，但已钉文档仍可解析。`)) return;
   try {
