@@ -72,6 +72,11 @@ const sourceEn: Record<string, string> = {
   '冻结当前工作表的第一列，已经冻结的行保持不变': 'Freeze the first column of the active sheet. Frozen rows stay as they are',
   '在选中单元格的上方和左侧冻结窗格': 'Freeze the rows above and the columns to the left of the selected cell',
   '取消当前工作表的冻结窗格': 'Release the frozen band of the active sheet',
+  '正在设置冻结窗格…': 'Freezing panes…', '服务器拒绝了冻结窗格': 'The server rejected the frozen pane',
+  '冻结行数须在 0 到 1048575 之间': 'Frozen rows must be between 0 and 1048575',
+  '冻结列数须在 0 到 16383 之间': 'Frozen columns must be between 0 and 16383',
+  '请先选中要冻结区域右下方的单元格': 'Select the cell below and to the right of the band to freeze',
+  'A1 的上方和左侧没有可冻结的行或列，请选中其他单元格': 'Nothing to freeze above or left of A1. Select another cell',
   '双击单元格或按 F2 编辑 · 右键显示操作菜单 ·': 'Double-click a cell or press F2 to edit · Right-click for actions ·',
   '插入行数': 'Rows to insert', '在选中行前插入': 'Insert before selected row',
   '行': ' rows', '在选中行后插入': 'Insert after selected row',
@@ -298,6 +303,7 @@ const dynamicEn: Record<string, string> = {
   '在上方插入 ': 'Insert above: ', '在下方插入 ': 'Insert below: ',
   ' · 已合并 ': ' · Merged ', ' · 已拆分 ': ' · Unmerged ',
   ' · 已新增第 ': ' · Added row ',
+  '设置冻结窗格失败：': 'Freezing panes failed: ',
 }
 
 const orderedEn = Object.entries(dynamicEn).sort((a, b) => b[0].length - a[0].length)
@@ -313,6 +319,16 @@ export function localizeDynamic(locale: EditorLocale, source: string): string {
   if (match) return `Page ${match[1]}`
   match = /^revision (\d+) · 已(删除|新增|撤销)第 (\d+) (行|列)$/.exec(source)
   if (match) return `Revision ${match[1]} · ${match[2] === '删除' ? 'Deleted' : match[2] === '新增' ? 'Added' : 'Removed'} ${match[4] === '行' ? 'row' : 'column'} ${match[3]}`
+  match = /^revision (\d+) · (.+) 已冻结前 (\d+) 行 (\d+) 列$/.exec(source)
+  if (match) {
+    const band = [[match[3], 'row'], [match[4], 'column']]
+      .filter(([count]) => Number(count) > 0)
+      .map(([count, unit]) => `${count} ${unit}${count === '1' ? '' : 's'}`)
+      .join(' and ')
+    return `Revision ${match[1]} · ${match[2]}: froze ${band}`
+  }
+  match = /^revision (\d+) · (.+) 已取消冻结$/.exec(source)
+  if (match) return `Revision ${match[1]} · ${match[2]}: unfrozen`
   let result = source
   for (const [original, translated] of orderedEn) result = result.replaceAll(original, translated)
   return result
