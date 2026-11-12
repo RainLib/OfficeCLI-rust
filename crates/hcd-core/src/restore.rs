@@ -67,6 +67,7 @@ pub fn restore_revision(
         slide_additions: Vec::new(),
         slide_removals: Vec::new(),
         slide_reorders: Vec::new(),
+        slide_copies: Vec::new(),
         structural_change: true,
     };
     head.revision = revision;

@@ -569,6 +569,13 @@ pub enum PatchOperation {
     /// source-backed export writes the presentation's slide list to match it.
     #[serde(rename = "pptx.slide.reorder", rename_all = "camelCase")]
     PptxSlideReorder { chunk_id: String, direction: String },
+    /// Duplicate one slide page, named by a chunk that holds it. The copy is a
+    /// page of its own, carrying its own chunks under a slide part the source
+    /// package does not have yet, and it stands immediately behind the page it
+    /// was copied from. Its text nodes are new nodes: the copy is edited on its
+    /// own and never reaches back at the original.
+    #[serde(rename = "pptx.slide.copy", rename_all = "camelCase")]
+    PptxSlideCopy { chunk_id: String },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -642,7 +649,8 @@ impl PatchOperation {
             | Self::XlsxSheetDelete { .. }
             | Self::PptxSlideAdd {}
             | Self::PptxSlideDelete { .. }
-            | Self::PptxSlideReorder { .. } => None,
+            | Self::PptxSlideReorder { .. }
+            | Self::PptxSlideCopy { .. } => None,
         }
     }
 
@@ -684,6 +692,7 @@ impl PatchOperation {
                 | Self::PptxSlideAdd { .. }
                 | Self::PptxSlideDelete { .. }
                 | Self::PptxSlideReorder { .. }
+                | Self::PptxSlideCopy { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -875,6 +884,11 @@ pub struct RevisionRecord {
     /// order out of that index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slide_reorders: Vec<SlideReorder>,
+    /// Slides this revision copied, as the part the copy now points at and the
+    /// part it was copied from. A copy has no page in the source package, so a
+    /// source-backed export writes the part the original's part says to copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_copies: Vec<SlideCopy>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
 }
@@ -886,6 +900,16 @@ pub struct RevisionRecord {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SlideReorder {
     pub slide_part: String,
+}
+
+/// Slide copied at one revision. Two parts travel: the page the copy stands for
+/// now, which the source package does not hold yet, and the page it was drawn
+/// from, which is where a source-backed export reads the content to write.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideCopy {
+    pub slide_part: String,
+    pub source_slide_part: String,
 }
 
 /// Slide removed at one revision. Only the part travels: the page, its text

@@ -13,8 +13,8 @@ use crate::{
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
-    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SlideAddition, SlideRemoval,
-    SlideReorder, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
+    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SlideAddition, SlideCopy,
+    SlideRemoval, SlideReorder, SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup,
     XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch, XlsxGridAction,
     XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10,
     HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13,
@@ -229,6 +229,22 @@ struct PptxSlideMoveTarget {
     slide_part: String,
     moving_chunk_ids: Vec<String>,
     passed_chunk_ids: Vec<String>,
+}
+
+/// Slide a patch asks to duplicate, named by one of the chunks that hold it. The
+/// copy is a page of its own, standing right behind the page it came from, under
+/// a part the source package does not carry yet — which is what the revision
+/// records, and what the export has to write.
+#[derive(Clone)]
+struct PptxSlideCopyTarget {
+    chunk_id: String,
+    /// Part the page the patch named holds today.
+    slide_part: String,
+    /// Part the copy will stand in.
+    new_slide_part: String,
+    /// Every chunk of the page, in the order the index holds them: a page whose
+    /// table reaches over several chunks is copied chunk for chunk.
+    page_chunk_ids: Vec<String>,
 }
 
 /// One page as the index holds it: the part its section names, and every chunk
@@ -539,6 +555,10 @@ pub fn apply_patch(
         .as_ref()
         .map(|moving| resolve_pptx_slide_reorder(bundle, &manifest, moving))
         .transpose()?;
+    let pptx_slide_copy = collect_pptx_slide_copy(patch)
+        .as_ref()
+        .map(|copy| resolve_pptx_slide_copy(bundle, &manifest, copy))
+        .transpose()?;
     if pptx_slide_removal.is_some() && pptx_slide_reorder.is_some() {
         return Err(HcdError::InvalidPatch(
             "one patch moves or removes a slide, not both".to_string(),
@@ -606,8 +626,9 @@ pub fn apply_patch(
         || pptx_slide_add.is_some()
         || pptx_slide_removal.is_some()
         // A move rewrites the index the deck's page order lives in, without
-        // touching a single chunk.
-        || pptx_slide_reorder.is_some();
+        // touching a single chunk. A copy rewrites it with one page more.
+        || pptx_slide_reorder.is_some()
+        || pptx_slide_copy.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -871,10 +892,12 @@ pub fn apply_patch(
                 && xlsx_sheet_rename.is_none()
                 // A removal rebuilds the whole index, so every surviving chunk
                 // has to be collected, not just the ones this patch edits. A
-                // move rebuilds it too, with nothing taken out of it.
+                // move rebuilds it too, with nothing taken out of it, and a copy
+                // rebuilds it with the copied page spliced in.
                 && xlsx_sheet_removal.is_none()
                 && pptx_slide_removal.is_none()
                 && pptx_slide_reorder.is_none()
+                && pptx_slide_copy.is_none()
             {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
@@ -1856,6 +1879,7 @@ pub fn apply_patch(
             if xlsx_sheet_removal.is_some()
                 || pptx_slide_removal.is_some()
                 || pptx_slide_reorder.is_some()
+                || pptx_slide_copy.is_some()
             {
                 kept_index_descriptors.push(descriptor.clone());
             }
@@ -1910,12 +1934,14 @@ pub fn apply_patch(
             }
         }
 
-        // A removal rewrites the index from the chunks it left behind, and a move
-        // rewrites it from the chunks it put in a different order, so pages are
-        // not written here while their lists still hold the old shape.
+        // A removal rewrites the index from the chunks it left behind, a move
+        // rewrites it from the chunks it put in a different order, and a copy
+        // rewrites it with the copied page spliced in, so pages are not written
+        // here while their lists still hold the old shape.
         if xlsx_sheet_removal.is_none()
             && pptx_slide_removal.is_none()
             && pptx_slide_reorder.is_none()
+            && pptx_slide_copy.is_none()
             && content_changed
             && (index_root_href.is_none() || page_changed)
         {
@@ -2170,6 +2196,50 @@ pub fn apply_patch(
         )?;
     }
 
+    // A copy gives the deck one more page, standing right behind the page it came
+    // from. The chunks it is made of are new objects carrying new ids: nothing
+    // that already stands in the index is rewritten, so the copy is spliced into
+    // the list the index keeps and every chunk is numbered again from the front
+    // the way a move numbers the list it put in a different order.
+    if let Some(copy) = pptx_slide_copy.as_ref() {
+        let cloned = clone_pptx_slide_chunks(bundle, &manifest, copy, &kept_index_descriptors)?;
+        let copied_count = cloned.len();
+        let Some(last_of_page) = copy.page_chunk_ids.last() else {
+            return Err(HcdError::InvalidBundle(
+                "PPTX slide copy found a page with no chunks".to_string(),
+            ));
+        };
+        let Some(at) = kept_index_descriptors
+            .iter()
+            .position(|descriptor| &descriptor.chunk_id == last_of_page)
+        else {
+            return Err(HcdError::InvalidBundle(
+                "PPTX slide copy target disappeared from the index".to_string(),
+            ));
+        };
+        for (offset, descriptor) in cloned.into_iter().enumerate() {
+            dirty_chunks.insert(descriptor.chunk_id.clone());
+            kept_index_descriptors.insert(at + 1 + offset, descriptor);
+        }
+        if kept_index_descriptors.len() != manifest.chunk_count + copied_count {
+            return Err(HcdError::InvalidBundle(format!(
+                "index pages cover {} chunks, manifest says {} with {} copied",
+                kept_index_descriptors.len(),
+                manifest.chunk_count + copied_count,
+                copied_count,
+            )));
+        }
+        root_hasher = rewrite_index_pages(
+            bundle,
+            &mut manifest,
+            &new_index_root,
+            new_revision,
+            std::mem::take(&mut kept_index_descriptors),
+            None,
+            &mut index_root_href,
+        )?;
+    }
+
     validate_annotation_ranges(patch, &found_nodes)?;
     let (annotation_href, annotation_root_hash) =
         apply_annotations(bundle, &manifest, patch, &removed_nodes)?;
@@ -2286,6 +2356,12 @@ pub fn apply_patch(
                 message: "slide is moved: the order the index holds its pages in is what a source-backed export writes into the presentation's slide list, and the page's own content is untouched".to_string(),
                 node_id: None,
                 source_part: Some(moving.slide_part.clone()),
+            }))
+            .chain(pptx_slide_copy.iter().map(|copy| FidelityWarning {
+                code: "PPTX_SLIDE_COPIED".to_string(),
+                message: "slide is duplicated: the copy stands right behind the page it came from, holds the same content under ids of its own, and is written as a slide part the source package never had".to_string(),
+                node_id: None,
+                source_part: Some(copy.new_slide_part.clone()),
             }))
             .chain(xlsx_number_formats.keys().map(|node_id| FidelityWarning {
                 code: "XLSX_DIRECT_CELL_NUMBER_FORMAT".to_string(),
@@ -2440,6 +2516,14 @@ pub fn apply_patch(
             .into_iter()
             .map(|moving| SlideReorder {
                 slide_part: moving.slide_part.clone(),
+            })
+            .collect(),
+        slide_copies: pptx_slide_copy
+            .as_ref()
+            .into_iter()
+            .map(|copy| SlideCopy {
+                slide_part: copy.new_slide_part.clone(),
+                source_slide_part: copy.slide_part.clone(),
             })
             .collect(),
         structural_change: false,
@@ -2751,6 +2835,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_41
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_42
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_43
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_44
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -3075,6 +3160,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/43 accepts one PPTX slide reorder operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_44
+        && (manifest.source.format != "pptx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PptxSlideCopy { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/44 accepts one PPTX slide copy operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -3482,6 +3579,26 @@ fn validate_patch_identity(
                 if direction != "up" && direction != "down" {
                     return Err(HcdError::InvalidPatch(
                         "pptx.slide.reorder direction must be \"up\" or \"down\"".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::PptxSlideCopy { chunk_id } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_44
+                    || manifest.source.format != "pptx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.slide.copy requires one PPTX operation with hcd-patch/44".to_string(),
+                    ));
+                }
+                if chunk_id.len() != 34
+                    || !chunk_id.starts_with("c_")
+                    || !chunk_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid PPTX slide copy target".to_string(),
                     ));
                 }
             }
@@ -5672,6 +5789,274 @@ fn swap_pptx_slide_pages(
     output.extend_from_slice(&descriptors[first.0..first.1]);
     output.extend_from_slice(&descriptors[second.1..]);
     Ok(output)
+}
+
+/// The operation asking one page to be copied, if the patch carries one.
+fn collect_pptx_slide_copy(patch: &PatchBatch) -> Option<PptxSlideCopyTarget> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::PptxSlideCopy { chunk_id } = operation else {
+            return None;
+        };
+        Some(PptxSlideCopyTarget {
+            chunk_id: chunk_id.clone(),
+            slide_part: String::new(),
+            new_slide_part: String::new(),
+            page_chunk_ids: Vec::new(),
+        })
+    })
+}
+
+/// Work out which page a copy duplicates, which chunks go with it, and which
+/// part the copy will stand in. The part is named the way a new page names its
+/// own: from the numbers the index holds and the numbers this history has
+/// already spent, so two pages never ask the package for the same name.
+///
+/// Two bounds come from how the copy is written rather than from HCD's liking.
+/// The export builds the copy out of the source package's page, so a page HCD
+/// created has nothing to build from, and a page HCD rewrote would copy the
+/// words the source still holds instead of the ones the bundle shows. Both are
+/// refused rather than quietly answered with a different page.
+fn resolve_pptx_slide_copy(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    request: &PptxSlideCopyTarget,
+) -> Result<PptxSlideCopyTarget, HcdError> {
+    let pages = pptx_index_slide_pages(bundle, manifest)?;
+    let Some(placed) = pages
+        .iter()
+        .position(|page| page.chunks.contains(&request.chunk_id))
+    else {
+        return Err(HcdError::Unsupported(
+            "PPTX slide chunk is not in the HCD index".to_string(),
+        ));
+    };
+    let slide_part = pages[placed].slide_part.clone();
+    let mut highest_number: usize = 0;
+    let mut known_parts: HashSet<String> = HashSet::new();
+    for page in &pages {
+        if known_parts.insert(page.slide_part.clone()) {
+            highest_number =
+                highest_number.max(slide_part_number(&page.slide_part).unwrap_or_default());
+        }
+    }
+    let mut created_in_hcd = false;
+    let mut rewritten_at: Option<u64> = None;
+    for revision in 1..=manifest.revision {
+        let record = bundle.revision(revision)?;
+        for addition in &record.slide_additions {
+            highest_number =
+                highest_number.max(slide_part_number(&addition.slide_part).unwrap_or_default());
+            created_in_hcd |= addition.slide_part == slide_part;
+        }
+        for copied in &record.slide_copies {
+            highest_number =
+                highest_number.max(slide_part_number(&copied.slide_part).unwrap_or_default());
+            created_in_hcd |= copied.slide_part == slide_part;
+        }
+        for removal in &record.slide_removals {
+            highest_number =
+                highest_number.max(slide_part_number(&removal.slide_part).unwrap_or_default());
+        }
+        if record.dirty_source_parts.contains(&slide_part) {
+            rewritten_at = Some(revision);
+        }
+    }
+    if created_in_hcd {
+        return Err(HcdError::InvalidPatch(format!(
+            "hcd-patch/44 cannot copy {slide_part}: that page was created in HCD, and a copy is written from the page the source package holds"
+        )));
+    }
+    if let Some(revision) = rewritten_at {
+        return Err(HcdError::InvalidPatch(format!(
+            "hcd-patch/44 cannot copy {slide_part} yet: revision {revision} rewrote that page in HCD, and a copy is written from the page the source package holds"
+        )));
+    }
+    Ok(PptxSlideCopyTarget {
+        chunk_id: request.chunk_id.clone(),
+        new_slide_part: format!(
+            "ppt/slides/slide{}.xml",
+            highest_number.max(known_parts.len()) + 1
+        ),
+        slide_part,
+        page_chunk_ids: pages[placed].chunks.clone(),
+    })
+}
+
+/// A node id is `n_` and the 32 lowercase hex characters a digest is written as.
+const PPTX_NODE_ID_LEN: usize = 34;
+
+/// The id a node of the copy takes, named by the node it was copied from and by
+/// the part the copy stands in. Copying one page into the same place again —
+/// after an undo, say — gives its nodes the same ids back, and no copy shares an
+/// id with the page it came from or with another copy of it.
+fn pptx_copied_node_id(document_id: &str, new_part: &str, node_id: &str) -> String {
+    stable_node_id(&[document_id, new_part, "slide-copy-node", node_id])
+}
+
+/// One character of the lowercase hex a node id is made of.
+fn is_node_id_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+/// Rewrites the node ids a slide chunk addresses. Only what stands between a
+/// pair of double quotes is touched: generated HTML escapes every quote a text
+/// node holds, so a quoted run is an attribute value and never a word of the
+/// page. The copy therefore shows exactly the words the original shows.
+fn rewrite_pptx_copied_ids(html: &str, document_id: &str, new_part: &str) -> String {
+    let mut output = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open) = rest.find('"') {
+        output.push_str(&rest[..=open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('"') else {
+            output.push_str(after);
+            return output;
+        };
+        output.push_str(&replace_pptx_copied_ids(
+            &after[..close],
+            document_id,
+            new_part,
+        ));
+        output.push('"');
+        rest = &after[close + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Replaces every node id one attribute value names, in the order they appear,
+/// writing each replacement straight to the output so a value that holds more
+/// than one id — a table fragment names two — is rewritten once per id.
+fn replace_pptx_copied_ids(value: &str, document_id: &str, new_part: &str) -> String {
+    if !value.contains("n_") {
+        return value.to_string();
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(at) = rest.find("n_") {
+        output.push_str(&rest[..at]);
+        let candidate = &rest[at..];
+        let bytes = candidate.as_bytes();
+        // Only a whole id is an id: a run that is shorter, holds a character no
+        // digest is written with, or runs on past 32 hex characters is text.
+        let complete = bytes.len() >= PPTX_NODE_ID_LEN
+            && bytes[2..PPTX_NODE_ID_LEN]
+                .iter()
+                .all(|byte| is_node_id_hex(*byte))
+            && !bytes
+                .get(PPTX_NODE_ID_LEN)
+                .is_some_and(|next| is_node_id_hex(*next));
+        if complete {
+            output.push_str(&pptx_copied_node_id(
+                document_id,
+                new_part,
+                &candidate[..PPTX_NODE_ID_LEN],
+            ));
+            rest = &candidate[PPTX_NODE_ID_LEN..];
+        } else {
+            output.push_str("n_");
+            rest = &candidate[2..];
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+/// The chunks a copy is made of, written the way the importer writes a page: the
+/// same HTML and the same map, with the part renamed and every node given an id
+/// of the copy's own. A page whose table reaches over several chunks is copied
+/// chunk for chunk, so the copy reaches over the same run.
+fn clone_pptx_slide_chunks(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    copy: &PptxSlideCopyTarget,
+    descriptors: &[crate::ChunkDescriptor],
+) -> Result<Vec<crate::ChunkDescriptor>, HcdError> {
+    let mut cloned = Vec::with_capacity(copy.page_chunk_ids.len());
+    for (ordinal, chunk_id) in copy.page_chunk_ids.iter().enumerate() {
+        let source = descriptors
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == *chunk_id)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle(
+                    "PPTX slide copy target disappeared from the index".to_string(),
+                )
+            })?;
+        let html = bundle.read_chunk(source)?;
+        let source_map = bundle.read_map(source)?;
+        // Every element of the page that names the part it was read from — the
+        // section, a picture, a chart — names the copy's part from now on.
+        let html = html.replace(
+            &format!(
+                "data-hcd-source-part=\"{}\"",
+                escape_attribute(&copy.slide_part)
+            ),
+            &format!(
+                "data-hcd-source-part=\"{}\"",
+                escape_attribute(&copy.new_slide_part)
+            ),
+        );
+        let html = rewrite_pptx_copied_ids(&html, &manifest.document_id, &copy.new_slide_part);
+        let entries: Vec<crate::NodeMapEntry> = source_map
+            .entries
+            .iter()
+            .map(|entry| crate::NodeMapEntry {
+                node_id: pptx_copied_node_id(
+                    &manifest.document_id,
+                    &copy.new_slide_part,
+                    &entry.node_id,
+                ),
+                node_hash: entry.node_hash.clone(),
+                source: crate::SourceAnchor {
+                    part: copy.new_slide_part.clone(),
+                    ..entry.source.clone()
+                },
+            })
+            .collect();
+        let chunk_id = stable_node_id(&[
+            &manifest.document_id,
+            &copy.new_slide_part,
+            "slide-chunk",
+            &ordinal.to_string(),
+        ])
+        .replacen("n_", "c_", 1);
+        let copied_map = crate::ChunkSourceMap {
+            schema_version: manifest.schema_version.clone(),
+            chunk_id: chunk_id.clone(),
+            entries,
+        };
+        let (html_href, html_hash) = bundle.write_chunk_object(&html)?;
+        let (map_href, map_hash) = bundle.write_json_object("maps", &copied_map)?;
+        cloned.push(crate::ChunkDescriptor {
+            sequence: 0,
+            chunk_id,
+            region: "slide".to_string(),
+            html_href,
+            html_hash,
+            map_href,
+            map_hash,
+            byte_length: html.len() as u64,
+            // The copy holds the same blocks and the same words as the page it
+            // came from; only the names it answers to are new.
+            block_count: source.block_count,
+            node_count: copied_map.entries.len(),
+            text_chars: source.text_chars,
+            node_bloom: node_bloom(
+                copied_map
+                    .entries
+                    .iter()
+                    .map(|entry| entry.node_id.as_str()),
+            ),
+            first_node_id: copied_map
+                .entries
+                .first()
+                .map(|entry| entry.node_id.clone()),
+            last_node_id: copied_map.entries.last().map(|entry| entry.node_id.clone()),
+            continuation: source.continuation,
+            grid: None,
+        });
+    }
+    Ok(cloned)
 }
 
 /// The placeholder the importer writes for a slide that has no shapes at all.
@@ -10041,6 +10426,7 @@ fn apply_annotations(
             | PatchOperation::PptxSlideAdd { .. }
             | PatchOperation::PptxSlideDelete { .. }
             | PatchOperation::PptxSlideReorder { .. }
+            | PatchOperation::PptxSlideCopy { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}
@@ -11106,6 +11492,427 @@ mod tests {
                 "{patch_id}: unexpected {error:?}"
             );
         }
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(0), slide_chunk(1)]
+        );
+    }
+
+    /// The chunk id the importer would hand a page's chunk: the same formula a
+    /// copy uses, so a test can name the chunk it expects without reading it back.
+    fn copied_chunk_id(document_id: &str, part: &str, ordinal: usize) -> String {
+        stable_node_id(&[document_id, part, "slide-chunk", &ordinal.to_string()])
+            .replacen("n_", "c_", 1)
+    }
+
+    fn copy_slide_patch(chunk_id: &str, base: u64) -> crate::PatchBatch {
+        crate::PatchBatch {
+            schema_version: crate::HCD_PATCH_SCHEMA_VERSION_44.to_string(),
+            document_id: "deck".to_string(),
+            patch_id: format!("copy-{chunk_id}-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![crate::PatchOperation::PptxSlideCopy {
+                chunk_id: chunk_id.to_string(),
+            }],
+        }
+    }
+
+    /// Every node id the index's slide chunks name, in index order.
+    fn index_slide_node_ids(bundle: &crate::Bundle) -> Vec<String> {
+        let manifest = bundle.manifest().unwrap();
+        (0..manifest.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&manifest, page).unwrap().chunks)
+            .filter(|descriptor| descriptor.region == "slide")
+            .flat_map(|descriptor| {
+                bundle
+                    .read_map(&descriptor)
+                    .unwrap()
+                    .entries
+                    .into_iter()
+                    .map(|entry| entry.node_id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pptx_slide_copy_duplicates_a_page_right_behind_the_original() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 3);
+        let before = bundle.manifest().unwrap();
+        let original = bundle.read_index_page(&before, 0).unwrap().chunks[0].clone();
+        let original_html = bundle.read_chunk(&original).unwrap();
+        let new_part = "ppt/slides/slide4.xml".to_string();
+        let copied = copied_chunk_id("deck", &new_part, 0);
+        let copied_node =
+            pptx_copied_node_id("deck", &new_part, original.first_node_id.as_ref().unwrap());
+
+        let result = apply_patch(&bundle, &copy_slide_patch(&slide_chunk(0), 0), 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_COPIED"));
+        // The page it was copied from is untouched: the copy is what dirtied, and
+        // it dirties no node and no source part, because nothing was said
+        // differently — a new page simply stands there.
+        assert!(result.dirty_node_ids.is_empty());
+        assert!(result.dirty_source_parts.is_empty());
+        assert_eq!(result.dirty_chunk_ids, vec![copied.clone()]);
+
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, before.chunk_count + 1);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![
+                slide_chunk(0),
+                copied.clone(),
+                slide_chunk(1),
+                slide_chunk(2)
+            ]
+        );
+
+        let page = bundle.read_index_page(&head, 0).unwrap();
+        let descriptor = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == copied)
+            .expect("the copy is in the index");
+        assert_eq!(descriptor.region, "slide");
+        assert!(!descriptor.continuation);
+        assert_eq!(descriptor.node_count, 1);
+        assert_eq!(
+            descriptor.first_node_id.as_deref(),
+            Some(copied_node.as_str())
+        );
+        assert_eq!(descriptor.block_count, original.block_count);
+        assert_eq!(descriptor.text_chars, original.text_chars);
+        assert_eq!(page.chunks.len(), head.chunk_count);
+
+        // The copy says the same thing about a page of its own.
+        let copied_html = bundle.read_chunk(descriptor).unwrap();
+        assert!(copied_html.contains(&format!("data-hcd-source-part=\"{new_part}\"")));
+        assert!(!copied_html.contains("ppt/slides/slide1.xml"));
+        assert!(copied_html.contains(&copied_node));
+        assert!(!copied_html.contains("n_00000000000000000000000000000000"));
+        assert!(copied_html.contains(">page-0<"));
+        assert_eq!(copied_html.len() as u64, descriptor.byte_length);
+        let copied_map = bundle.read_map(descriptor).unwrap();
+        assert_eq!(copied_map.chunk_id, copied);
+        assert_eq!(copied_map.entries.len(), 1);
+        assert_eq!(copied_map.entries[0].node_id, copied_node);
+        assert_eq!(copied_map.entries[0].node_hash, hash_bytes(b"page-0"));
+        assert_eq!(copied_map.entries[0].source.part, new_part);
+        assert!(!copied_map.entries[0].source.created_in_hcd);
+        assert_eq!(
+            copied_map.entries[0].source.text_id.as_deref(),
+            Some("bytes:0:1")
+        );
+        assert_eq!(bundle.read_chunk(&original).unwrap(), original_html);
+
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(
+            record.slide_copies,
+            vec![crate::SlideCopy {
+                slide_part: new_part.clone(),
+                source_slide_part: "ppt/slides/slide1.xml".to_string(),
+            }]
+        );
+        assert_eq!(record.chunk_count.unwrap(), head.chunk_count);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+
+        // A reader renders the page twice.
+        let mut rendered = Vec::new();
+        crate::render_standalone_html(
+            &bundle,
+            &crate::HtmlPresentationOptions::default(),
+            &mut rendered,
+        )
+        .unwrap();
+        let html = String::from_utf8(rendered).unwrap();
+        assert_eq!(html.matches("page-0").count(), 2, "{html}");
+
+        // Editing the copy reaches the copy and not the page it was made from:
+        // the ids are the copy's own, and so is the part they name.
+        let splice = crate::PatchBatch {
+            schema_version: crate::HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: "deck".to_string(),
+            patch_id: "edit-the-copy".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![crate::PatchOperation::TextSplice {
+                node_id: copied_node.clone(),
+                start: 0,
+                delete_count: 6,
+                insert_text: "second".to_string(),
+                precondition: crate::NodePrecondition {
+                    node_hash: hash_bytes(b"page-0"),
+                },
+            }],
+        };
+        let result = apply_patch(&bundle, &splice, 1).unwrap();
+        assert_eq!(result.dirty_node_ids, vec![copied_node.clone()]);
+        assert_eq!(result.dirty_source_parts, vec![new_part.clone()]);
+        assert_eq!(bundle.read_chunk(&original).unwrap(), original_html);
+        let head = bundle.manifest().unwrap();
+        let descriptor = (0..head.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&head, page).unwrap().chunks)
+            .find(|descriptor| descriptor.chunk_id == copied)
+            .unwrap();
+        let copied_html = bundle.read_chunk(&descriptor).unwrap();
+        assert!(copied_html.contains(">second<"), "{copied_html}");
+        assert!(copied_html.contains(&new_part));
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_copies_every_chunk_of_a_page_that_spans_two() {
+        let temp = tempfile::tempdir().unwrap();
+        // One page spread over two chunks, the way a slide whose table the
+        // importer had to split arrives, with a one-chunk page behind it.
+        let parts: Vec<String> = [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let bundle = slide_deck_chunks(&temp.path().join("bundle"), &parts);
+
+        // Naming either chunk of the page copies the whole page.
+        let result = apply_patch(&bundle, &copy_slide_patch(&slide_chunk(1), 0), 0).unwrap();
+        assert_eq!(result.revision, 1);
+        let new_part = "ppt/slides/slide3.xml";
+        let first = copied_chunk_id("deck", new_part, 0);
+        let second = copied_chunk_id("deck", new_part, 1);
+        let mut expected = vec![first.clone(), second.clone()];
+        expected.sort();
+        assert_eq!(result.dirty_chunk_ids, expected);
+
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![
+                slide_chunk(0),
+                slide_chunk(1),
+                first.clone(),
+                second.clone(),
+                slide_chunk(2)
+            ]
+        );
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, 5);
+        let page = bundle.read_index_page(&head, 0).unwrap();
+        let cloned_first = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == first)
+            .unwrap();
+        let cloned_second = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == second)
+            .unwrap();
+        // The run the copy reaches over is the run the page it came from spans.
+        assert_eq!(cloned_first.continuation, page.chunks[0].continuation);
+        assert_eq!(cloned_second.continuation, page.chunks[1].continuation);
+        for descriptor in [cloned_first, cloned_second] {
+            assert!(bundle
+                .read_chunk(descriptor)
+                .unwrap()
+                .contains(&format!("data-hcd-source-part=\"{new_part}\"")));
+        }
+        assert_eq!(
+            bundle.revision(1).unwrap().slide_copies[0].source_slide_part,
+            "ppt/slides/slide1.xml"
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_twice_names_each_copy_by_its_own_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 2);
+        apply_patch(&bundle, &copy_slide_patch(&slide_chunk(0), 0), 0).unwrap();
+        let result = apply_patch(&bundle, &copy_slide_patch(&slide_chunk(0), 1), 1).unwrap();
+
+        // The second copy stands right behind the page it was made from, ahead of
+        // the copy made before it, and it is named by a part of its own — three
+        // pages, no node id shared by any two of them.
+        let first_copy = copied_chunk_id("deck", "ppt/slides/slide3.xml", 0);
+        let second_copy = copied_chunk_id("deck", "ppt/slides/slide4.xml", 0);
+        assert_eq!(result.dirty_chunk_ids, vec![second_copy.clone()]);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(0), second_copy, first_copy, slide_chunk(1)]
+        );
+        assert_eq!(bundle.manifest().unwrap().chunk_count, 4);
+        // Two pages copied from one deck of two: four chunks, four node ids, and
+        // no two of them the same.
+        let ids = index_slide_node_ids(&bundle);
+        assert_eq!(ids.len(), 4);
+        let unique: HashSet<String> = ids.iter().cloned().collect();
+        assert_eq!(unique.len(), 4, "{ids:?}");
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_refuses_a_page_hcd_created_or_hcd_rewrote() {
+        let temp = tempfile::tempdir().unwrap();
+        // A page HCD created has no page in the source package to copy from.
+        let bundle = slide_deck(&temp.path().join("created"), 2);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "add-one".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideAdd {}],
+            },
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        let added = (0..head.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&head, page).unwrap().chunks)
+            .find(|descriptor| {
+                descriptor.region == "slide"
+                    && bundle
+                        .read_chunk(descriptor)
+                        .unwrap()
+                        .contains("ppt/slides/slide3.xml")
+            })
+            .expect("the created page is in the index");
+        let error = apply_patch(&bundle, &copy_slide_patch(&added.chunk_id, 1), 1)
+            .expect_err("a page the source package never had cannot be copied");
+        assert!(error.to_string().contains("created in HCD"), "{error}");
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+
+        // A page HCD rewrote would be copied from the words the source package
+        // still holds rather than the ones the bundle shows, so it waits.
+        let other = slide_deck(&temp.path().join("rewrote"), 2);
+        let node = get_text_node(&other, "n_00000000000000000000000000000000").unwrap();
+        apply_patch(
+            &other,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "rewrite-page-0".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextSplice {
+                    node_id: node.node.node_id.clone(),
+                    start: 0,
+                    delete_count: node.node.text.chars().count(),
+                    insert_text: "changed".to_string(),
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            other.revision(1).unwrap().dirty_source_parts,
+            vec!["ppt/slides/slide1.xml".to_string()]
+        );
+        let error = apply_patch(&other, &copy_slide_patch(&slide_chunk(0), 1), 1)
+            .expect_err("a rewritten page is not copied from the source package");
+        assert!(error.to_string().contains("rewrote"), "{error}");
+        // The page nobody typed into is still there to copy.
+        apply_patch(&other, &copy_slide_patch(&slide_chunk(1), 1), 1).unwrap();
+        assert_eq!(
+            bundle.manifest().unwrap().chunk_count,
+            3,
+            "the refused copy left a chunk behind"
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+        assert!(crate::validate_bundle(&other).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_needs_the_page_and_the_version_it_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 2);
+        for (patch_id, schema_version, chunk_id) in [
+            (
+                "old-version",
+                crate::HCD_PATCH_SCHEMA_VERSION,
+                slide_chunk(0),
+            ),
+            (
+                "wrong-version",
+                crate::HCD_PATCH_SCHEMA_VERSION_43,
+                slide_chunk(0),
+            ),
+            (
+                "short-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_44,
+                "c_0".to_string(),
+            ),
+            (
+                "uppercase-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_44,
+                "c_0000000000000000000000000000000A".to_string(),
+            ),
+            (
+                "other-chunk",
+                crate::HCD_PATCH_SCHEMA_VERSION_44,
+                "s_00000000000000000000000000000000".to_string(),
+            ),
+        ] {
+            let error = apply_patch(
+                &bundle,
+                &crate::PatchBatch {
+                    schema_version: schema_version.to_string(),
+                    document_id: "deck".to_string(),
+                    patch_id: patch_id.to_string(),
+                    base_revision: bundle.manifest().unwrap().revision,
+                    actor: BTreeMap::new(),
+                    metadata: BTreeMap::new(),
+                    operations: vec![crate::PatchOperation::PptxSlideCopy { chunk_id }],
+                },
+                0,
+            )
+            .expect_err("the patch was expected to be refused");
+            assert!(
+                matches!(error, HcdError::Unsupported(_) | HcdError::InvalidPatch(_)),
+                "{patch_id}: unexpected {error:?}"
+            );
+        }
+
+        // One operation per patch: a copy that also asks for another copy waits.
+        let error = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_44.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "two-copies".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![
+                    crate::PatchOperation::PptxSlideCopy {
+                        chunk_id: slide_chunk(0),
+                    },
+                    crate::PatchOperation::PptxSlideCopy {
+                        chunk_id: slide_chunk(1),
+                    },
+                ],
+            },
+            0,
+        )
+        .expect_err("a patch copies one page at a time");
+        assert!(error.to_string().contains("one PPTX slide copy"), "{error}");
+
         assert_eq!(bundle.manifest().unwrap().revision, 0);
         assert_eq!(
             index_chunk_order(&bundle),
