@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +20,17 @@ pub const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CATALOG_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_FACES: usize = 32;
 const MAX_PRESENTATION_FACE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Bounds for one audit line. A day file is read from its end, so a log that
+/// grows past `MAX_AUDIT_FILE_BYTES` still answers with its newest entries
+/// instead of failing the read; only the oldest fragment of that day is out of
+/// reach, and the page counts it as unreadable rather than hiding it.
+const MAX_AUDIT_ACTION_CHARS: usize = 48;
+const MAX_AUDIT_TARGET_CHARS: usize = 160;
+const MAX_AUDIT_ACTOR_CHARS: usize = 128;
+const MAX_AUDIT_DETAIL_CHARS: usize = 512;
+const MAX_AUDIT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_AUDIT_LIMIT: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct DiskCatalog {
@@ -245,6 +257,69 @@ impl ThemeDocumentRef {
     }
 }
 
+/// Names the catalog audit log records. The log stores the string, so a new
+/// action can be added without a schema change; these constants exist so the
+/// HTTP layer and the admin console agree on the wording.
+pub mod audit_action {
+    pub const FONT_BYTES_PUT: &str = "font.bytes.put";
+    pub const FONT_REVISION_PUT: &str = "font.revision.put";
+    pub const FONT_DELETE: &str = "font.delete";
+    pub const FONT_REVISION_DELETE: &str = "font.revision.delete";
+    pub const THEME_PUT: &str = "theme.put";
+    pub const THEME_RETIRE: &str = "theme.retire";
+    pub const THEME_UNRETIRE: &str = "theme.unretire";
+    pub const THEME_DELETE: &str = "theme.delete";
+    pub const DOCUMENT_THEME_PIN: &str = "document.theme.pin";
+    pub const DOCUMENT_THEME_UNPIN: &str = "document.theme.unpin";
+}
+
+/// One operation to append to the audit log, before its timestamp is taken.
+///
+/// Fields are named rather than positional because a record that swaps `target`
+/// for `actor` says something false about who did what, and nothing downstream
+/// would notice.
+#[derive(Debug, Clone, Default)]
+pub struct AuditRecord<'a> {
+    pub action: &'a str,
+    pub target: &'a str,
+    pub actor: &'a str,
+    /// Short free text: what changed, how many, or why it was refused-safe.
+    pub detail: &'a str,
+}
+
+/// One appended line of the audit log.
+///
+/// This is the only place an operator's identity survives: a font revision, a
+/// theme revision and a document pin each record their contents, never who wrote
+/// them. Unknown JSON fields are accepted on read, so a later build can add a
+/// field without older readers losing the line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEntry {
+    /// Wall-clock milliseconds since the Unix epoch, when the write took effect.
+    pub at: u64,
+    /// One of [`audit_action`], as stored.
+    pub action: String,
+    /// What the operation addressed: `fontId/rev`, a `themeRevisionId`, a
+    /// `documentId`.
+    pub target: String,
+    /// Who asked for it, taken from the caller's token claims.
+    pub actor: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// A page read back from the audit log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditPage {
+    /// Newest first.
+    pub entries: Vec<AuditEntry>,
+    /// Log lines that could not be read as records: a torn final line after a
+    /// crash, or the fragment cut off by the tail read of a very large day.
+    /// Reported so a short list is never mistaken for the whole trail.
+    pub unreadable: usize,
+}
+
 /// Scan `{docs_root}/*.hcd` for documents pinning `theme_revision_id`, on the
 /// head or anywhere in revision history. Documents are named by their bundle
 /// stem, which is the `documentId` the HTTP layer uses.
@@ -401,6 +476,7 @@ impl DiskCatalog {
         fs::create_dir_all(root.join("themes"))?;
         fs::create_dir_all(root.join("fonts"))?;
         fs::create_dir_all(root.join("blobs"))?;
+        fs::create_dir_all(root.join("audit"))?;
         Ok(Self {
             root: root.canonicalize()?,
         })
@@ -937,6 +1013,121 @@ impl DiskCatalog {
             .root
             .join("blobs")
             .join(format!("{sha256}.{}", format.extension())))
+    }
+
+    /// Append one operation to the audit log and return the stored line.
+    ///
+    /// Records go to `{catalog}/audit/{YYYY-MM-DD}.jsonl`, one JSON object per
+    /// line, split by UTC day so the log is never rewritten as a whole and an
+    /// operator can read a busy period without touching the rest. Nothing in the
+    /// catalog edits or removes a line: the point of the file is that a change
+    /// made through this API stays visible afterwards.
+    ///
+    /// A failure to append is returned instead of being swallowed. An operation
+    /// that took effect without being recorded is precisely the hole an audit
+    /// trail exists to close, so callers treat this as a failed request; the
+    /// import auto-pin is the one place that degrades to a warning, because
+    /// there the pin itself is already best-effort.
+    pub fn record_audit(&self, record: AuditRecord<'_>) -> Result<AuditEntry, HcdError> {
+        require_audit_action(record.action)?;
+        require_audit_text(record.target, "target", MAX_AUDIT_TARGET_CHARS)?;
+        require_audit_text(record.actor, "actor", MAX_AUDIT_ACTOR_CHARS)?;
+        require_audit_detail(record.detail)?;
+        let entry = AuditEntry {
+            at: now_epoch_ms(),
+            action: record.action.to_string(),
+            target: record.target.to_string(),
+            actor: record.actor.to_string(),
+            detail: record.detail.to_string(),
+        };
+        let line = format!("{}\n", serde_json::to_string(&entry)?);
+        let path = self.audit_path(&utc_day_name(entry.at))?;
+        fs::create_dir_all(path.parent().expect("audit path has a parent"))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| {
+                HcdError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!("audit log {} could not be opened: {error}", path.display()),
+                ))
+            })?;
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
+        Ok(entry)
+    }
+
+    /// Read the newest audit entries, most recent first, across at most `limit`
+    /// lines (clamped to `1..=MAX_AUDIT_LIMIT`).
+    ///
+    /// Days are scanned newest-first and each is read from its end, so the cost
+    /// of one page does not grow with the age of the log. Lines that fail to
+    /// parse are counted in [`AuditPage::unreadable`] rather than dropped
+    /// silently: a torn final line from a crash, or a fragment cut off by the
+    /// tail bound, must not turn into "nothing else happened".
+    pub fn audit_entries(&self, limit: usize) -> Result<AuditPage, HcdError> {
+        let limit = limit.clamp(1, MAX_AUDIT_LIMIT);
+        let mut days: Vec<String> = Vec::new();
+        match fs::read_dir(self.root.join("audit")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry?.path();
+                    if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    let stem = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default();
+                    if is_audit_day(stem) {
+                        days.push(stem.to_string());
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AuditPage::default())
+            }
+            Err(error) => return Err(HcdError::Io(error)),
+        }
+        days.sort();
+        days.reverse();
+        let mut page = AuditPage::default();
+        for day in days {
+            if page.entries.len() >= limit {
+                break;
+            }
+            let path = self.audit_path(&day)?;
+            let (bytes, dropped_front) = read_audit_tail(&path, MAX_AUDIT_FILE_BYTES)?;
+            if dropped_front {
+                page.unreadable += 1;
+            }
+            let mut lines: Vec<&str> = bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| std::str::from_utf8(line).ok())
+                .collect();
+            lines.reverse();
+            for line in lines {
+                if page.entries.len() >= limit {
+                    break;
+                }
+                match serde_json::from_str::<AuditEntry>(line) {
+                    Ok(entry) => page.entries.push(entry),
+                    Err(_) => page.unreadable += 1,
+                }
+            }
+        }
+        Ok(page)
+    }
+
+    fn audit_path(&self, day: &str) -> Result<PathBuf, HcdError> {
+        if !is_audit_day(day) {
+            return Err(HcdError::InvalidBundle(
+                "audit day must be a YYYY-MM-DD date".to_string(),
+            ));
+        }
+        Ok(self.root.join("audit").join(format!("{day}.jsonl")))
     }
 }
 
@@ -1723,6 +1914,115 @@ fn now_epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Audit actions are machine names, not prose: they are what the console groups
+/// and filters on, so the charset is the same one the font ids use, plus dots.
+fn require_audit_action(value: &str) -> Result<(), HcdError> {
+    let bytes = value.as_bytes();
+    if (1..=MAX_AUDIT_ACTION_CHARS).contains(&bytes.len())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        })
+    {
+        Ok(())
+    } else {
+        Err(HcdError::InvalidBundle(format!(
+            "audit action must be 1-{MAX_AUDIT_ACTION_CHARS} lowercase letters, digits, dots, hyphens or underscores"
+        )))
+    }
+}
+
+/// Target and actor are stored one record per line and shown in a table, so
+/// control characters are refused: a newline would splice a forged record into
+/// the log, and an empty one would leave a line nobody acted on.
+fn require_audit_text(value: &str, kind: &str, maximum: usize) -> Result<(), HcdError> {
+    let count = value.chars().count();
+    if count == 0 || count > maximum || value.chars().any(char::is_control) {
+        return Err(HcdError::InvalidBundle(format!(
+            "audit {kind} must be 1-{maximum} characters without control characters"
+        )));
+    }
+    Ok(())
+}
+
+/// The detail may be empty (nothing extra to say), but follows the same rule
+/// about control characters and length.
+fn require_audit_detail(value: &str) -> Result<(), HcdError> {
+    let count = value.chars().count();
+    if count > MAX_AUDIT_DETAIL_CHARS || value.chars().any(char::is_control) {
+        return Err(HcdError::InvalidBundle(format!(
+            "audit detail must be at most {MAX_AUDIT_DETAIL_CHARS} characters without control characters"
+        )));
+    }
+    Ok(())
+}
+
+/// `YYYY-MM-DD` shape check, which also keeps a hand-planted file name out of
+/// the day scan.
+fn is_audit_day(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+/// The UTC calendar day for an epoch-millisecond timestamp, used as the audit
+/// file name so days sort lexicographically in the order they happened.
+fn utc_day_name(epoch_ms: u64) -> String {
+    // Days since 1970-01-01, shifted to the 146097-day Gregorian cycle whose
+    // civil-date formula starts at March.
+    const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
+    let shifted = epoch_ms / MS_PER_DAY + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_period = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_period + 2) / 5 + 1;
+    let month = if month_period < 10 {
+        month_period + 3
+    } else {
+        month_period - 9
+    };
+    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Read the last `maximum_bytes` of one audit day file.
+///
+/// The second field says whether the returned slice starts inside a longer line,
+/// which happens only once a day grows past the bound. A missing file is an
+/// empty log, not an error.
+fn read_audit_tail(path: &Path, maximum_bytes: u64) -> Result<(Vec<u8>, bool), HcdError> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), false))
+        }
+        Err(error) => return Err(HcdError::Io(error)),
+    };
+    let length = file.metadata()?.len();
+    if length <= maximum_bytes {
+        let mut bytes = Vec::with_capacity(length as usize);
+        file.read_to_end(&mut bytes)?;
+        return Ok((bytes, false));
+    }
+    let start = length - maximum_bytes;
+    // The byte just before the cut decides whether the first line survives it.
+    let mut probe = [0u8; 1];
+    file.seek(SeekFrom::Start(start - 1))?;
+    file.read_exact(&mut probe)?;
+    let first_line_whole = probe[0] == b'\n';
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity(maximum_bytes as usize);
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, !first_line_whole))
 }
 
 #[cfg(test)]
@@ -2727,6 +3027,269 @@ mod tests {
                 "documentId": "demo",
                 "headPinned": true,
                 "pinnedRevisions": [1, 4],
+            })
+        );
+    }
+
+    fn audit_catalog() -> (tempfile::TempDir, DiskCatalog) {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = DiskCatalog::open(temp.path()).unwrap();
+        (temp, catalog)
+    }
+
+    fn record(catalog: &DiskCatalog, action: &str, target: &str, actor: &str, detail: &str) {
+        catalog
+            .record_audit(AuditRecord {
+                action,
+                target,
+                actor,
+                detail,
+            })
+            .unwrap();
+    }
+
+    /// Hand-written log lines, one file per named day, for readers that must not
+    /// depend on the wall clock.
+    fn plant_audit_lines(catalog: &DiskCatalog, day: &str, lines: &[&str]) {
+        let path = catalog.root().join("audit").join(format!("{day}.jsonl"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut body = String::new();
+        for line in lines {
+            body.push_str(line);
+            body.push('\n');
+        }
+        fs::write(&path, body).unwrap();
+    }
+
+    #[test]
+    fn audit_lines_append_one_file_per_day_and_read_back_newest_first() {
+        let (_temp, catalog) = audit_catalog();
+        record(
+            &catalog,
+            audit_action::FONT_BYTES_PUT,
+            "ui-serif",
+            "admin:will",
+            "1024 bytes, woff2",
+        );
+        record(
+            &catalog,
+            audit_action::THEME_RETIRE,
+            "a".repeat(64).as_str(),
+            "admin:will",
+            "",
+        );
+        let day = utc_day_name(now_epoch_ms());
+        let path = catalog.root().join("audit").join(format!("{day}.jsonl"));
+        let stored = fs::read_to_string(&path).unwrap();
+        assert_eq!(stored.lines().count(), 2, "both records share one day file");
+        assert!(stored.ends_with('\n'), "every record ends its own line");
+
+        let page = catalog.audit_entries(10).unwrap();
+        assert_eq!(page.unreadable, 0);
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].action, audit_action::THEME_RETIRE);
+        assert_eq!(page.entries[1].action, audit_action::FONT_BYTES_PUT);
+        assert_eq!(page.entries[1].detail, "1024 bytes, woff2");
+        assert!(page.entries[1].at > 0);
+        assert_eq!(page.entries[0].detail, "");
+
+        // The limit is a newest-first window, not a truncation of the oldest.
+        let one = catalog.audit_entries(1).unwrap();
+        assert_eq!(one.entries.len(), 1);
+        assert_eq!(one.entries[0].action, audit_action::THEME_RETIRE);
+    }
+
+    #[test]
+    fn audit_read_walks_days_newest_first_across_files() {
+        let (_temp, catalog) = audit_catalog();
+        let older = serde_json::json!({
+            "at": 1_600_000_000_000u64, "action": "theme.put", "target": "old",
+            "actor": "admin:will", "detail": "first",
+        });
+        let newer = serde_json::json!({
+            "at": 1_700_000_000_000u64, "action": "theme.delete", "target": "old",
+            "actor": "admin:will",
+        });
+        plant_audit_lines(
+            &catalog,
+            "2020-09-13",
+            &[&older.to_string(), "not json at all"],
+        );
+        plant_audit_lines(&catalog, "2023-11-14", &[&newer.to_string()]);
+
+        let page = catalog.audit_entries(5).unwrap();
+        assert_eq!(page.entries.len(), 2, "the day order is newest first");
+        assert_eq!(page.entries[0].action, "theme.delete");
+        assert_eq!(
+            page.entries[0].detail, "",
+            "an absent detail reads as empty"
+        );
+        assert_eq!(page.entries[1].action, "theme.put");
+        assert_eq!(page.unreadable, 1, "the torn line is counted, not hidden");
+
+        // A limit that stops inside the newest day must not reach back further.
+        let one = catalog.audit_entries(1).unwrap();
+        assert_eq!(one.entries.len(), 1);
+        assert_eq!(one.entries[0].action, "theme.delete");
+    }
+
+    #[test]
+    fn audit_rejects_a_bad_action_and_forgery_shaped_text() {
+        let (_temp, catalog) = audit_catalog();
+        let long_action = "a".repeat(MAX_AUDIT_ACTION_CHARS + 1);
+        let long = "d".repeat(MAX_AUDIT_DETAIL_CHARS + 1);
+        for (action, target, actor, detail, why) in [
+            ("Theme.Put", "x", "a", "", "uppercase action"),
+            ("theme put", "x", "a", "", "space in action"),
+            ("", "x", "a", "", "empty action"),
+            (long_action.as_str(), "x", "a", "", "oversized action"),
+            ("theme.put", "", "a", "", "empty target"),
+            ("theme.put", "x\nforged", "a", "", "newline in target"),
+            (
+                "theme.put",
+                "x\ttabbed",
+                "a",
+                "",
+                "tab in target, inside the limit",
+            ),
+            ("theme.put", "x", "", "", "empty actor"),
+            ("theme.put", "x", "a", long.as_str(), "oversized detail"),
+        ] {
+            let error = catalog
+                .record_audit(AuditRecord {
+                    action,
+                    target,
+                    actor,
+                    detail,
+                })
+                .expect_err(why);
+            assert!(
+                matches!(error, HcdError::InvalidBundle(_)),
+                "{why}: {error}"
+            );
+        }
+        // An over-long target names its own bound rather than failing as a
+        // generic text check, so a caller can tell which field to shorten.
+        let error = catalog
+            .record_audit(AuditRecord {
+                action: "theme.put",
+                target: long.as_str(),
+                actor: "a",
+                detail: "",
+            })
+            .expect_err("oversized target");
+        assert!(
+            error
+                .to_string()
+                .contains(&MAX_AUDIT_TARGET_CHARS.to_string()),
+            "{error}"
+        );
+        assert!(
+            catalog
+                .root()
+                .join("audit")
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .next()
+                .is_none(),
+            "a refused record leaves no line behind"
+        );
+    }
+
+    #[test]
+    fn audit_tail_keeps_the_newest_lines_of_an_oversized_day() {
+        let (_temp, catalog) = audit_catalog();
+        let line = |index: usize| {
+            format!(
+                "{{\"at\":{},\"action\":\"theme.put\",\"target\":\"t{index}\",\"actor\":\"admin\"}}",
+                1_700_000_000_000u64 + index as u64
+            )
+        };
+        let whole = line(0);
+        let bound = whole.len() * 3;
+        plant_audit_lines(
+            &catalog,
+            "2023-11-14",
+            &[&line(0), &line(1), &line(2), &line(3)],
+        );
+        let path = catalog.root().join("audit").join("2023-11-14.jsonl");
+
+        // Cut mid-line: the fragment is dropped and counted, the rest survives.
+        let (bytes, dropped) = read_audit_tail(&path, bound as u64).unwrap();
+        assert!(dropped, "the read started inside a line");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(&line(2)), "{text}");
+        assert!(text.contains(&line(3)), "{text}");
+        assert!(!text.contains(&whole), "the oldest line is out of reach");
+
+        // A cut that lands on a boundary is not a fragment.
+        let exact = (whole.len() + 1) * 2;
+        let (bytes, dropped) = read_audit_tail(&path, exact as u64).unwrap();
+        assert!(!dropped);
+        assert_eq!(bytes, format!("{}\n{}\n", line(2), line(3)).as_bytes());
+
+        // A file within the bound is read whole.
+        let (bytes, dropped) = read_audit_tail(&path, 1 << 20).unwrap();
+        assert!(!dropped);
+        assert_eq!(bytes.len(), (whole.len() + 1) * 4);
+    }
+
+    #[test]
+    fn audit_day_names_follow_the_utc_calendar() {
+        assert_eq!(utc_day_name(0), "1970-01-01");
+        assert_eq!(utc_day_name(8_639_999), "1970-01-01");
+        assert_eq!(utc_day_name(86_400_000), "1970-01-02");
+        assert_eq!(utc_day_name(1_700_000_000_000), "2023-11-14");
+        assert_eq!(utc_day_name(1_709_164_800_000), "2024-02-29");
+        assert_eq!(utc_day_name(1_735_689_599_000), "2024-12-31");
+        assert!(is_audit_day("2024-02-29"));
+        assert!(!is_audit_day("2024-2-29"));
+        assert!(!is_audit_day("../../etc/passwd"));
+        assert!(!is_audit_day(""));
+    }
+
+    #[test]
+    fn audit_a_missing_log_reads_as_empty_and_unknown_fields_survive() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = DiskCatalog::open(temp.path().join("catalog")).unwrap();
+        fs::remove_dir_all(catalog.root().join("audit")).unwrap();
+        let page = catalog.audit_entries(20).unwrap();
+        assert!(page.entries.is_empty());
+        assert_eq!(page.unreadable, 0);
+
+        // A later build may add a field; an older reader must still show the line.
+        plant_audit_lines(
+            &catalog,
+            "2023-11-14",
+            &["{\"at\":1,\"action\":\"theme.put\",\"target\":\"t\",\"actor\":\"a\",\"future\":true}"],
+        );
+        let page = catalog.audit_entries(20).unwrap();
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "an unknown field is not a lost record"
+        );
+        assert_eq!(page.unreadable, 0);
+    }
+
+    #[test]
+    fn audit_entries_serialize_with_http_names() {
+        let value = serde_json::to_value(AuditEntry {
+            at: 7,
+            action: "theme.retire".to_string(),
+            target: "abc".to_string(),
+            actor: "admin:will".to_string(),
+            detail: String::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "at": 7,
+                "action": "theme.retire",
+                "target": "abc",
+                "actor": "admin:will",
             })
         );
     }
