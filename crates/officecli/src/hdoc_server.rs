@@ -12,14 +12,15 @@ use axum::{Json, Router};
 use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
-    apply_patch, apply_structure_patch, detect_font_format, editor_projection, hash_file,
-    list_documents, manifest_at_revision, pin_document_theme, project_editor,
+    apply_patch, apply_structure_patch, audit_action, detect_font_format, editor_projection,
+    hash_file, list_documents, manifest_at_revision, pin_document_theme, project_editor,
     resolve_document_theme, restore_revision, search_bundle, theme_documents, unpin_document_theme,
-    BlockPrecondition, Bundle, DiskCatalog, DocumentSummary, EditorBlockContent, EditorInline,
-    FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch,
-    FontStyle, HcdError, PatchBatch, StructureOperation, StructurePatchBatch, ThemeDocumentRef,
-    ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES,
-    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
+    AuditRecord, BlockPrecondition, Bundle, DiskCatalog, DocumentSummary, EditorBlockContent,
+    EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRevision,
+    FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
+    StructurePatchBatch, ThemeDocumentRef, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
+    HCD_PATCH_SCHEMA_VERSION_4, MAX_AUDIT_LIMIT, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES,
+    THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -179,6 +180,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             "/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}",
             get(theme_file),
         )
+        .route("/v1/catalog/audit", get(catalog_audit))
         .route("/v1/catalog/fonts", get(catalog_fonts))
         .route(
             "/v1/catalog/fonts/{font_id}",
@@ -240,7 +242,9 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
     Ok(())
 }
 
-fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
+/// Upload routes need a token of their own scope, and the claims are handed back
+/// so a default-theme auto-pin can record who imported the document.
+fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<Claims, ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -267,7 +271,7 @@ fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiE
             "upload token required".to_string(),
         ));
     }
-    Ok(())
+    Ok(claims)
 }
 
 /// `--default-theme` names a catalog theme revision, so it must be a 64-character lowercase digest.
@@ -287,10 +291,16 @@ fn configured_default_theme(value: Option<String>) -> Result<Option<String>> {
 /// keeps it, because the default only fills in for documents that have no theme yet.
 /// A stale, retired, or unreadable theme must not strand the document an operator just
 /// uploaded, so the failure becomes a job warning instead of a failed import.
+///
+/// `actor` is who uploaded the document: the pin itself is the service's policy
+/// (`--default-theme`), but the operation log should say whose import caused it.
+/// Here a refused audit line degrades to a job warning rather than a failed
+/// request, because the pin is already committed and the import is best-effort.
 fn pin_default_theme(
     catalog: &DiskCatalog,
     default_theme: Option<&str>,
     destination: &std::path::Path,
+    actor: &str,
 ) -> Option<String> {
     let theme_id = default_theme?;
     let bundle = match Bundle::open(destination) {
@@ -307,7 +317,18 @@ fn pin_default_theme(
         return None;
     }
     match pin_document_theme(catalog, &bundle, theme_id) {
-        Ok(_) => None,
+        Ok(manifest) => catalog
+            .record_audit(AuditRecord {
+                action: audit_action::DOCUMENT_THEME_PIN,
+                target: &manifest.document_id,
+                actor,
+                detail: &format!(
+                    "导入时按服务默认主题自动钉上 {theme_id}，写入修订 r{}",
+                    manifest.revision
+                ),
+            })
+            .err()
+            .map(|error| format!("默认主题已钉上，但操作记录没有写入: {error}")),
         Err(error) => Some(format!("default theme {theme_id} was not pinned: {error}")),
     }
 }
@@ -323,7 +344,10 @@ async fn import_document(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Value>, ApiError> {
-    authorize_upload(&state, &headers)?;
+    let claims = authorize_upload(&state, &headers)?;
+    // Resolved before the job is spawned: the background task cannot reach the
+    // request headers, but the auto-pin it may perform still needs an actor.
+    let actor = audit_actor(&claims);
     let extension = std::path::Path::new(&query.filename)
         .extension()
         .and_then(|value| value.to_str())
@@ -362,7 +386,7 @@ async fn import_document(
         return Err(bad("empty upload"));
     }
     if extension == "hcd" {
-        return import_hcd_archive(state, temporary, job_id).await;
+        return import_hcd_archive(state, temporary, job_id, actor).await;
     }
     let hash = hash_file(&temporary).map_err(internal)?;
     let document_id = format!("doc-{}", &hash[..32]);
@@ -441,7 +465,7 @@ async fn import_document(
             }
             let mut warnings = Vec::new();
             if let Some(warning) =
-                pin_default_theme(&catalog, default_theme.as_deref(), &destination)
+                pin_default_theme(&catalog, default_theme.as_deref(), &destination, &actor)
             {
                 warnings.push(warning);
             }
@@ -469,6 +493,7 @@ async fn import_hcd_archive(
     state: ServerState,
     archive: PathBuf,
     job_id: String,
+    actor: String,
 ) -> Result<Json<Value>, ApiError> {
     let inspected = match hcd_core::inspect_archive(&archive) {
         Ok(manifest) => manifest,
@@ -531,7 +556,7 @@ async fn import_hcd_archive(
             }
             let mut warnings = Vec::new();
             if let Some(warning) =
-                pin_default_theme(&catalog, default_theme.as_deref(), &destination)
+                pin_default_theme(&catalog, default_theme.as_deref(), &destination, &actor)
             {
                 warnings.push(warning);
             }
@@ -705,11 +730,12 @@ fn authorize(
 /// token it already holds instead of minting a short-lived write token per
 /// document. Every route that changes content still requires a token written for
 /// that document, so this is the one place the admin token reaches a document.
-fn authorize_theme(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<(), ApiError> {
-    if authorize_admin(state, headers).is_ok() {
-        return Ok(());
+fn authorize_theme(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
+    // The claims are returned, not just checked: the pin has to record who made it.
+    if let Ok(claims) = authorize_admin(state, headers) {
+        return Ok(claims);
     }
-    authorize(state, headers, id, true)
+    write_claims(state, headers, id)
 }
 
 fn authorize_catalog(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -776,6 +802,65 @@ fn authorize_admin(state: &ServerState, headers: &HeaderMap) -> Result<Claims, A
         ));
     }
     Ok(actor)
+}
+
+/// Who a token belongs to, as the audit log records it.
+///
+/// Tokens already carry `--user-id` and `--display-name`, so an operator who
+/// mints one for themselves shows up by name. Control characters are stripped
+/// rather than rejected: they come from whatever the token said, and one must
+/// not be able to forge a second log line or break a record that was already
+/// written. A token with no identity still says which kind of credential acted.
+fn audit_actor(claims: &Claims) -> String {
+    let clean = |value: &str| -> String {
+        value
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(64)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
+    let name = claims.name.as_deref().map(str::trim).map(clean);
+    let id = claims.sub.as_deref().map(str::trim).map(clean);
+    match (
+        name.filter(|value| !value.is_empty()),
+        id.filter(|value| !value.is_empty()),
+    ) {
+        (Some(name), Some(id)) if name != id => format!("{name} ({id})"),
+        (Some(name), _) => name,
+        (_, Some(id)) => id,
+        (None, None) => format!("{}:{}", clean(&claims.scope), clean(&claims.doc)),
+    }
+}
+
+/// Append one finished catalog operation to the audit log.
+///
+/// Called after the change took effect, so a record never describes work that
+/// did not happen. The flip side is chosen deliberately: if the line cannot be
+/// written the request still reports failure, because an operation that changed
+/// the catalog without leaving a trace is the hole this log exists to close.
+fn record_catalog_audit(
+    catalog: &DiskCatalog,
+    claims: &Claims,
+    action: &str,
+    target: &str,
+    detail: String,
+) -> Result<(), ApiError> {
+    catalog
+        .record_audit(AuditRecord {
+            action,
+            target,
+            actor: &audit_actor(claims),
+            detail: &detail,
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("变更已经生效，但操作记录没有写入：{error}"),
+            )
+        })
 }
 
 fn write_claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
@@ -1590,20 +1675,45 @@ async fn pin_theme(
     headers: HeaderMap,
     Json(body): Json<PinThemeBody>,
 ) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
-    authorize_theme(&state, &headers, &id)?;
+    let claims = authorize_theme(&state, &headers, &id)?;
     let bundle = open(&state, &id)?;
-    let manifest = match body.theme_revision_id.as_deref() {
+    // A re-pin of the theme already on the head, or an unpin of a document that
+    // carries nothing, is a no-op the commit path reports with the same revision
+    // number. Those requests are not recorded: the log answers "who changed
+    // what", and a repeated click on an unchanged document changed nothing.
+    let before = bundle.manifest().map_err(internal)?.revision;
+    let (manifest, action, detail) = match body.theme_revision_id.as_deref() {
         Some(theme_revision_id) => {
-            state
-                .catalog
-                .resolve(theme_revision_id, |font_id, revision, sha| {
-                    theme_font_href(theme_revision_id, font_id, revision, sha)
-                })
+            let manifest = pin_document_theme(&state.catalog, &bundle, theme_revision_id)
                 .map_err(hcd_error)?;
-            pin_document_theme(&state.catalog, &bundle, theme_revision_id).map_err(hcd_error)?
+            // The name comes from the catalog, which the pin already proved
+            // resolves; a theme deleted out from under us still leaves the digest.
+            let named = state
+                .catalog
+                .get_theme(theme_revision_id)
+                .map(|theme| format!("「{}」", theme.name))
+                .unwrap_or_default();
+            (
+                manifest,
+                audit_action::DOCUMENT_THEME_PIN,
+                format!("钉上主题{named}（{}）", short_digest(theme_revision_id)),
+            )
         }
-        None => unpin_document_theme(&state.catalog, &bundle).map_err(hcd_error)?,
+        None => (
+            unpin_document_theme(&state.catalog, &bundle).map_err(hcd_error)?,
+            audit_action::DOCUMENT_THEME_UNPIN,
+            "取消钉版，文档回到自己的样式".to_string(),
+        ),
     };
+    if manifest.revision != before {
+        record_catalog_audit(
+            &state.catalog,
+            &claims,
+            action,
+            &manifest.document_id,
+            format!("{}，修订 r{before} → r{}", detail, manifest.revision),
+        )?;
+    }
     if body.theme_revision_id.is_none() {
         // An unpin leaves nothing to resolve: resolve_document_theme reports a
         // missing pin as 404, and answering a successful call with that would
@@ -1815,13 +1925,37 @@ async fn catalog_delete_font(
     Path(font_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<FontDeleteReport>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     if !valid_font_id(&font_id) {
         return Err(bad(
             "fontId must be 1-64 lowercase letters, digits, or hyphens",
         ));
     }
     let report = state.catalog.delete_font(&font_id).map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_DELETE,
+        &font_id,
+        format!(
+            "删除 {} 个字体修订；{}{}。",
+            report.removed_revisions.len(),
+            if report.removed_blobs.is_empty() {
+                "没有字库失去最后一个引用".to_string()
+            } else {
+                format!("回收 {} 个字库", report.removed_blobs.len())
+            },
+            // The ids are the log's own evidence, so a few are named in full.
+            match report.removed_revisions.len() {
+                0 => String::new(),
+                1 => format!("（修订 {}）", short_digest(&report.removed_revisions[0])),
+                count => format!(
+                    "（含最近的 {}）",
+                    short_digest(&report.removed_revisions[count - 1])
+                ),
+            }
+        ),
+    )?;
     Ok(Json(report))
 }
 
@@ -1830,7 +1964,7 @@ async fn catalog_delete_font_revision(
     Path((font_id, revision)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<FontDeleteReport>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     if !valid_font_id(&font_id) {
         return Err(bad(
             "fontId must be 1-64 lowercase letters, digits, or hyphens",
@@ -1843,6 +1977,25 @@ async fn catalog_delete_font_revision(
         .catalog
         .delete_font_revision(&font_id, &revision)
         .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_REVISION_DELETE,
+        &format!("{font_id}/{revision}"),
+        format!(
+            "删除修订 {}；{}。字体其它修订不受影响",
+            short_digest(&revision),
+            if report.removed_blobs.is_empty() {
+                "没有字库失去最后一个引用".to_string()
+            } else {
+                format!(
+                    "回收 {} 个字库（{}）",
+                    report.removed_blobs.len(),
+                    short_digest(&report.removed_blobs[0])
+                )
+            }
+        ),
+    )?;
     Ok(Json(report))
 }
 
@@ -1858,7 +2011,7 @@ async fn catalog_put_blob(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     if !valid_font_id(&font_id) {
         return Err(bad(
             "fontId must be 1-64 lowercase letters, digits, or hyphens",
@@ -1883,6 +2036,17 @@ async fn catalog_put_blob(
         .catalog
         .put_font_bytes(&body, format)
         .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_BYTES_PUT,
+        &font_id,
+        format!(
+            "存入字库 {sha256}（{} 字节，{}）；同一摘要的重复上传不增加字节",
+            body.len(),
+            query.format
+        ),
+    )?;
     Ok(Json(json!({
         "sha256": sha256,
         "byteLength": body.len(),
@@ -1917,7 +2081,7 @@ async fn catalog_put_font_revision(
     headers: HeaderMap,
     Json(body): Json<NewFontRevisionBody>,
 ) -> Result<Json<FontRevision>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     if !valid_font_id(&font_id) {
         return Err(bad(
             "fontId must be 1-64 lowercase letters, digits, or hyphens",
@@ -1926,7 +2090,7 @@ async fn catalog_put_font_revision(
     let family = body.family;
     let revision = FontRevision {
         schema_version: FONT_CATALOG_SCHEMA.to_string(),
-        font_id,
+        font_id: font_id.clone(),
         font_revision_id: String::new(),
         family: family.clone(),
         faces: body
@@ -1950,7 +2114,64 @@ async fn catalog_put_font_revision(
         .catalog
         .put_font_revision(&revision)
         .map_err(hcd_error)?;
+    let license = format!(
+        "许可证 {}（网页预览{}，docx/pptx{}，pdf{}，再分发{}{}）",
+        stored.license.name,
+        if stored.license.web_preview {
+            "可"
+        } else {
+            "不可"
+        },
+        if stored.license.ooxml_embed {
+            "可"
+        } else {
+            "不可"
+        },
+        if stored.license.pdf_embed {
+            "可"
+        } else {
+            "不可"
+        },
+        if stored.license.redistribution {
+            "可"
+        } else {
+            "不可"
+        },
+        match stored.license.expires_at_epoch_ms {
+            Some(expires) => format!("，到期 {expires}"),
+            None => String::new(),
+        }
+    );
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_REVISION_PUT,
+        &font_id,
+        format!(
+            "登记修订 {}，字族「{}」，{} 个 face；{license}",
+            short_digest(&stored.font_revision_id),
+            stored.family,
+            stored.faces.len()
+        ),
+    )?;
     Ok(Json(stored))
+}
+
+/// First and last characters of a digest, for a log line a human reads.
+fn short_digest(value: &str) -> String {
+    if value.chars().count() <= 16 {
+        return value.to_string();
+    }
+    let head: String = value.chars().take(8).collect();
+    let tail: String = value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
 }
 
 async fn catalog_themes(
@@ -1975,7 +2196,7 @@ async fn catalog_put_theme(
     headers: HeaderMap,
     Json(body): Json<NewThemeBody>,
 ) -> Result<Json<ThemeRevision>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     let theme = ThemeRevision {
         schema_version: THEME_SCHEMA.to_string(),
         theme_revision_id: String::new(),
@@ -1989,7 +2210,33 @@ async fn catalog_put_theme(
         .catalog
         .get_theme(&theme_revision_id)
         .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_PUT,
+        &theme_revision_id,
+        format!(
+            "保存主题「{}」为修订 {}；标题槽位 {}，正文槽位 {}，回退 {}",
+            stored.name,
+            short_digest(&theme_revision_id),
+            slot_count(&stored.major),
+            slot_count(&stored.minor),
+            if stored.fallback_families.is_empty() {
+                "无".to_string()
+            } else {
+                stored.fallback_families.join(" / ")
+            }
+        ),
+    )?;
     Ok(Json(stored))
+}
+
+/// How many script slots a theme pair fills.
+fn slot_count(slots: &ThemeFontSlots) -> usize {
+    [&slots.latin, &slots.east_asia, &slots.bidi]
+        .into_iter()
+        .flatten()
+        .count()
 }
 
 async fn catalog_retired_themes(
@@ -2007,14 +2254,42 @@ async fn catalog_retire_theme(
     Path(theme_revision_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     if !valid_digest_hex(&theme_revision_id) {
         return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
     }
+    // Read before the change: a later build could refuse, and only the name
+    // already fetched is safe to quote in the record.
+    let name = state
+        .catalog
+        .get_theme(&theme_revision_id)
+        .map_err(hcd_error)?
+        .name;
+    // Asked before the change, so a repeat call can say it changed nothing.
+    let was_retired = state
+        .catalog
+        .is_theme_retired(&theme_revision_id)
+        .map_err(hcd_error)?;
     state
         .catalog
         .retire_theme(&theme_revision_id)
         .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_RETIRE,
+        &theme_revision_id,
+        format!(
+            "退役主题「{}」（{}）；已钉住它的文档仍可正常解析，新钉版会被拒绝{}",
+            name,
+            short_digest(&theme_revision_id),
+            if was_retired {
+                "；此前已是退役状态，本次没有改变"
+            } else {
+                ""
+            }
+        ),
+    )?;
     Ok(Json(json!({
         "themeRevisionId": theme_revision_id,
         "retired": true,
@@ -2026,14 +2301,40 @@ async fn catalog_unretire_theme(
     Path(theme_revision_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     if !valid_digest_hex(&theme_revision_id) {
         return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
     }
+    let was_retired = state
+        .catalog
+        .is_theme_retired(&theme_revision_id)
+        .map_err(hcd_error)?;
     state
         .catalog
         .unretire_theme(&theme_revision_id)
         .map_err(hcd_error)?;
+    // The theme may already be deleted, so the name is best effort: the record
+    // must still be written for a state change nobody can name any more.
+    let name = state.catalog.get_theme(&theme_revision_id).ok();
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_UNRETIRE,
+        &theme_revision_id,
+        format!(
+            "取消退役{}（{}）；该主题可以重新被钉到文档上{}",
+            match &name {
+                Some(theme) => format!("主题「{}」", theme.name),
+                None => "一个目录里已经没有记录的主题".to_string(),
+            },
+            short_digest(&theme_revision_id),
+            if was_retired {
+                ""
+            } else {
+                "；此前并没有退役，本次没有改变"
+            }
+        ),
+    )?;
     Ok(Json(json!({
         "themeRevisionId": theme_revision_id,
         "retired": false,
@@ -2077,17 +2378,59 @@ async fn catalog_delete_theme(
     Path(theme_revision_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize_admin(&state, &headers)?;
+    let claims = authorize_admin(&state, &headers)?;
     if !valid_digest_hex(&theme_revision_id) {
         return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
     }
+    // Read the name first: after the delete there is nothing left to ask.
+    let name = state
+        .catalog
+        .get_theme(&theme_revision_id)
+        .map_err(hcd_error)?
+        .name;
     state
         .catalog
         .delete_theme(&theme_revision_id, &state.root)
         .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_DELETE,
+        &theme_revision_id,
+        format!(
+            "彻底删除主题「{}」（{}）；删除前本服务的文档目录里没有文档钉住它，它引用的字体与字库保持不变",
+            name,
+            short_digest(&theme_revision_id)
+        ),
+    )?;
     Ok(Json(json!({
         "themeRevisionId": theme_revision_id,
         "deleted": true,
+    })))
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    limit: Option<usize>,
+}
+
+/// The catalog operation log: who uploaded or deleted a font, who retired or
+/// deleted a theme, who pinned or unpinned a document. Newest first.
+///
+/// The log only ever records what this service did through these routes; it is
+/// admin-only because it names documents and operators.
+async fn catalog_audit(
+    State(state): State<ServerState>,
+    Query(query): Query<AuditQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    let limit = query.limit.unwrap_or(100).clamp(1, MAX_AUDIT_LIMIT);
+    let page = state.catalog.audit_entries(limit).map_err(hcd_error)?;
+    Ok(Json(json!({
+        "entries": page.entries,
+        "unreadable": page.unreadable,
+        "limit": limit,
     })))
 }
 
@@ -2412,6 +2755,18 @@ mod tests {
     }
 
     fn bearer(secret: &[u8], doc: &str, scope: &str) -> HeaderMap {
+        bearer_as(secret, doc, scope, None, None)
+    }
+
+    /// The same token with the identity a real one carries (`--user-id`,
+    /// `--display-name`), which is what makes the audit actor worth reading.
+    fn bearer_as(
+        secret: &[u8],
+        doc: &str,
+        scope: &str,
+        sub: Option<&str>,
+        name: Option<&str>,
+    ) -> HeaderMap {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2421,8 +2776,8 @@ mod tests {
             &Claims {
                 doc: doc.to_string(),
                 scope: scope.to_string(),
-                sub: None,
-                name: None,
+                sub: sub.map(str::to_string),
+                name: name.map(str::to_string),
                 aud: "hcd-core".to_string(),
                 iat: now,
                 exp: now + 600,
@@ -3007,6 +3362,11 @@ mod tests {
         assert!(html.contains("/v1/documents"));
         assert!(html.contains("目录管理"));
         assert!(html.contains("上传登记"));
+        // The operation log view is part of the same shipped bundle: it calls the
+        // admin-only audit route and labels the sidebar group it lives under.
+        assert!(html.contains("/v1/catalog/audit"));
+        assert!(html.contains("操作记录"));
+        assert!(html.contains("留痕"));
     }
 
     #[tokio::test]
@@ -3338,7 +3698,12 @@ mod tests {
         imported_bundle(&destination, "doc-new", None);
 
         assert_eq!(
-            pin_default_theme(&state.catalog, state.default_theme.as_deref(), &destination),
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:test"
+            ),
             None
         );
 
@@ -3362,7 +3727,12 @@ mod tests {
         imported_bundle(&destination, "doc-none", None);
 
         assert_eq!(
-            pin_default_theme(&state.catalog, state.default_theme.as_deref(), &destination),
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:test"
+            ),
             None
         );
 
@@ -3387,7 +3757,12 @@ mod tests {
         imported_bundle(&destination, "doc-brand", Some(own.clone()));
 
         assert_eq!(
-            pin_default_theme(&state.catalog, state.default_theme.as_deref(), &destination),
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:test"
+            ),
             None
         );
 
@@ -3407,7 +3782,8 @@ mod tests {
         let unknown = "f".repeat(64);
         let stale = temp.path().join("doc-stale.hcd");
         imported_bundle(&stale, "doc-stale", None);
-        let warning = pin_default_theme(&state.catalog, Some(&unknown), &stale).unwrap();
+        let warning =
+            pin_default_theme(&state.catalog, Some(&unknown), &stale, "upload:test").unwrap();
         assert!(warning.contains("was not pinned"), "{warning}");
         let manifest = Bundle::open(&stale).unwrap().manifest().unwrap();
         assert_eq!(manifest.revision, 0);
@@ -3416,7 +3792,8 @@ mod tests {
         state.catalog.retire_theme(&theme).unwrap();
         let retired = temp.path().join("doc-retired.hcd");
         imported_bundle(&retired, "doc-retired", None);
-        let warning = pin_default_theme(&state.catalog, Some(&theme), &retired).unwrap();
+        let warning =
+            pin_default_theme(&state.catalog, Some(&theme), &retired, "upload:test").unwrap();
         assert!(warning.contains("retired"), "{warning}");
         assert_eq!(
             Bundle::open(&retired)
@@ -3427,8 +3804,13 @@ mod tests {
             None
         );
 
-        let warning =
-            pin_default_theme(&state.catalog, Some(&theme), &temp.path().join("gone.hcd")).unwrap();
+        let warning = pin_default_theme(
+            &state.catalog,
+            Some(&theme),
+            &temp.path().join("gone.hcd"),
+            "upload:test",
+        )
+        .unwrap();
         assert!(warning.contains("was not pinned"), "{warning}");
     }
 
@@ -3700,6 +4082,390 @@ mod tests {
                 .unwrap_err()
                 .0,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_route_is_admin_only_and_answers_newest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+
+        // The log names documents and operators, so no document token may read it,
+        // whatever its scope.
+        assert_eq!(
+            catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery { limit: None }),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        for (doc, scope) in [
+            ("doc-a", "read"),
+            ("doc-a", "write"),
+            ("*", "read"),
+            ("*", "upload"),
+            ("*", "write"),
+        ] {
+            let error = catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery { limit: None }),
+                bearer(secret, doc, scope),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{doc}/{scope} read the log");
+        }
+
+        // A catalog nobody has touched answers an empty log, not an error.
+        let admin = bearer(secret, "*", "admin");
+        let empty = catalog_audit(
+            State(state.clone()),
+            Query(AuditQuery { limit: None }),
+            admin.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty.0["entries"], json!([]));
+        assert_eq!(empty.0["unreadable"], json!(0));
+        assert_eq!(
+            empty.0["limit"],
+            json!(100),
+            "the console asks without a limit and gets a page"
+        );
+        assert_eq!(
+            catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery { limit: Some(0) }),
+                admin.clone()
+            )
+            .await
+            .unwrap()
+            .0["limit"],
+            json!(1),
+            "a zero limit still answers something instead of nothing"
+        );
+        assert_eq!(
+            catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery { limit: Some(9_999) }),
+                admin.clone()
+            )
+            .await
+            .unwrap()
+            .0["limit"],
+            json!(MAX_AUDIT_LIMIT),
+            "the read stays bounded"
+        );
+
+        // Seeding through the same admin write surface the console uses leaves one
+        // line per step, newest first.
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let page = catalog_audit(
+            State(state),
+            Query(AuditQuery { limit: None }),
+            bearer(secret, "*", "admin"),
+        )
+        .await
+        .unwrap();
+        let entries = page.0["entries"].as_array().unwrap();
+        let actions: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                audit_action::THEME_PUT,
+                audit_action::FONT_REVISION_PUT,
+                audit_action::FONT_BYTES_PUT,
+            ]
+        );
+        assert_eq!(entries[0]["target"], json!(theme));
+        assert!(entries[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Brand default"));
+        assert_eq!(
+            entries[0]["actor"],
+            json!("admin:*"),
+            "a token with no identity says which kind of credential acted"
+        );
+        let times: Vec<u64> = entries
+            .iter()
+            .map(|entry| entry["at"].as_u64().unwrap())
+            .collect();
+        assert!(
+            times.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{times:?} is not newest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_finished_catalog_change_appends_a_line_and_a_refusal_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer_as(secret, "*", "admin", Some("op-1"), Some("林运营"));
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .theme_revision_id;
+
+        // Retire it, retire it a second time, then bring it back.
+        for _ in 0..2 {
+            let _ = catalog_retire_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap();
+        }
+        let _ = catalog_unretire_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap();
+
+        // A document pins it; pinning the same theme again changes nothing.
+        let body = || {
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            })
+        };
+        imported_bundle(&temp.path().join("doc-a.hcd"), "doc-a", None);
+        let _ = pin_theme(
+            State(state.clone()),
+            Path("doc-a".to_string()),
+            admin.clone(),
+            body(),
+        )
+        .await
+        .unwrap();
+        let _ = pin_theme(
+            State(state.clone()),
+            Path("doc-a".to_string()),
+            admin.clone(),
+            body(),
+        )
+        .await
+        .unwrap();
+
+        // Refused requests are not recorded: nothing was changed.
+        let counted = state
+            .catalog
+            .audit_entries(MAX_AUDIT_LIMIT)
+            .unwrap()
+            .entries
+            .len();
+        assert_eq!(
+            pin_theme(
+                State(state.clone()),
+                Path("doc-a".to_string()),
+                bearer(secret, "doc-a", "read"),
+                body(),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            catalog_delete_theme(State(state.clone()), Path("cd".repeat(32)), admin.clone())
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            state
+                .catalog
+                .audit_entries(MAX_AUDIT_LIMIT)
+                .unwrap()
+                .entries
+                .len(),
+            counted,
+            "a refusal left a line behind"
+        );
+
+        // The document's own writer unpins it, which frees the theme and then the
+        // font for deletion.
+        let writer = bearer_as(secret, "doc-a", "write", Some("editor-7"), Some("陈瑞"));
+        let _ = pin_theme(
+            State(state.clone()),
+            Path("doc-a".to_string()),
+            writer,
+            Json(PinThemeBody {
+                theme_revision_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        // The document's history still cites the theme it pinned once, so the theme
+        // stays reachable from here until the bundle itself goes.
+        std::fs::remove_dir_all(temp.path().join("doc-a.hcd")).unwrap();
+        let _ = catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap();
+        let _ = catalog_delete_font(State(state.clone()), Path("demo-serif".to_string()), admin)
+            .await
+            .unwrap();
+
+        let page = state.catalog.audit_entries(MAX_AUDIT_LIMIT).unwrap();
+        let actions: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|entry| entry.action.as_str())
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                audit_action::FONT_DELETE,
+                audit_action::THEME_DELETE,
+                audit_action::DOCUMENT_THEME_UNPIN,
+                audit_action::DOCUMENT_THEME_PIN,
+                audit_action::THEME_UNRETIRE,
+                audit_action::THEME_RETIRE,
+                audit_action::THEME_RETIRE,
+                audit_action::THEME_PUT,
+                audit_action::FONT_REVISION_PUT,
+                audit_action::FONT_BYTES_PUT,
+            ],
+            "one line per finished change, newest first, and no line for the no-op re-pin"
+        );
+        assert_eq!(page.unreadable, 0);
+        assert_eq!(page.entries[0].actor, "林运营 (op-1)");
+        assert_eq!(
+            page.entries[2].actor, "陈瑞 (editor-7)",
+            "the document's own writer is named, not the operator"
+        );
+        assert_eq!(page.entries[3].target, "doc-a");
+        assert!(
+            page.entries[3].detail.contains("修订 r0 → r1"),
+            "{}",
+            page.entries[3].detail
+        );
+        assert!(
+            page.entries[3].detail.contains("Brand default"),
+            "{}",
+            page.entries[3].detail
+        );
+        assert!(
+            page.entries[2].detail.contains("修订 r1 → r2"),
+            "{}",
+            page.entries[2].detail
+        );
+        // The repeat retire says out loud that it changed nothing, so two lines are
+        // not read as two state flips.
+        assert!(
+            page.entries[5].detail.contains("本次没有改变"),
+            "{}",
+            page.entries[5].detail
+        );
+        assert!(
+            !page.entries[6].detail.contains("本次没有改变"),
+            "{}",
+            page.entries[6].detail
+        );
+        assert!(page.entries[9].detail.contains(&sha256));
+        assert_eq!(page.entries[9].target, "demo-serif");
+    }
+
+    #[tokio::test]
+    async fn an_import_auto_pin_is_recorded_against_the_uploader() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(theme.clone());
+
+        let destination = temp.path().join("doc-new.hcd");
+        imported_bundle(&destination, "doc-new", None);
+        assert_eq!(
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:op-9"
+            ),
+            None
+        );
+
+        let page = state.catalog.audit_entries(MAX_AUDIT_LIMIT).unwrap();
+        let pin = &page.entries[0];
+        assert_eq!(pin.action, audit_action::DOCUMENT_THEME_PIN);
+        assert_eq!(pin.target, "doc-new");
+        assert_eq!(
+            pin.actor, "upload:op-9",
+            "the upload that caused the pin is named, not the service"
+        );
+        assert!(pin.detail.contains("自动钉上"), "{}", pin.detail);
+        assert!(pin.detail.contains(&theme), "{}", pin.detail);
+
+        // A document that arrived carrying its own pin is not touched, and the log
+        // does not claim it was.
+        let counted = page.entries.len();
+        let archive = temp.path().join("doc-own.hcd");
+        imported_bundle(&archive, "doc-own", Some("cd".repeat(32)));
+        assert_eq!(
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &archive,
+                "upload:op-9"
+            ),
+            None
+        );
+        assert_eq!(
+            state
+                .catalog
+                .audit_entries(MAX_AUDIT_LIMIT)
+                .unwrap()
+                .entries
+                .len(),
+            counted,
+            "an untouched document was logged"
         );
     }
 
