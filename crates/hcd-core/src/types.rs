@@ -563,6 +563,12 @@ pub enum PatchOperation {
     /// the slide part with them. A presentation cannot drop its last slide.
     #[serde(rename = "pptx.slide.delete", rename_all = "camelCase")]
     PptxSlideDelete { chunk_id: String },
+    /// Move one slide page one place through the deck, named by a chunk that
+    /// holds it. A page that spans chunks moves as a whole, and the page it
+    /// passes takes the place it leaves. HCD keeps the order on the index, so a
+    /// source-backed export writes the presentation's slide list to match it.
+    #[serde(rename = "pptx.slide.reorder", rename_all = "camelCase")]
+    PptxSlideReorder { chunk_id: String, direction: String },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -635,7 +641,8 @@ impl PatchOperation {
             | Self::XlsxSheetAdd { .. }
             | Self::XlsxSheetDelete { .. }
             | Self::PptxSlideAdd {}
-            | Self::PptxSlideDelete { .. } => None,
+            | Self::PptxSlideDelete { .. }
+            | Self::PptxSlideReorder { .. } => None,
         }
     }
 
@@ -676,6 +683,7 @@ impl PatchOperation {
                 | Self::XlsxSheetDelete { .. }
                 | Self::PptxSlideAdd { .. }
                 | Self::PptxSlideDelete { .. }
+                | Self::PptxSlideReorder { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -861,8 +869,23 @@ pub struct RevisionRecord {
     /// and its content-type override out of the package.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slide_removals: Vec<SlideRemoval>,
+    /// Slides this revision moved against a neighbour. The order itself is on the
+    /// index, which every revision keeps as its own copy, so a source-backed
+    /// export only needs to know that a page moved before it reads the deck's
+    /// order out of that index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_reorders: Vec<SlideReorder>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
+}
+
+/// Slide moved at one revision, named by the part its page points at. Which way
+/// it went is not recorded: the index this revision wrote already answers that,
+/// and a second record of the same fact could only disagree with it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideReorder {
+    pub slide_part: String,
 }
 
 /// Slide removed at one revision. Only the part travels: the page, its text

@@ -284,6 +284,7 @@ fn revision_record(
         sheet_removals: Vec::new(),
         slide_additions: Vec::new(),
         slide_removals: Vec::new(),
+        slide_reorders: Vec::new(),
         structural_change,
     })
 }

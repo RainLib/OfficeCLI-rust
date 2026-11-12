@@ -90,6 +90,7 @@ pub const HCD_PATCH_SCHEMA_VERSION_36: &str = "hcd-patch/36";
 /// pending remap, so this line does not take them.
 pub const HCD_PATCH_SCHEMA_VERSION_41: &str = "hcd-patch/41";
 pub const HCD_PATCH_SCHEMA_VERSION_42: &str = "hcd-patch/42";
+pub const HCD_PATCH_SCHEMA_VERSION_43: &str = "hcd-patch/43";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
 pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
@@ -130,6 +131,7 @@ pub const HCD_PATCH_SCHEMA_V35_JSON: &str = include_str!("../schemas/hcd-patch-3
 pub const HCD_PATCH_SCHEMA_V36_JSON: &str = include_str!("../schemas/hcd-patch-36.schema.json");
 pub const HCD_PATCH_SCHEMA_V41_JSON: &str = include_str!("../schemas/hcd-patch-41.schema.json");
 pub const HCD_PATCH_SCHEMA_V42_JSON: &str = include_str!("../schemas/hcd-patch-42.schema.json");
+pub const HCD_PATCH_SCHEMA_V43_JSON: &str = include_str!("../schemas/hcd-patch-43.schema.json");
 pub const DEFAULT_CHUNK_SOFT_BYTES: usize = 512 * 1024;
 pub const DEFAULT_CHUNK_BLOCKS: usize = 256;
 pub const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -218,6 +220,8 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V41_JSON).unwrap();
         let patch_v42: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V42_JSON).unwrap();
+        let patch_v43: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V43_JSON).unwrap();
         assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
@@ -257,6 +261,7 @@ mod schema_tests {
         assert_eq!(patch_v36["$id"], "urn:officecli:hcd-patch:36");
         assert_eq!(patch_v41["$id"], "urn:officecli:hcd-patch:41");
         assert_eq!(patch_v42["$id"], "urn:officecli:hcd-patch:42");
+        assert_eq!(patch_v43["$id"], "urn:officecli:hcd-patch:43");
     }
 
     #[test]
