@@ -2,74 +2,151 @@ use crate::dom_types::{WordElementType, WordNode};
 use handler_common::HandlerError;
 
 /// Split a run at a text offset.
-/// Given a run node and a byte offset within its text content, split it into two runs:
+/// Given a run node and a byte offset within its complete paragraph_text(), split it into two runs:
 /// - Left run: text from 0..offset (preserving original rPr)
 /// - Right run: text from offset..end (preserving original rPr)
 ///
 /// Returns (left_run, right_run). If offset is 0, left is None.
 /// If offset equals text length, right is None.
 pub fn split_run_at_offset(run: &WordNode, offset: usize) -> (Option<WordNode>, Option<WordNode>) {
-    // Find the w:t element and its text
-    let text_node = run
-        .children
-        .iter()
-        .find(|c| c.element_type == WordElementType::Text);
-    if text_node.is_none() {
-        // No text in this run; can't split
-        return (Some(run.clone()), None);
-    }
-    let text_node = text_node.unwrap();
-    let text = text_node.text_content.as_deref().unwrap_or("");
-
     if offset == 0 {
         return (None, Some(run.clone()));
     }
+    let text = run.paragraph_text();
     if offset >= text.len() {
         return (Some(run.clone()), None);
     }
 
-    // Get run properties to clone into both halves
-    let rpr = run.run_properties().cloned();
-
-    // Left run: text[0..offset]
-    let left_text = text[..offset].to_string();
-    let left_preserve =
-        text_node.has_preserve_space() || left_text.ends_with(' ') || left_text.starts_with(' ');
-    let left_t = WordNode::new(WordElementType::Text).with_text(&left_text);
-    let mut left_t = left_t;
-    if left_preserve {
-        left_t
-            .attributes
-            .insert("xml:space".to_string(), "preserve".to_string());
-        left_t.preserve_space = true;
-    }
-
+    // Offsets refer to the complete run text, including every w:t, tab and break.
+    // Slicing only the first w:t can cut through UTF-8 when a tab precedes it.
+    // Partition the original children so fields, drawings and run attributes are
+    // preserved too; only run properties are copied into both fragments.
     let mut left_children = Vec::new();
-    if let Some(rpr) = &rpr {
-        left_children.push(rpr.clone());
-    }
-    left_children.push(left_t);
-
-    let left_run = WordNode::new(WordElementType::Run).with_children(left_children);
-
-    // Right run: text[offset..end]
-    let right_text = text[offset..].to_string();
-    let _right_preserve = true; // Always preserve space on the right part after split
-    let mut right_t = WordNode::new(WordElementType::Text).with_text(&right_text);
-    right_t
-        .attributes
-        .insert("xml:space".to_string(), "preserve".to_string());
-    right_t.preserve_space = true;
-
     let mut right_children = Vec::new();
-    if let Some(rpr) = &rpr {
-        right_children.push(rpr.clone());
+    let mut cursor = 0;
+    for child in &run.children {
+        if child.element_type == WordElementType::RunProperties {
+            left_children.push(child.clone());
+            right_children.push(child.clone());
+            continue;
+        }
+        let len = child.paragraph_text().len();
+        if cursor >= offset {
+            right_children.push(child.clone());
+        } else if cursor + len <= offset {
+            left_children.push(child.clone());
+        } else {
+            let (left, right) = split_run_child(child, offset - cursor);
+            left_children.extend(left);
+            right_children.extend(right);
+        }
+        cursor += len;
     }
-    right_children.push(right_t);
-
-    let right_run = WordNode::new(WordElementType::Run).with_children(right_children);
-
+    let mut left_run = run.clone();
+    left_run.children = left_children;
+    let mut right_run = run.clone();
+    right_run.children = right_children;
     (Some(left_run), Some(right_run))
+}
+
+fn split_run_child(node: &WordNode, offset: usize) -> (Option<WordNode>, Option<WordNode>) {
+    if node.element_type == WordElementType::Text {
+        let text = node.text_content.as_deref().unwrap_or("");
+        // Callers normally pass a UTF-8 boundary. Keep malformed offsets from
+        // panicking, while never discarding or duplicating a character.
+        let mut boundary = offset.min(text.len());
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let fragment = |text: &str| {
+            if text.is_empty() {
+                return None;
+            }
+            let mut fragment = node.clone();
+            fragment.text_content = Some(text.to_string());
+            fragment
+                .attributes
+                .insert("xml:space".to_string(), "preserve".to_string());
+            fragment.preserve_space = true;
+            Some(fragment)
+        };
+        return (fragment(&text[..boundary]), fragment(&text[boundary..]));
+    }
+    if !node.children.is_empty() {
+        return split_run_at_offset(node, offset);
+    }
+    // Tabs and breaks are indivisible XML elements.
+    (None, Some(node.clone()))
+}
+
+#[cfg(test)]
+mod split_run_tests {
+    use super::*;
+
+    fn text(value: &str) -> WordNode {
+        WordNode::new(WordElementType::Text).with_text(value)
+    }
+
+    #[test]
+    fn splits_chinese_after_leading_tab_without_panicking() {
+        let run = WordNode::new(WordElementType::Run)
+            .with_attribute("rsidRPr", "004E3B96")
+            .with_children(vec![
+                WordNode::new(WordElementType::RunProperties),
+                WordNode::new(WordElementType::Tab),
+                text("采购合同条件"),
+            ]);
+        // The contract's /body/p[85]/r[2][1..6]: split off the tab, then
+        // enclose five Chinese characters, leaving the final character intact.
+        let (left, rest) = split_run_at_offset(&run, 1);
+        let (middle, right) = split_run_at_offset(&rest.unwrap(), "采购合同条".len());
+        let (left, middle, right) = (left.unwrap(), middle.unwrap(), right.unwrap());
+        assert_eq!(left.paragraph_text(), "\t");
+        assert_eq!(middle.paragraph_text(), "采购合同条");
+        assert_eq!(right.paragraph_text(), "件");
+        for fragment in [&left, &middle, &right] {
+            assert_eq!(fragment.attributes, run.attributes);
+            assert!(fragment.run_properties().is_some());
+        }
+    }
+
+    #[test]
+    fn preserves_all_text_and_non_text_children_at_every_boundary() {
+        let run = WordNode::new(WordElementType::Run).with_children(vec![
+            WordNode::new(WordElementType::RunProperties),
+            WordNode::new(WordElementType::Unknown("fldChar".into()))
+                .with_attribute("fldCharType", "begin"),
+            text("甲😀"),
+            WordNode::new(WordElementType::Tab),
+            text("乙 丙"),
+            WordNode::new(WordElementType::Break),
+            WordNode::new(WordElementType::Drawing),
+            text("丁"),
+        ]);
+        let original = run.paragraph_text();
+        for offset in original
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([original.len()])
+        {
+            let (left, right) = split_run_at_offset(&run, offset);
+            let fragments: Vec<_> = left.into_iter().chain(right).collect();
+            let combined: String = fragments.iter().map(WordNode::paragraph_text).collect();
+            assert_eq!(combined, original, "offset={offset}");
+            let children: Vec<_> = fragments.iter().flat_map(|n| &n.children).collect();
+            for kind in [
+                WordElementType::Tab,
+                WordElementType::Break,
+                WordElementType::Drawing,
+                WordElementType::Unknown("fldChar".into()),
+            ] {
+                assert_eq!(
+                    children.iter().filter(|n| n.element_type == kind).count(),
+                    1
+                );
+            }
+        }
+    }
 }
 
 /// Build a new run carrying `text`, inheriting the source run's rPr (so the
