@@ -64,6 +64,7 @@ pub fn restore_revision(
         sheet_renames: Vec::new(),
         sheet_additions: Vec::new(),
         sheet_removals: Vec::new(),
+        slide_additions: Vec::new(),
         structural_change: true,
     };
     head.revision = revision;

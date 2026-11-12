@@ -254,7 +254,7 @@ const dynamicEn: Record<string, string> = {
   '上移段落': 'Move paragraph up', '下移段落': 'Move paragraph down',
   '编辑文字': 'Edit text', '编辑文字：': 'Edit text: ',
   '调整文字框位置': 'Move text box', '调整 PDF 文字框位置': 'Move PDF text box',
-  '新增文字框': 'Add text box', '幻灯片目录': 'Slide outline', '页面目录': 'Page outline',
+  '新增文字框': 'Add text box', '新增幻灯片': 'Add slide', '幻灯片目录': 'Slide outline', '页面目录': 'Page outline',
   '编辑单元格': 'Edit cell', '新增行': 'Add rows', '列': 'column',
   '插入或删除多行列': 'Insert or delete rows and columns',
   '插入行': 'Insert rows', '插入列': 'Insert columns',

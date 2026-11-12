@@ -553,6 +553,11 @@ pub enum PatchOperation {
     /// visible worksheet.
     #[serde(rename = "xlsx.sheet.delete", rename_all = "camelCase")]
     XlsxSheetDelete { sheet_id: String },
+    /// Append one blank slide after the last one. HCD mints the slide part the
+    /// page will need in the package and one empty page chunk carrying it, so
+    /// the new slide is there to type into with the normal text box right away.
+    #[serde(rename = "pptx.slide.add", rename_all = "camelCase")]
+    PptxSlideAdd {},
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -623,7 +628,8 @@ impl PatchOperation {
             | Self::XlsxRowHeight { .. }
             | Self::XlsxSheetRename { .. }
             | Self::XlsxSheetAdd { .. }
-            | Self::XlsxSheetDelete { .. } => None,
+            | Self::XlsxSheetDelete { .. }
+            | Self::PptxSlideAdd {} => None,
         }
     }
 
@@ -662,6 +668,7 @@ impl PatchOperation {
                 | Self::XlsxSheetRename { .. }
                 | Self::XlsxSheetAdd { .. }
                 | Self::XlsxSheetDelete { .. }
+                | Self::PptxSlideAdd { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -838,8 +845,21 @@ pub struct RevisionRecord {
     /// they carried and rewrites whatever named them in the same pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheet_removals: Vec<SheetRemoval>,
+    /// Slides this revision created. Their part is not in the source package,
+    /// so a source-backed export has to add it rather than rewrite it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_additions: Vec<SlideAddition>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
+}
+
+/// Slide created at one revision, named by the part its page points at. The
+/// page itself lives on the chunks, so a later edit of the slide is not copied
+/// into this record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideAddition {
+    pub slide_part: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

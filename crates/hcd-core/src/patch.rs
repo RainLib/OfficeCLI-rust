@@ -13,8 +13,8 @@ use crate::{
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
-    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SourceAnchor, TextExtractEntry,
-    TextExtractPage, TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch,
+    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SlideAddition, SourceAnchor,
+    TextExtractEntry, TextExtractPage, TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch,
     XlsxCellNumberFormatPatch, XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION,
     HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
     HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
@@ -195,6 +195,16 @@ struct XlsxSheetAddTarget {
     sheet_index: usize,
 }
 
+/// Slide a patch asks to append: the part its page will need in the package and
+/// the slide size HCD already draws its pages at, taken from a page the bundle
+/// has rather than from the source package, which the patch never reads.
+#[derive(Clone)]
+struct PptxSlideAddTarget {
+    slide_part: String,
+    width_emu: u64,
+    height_emu: u64,
+}
+
 #[derive(Clone)]
 struct XlsxSheetRenameTarget {
     sheet_id: String,
@@ -273,6 +283,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxSheetRename { .. }
                         | PatchOperation::XlsxSheetAdd { .. }
                         | PatchOperation::XlsxSheetDelete { .. }
+                        | PatchOperation::PptxSlideAdd { .. }
                         | PatchOperation::XlsxRowInsert { .. }
                         | PatchOperation::XlsxRowDelete { .. }
                         | PatchOperation::XlsxColumnInsert { .. }
@@ -406,6 +417,9 @@ pub fn apply_patch(
         .as_ref()
         .map(|removal| resolve_xlsx_sheet_removal(bundle, &manifest, removal))
         .transpose()?;
+    let pptx_slide_add = collect_pptx_slide_add(patch)
+        .then(|| resolve_pptx_slide_add(bundle, &manifest))
+        .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -464,7 +478,8 @@ pub fn apply_patch(
         || xlsx_row_height.is_some()
         || xlsx_sheet_rename.is_some()
         || xlsx_sheet_add.is_some()
-        || xlsx_sheet_removal.is_some();
+        || xlsx_sheet_removal.is_some()
+        || pptx_slide_add.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -501,6 +516,13 @@ pub fn apply_patch(
         .map(|addition| mint_xlsx_sheet_chunk(bundle, &manifest, addition))
         .transpose()?;
     let mut added_xlsx_sheet = false;
+    // A new slide is one page chunk appended after the last one, so it takes the
+    // same tail-of-index write a new worksheet tab takes.
+    let mut added_slide_chunk = pptx_slide_add
+        .as_ref()
+        .map(|addition| mint_pptx_slide_chunk(bundle, &manifest, addition))
+        .transpose()?;
+    let mut added_pptx_slide = false;
     let mut appended_index_page: Option<crate::ChunkIndexPage> = None;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
@@ -1709,6 +1731,27 @@ pub fn apply_patch(
                         chunks: vec![new_chunk],
                     });
                 }
+            } else if let Some(new_chunk) = added_slide_chunk.take() {
+                // A new page lands where a new tab lands: at the end of the last
+                // index page, or on a page of its own once that one is full.
+                dirty_chunks.insert(new_chunk.chunk_id.clone());
+                added_pptx_slide = true;
+                if page.chunks.len() < INDEX_PAGE_SIZE {
+                    page.chunks.push(new_chunk);
+                    hash_descriptor(
+                        &mut root_hasher,
+                        page.chunks.last().expect("appended slide chunk"),
+                    );
+                    page_changed = true;
+                } else {
+                    hash_descriptor(&mut root_hasher, &new_chunk);
+                    appended_index_page = Some(crate::ChunkIndexPage {
+                        schema_version: manifest.schema_version.clone(),
+                        revision: new_revision,
+                        page: page_number + 1,
+                        chunks: vec![new_chunk],
+                    });
+                }
             }
         }
 
@@ -1853,7 +1896,12 @@ pub fn apply_patch(
         }
         manifest.index_page_count += 1;
     }
-    if added_xlsx_sheet {
+    if pptx_slide_add.is_some() && !added_pptx_slide {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide addition had nowhere to write its page".to_string(),
+        ));
+    }
+    if added_xlsx_sheet || added_pptx_slide {
         manifest.chunk_count += 1;
     }
     if xlsx_sheet_rename.is_some() && !renamed_xlsx_sheet {
@@ -2034,6 +2082,12 @@ pub fn apply_patch(
                 node_id: None,
                 source_part: Some(removal.sheet_part.clone()),
             }))
+            .chain(pptx_slide_add.iter().map(|addition| FidelityWarning {
+                code: "PPTX_SLIDE_ADDED".to_string(),
+                message: "new slide is blank in HCD; source-backed export writes it as a slide part the source package never had, on the layout the last existing slide uses".to_string(),
+                node_id: None,
+                source_part: Some(addition.slide_part.clone()),
+            }))
             .chain(xlsx_number_formats.keys().map(|node_id| FidelityWarning {
                 code: "XLSX_DIRECT_CELL_NUMBER_FORMAT".to_string(),
                 message: "cell number format clones the source style and writes a built-in or custom Excel format code".to_string(),
@@ -2166,6 +2220,13 @@ pub fn apply_patch(
             .map(|removal| SheetRemoval {
                 sheet_part: removal.sheet_part.clone(),
                 name: removal.name.clone(),
+            })
+            .collect(),
+        slide_additions: pptx_slide_add
+            .as_ref()
+            .into_iter()
+            .map(|addition| SlideAddition {
+                slide_part: addition.slide_part.clone(),
             })
             .collect(),
         structural_change: false,
@@ -2474,6 +2535,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_34
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_35
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_36
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_41
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2762,6 +2824,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/36 accepts one XLSX worksheet deletion operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_41
+        && (manifest.source.format != "pptx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PptxSlideAdd { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/41 accepts one PPTX slide addition operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -3109,6 +3183,16 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "invalid XLSX worksheet deletion target".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::PptxSlideAdd {} => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_41
+                    || manifest.source.format != "pptx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.slide.add requires one PPTX operation with hcd-patch/41".to_string(),
                     ));
                 }
             }
@@ -4979,6 +5063,153 @@ fn mint_xlsx_sheet_chunk(
             default_row_height_emu: None,
             sheet_part: Some(addition.sheet_part.clone()),
         }),
+    })
+}
+
+/// Whether this patch appends a slide. The operation carries no fields: the new
+/// page lands after the last one the bundle has, the same way a new worksheet
+/// tab lands after the last tab.
+fn collect_pptx_slide_add(patch: &PatchBatch) -> bool {
+    patch
+        .operations
+        .iter()
+        .any(|operation| matches!(operation, PatchOperation::PptxSlideAdd {}))
+}
+
+/// Trailing number of a slide part such as `ppt/slides/slide12.xml`.
+fn slide_part_number(part: &str) -> Option<usize> {
+    let stem = part.rsplit('/').next()?.strip_suffix(".xml")?;
+    stem.strip_prefix("slide")?.parse().ok()
+}
+
+/// Work out where a new page lands: the slide part it will need in the package,
+/// and the page size every other page already draws at. A patch never reads the
+/// source package, so both come from the chunks the bundle holds. A part name is
+/// only free for as long as the bundle can see it, and the package rewrite
+/// refuses to shadow a name the source archive already carries.
+fn resolve_pptx_slide_add(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+) -> Result<PptxSlideAddTarget, HcdError> {
+    let mut known_parts: HashSet<String> = HashSet::new();
+    let mut highest_number: usize = 0;
+    let mut size: Option<(u64, u64)> = None;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            if descriptor.region != "slide" {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            let tag_end = html.find('>').ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX slide section is not closed".to_string())
+            })?;
+            let tag = &html[..=tag_end];
+            if !tag.starts_with("<section class=\"hcd-slide\"") {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX slide chunk is not a slide section".to_string(),
+                ));
+            }
+            let part = xlsx_attribute(tag, "data-hcd-source-part").ok_or_else(|| {
+                HcdError::InvalidBundle(
+                    "PPTX slide chunk does not name its source part".to_string(),
+                )
+            })?;
+            if known_parts.insert(part.to_string()) {
+                highest_number = highest_number.max(slide_part_number(part).unwrap_or_default());
+            }
+            let dimension = |name: &str| -> Result<u64, HcdError> {
+                xlsx_attribute(tag, name)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {name} is missing")))
+            };
+            let page_size = (
+                dimension("data-hcd-width-emu")?,
+                dimension("data-hcd-height-emu")?,
+            );
+            if let Some(seen) = size.filter(|seen| *seen != page_size) {
+                return Err(HcdError::Unsupported(format!(
+                    "PPTX slides disagree on the page size ({}x{} and {}x{})",
+                    seen.0, seen.1, page_size.0, page_size.1
+                )));
+            }
+            size = Some(page_size);
+        }
+    }
+    let Some((width_emu, height_emu)) = size else {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/41 needs a presentation with at least one slide".to_string(),
+        ));
+    };
+    if !(1..=100_000_000).contains(&width_emu) || !(1..=100_000_000).contains(&height_emu) {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide page size is out of bounds".to_string(),
+        ));
+    }
+    Ok(PptxSlideAddTarget {
+        slide_part: format!(
+            "ppt/slides/slide{}.xml",
+            highest_number.max(known_parts.len()) + 1
+        ),
+        width_emu,
+        height_emu,
+    })
+}
+
+/// The placeholder the importer writes for a slide that has no shapes at all.
+/// A slide HCD created starts as one of those, and loses the marker as soon as
+/// it carries its first text box.
+const PPTX_EMPTY_SLIDE_MARK: &str = "<div class=\"hcd-empty-slide\"></div>";
+
+/// Write the new page's chunk exactly as the importer writes a slide that has no
+/// shapes yet, so the page renders and takes a text box straight away.
+fn mint_pptx_slide_chunk(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    addition: &PptxSlideAddTarget,
+) -> Result<crate::ChunkDescriptor, HcdError> {
+    let px = |value: u64| format!("{:.2}px", value as f64 * 96.0 / 914_400.0);
+    let html = format!(
+        "<section class=\"hcd-slide\" data-hcd-source-part=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\" style=\"position:relative;width:{};height:{}\">{}</section>",
+        escape_attribute(&addition.slide_part),
+        addition.width_emu,
+        addition.height_emu,
+        px(addition.width_emu),
+        px(addition.height_emu),
+        PPTX_EMPTY_SLIDE_MARK,
+    );
+    let chunk_id = stable_node_id(&[
+        &manifest.document_id,
+        &addition.slide_part,
+        "slide-chunk",
+        "0",
+    ])
+    .replacen("n_", "c_", 1);
+    let source_map = crate::ChunkSourceMap {
+        schema_version: manifest.schema_version.clone(),
+        chunk_id: chunk_id.clone(),
+        entries: Vec::new(),
+    };
+    let (html_href, html_hash) = bundle.write_chunk_object(&html)?;
+    let (map_href, map_hash) = bundle.write_json_object("maps", &source_map)?;
+    Ok(crate::ChunkDescriptor {
+        sequence: manifest.chunk_count,
+        chunk_id,
+        region: "slide".to_string(),
+        html_href,
+        html_hash,
+        map_href,
+        map_hash,
+        byte_length: html.len() as u64,
+        // An empty page is still one block, so the first text box placed on it
+        // opens that block instead of adding a second one.
+        block_count: 1,
+        node_count: 0,
+        text_chars: 0,
+        node_bloom: node_bloom(std::iter::empty::<&str>()),
+        first_node_id: None,
+        last_node_id: None,
+        continuation: false,
+        grid: None,
     })
 }
 
@@ -7814,6 +8045,11 @@ fn insert_pptx_text(
         emu_px(insertion.x_emu), emu_px(insertion.y_emu), emu_px(insertion.width_emu), emu_px(insertion.height_emu),
         insertion.node_id, escape_text(&insertion.text),
     );
+    // A slide that gains its first shape is no longer an empty page, and the
+    // placeholder the importer leaves behind would draw a blank panel over it.
+    if let Some(start) = html.find(PPTX_EMPTY_SLIDE_MARK) {
+        html.replace_range(start..start + PPTX_EMPTY_SLIDE_MARK.len(), "");
+    }
     let end = html
         .rfind("</section>")
         .ok_or_else(|| HcdError::InvalidBundle("PPTX slide closing tag is missing".to_string()))?;
@@ -9283,6 +9519,7 @@ fn apply_annotations(
             | PatchOperation::XlsxSheetRename { .. }
             | PatchOperation::XlsxSheetAdd { .. }
             | PatchOperation::XlsxSheetDelete { .. }
+            | PatchOperation::PptxSlideAdd { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}

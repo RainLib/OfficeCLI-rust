@@ -1,13 +1,15 @@
 use crate::common::{
-    base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
-    emit_started, escape_attribute, escape_text, finish_import, source_identity,
-    write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
+    append_control_children, attribute, base_manifest, checked_export_state_with_restores,
+    collect_dirty_nodes, current_control_part, emit_failed, emit_started, escape_attribute,
+    escape_text, finish_import, highest_control_id, local_name, package_error, source_identity,
+    write_fidelity_report, AddedElement, ExportOptions, ImportOptions, XmlBudget,
+    MAX_CONTROL_BYTES,
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    PptxRunFormat, PptxShapeGeometry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION,
-    MAX_CHUNK_BYTES,
+    PptxRunFormat, PptxShapeGeometry, SlideAddition, SourceAnchor, DEFAULT_CHUNK_BLOCKS,
+    HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -21,6 +23,29 @@ use std::path::{Component, Path, PathBuf};
 const MAX_PPTX_TABLE_COLUMNS: usize = 16_384;
 const MAX_PPTX_TABLE_CELLS: usize = 1_000_000;
 const PPTX_TABLE_ROWS_PER_FRAGMENT: usize = 128;
+const PPTX_SLIDE_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+const PPTX_SLIDE_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
+const PPTX_SLIDE_LAYOUT_RELATIONSHIP_TYPE_SUFFIX: &str = "/slideLayout";
+/// Slide an export writes for a page HCD created. It is the empty page a
+/// presentation editor appends: one shape tree with its group properties and no
+/// shapes, and the master colour map every slide carries. `<p:cNvPr id="1"/>`
+/// is the seed `rewrite_text_part` counts shape IDs from, so the first text box
+/// placed on the new slide becomes shape 2.
+const BLANK_PPTX_SLIDE_XML: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+    "<p:sld ",
+    "xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" ",
+    "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" ",
+    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">",
+    "<p:cSld><p:spTree>",
+    "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>",
+    "<p:grpSpPr/>",
+    "</p:spTree></p:cSld>",
+    "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>",
+    "</p:sld>",
+);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3021,7 +3046,7 @@ pub(crate) fn export_pptx(
     target: &Path,
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
-    let (manifest, dirty_parts, dirty_node_ids, _) =
+    let (manifest, dirty_parts, dirty_node_ids, revisions) =
         checked_export_state_with_restores(bundle, source, options)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     let edited_formats = collect_edited_run_formats(bundle, &manifest, &dirty_parts)?;
@@ -3070,9 +3095,36 @@ pub(crate) fn export_pptx(
         shapes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     }
     let native_geometry = collect_edited_shape_geometry(bundle, &manifest, &dirty_parts)?;
+    // A slide HCD created is not in the source package, so the export writes it
+    // the way the workbook export writes a new tab: a blank slide part built
+    // here, grown with whatever text boxes landed on it, plus the three control
+    // parts that let the package address it and the presentation show it last.
+    let mut added_slides: Vec<SlideAddition> = Vec::new();
+    for &revision in &revisions {
+        added_slides.extend(bundle.revision(revision)?.slide_additions);
+    }
+    // Undoing the revision that added a slide is not one of these records: a
+    // restore is a structural revision, so the walk above never reaches it and
+    // the page is simply gone. A slide deleted later, the way a worksheet tab
+    // can be, would need the cancellation the workbook export does.
     let scratch = tempfile::tempdir()?;
-    let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let mut blank_slides: HashMap<String, PathBuf> = HashMap::new();
+    for addition in &added_slides {
+        if archive.contains(&addition.slide_part) {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX slide addition {} is already in the source presentation",
+                addition.slide_part
+            )));
+        }
+        let path = scratch
+            .path()
+            .join(safe_temp_name(&format!("blank-{}", addition.slide_part)));
+        std::fs::write(&path, BLANK_PPTX_SLIDE_XML)?;
+        blank_slides.insert(addition.slide_part.clone(), path);
+    }
+    let mut replacement_paths = HashMap::new();
+    let mut addition_paths: HashMap<String, PathBuf> = HashMap::new();
     for part in replacements
         .keys()
         .chain(insertions.keys())
@@ -3086,24 +3138,139 @@ pub(crate) fn export_pptx(
         let formats = source_formats.get(part).cloned().unwrap_or_default();
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
-        archive
-            .with_part(part, |input| {
-                rewrite_text_part(
-                    input,
-                    BufWriter::new(output),
-                    &values,
-                    &shapes,
-                    &geometry,
-                    &formats,
-                )
-                .map_err(|error| PackageError::ReadPartError(error.to_string()))
-            })
-            .map_err(package_error)?;
-        replacement_paths.insert(part.clone(), path);
+        let rewrite = |input: &mut dyn Read, output: File| {
+            rewrite_text_part(
+                input,
+                BufWriter::new(output),
+                &values,
+                &shapes,
+                &geometry,
+                &formats,
+            )
+        };
+        match blank_slides.get(part) {
+            Some(template) => {
+                let mut input = File::open(template)?;
+                rewrite(&mut input, output)?;
+                addition_paths.insert(part.clone(), path);
+            }
+            None => {
+                archive
+                    .with_part(part, |input| {
+                        rewrite(input, output)
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    })
+                    .map_err(package_error)?;
+                replacement_paths.insert(part.clone(), path);
+            }
+        }
     }
-    let changed =
-        StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "ppt/presentation.xml")
-            .map_err(package_error)?;
+    // A slide nobody typed into yet is still a slide the package has to carry.
+    for (part, template) in &blank_slides {
+        addition_paths
+            .entry(part.clone())
+            .or_insert_with(|| template.clone());
+    }
+    if !blank_slides.is_empty() {
+        let layout_target = pptx_added_slide_layout(&mut archive)?;
+        let mut ordered: Vec<&String> = blank_slides.keys().collect();
+        ordered.sort_by_key(|part| (numeric_suffix(part.as_str()), part.to_string()));
+        let content_types =
+            current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
+        let relationships = current_control_part(
+            &mut archive,
+            &replacement_paths,
+            "ppt/_rels/presentation.xml.rels",
+        )?;
+        let presentation =
+            current_control_part(&mut archive, &replacement_paths, "ppt/presentation.xml")?;
+        let first_relationship_id = highest_control_id(&relationships, "Relationship", "Id")? + 1;
+        // A slide's `id` is not its position: PowerPoint numbers them from 256,
+        // and a presentation whose list the exporter cannot find starts there.
+        let first_slide_id = highest_control_id(&presentation, "sldId", "id")?.max(255) + 1;
+        let mut type_children = Vec::new();
+        let mut relationship_children = Vec::new();
+        let mut slide_children = Vec::new();
+        for (index, part) in ordered.into_iter().enumerate() {
+            let file_name = slide_file_name(part)?;
+            type_children.push(AddedElement {
+                name: "Override",
+                attributes: vec![
+                    ("PartName".to_string(), format!("/{part}")),
+                    (
+                        "ContentType".to_string(),
+                        PPTX_SLIDE_CONTENT_TYPE.to_string(),
+                    ),
+                ],
+            });
+            relationship_children.push(AddedElement {
+                name: "Relationship",
+                attributes: vec![
+                    (
+                        "Id".to_string(),
+                        format!("rId{}", first_relationship_id + index as u64),
+                    ),
+                    ("Type".to_string(), PPTX_SLIDE_RELATIONSHIP_TYPE.to_string()),
+                    ("Target".to_string(), format!("slides/{file_name}")),
+                ],
+            });
+            slide_children.push(AddedElement {
+                name: "sldId",
+                attributes: vec![
+                    (
+                        "id".to_string(),
+                        (first_slide_id + index as u64).to_string(),
+                    ),
+                    (
+                        "r:id".to_string(),
+                        format!("rId{}", first_relationship_id + index as u64),
+                    ),
+                ],
+            });
+            // The new slide draws its master from a layout, the same way the
+            // slide before it does; without that relationship the presentation
+            // opens with a repair prompt instead of a blank page.
+            let rels_part = slide_relationships_part(part)?;
+            let rels_path = scratch.path().join(safe_temp_name(&rels_part));
+            std::fs::write(&rels_path, pptx_slide_relationships_xml(&layout_target))?;
+            addition_paths.insert(rels_part, rels_path);
+        }
+        for (part, parent, source_bytes, children) in [
+            (
+                "[Content_Types].xml",
+                "Types",
+                &content_types,
+                &type_children,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                "Relationships",
+                &relationships,
+                &relationship_children,
+            ),
+            (
+                "ppt/presentation.xml",
+                "sldIdLst",
+                &presentation,
+                &slide_children,
+            ),
+        ] {
+            let rewritten = append_control_children(source_bytes, parent, children, part)?;
+            let path = scratch
+                .path()
+                .join(safe_temp_name(&format!("added-{part}")));
+            std::fs::write(&path, rewritten)?;
+            replacement_paths.insert(part.to_string(), path);
+        }
+    }
+    let changed = StreamingOxmlRewriter::rewrite_with_additions(
+        source,
+        target,
+        &replacement_paths,
+        &addition_paths,
+        "ppt/presentation.xml",
+    )
+    .map_err(package_error)?;
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if changed.is_empty() {
@@ -3115,12 +3282,150 @@ pub(crate) fn export_pptx(
             "unmodified OOXML entries copied as raw compressed payloads".to_string(),
             "slide geometry, run formatting, media, charts, notes and animations".to_string(),
         ],
-        flattened: Vec::new(),
+        flattened: if addition_paths.is_empty() {
+            Vec::new()
+        } else {
+            vec![
+                "a slide created in HCD is written as a slide part the source package never had, on the layout the last existing slide draws from".to_string(),
+            ]
+        },
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
         warnings: manifest.warnings,
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
+}
+
+/// The file name of a slide part, checked to be one part of the slide folder.
+/// A slide HCD created is named `ppt/slides/slideN.xml`, and both the workbook
+/// of relationships and the content-type override are built from that name.
+fn slide_file_name(part: &str) -> Result<&str, HcdError> {
+    let name = part.strip_prefix("ppt/slides/").ok_or_else(|| {
+        HcdError::InvalidBundle(format!("PPTX slide addition {part} is not a slide part"))
+    })?;
+    if name.is_empty()
+        || !name.ends_with(".xml")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return Err(HcdError::InvalidBundle(format!(
+            "PPTX slide addition {part} is not a slide part"
+        )));
+    }
+    Ok(name)
+}
+
+/// The relationship part that belongs to a slide part.
+fn slide_relationships_part(part: &str) -> Result<String, HcdError> {
+    Ok(format!("ppt/slides/_rels/{}.rels", slide_file_name(part)?))
+}
+
+/// The layout a slide HCD created draws from, written as the target of its own
+/// relationship: the layout the last slide that names one uses, which is the
+/// page the patch measured its size from in every presentation PowerPoint or
+/// WPS writes. A package that carries no layout at all cannot host a new slide,
+/// so the export names the part it would have to invent instead of writing a
+/// slide the application would refuse to open.
+fn pptx_added_slide_layout(archive: &mut StreamingOxmlArchive) -> Result<String, HcdError> {
+    let slides = presentation_slides(archive)?;
+    for (part, _) in slides.iter().rev() {
+        if let Some(layout) = slide_layout_part(archive, part)? {
+            return slide_layout_target(&layout);
+        }
+    }
+    // A hand-built package may carry a layout no slide references yet.
+    let mut layouts: Vec<String> = archive
+        .entries()
+        .iter()
+        .filter(|entry| !entry.is_dir)
+        .map(|entry| entry.name.clone())
+        .filter(|name| name.starts_with("ppt/slideLayouts/") && name.ends_with(".xml"))
+        .collect();
+    layouts.sort_by_key(|name| (numeric_suffix(name), name.clone()));
+    match layouts.first() {
+        Some(layout) => slide_layout_target(layout),
+        None => Err(HcdError::InvalidBundle(
+            "PPTX slide addition needs a slide layout for the new slide to draw from; \
+             give the presentation a layout or export it without --source"
+                .to_string(),
+        )),
+    }
+}
+
+/// The layout part a slide of the source package points at, if it points at one.
+fn slide_layout_part(
+    archive: &mut StreamingOxmlArchive,
+    slide_part: &str,
+) -> Result<Option<String>, HcdError> {
+    let rels_part = slide_relationships_part(slide_part)?;
+    if !archive.contains(&rels_part) {
+        return Ok(None);
+    }
+    let xml = archive
+        .read_control_part(&rels_part, MAX_CONTROL_BYTES)
+        .map_err(package_error)?;
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("slide layout XML: {error}")))?;
+        budget.observe(&event, &rels_part)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let is_layout = attribute(element, "Type")
+                    .is_some_and(|kind| kind.ends_with(PPTX_SLIDE_LAYOUT_RELATIONSHIP_TYPE_SUFFIX));
+                let is_external = attribute(element, "TargetMode")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                if is_layout && !is_external {
+                    if let Some(target) = attribute(element, "Target") {
+                        // A relationship target is read against the part that
+                        // owns the file, not against the `_rels` entry itself.
+                        // The walk stops here, so the budget is not closed.
+                        return Ok(Some(resolve_part(slide_part, &target)?));
+                    }
+                }
+            }
+            Event::Eof => {
+                budget.finish(&rels_part)?;
+                return Ok(None);
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+/// A layout part written as a target seen from `ppt/slides`.
+fn slide_layout_target(layout_part: &str) -> Result<String, HcdError> {
+    let below_presentation = layout_part.strip_prefix("ppt/").ok_or_else(|| {
+        HcdError::InvalidBundle(format!(
+            "PPTX slide layout {layout_part} is outside the presentation folder"
+        ))
+    })?;
+    if below_presentation.starts_with("slides/") {
+        return Err(HcdError::InvalidBundle(format!(
+            "PPTX slide layout {layout_part} is a slide, not a layout"
+        )));
+    }
+    Ok(format!("../{below_presentation}"))
+}
+
+/// The relationships a slide HCD created carries: the layout it draws from.
+fn pptx_slide_relationships_xml(layout_target: &str) -> String {
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"{}\"/>",
+            "</Relationships>",
+        ),
+        escape_attribute(layout_target)
+    )
 }
 
 #[derive(Clone)]
@@ -4088,29 +4393,6 @@ fn relationship_id_attribute(element: &BytesStart<'_>) -> Option<String> {
         })
 }
 
-fn attribute(element: &BytesStart<'_>, wanted: &str) -> Option<String> {
-    element
-        .attributes()
-        .with_checks(false)
-        .flatten()
-        .find(|attribute| local_name(attribute.key.as_ref()) == wanted)
-        .and_then(|attribute| {
-            attribute
-                .unescape_value()
-                .ok()
-                .map(|value| value.into_owned())
-        })
-}
-
-fn local_name(name: &[u8]) -> &str {
-    let local = name
-        .iter()
-        .rposition(|byte| *byte == b':')
-        .map(|index| &name[index + 1..])
-        .unwrap_or(name);
-    std::str::from_utf8(local).unwrap_or("")
-}
-
 fn resolve_part(source_part: &str, target: &str) -> Result<String, HcdError> {
     let base = Path::new(source_part)
         .parent()
@@ -4154,13 +4436,6 @@ fn safe_temp_name(part: &str) -> String {
         .collect()
 }
 
-fn package_error(error: PackageError) -> HcdError {
-    match error {
-        PackageError::ResourceLimit(message) => HcdError::ResourceLimit(message),
-        other => HcdError::InvalidBundle(other.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4168,7 +4443,7 @@ mod tests {
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
         PatchOperation, PptxRunFormat, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
         HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
-        HCD_PATCH_SCHEMA_VERSION_30,
+        HCD_PATCH_SCHEMA_VERSION_30, HCD_PATCH_SCHEMA_VERSION_41,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -4464,6 +4739,224 @@ mod tests {
         .unwrap();
         assert_eq!(report.level, FidelityLevel::Exact);
         assert!(!read_zip_entry(&original, &slide_part).contains("HCD Text"));
+    }
+
+    #[test]
+    fn appends_a_blank_slide_and_exports_it_as_a_new_slide_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let before = temp.path().join("revision0.pptx");
+        let exported = temp.path().join("added.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("add-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        // A slide the history has not created yet is not written: revision 0
+        // still exports the presentation exactly as it arrived.
+        export_pptx(
+            &bundle,
+            &source,
+            &before,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&before, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml")
+        );
+        assert!(!has_zip_entry(&before, "ppt/slides/slide3.xml"));
+
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        let result = apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_ADDED"));
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count + 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        // The new page is the last slide chunk, and its HTML names the part.
+        let page = bundle
+            .read_index_page(&head, head.index_page_count - 1)
+            .unwrap();
+        let added_part = "ppt/slides/slide3.xml";
+        let chunk_id = page
+            .chunks
+            .iter()
+            .find(|descriptor| {
+                descriptor.region == "slide"
+                    && bundle
+                        .read_chunk(descriptor)
+                        .unwrap_or_default()
+                        .contains(added_part)
+            })
+            .expect("the added slide page")
+            .chunk_id
+            .clone();
+
+        // The blank page is there to type into: one text box makes it a slide.
+        let insert = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_16.to_string(),
+            document_id: head.document_id.clone(),
+            patch_id: "add-slide-r2".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxTextInsert {
+                chunk_id: chunk_id.clone(),
+                slide_part: added_part.to_string(),
+                x_emu: 914_400,
+                y_emu: 2_000_000,
+                width_emu: 4_000_000,
+                height_emu: 1_000_000,
+                font_size_pt: 20.0,
+                text: "新幻灯片".to_string(),
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &insert, 1).unwrap().revision, 2);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        // The page no longer carries the empty-slide placeholder. The index is
+        // read again: the shape rewrite published a new chunk object.
+        let current = bundle.manifest().unwrap();
+        let page = bundle
+            .read_index_page(&current, current.index_page_count - 1)
+            .unwrap();
+        let added_descriptor = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == chunk_id)
+            .unwrap();
+        assert!(
+            !bundle
+                .read_chunk(added_descriptor)
+                .unwrap()
+                .contains("hcd-empty-slide"),
+            "a slide with a shape on it is not an empty page"
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("slide part the source package never had")));
+        let slide = read_zip_entry(&exported, added_part);
+        assert!(slide.contains("name=\"HCD Text"), "{slide}");
+        assert!(slide.contains("新幻灯片"));
+        assert!(slide.contains("<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>"));
+        assert_eq!(
+            slide.matches("<p:cNvPr id=").count(),
+            2,
+            "the group and the one shape it holds: {slide}"
+        );
+        // The new slide draws from the layout the last existing slide uses.
+        assert!(
+            read_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels")
+                .contains("Target=\"../slideLayouts/slideLayout1.xml\"")
+        );
+        // The presentation gains the tab at the end and keeps the ones it had.
+        let presentation = read_zip_entry(&exported, "ppt/presentation.xml");
+        assert!(presentation.contains("<p:sldId id=\"256\" r:id=\"rId2\"/>"));
+        assert!(presentation.contains("<p:sldId id=\"257\" r:id=\"rId1\"/>"));
+        assert!(
+            presentation.contains("<p:sldId id=\"258\" r:id=\"rId3\"/>"),
+            "{presentation}"
+        );
+        assert!(read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels").contains(
+            "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide3.xml\"/>"
+        ));
+        assert!(read_zip_entry(&exported, "[Content_Types].xml").contains(
+            "<Override PartName=\"/ppt/slides/slide3.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
+        ));
+        // Nothing else in the package moved.
+        for part in [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+            "ppt/slides/_rels/slide2.xml.rels",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/media/image1.png",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+
+        // Re-importing the export finds the new page under the same ID, so the
+        // slide HCD created stays a page the editor can keep editing.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("add-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        let found = (0..reopened.index_page_count)
+            .flat_map(|page_number| {
+                reopened_bundle
+                    .read_index_page(&reopened, page_number)
+                    .unwrap()
+                    .chunks
+            })
+            .any(|descriptor| descriptor.chunk_id == chunk_id);
+        assert!(found, "the added slide keeps its page after a round trip");
+    }
+
+    #[test]
+    fn an_added_slide_refuses_a_package_that_has_no_layout_to_draw() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("added.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("add-slide-no-layout"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide-no-layout-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        assert_eq!(apply_patch(&bundle, &patch, 0).unwrap().revision, 1);
+        // HCD keeps the page: the refusal is about writing the source package,
+        // not about the revision, and the bundle still validates.
+        let error = export_pptx(&bundle, &source, &exported, &ExportOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("needs a slide layout"), "{error}");
+        assert!(!exported.exists());
+        assert!(validate_bundle(&bundle).unwrap().valid);
     }
 
     #[test]
@@ -5220,12 +5713,51 @@ mod tests {
         contents
     }
 
+    fn has_zip_entry(path: &Path, name: &str) -> bool {
+        let file = File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let found = archive.by_name(name).is_ok();
+        found
+    }
+
     fn create_styled_fixture(path: &Path) {
+        write_zip_fixture(path, &styled_fixture_parts());
+    }
+
+    /// The same presentation with the layout a real editor carries: the slide
+    /// that shows last draws its master from `ppt/slideLayouts/slideLayout1.xml`,
+    /// so a slide HCD appends has a layout to point at as well.
+    fn create_layout_fixture(path: &Path) {
+        let mut parts: Vec<(&str, &str)> = Vec::new();
+        for part in styled_fixture_parts() {
+            match part.0 {
+                "[Content_Types].xml" => parts.push((part.0, LAYOUTED_TYPES_XML)),
+                "ppt/slides/_rels/slide2.xml.rels" => {
+                    parts.push((part.0, LAYOUTED_SLIDE2_RELS_XML))
+                }
+                _ => parts.push(part),
+            }
+            if part.0 == "ppt/slides/slide1.xml" {
+                parts.push(("ppt/slideLayouts/slideLayout1.xml", SLIDE_LAYOUT_XML));
+            }
+        }
+        write_zip_fixture(path, &parts);
+    }
+
+    fn write_zip_fixture(path: &Path, parts: &[(&str, &str)]) {
         let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        let parts = [
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn styled_fixture_parts() -> Vec<(&'static str, &'static str)> {
+        vec![
             (
                 "[Content_Types].xml",
                 r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#,
@@ -5262,11 +5794,34 @@ mod tests {
                 "ppt/media/image2.png",
                 "not-a-real-png-but-streamed-as-an-asset",
             ),
-        ];
-        for (name, contents) in parts {
-            zip.start_file(name, options).unwrap();
-            zip.write_all(contents.as_bytes()).unwrap();
-        }
-        zip.finish().unwrap();
+        ]
     }
+
+    /// `styled_fixture_parts` with the layout declared and the second slide
+    /// bound to it, which is how PowerPoint and WPS write a saved presentation.
+    const LAYOUTED_TYPES_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>"#,
+        r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#,
+        "</Types>",
+    );
+
+    const LAYOUTED_SLIDE2_RELS_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rIdImage1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>"#,
+        r#"<Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#,
+        "</Relationships>",
+    );
+
+    const SLIDE_LAYOUT_XML: &str = concat!(
+        r#"<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" type="title">"#,
+        "<p:cSld><p:spTree>",
+        r#"<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"#,
+        "<p:grpSpPr/>",
+        "</p:spTree></p:cSld>",
+        "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>",
+        "</p:sldLayout>",
+    );
 }
