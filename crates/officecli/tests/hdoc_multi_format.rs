@@ -1309,7 +1309,7 @@ fn pinned_block_fonts_reach_semantic_docx_and_pptx_exports() {
                 &entry_for("Revenue in yen"),
                 serde_json::json!({ "latin": "Brand Serif", "eastAsia": "Brand Gothic" }),
             ),
-            // A complex-script face is outside what the semantic export writes.
+            // A complex-script-only pin is a block face like any other slot.
             font_operation(
                 &entry_for("Arabic totals"),
                 serde_json::json!({ "bidi": "Brand Naskh" }),
@@ -1351,7 +1351,7 @@ fn pinned_block_fonts_reach_semantic_docx_and_pptx_exports() {
         document.contains(r#"w:eastAsia="Brand Gothic""#),
         "{document}"
     );
-    assert!(!document.contains("Brand Naskh"), "{document}");
+    assert!(document.contains(r#"w:cs="Brand Naskh""#), "{document}");
     let word_report: Value = serde_json::from_slice(&std::fs::read(&word_report).unwrap()).unwrap();
     assert!(
         word_report["preserved"]
@@ -1361,18 +1361,18 @@ fn pinned_block_fonts_reach_semantic_docx_and_pptx_exports() {
             .any(|line| line
                 .as_str()
                 .unwrap_or_default()
-                .starts_with("block fonts pinned by text.font on 2 generated paragraph(s)")),
+                .starts_with("block fonts pinned by text.font on 3 generated paragraph(s)")),
         "{word_report}"
     );
     assert!(
-        word_report["warnings"]
+        !word_report["warnings"]
             .as_array()
             .unwrap()
             .iter()
             .any(|warning| warning["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("bidi face was not exported")),
+                .contains("bidi")),
         "{word_report}"
     );
 
@@ -1408,7 +1408,10 @@ fn pinned_block_fonts_reach_semantic_docx_and_pptx_exports() {
         slides.contains(r#"<a:ea typeface="Brand Gothic""#),
         "{slides}"
     );
-    assert!(!slides.contains("Brand Naskh"), "{slides}");
+    assert!(
+        slides.contains(r#"<a:cs typeface="Brand Naskh""#),
+        "the complex-script slot was not carried onto the Arabic block: {slides}"
+    );
     assert!(
         slides.contains("<a:t>Quarterly numbers</a:t>")
             && slides.contains("<a:t>Revenue in yen</a:t>"),

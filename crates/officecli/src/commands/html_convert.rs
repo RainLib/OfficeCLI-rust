@@ -164,18 +164,19 @@ struct SemanticHtml {
 /// A script face that a `text.font` patch pinned onto one canonical node. The
 /// semantic export has no run structure to pin onto, so a pinned face is applied
 /// to the whole block the node was read from: `latin` becomes
-/// `w:rFonts w:ascii`/`w:hAnsi` in DOCX and `<a:latin>` in PPTX, and
-/// `east_asia` becomes `w:rFonts w:eastAsia` and `<a:ea>`. A bidi-only pin is
-/// not written by the semantic export.
+/// `w:rFonts w:ascii`/`w:hAnsi` in DOCX and `<a:latin>` in PPTX, `east_asia`
+/// becomes `w:rFonts w:eastAsia` and `<a:ea>`, and `bidi` becomes
+/// `w:rFonts w:cs` and `<a:cs>`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct BlockFaces {
     latin: Option<String>,
     east_asia: Option<String>,
+    bidi: Option<String>,
 }
 
 impl BlockFaces {
     fn is_empty(&self) -> bool {
-        self.latin.is_none() && self.east_asia.is_none()
+        self.latin.is_none() && self.east_asia.is_none() && self.bidi.is_none()
     }
 
     /// A later face in the same block fills a slot the block does not have yet,
@@ -186,6 +187,9 @@ impl BlockFaces {
         }
         if self.east_asia.is_none() {
             self.east_asia = faces.east_asia.clone();
+        }
+        if self.bidi.is_none() {
+            self.bidi = faces.bidi.clone();
         }
     }
 }
@@ -1579,7 +1583,8 @@ impl HtmlParser {
     }
 
     /// A `text.font` patch leaves its slots on the canonical node element as
-    /// `data-hcd-font-latin` / `data-hcd-font-east-asia`. The semantic writers
+    /// `data-hcd-font-latin` / `data-hcd-font-east-asia` / `data-hcd-font-bidi`.
+    /// The semantic writers
     /// address whole paragraphs, so the face is remembered for the block this
     /// element belongs to.
     fn note_block_font(&mut self, attributes: &HashMap<String, String>) {
@@ -1590,12 +1595,11 @@ impl HtmlParser {
             east_asia: attributes
                 .get("data-hcd-font-east-asia")
                 .and_then(|value| semantic_font_face(value).map(str::to_string)),
+            bidi: attributes
+                .get("data-hcd-font-bidi")
+                .and_then(|value| semantic_font_face(value).map(str::to_string)),
         };
-        let bidi = attributes
-            .get("data-hcd-font-bidi")
-            .and_then(|value| semantic_font_face(value))
-            .is_some();
-        if faces.is_empty() && !bidi {
+        if faces.is_empty() {
             return;
         }
         if self.table.is_some() || self.logical_table.is_some() {
@@ -1604,15 +1608,6 @@ impl HtmlParser {
             self.document.warnings.insert(
                 "a pinned text.font face on a table cell was not exported; the semantic export applies faces to whole blocks, so use the source-backed export for one cell".to_string(),
             );
-            return;
-        }
-        if bidi {
-            self.document.warnings.insert(
-                "a pinned text.font bidi face was not exported; the semantic export writes only the latin and eastAsia slots, so use the source-backed export for complex-script text"
-                    .to_string(),
-            );
-        }
-        if faces.is_empty() {
             return;
         }
         match &mut self.pending_font {
@@ -3606,13 +3601,15 @@ fn escape_face(value: &str) -> String {
 }
 
 fn docx_font_element(existing: Option<&str>, faces: &BlockFaces) -> String {
-    const OVERRIDDEN: [&str; 7] = [
+    const OVERRIDDEN: [&str; 9] = [
         "w:ascii",
         "w:hAnsi",
         "w:eastAsia",
+        "w:cs",
         "w:asciiTheme",
         "w:hAnsiTheme",
         "w:eastAsiaTheme",
+        "w:csTheme",
         "w:hint",
     ];
     let mut attributes: Vec<(String, String)> = existing
@@ -3629,6 +3626,9 @@ fn docx_font_element(existing: Option<&str>, faces: &BlockFaces) -> String {
     }
     if let Some(east_asia) = faces.east_asia.as_deref() {
         attributes.push(("w:eastAsia".to_string(), escape_face(east_asia)));
+    }
+    if let Some(bidi) = faces.bidi.as_deref() {
+        attributes.push(("w:cs".to_string(), escape_face(bidi)));
     }
     let rendered = attributes
         .into_iter()
@@ -3710,6 +3710,9 @@ fn pptx_font_children(faces: &BlockFaces) -> String {
     if let Some(east_asia) = faces.east_asia.as_deref() {
         children.push_str(&format!("<a:ea typeface=\"{}\" />", escape_face(east_asia)));
     }
+    if let Some(bidi) = faces.bidi.as_deref() {
+        children.push_str(&format!("<a:cs typeface=\"{}\" />", escape_face(bidi)));
+    }
     children
 }
 
@@ -3774,6 +3777,7 @@ fn pin_pptx_properties(properties: &ElementScan<'_>, faces: &BlockFaces) -> Stri
     for (slot, pinned) in [
         ("a:latin", faces.latin.is_some()),
         ("a:ea", faces.east_asia.is_some()),
+        ("a:cs", faces.bidi.is_some()),
     ] {
         if !pinned {
             continue;
@@ -4351,7 +4355,7 @@ mod tests {
     #[test]
     fn semantic_parser_records_pinned_block_faces() {
         let document = parse_html(
-            r#"<h2 data-hcd-id="n_one" data-hcd-font-latin="Brand Serif">Quarterly numbers</h2><p data-hcd-id="n_two"><span data-hcd-id="n_two" data-hcd-font-latin="Brand Serif" data-hcd-font-east-asia="Brand Gothic">Revenue in yen</span></p>"#,
+            r#"<h2 data-hcd-id="n_one" data-hcd-font-latin="Brand Serif">Quarterly numbers</h2><p data-hcd-id="n_two"><span data-hcd-id="n_two" data-hcd-font-latin="Brand Serif" data-hcd-font-east-asia="Brand Gothic" data-hcd-font-bidi="Brand Naskh">Revenue in yen</span></p>"#,
         )
         .unwrap();
         assert_eq!(
@@ -4362,6 +4366,7 @@ mod tests {
                     faces: BlockFaces {
                         latin: Some("Brand Serif".to_string()),
                         east_asia: None,
+                        bidi: None,
                     },
                 },
                 SemanticBlockFont {
@@ -4369,24 +4374,34 @@ mod tests {
                     faces: BlockFaces {
                         latin: Some("Brand Serif".to_string()),
                         east_asia: Some("Brand Gothic".to_string()),
+                        bidi: Some("Brand Naskh".to_string()),
                     },
                 },
             ]
         );
     }
 
+    /// A theme that pins only the complex-script slot is still a pin: the block
+    /// keeps it instead of losing it on the way to the export.
+    #[test]
+    fn semantic_parser_records_a_bidi_only_face() {
+        let document = parse_html(r#"<p data-hcd-font-bidi="Brand Naskh">مرحبا</p>"#).unwrap();
+        assert_eq!(
+            document.block_fonts,
+            vec![SemanticBlockFont {
+                block_index: 0,
+                faces: BlockFaces {
+                    latin: None,
+                    east_asia: None,
+                    bidi: Some("Brand Naskh".to_string()),
+                },
+            }]
+        );
+        assert!(document.warnings.is_empty(), "{:?}", document.warnings);
+    }
+
     #[test]
     fn semantic_parser_reports_faces_it_cannot_write() {
-        let bidi = parse_html(r#"<p data-hcd-font-bidi="Brand Naskh">مرحبا</p>"#).unwrap();
-        assert!(bidi.block_fonts.is_empty(), "{:?}", bidi.block_fonts);
-        assert!(
-            bidi.warnings
-                .iter()
-                .any(|warning| warning.contains("bidi face was not exported")),
-            "{:?}",
-            bidi.warnings
-        );
-
         let cell = parse_html(
             r#"<table><tr><td data-hcd-font-latin="Brand Serif">Cell</td></tr></table>"#,
         )
@@ -4428,14 +4443,14 @@ mod tests {
             "{xml}"
         );
         assert!(xml.contains(r#"w:eastAsia="Brand Gothic""#), "{xml}");
-        assert!(!xml.contains("Brand Naskh"), "{xml}");
+        assert!(xml.contains(r#"w:cs="Brand Naskh""#), "{xml}");
         assert!(validate_output(&output, "docx").is_ok());
     }
 
     #[test]
     fn semantic_pptx_export_pins_block_faces_onto_runs() {
         let document = parse_html(
-            r#"<p data-hcd-font-latin="Brand Serif">Quarterly numbers</p><p data-hcd-font-latin="Brand Serif" data-hcd-font-east-asia="Brand Gothic">Revenue in yen</p>"#,
+            r#"<p data-hcd-font-latin="Brand Serif">Quarterly numbers</p><p data-hcd-font-latin="Brand Serif" data-hcd-font-east-asia="Brand Gothic" data-hcd-font-bidi="Brand Naskh">Revenue in yen</p>"#,
         )
         .unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -4463,7 +4478,9 @@ mod tests {
             .and_then(|rest| rest.split("</a:p>").next())
             .unwrap_or_default();
         assert!(
-            first.contains(r#"<a:latin typeface="Brand Serif""#) && !first.contains("<a:ea"),
+            first.contains(r#"<a:latin typeface="Brand Serif""#)
+                && !first.contains("<a:ea")
+                && !first.contains("<a:cs"),
             "{first}"
         );
         let second = xml
@@ -4473,9 +4490,15 @@ mod tests {
             .unwrap_or_default();
         assert!(
             second.contains(r#"<a:latin typeface="Brand Serif""#)
-                && second.contains(r#"<a:ea typeface="Brand Gothic""#),
+                && second.contains(r#"<a:ea typeface="Brand Gothic""#)
+                && second.contains(r#"<a:cs typeface="Brand Naskh""#),
             "{second}"
         );
+        // DrawingML wants the slots in latin, ea, cs order.
+        let latin = second.find(r#"<a:latin"#).unwrap();
+        let ea = second.find(r#"<a:ea"#).unwrap();
+        let cs = second.find(r#"<a:cs"#).unwrap();
+        assert!(latin < ea && ea < cs, "{second}");
         assert!(validate_output(&output, "pptx").is_ok());
     }
 
@@ -4515,10 +4538,11 @@ mod tests {
 
     #[test]
     fn semantic_pptx_export_keeps_existing_run_properties_when_pinning() {
-        let body = r#"<a:p><a:r><a:rPr lang="en-US" dirty="0"><a:b/><a:sym typeface="+mn-lt"/></a:rPr><a:t>Quarterly numbers</a:t></a:r></a:p>"#;
+        let body = r#"<a:p><a:r><a:rPr lang="en-US" dirty="0"><a:b/><a:cs typeface="Old Body"/><a:sym typeface="+mn-lt"/></a:rPr><a:t>Quarterly numbers</a:t></a:r></a:p>"#;
         let faces = BlockFaces {
             latin: Some("Brand Serif".to_string()),
             east_asia: Some("Brand Gothic".to_string()),
+            bidi: Some("Brand Naskh".to_string()),
         };
         let pinned = pin_pptx_runs(body, &faces);
         assert!(pinned.contains(r#"lang="en-US" dirty="0""#), "{pinned}");
@@ -4532,6 +4556,11 @@ mod tests {
             pinned.contains(r#"<a:ea typeface="Brand Gothic""#),
             "{pinned}"
         );
+        // The old complex-script typeface is replaced, not left as a second child.
+        assert!(
+            pinned.contains(r#"<a:cs typeface="Brand Naskh""#) && !pinned.contains("Old Body"),
+            "{pinned}"
+        );
     }
 
     #[test]
@@ -4539,19 +4568,29 @@ mod tests {
         let faces = BlockFaces {
             latin: Some("Brand Serif".to_string()),
             east_asia: None,
+            bidi: None,
         };
-        let body = r#"<w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:hint="eastAsia"/><w:b/></w:rPr><w:t>Quarterly numbers</w:t></w:r>"#;
+        let body = r#"<w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:csTheme="majorCs" w:cs="Old Body" w:hint="eastAsia"/><w:b/></w:rPr><w:t>Quarterly numbers</w:t></w:r>"#;
         let pinned = pin_docx_runs(body, &faces);
         assert!(
             pinned.contains(r#"w:ascii="Brand Serif""#)
                 && pinned.contains(r#"w:hAnsi="Brand Serif""#),
             "{pinned}"
         );
-        for dropped in ["w:asciiTheme", "w:hAnsiTheme", "w:eastAsiaTheme", "w:hint"] {
+        for dropped in [
+            "w:asciiTheme",
+            "w:hAnsiTheme",
+            "w:eastAsiaTheme",
+            "w:csTheme",
+            "w:hint",
+        ] {
             assert!(!pinned.contains(dropped), "{pinned}");
         }
         assert!(pinned.contains("<w:b/>"), "{pinned}");
+        // Slots the pin does not cover go with the ones it replaces: a run cannot
+        // keep a half-applied font, and Old Body would otherwise outrank the pin.
         assert!(!pinned.contains("w:eastAsia"), "{pinned}");
+        assert!(!pinned.contains("w:cs"), "{pinned}");
     }
 
     #[test]
