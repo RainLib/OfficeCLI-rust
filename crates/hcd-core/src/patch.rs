@@ -12181,4 +12181,69 @@ mod tests {
         annotation.annotation_id = "x".repeat(MAX_IDENTIFIER_BYTES + 1);
         assert!(validate_annotation(&annotation).is_err());
     }
+
+    #[test]
+    fn freezing_a_worksheet_replaces_every_window_pane_and_reports_what_changed() {
+        // Two windows of one worksheet, the first read straight out of a source
+        // workbook that had been split by hand: state, absolute corner, and the
+        // split written in twips, with no marker yet.
+        let mut html = concat!(
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"1\" ",
+            "data-hcd-pane-state=\"frozen-split\" data-hcd-pane-top-left-cell=\"$C$4\" ",
+            "data-hcd-active-pane=\"bottom-right\" data-hcd-frozen-rows=\"1\" ",
+            "data-hcd-split-x-twips=\"720\" data-hcd-split-y-twips=\"240\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"16\"></section>",
+            "<section class=\"hcd-text\" data-hcd-node=\"n_00000000000000000000000000000001\"></section>",
+        )
+        .to_string();
+        let (rewritten, windows) = freeze_xlsx_sheet_sections(&mut html, 2, 3).unwrap();
+        assert_eq!(
+            (rewritten, windows),
+            (2, 2),
+            "both windows of the sheet speak"
+        );
+        assert!(html.contains("data-hcd-pane-edited=\"true\""));
+        assert!(html.contains("data-hcd-pane-state=\"frozen\""));
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"D3\""));
+        assert!(html.contains("data-hcd-frozen-rows=\"2\""));
+        assert!(html.contains("data-hcd-frozen-columns=\"3\""));
+        assert!(html.contains("data-hcd-active-pane=\"bottom-right\""));
+        // The split the source wrote by hand does not ride along behind a freeze,
+        // and the sheet's own window attributes stay where they were.
+        assert!(!html.contains("data-hcd-split-x-twips"));
+        assert!(!html.contains("data-hcd-split-y-twips"));
+        assert!(!html.contains("$C$4"));
+        assert!(!html.contains("frozen-split"));
+        assert!(html.contains("data-hcd-row-start=\"16\""));
+        // A window of another chunk kind is left completely alone: the marker
+        // lands on the two worksheet windows and nowhere else in the chunk.
+        assert_eq!(html.matches("data-hcd-pane-edited=\"true\"").count(), 2);
+
+        // Asking for the split the sheet already holds changes nothing, which is
+        // what lets the patch refuse it instead of recording an empty revision.
+        assert_eq!(freeze_xlsx_sheet_sections(&mut html, 2, 3).unwrap(), (0, 2));
+
+        // Excel names only the side it splits, so a column-only freeze writes no
+        // row count and the scrolling corner sits in the top right window.
+        let mut column_only =
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Ledger\"></section>".to_string();
+        assert_eq!(
+            freeze_xlsx_sheet_sections(&mut column_only, 0, 1).unwrap(),
+            (1, 1)
+        );
+        assert!(column_only.contains("data-hcd-pane-top-left-cell=\"B1\""));
+        assert!(column_only.contains("data-hcd-active-pane=\"top-right\""));
+        assert!(column_only.contains("data-hcd-frozen-columns=\"1\""));
+        assert!(!column_only.contains("data-hcd-frozen-rows"));
+
+        // Releasing takes the whole pane vocabulary with it but keeps the marker:
+        // an export has to know this window spoke, not that it was never asked.
+        let (released, windows) = freeze_xlsx_sheet_sections(&mut html, 0, 0).unwrap();
+        assert_eq!((released, windows), (2, 2));
+        assert!(html.contains("data-hcd-pane-edited=\"true\""));
+        assert!(!html.contains("data-hcd-pane-state"));
+        assert!(!html.contains("data-hcd-pane-top-left-cell"));
+        assert!(!html.contains("data-hcd-active-pane"));
+        assert!(!html.contains("data-hcd-frozen-"));
+    }
 }
