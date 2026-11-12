@@ -10,7 +10,8 @@ import * as Y from 'yjs'
 import { clearPastedBlockIds, jsonToSnapshot, schemaExtensions, type Projection } from './schema.ts'
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { api, type Session } from './api.ts'
-import { loadThemeCss } from './themeCss.ts'
+import { loadTheme, type ThemeFace } from './themeCss.ts'
+import { BlockFontPicker } from './BlockFontPicker.tsx'
 import { FixedViewer } from './FixedViewer.tsx'
 import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
@@ -158,13 +159,14 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchVersion, setSearchVersion] = useState(0)
   const [themeCss, setThemeCss] = useState('')
+  const [themeFaces, setThemeFaces] = useState<ThemeFace[]>([])
   const lastOutline = useRef('')
   const lastSemantic = useRef<string | null>(null)
   useEffect(() => { saveLayout(layout) }, [layout])
   useEffect(() => {
     let live = true
-    loadThemeCss(session, historical?.revision ?? null, { editor: true })
-      .then(css => { if (live) setThemeCss(css) })
+    loadTheme(session, historical?.revision ?? null, { editor: true })
+      .then(theme => { if (live) { setThemeCss(theme.css); setThemeFaces(theme.faces) } })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
   }, [session, historical?.revision])
@@ -424,6 +426,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={searchVersion} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
       {activeTab === 'home' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().undo().run()} disabled={readOnly || !editor?.can().undo()}><LocalText source={"↶ 撤销"} /></button><button onClick={() => editor?.chain().focus().redo().run()} disabled={readOnly || !editor?.can().redo()}><LocalText source={"↷ 重做"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().setParagraph().run()} disabled={readOnly}><LocalText source={"正文"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}><LocalText source={"标题"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly}><LocalText source={"𝐁 加粗"} /></button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly}><LocalText source={"𝑰 斜体"} /></button><button onClick={openLink} disabled={readOnly}><LocalText source={"链接"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}><LocalText source={"项目符号"} /></button><button onClick={() => editor?.chain().focus().toggleOrderedList().run()} disabled={readOnly}><LocalText source={"编号"} /></button></div><div className="tool-group"><button onClick={() => moveBlock(-1)} disabled={readOnly}><LocalText source={"段落上移"} /></button><button onClick={() => moveBlock(1)} disabled={readOnly}><LocalText source={"段落下移"} /></button></div></>}
+      {activeTab === 'home' && <BlockFontPicker editor={editor} faces={themeFaces} disabled={readOnly || historical !== null} />}
       {activeTab === 'insert' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().insertContent({ type: 'paragraph', content: [{ type: 'text', text: '新段落' }] }).run()} disabled={readOnly}><LocalText source={"＋ 新增段落"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}><LocalText source={"插入标题"} /></button><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}><LocalText source={"插入列表"} /></button></div><div className="tool-group"><button onClick={openLink} disabled={readOnly}><LocalText source={"插入链接"} /></button><button onClick={deleteCurrentBlock} disabled={readOnly}><LocalText source={"删除段落"} /></button></div></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示大纲"} /></label><label className="mode"><input type="checkbox" checked={readOnly} disabled={session.scope === 'read'} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => void save()} disabled={readOnly}><LocalText source={"创建保存点"} /></button><button onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{revision ?? '…'}</span></>}
