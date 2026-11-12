@@ -1629,9 +1629,15 @@ fn font_response(bytes: Vec<u8>, format: hcd_core::FontFileFormat) -> Result<Res
     Ok(response)
 }
 
-/// Same-machine font catalog console. The HTML is embedded so `hdoc serve`
-/// serves it same-origin; every call carries the pasted admin token.
-const CATALOG_ADMIN_HTML: &str = include_str!("../../../examples/hdoc/admin/index.html");
+/// Same-machine font catalog console. The built page is embedded so `hdoc serve`
+/// serves it same-origin and the binary stays self-contained; every call carries
+/// the pasted admin token.
+///
+/// Source: `examples/hdoc/admin-app` (React + Tailwind + shadcn/ui primitives),
+/// built with `npm run build`, which inlines the bundle into this one HTML file.
+/// The checked-in `embed/index.html` is what ships — edit the app and rebuild,
+/// not the built file.
+const CATALOG_ADMIN_HTML: &str = include_str!("../../../examples/hdoc/admin-app/embed/index.html");
 
 async fn catalog_admin() -> Result<Response, ApiError> {
     let mut response = Response::new(Body::from(CATALOG_ADMIN_HTML));
@@ -2894,6 +2900,14 @@ mod tests {
         assert!(html.contains("/v1/catalog/fonts"));
         assert!(html.contains("/v1/catalog/themes"));
         assert!(html.contains("--scope admin"));
+        // The shipped page is the built React console, so these prove the
+        // checked-in bundle — not a stale hand-written page — is embedded: the
+        // admin-only document list it calls, and the sidebar labels that keep
+        // catalogue management and document content in separate views.
+        assert!(html.contains("<div id=\"root\">"));
+        assert!(html.contains("/v1/documents"));
+        assert!(html.contains("目录管理"));
+        assert!(html.contains("上传登记"));
     }
 
     #[tokio::test]
