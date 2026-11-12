@@ -304,6 +304,61 @@ pub fn theme_documents(
     Ok(documents)
 }
 
+/// One document in a document root: what it is, and which theme its head pins.
+///
+/// This is the content side of the catalog: the admin console lists these to
+/// check what a theme change actually reached. It reads the head manifest only,
+/// so a theme that survives just in history shows up here as unpinned; the
+/// reference check for deletion is [`theme_documents`], which walks history.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSummary {
+    pub document_id: String,
+    pub profile: String,
+    pub format: String,
+    pub revision: u64,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision_id: Option<String>,
+}
+
+/// Summarize every `{docs_root}/*.hcd` bundle, ordered by `documentId`.
+///
+/// A missing root simply means no documents yet. Non-bundle entries in the root
+/// (the catalog directory, `jobs/`, `sources/`, locks) are skipped, but an
+/// unreadable bundle fails the scan: a management list must not quietly drop a
+/// document nobody could read.
+pub fn list_documents(docs_root: &Path) -> Result<Vec<DocumentSummary>, HcdError> {
+    let entries = match fs::read_dir(docs_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(HcdError::Io(error)),
+    };
+    let mut documents = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let document_id = match bundle_document_id(&path) {
+            Some(document_id) => document_id,
+            None => continue,
+        };
+        let bundle = Bundle::open(&path)
+            .map_err(|error| note_unreadable(&document_id, "manifest", error))?;
+        let manifest = bundle
+            .manifest()
+            .map_err(|error| note_unreadable(&document_id, "manifest", error))?;
+        documents.push(DocumentSummary {
+            document_id,
+            profile: manifest.profile,
+            format: manifest.source.format,
+            revision: manifest.revision,
+            state: manifest.state,
+            theme_revision_id: manifest.theme_revision_id,
+        });
+    }
+    documents.sort_by(|left, right| left.document_id.cmp(&right.document_id));
+    Ok(documents)
+}
+
 /// The `documentId` for a `{docs_root}/{id}.hcd` bundle directory, `None` for
 /// anything else in the root (the catalog directory, scratch files, locks).
 fn bundle_document_id(path: &Path) -> Option<String> {
@@ -2409,6 +2464,93 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(theme_documents(docs.path(), "not-a-digest").is_err());
+    }
+
+    #[test]
+    fn listing_documents_shows_the_head_pin() {
+        let (_temp, catalog, _font_revision_id, theme_id) = install();
+        let docs = tempfile::tempdir().unwrap();
+        let bundle = bundle_at(docs.path(), "demo", "article { color: #123456; }");
+
+        let before = list_documents(docs.path()).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].document_id, "demo");
+        assert_eq!(before[0].profile, "semantic-flow");
+        assert_eq!(before[0].format, "docx");
+        assert_eq!(before[0].revision, 0);
+        assert_eq!(before[0].theme_revision_id, None);
+
+        pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        let after = list_documents(docs.path()).unwrap();
+        assert_eq!(after[0].revision, 1);
+        assert_eq!(
+            after[0].theme_revision_id.as_deref(),
+            Some(theme_id.as_str())
+        );
+    }
+
+    #[test]
+    fn listing_documents_skips_loose_files_and_sorts_by_id() {
+        let (_temp, _catalog, _font_revision_id, _theme_id) = install();
+        let docs = tempfile::tempdir().unwrap();
+        // The production root mixes bundles with the catalog and scratch files.
+        DiskCatalog::open(docs.path().join("catalog")).unwrap();
+        fs::write(docs.path().join("uploads"), b"not a directory of bundles").unwrap();
+        bundle_at(docs.path(), "beta", "article { color: #123456; }");
+        bundle_at(docs.path(), "alpha", "article { color: #222222; }");
+
+        let ids: Vec<String> = list_documents(docs.path())
+            .unwrap()
+            .into_iter()
+            .map(|document| document.document_id)
+            .collect();
+        assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
+        assert!(list_documents(&docs.path().join("absent"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn listing_documents_fails_loudly_on_an_unreadable_bundle() {
+        let (_temp, _catalog, _font_revision_id, _theme_id) = install();
+        let docs = tempfile::tempdir().unwrap();
+        bundle_at(docs.path(), "good", "article { color: #123456; }");
+        bundle_at(docs.path(), "bad", "article { color: #222222; }");
+        // A half-written bundle must not disappear from a management list.
+        fs::write(
+            docs.path().join("bad.hcd").join("manifest.json"),
+            b"{ this is not json",
+        )
+        .unwrap();
+
+        let error = list_documents(docs.path()).unwrap_err();
+        assert!(matches!(
+            &error,
+            HcdError::InvalidBundle(message) if message.contains("bad")
+        ));
+    }
+
+    #[test]
+    fn document_summaries_omit_an_absent_pin() {
+        let value = serde_json::to_value(DocumentSummary {
+            document_id: "demo".to_string(),
+            profile: "semantic-flow".to_string(),
+            format: "docx".to_string(),
+            revision: 3,
+            state: "READY".to_string(),
+            theme_revision_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "documentId": "demo",
+                "profile": "semantic-flow",
+                "format": "docx",
+                "revision": 3,
+                "state": "READY",
+            })
+        );
     }
 
     #[test]

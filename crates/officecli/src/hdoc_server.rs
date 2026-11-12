@@ -13,12 +13,13 @@ use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, detect_font_format, editor_projection, hash_file,
-    manifest_at_revision, pin_document_theme, project_editor, resolve_document_theme,
-    restore_revision, search_bundle, theme_documents, BlockPrecondition, Bundle, DiskCatalog,
-    EditorBlockContent, EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense,
-    FontRevision, FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
-    StructurePatchBatch, ThemeDocumentRef, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
-    HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
+    list_documents, manifest_at_revision, pin_document_theme, project_editor,
+    resolve_document_theme, restore_revision, search_bundle, theme_documents, BlockPrecondition,
+    Bundle, DiskCatalog, DocumentSummary, EditorBlockContent, EditorInline, FontDeleteReport,
+    FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch, FontStyle,
+    HcdError, PatchBatch, StructureOperation, StructurePatchBatch, ThemeDocumentRef,
+    ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, MAX_FONT_BYTES,
+    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -148,6 +149,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
     let router = Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true})) }))
         .route("/admin", get(catalog_admin))
+        .route("/v1/documents", get(catalog_documents))
         .route("/v1/documents/{id}", get(manifest))
         .route("/v1/import", post(import_document))
         .route("/v1/jobs/{job_id}", get(job_status))
@@ -1953,6 +1955,18 @@ async fn catalog_unretire_theme(
     })))
 }
 
+/// Content side of the catalog: every bundle in this service's document root,
+/// with the theme its head pins. A document read token only covers one document
+/// (`claims.doc` must equal the id), so an operator with the admin token has no
+/// way to see what the catalog changes actually reached without this listing.
+async fn catalog_documents(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    Ok(Json(list_documents(&state.root).map_err(hcd_error)?))
+}
+
 /// Which documents pin this theme. The scan covers this service's own document
 /// root only — head pins and revision history both count — so an empty answer
 /// means "unreachable from the documents stored here", not "unused everywhere".
@@ -3276,6 +3290,86 @@ mod tests {
         let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
         assert_eq!(manifest.revision, 0);
         assert_eq!(manifest.theme_revision_id.as_deref(), Some(own.as_str()));
+    }
+
+    #[tokio::test]
+    async fn catalog_documents_lists_the_root_with_its_head_pins() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        imported_bundle(
+            &temp.path().join("doc-own.hcd"),
+            "doc-own",
+            Some(theme.clone()),
+        );
+        imported_bundle(&temp.path().join("doc-plain.hcd"), "doc-plain", None);
+
+        let listed = catalog_documents(State(state.clone()), admin.clone())
+            .await
+            .unwrap()
+            .0;
+        let ids: Vec<&str> = listed
+            .iter()
+            .map(|document| document.document_id.as_str())
+            .collect();
+        // The catalog directory shares this root and is not a document.
+        assert_eq!(ids, vec!["doc-own", "doc-plain"]);
+        assert_eq!(listed[0].theme_revision_id.as_deref(), Some(theme.as_str()));
+        assert_eq!(listed[1].theme_revision_id, None);
+
+        let body = serde_json::to_value(&listed).unwrap();
+        assert_eq!(body[0]["documentId"], "doc-own");
+        assert_eq!(body[0]["profile"], "semantic-flow");
+        assert_eq!(body[0]["format"], "docx");
+        assert_eq!(body[0]["revision"], 0);
+        // `BundleWriter::finish` normalizes the state it wrote, so the console
+        // sees a finished bundle, not the `IMPORTING` stub the helper passed in.
+        assert_eq!(body[0]["state"], "COMPLETE");
+        assert_eq!(body[0]["themeRevisionId"], theme.clone());
+        assert!(
+            body[1].get("themeRevisionId").is_none(),
+            "an unpinned document omits the key instead of sending null"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_documents_needs_admin_and_refuses_a_broken_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        imported_bundle(&temp.path().join("doc-own.hcd"), "doc-own", Some(theme));
+
+        // A document token — even one scoped to the very document listed here —
+        // is not a catalog administrator.
+        let reader = bearer(secret, "doc-own", "read");
+        assert_eq!(
+            catalog_documents(State(state.clone()), reader)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // A half-written bundle is named, not dropped from the list.
+        std::fs::write(
+            temp.path().join("doc-own.hcd").join("manifest.json"),
+            b"{ this is not json",
+        )
+        .unwrap();
+        let error = catalog_documents(State(state.clone()), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error.1.contains("doc-own"),
+            "the failing document is named: {}",
+            error.1
+        );
     }
 
     #[tokio::test]
