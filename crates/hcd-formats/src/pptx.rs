@@ -1,15 +1,15 @@
 use crate::common::{
-    append_control_children, attribute, base_manifest, checked_export_state_with_restores,
-    collect_dirty_nodes, current_control_part, emit_failed, emit_started, escape_attribute,
-    escape_text, finish_import, highest_control_id, local_name, package_error, source_identity,
-    write_fidelity_report, AddedElement, ExportOptions, ImportOptions, XmlBudget,
-    MAX_CONTROL_BYTES,
+    append_control_children, attribute, base_manifest, checked_attribute,
+    checked_export_state_with_restores, collect_dirty_nodes, current_control_part,
+    drop_control_elements, emit_failed, emit_started, escape_attribute, escape_text, finish_import,
+    highest_control_id, local_name, package_error, source_identity, write_fidelity_report,
+    AddedElement, ExportOptions, ImportOptions, XmlBudget, MAX_CONTROL_BYTES,
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    PptxRunFormat, PptxShapeGeometry, SlideAddition, SourceAnchor, DEFAULT_CHUNK_BLOCKS,
-    HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    PptxRunFormat, PptxShapeGeometry, SlideAddition, SlideRemoval, SourceAnchor,
+    DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -3094,23 +3094,230 @@ pub(crate) fn export_pptx(
     for shapes in insertions.values_mut() {
         shapes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     }
-    let native_geometry = collect_edited_shape_geometry(bundle, &manifest, &dirty_parts)?;
+    let mut native_geometry = collect_edited_shape_geometry(bundle, &manifest, &dirty_parts)?;
     // A slide HCD created is not in the source package, so the export writes it
     // the way the workbook export writes a new tab: a blank slide part built
     // here, grown with whatever text boxes landed on it, plus the three control
     // parts that let the package address it and the presentation show it last.
+    // A page HCD deleted is that ledger read backwards: the part leaves, and so
+    // does every control entry that addressed it.
     let mut added_slides: Vec<SlideAddition> = Vec::new();
+    let mut removed_slides: Vec<SlideRemoval> = Vec::new();
     for &revision in &revisions {
-        added_slides.extend(bundle.revision(revision)?.slide_additions);
+        let record = bundle.revision(revision)?;
+        added_slides.extend(record.slide_additions);
+        removed_slides.extend(record.slide_removals);
     }
-    // Undoing the revision that added a slide is not one of these records: a
-    // restore is a structural revision, so the walk above never reaches it and
-    // the page is simply gone. A slide deleted later, the way a worksheet tab
-    // can be, would need the cancellation the workbook export does.
+    // Undoing either revision is not one of these records: a restore is a
+    // structural revision, so the walk above never reaches it and the page is
+    // simply back in the deck or gone from it.
+    let removed_parts: BTreeSet<String> = removed_slides
+        .iter()
+        .map(|removal| removal.slide_part.clone())
+        .collect();
+    // A page this history both created and deleted again never reached the source
+    // package, so there is no part to drop and no blank page to write: it cancels
+    // out, the way a worksheet tab does.
+    let cancelled_parts: BTreeSet<String> = added_slides
+        .iter()
+        .map(|addition| addition.slide_part.clone())
+        .filter(|part| removed_parts.contains(part))
+        .collect();
     let scratch = tempfile::tempdir()?;
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let mut replacement_paths: HashMap<String, PathBuf> = HashMap::new();
+    let mut removal_paths: BTreeSet<String> = BTreeSet::new();
+    if !removed_slides.is_empty() {
+        let names: Vec<String> = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        // Text written on a page this history later deleted is not exported: the
+        // part is dropped, so rebuilding it would only ask for canonical maps the
+        // index no longer holds.
+        for part in &removed_parts {
+            replacements.remove(part);
+            insertions.remove(part);
+            native_geometry.remove(part);
+            source_formats.remove(part);
+        }
+        for removal in &removed_slides {
+            let part = removal.slide_part.as_str();
+            if cancelled_parts.contains(part) {
+                continue;
+            }
+            // The name has to be a page's, because everything below addresses the
+            // package's three lists in the shape a slide part is written in.
+            slide_file_name(part)?;
+            if !names.iter().any(|name| name == part) {
+                return Err(HcdError::InvalidBundle(format!(
+                    "PPTX slide deletion target {part} is not in the source presentation"
+                )));
+            }
+            removal_paths.insert(part.to_string());
+            let rels = slide_relationships_part(part)?;
+            if names.iter().any(|name| name == &rels) {
+                removal_paths.insert(rels);
+            }
+        }
+        let deleted: BTreeSet<String> = removed_parts
+            .iter()
+            .filter(|part| !cancelled_parts.contains(*part))
+            .cloned()
+            .collect();
+        if !deleted.is_empty() {
+            let presentation =
+                current_control_part(&mut archive, &replacement_paths, "ppt/presentation.xml")?;
+            let list = read_pptx_slide_list(&presentation)?;
+            if list.custom_shows {
+                return Err(HcdError::Unsupported(
+                    "PPTX slide deletion cannot drop a page out of a presentation with custom shows; a show names slides by their list id, so remove the show first or export without --source".to_string(),
+                ));
+            }
+            if list.sections {
+                return Err(HcdError::Unsupported(
+                    "PPTX slide deletion cannot drop a page out of a presentation that groups its slides in sections; a section lists its own pages, so remove the sections first or export without --source".to_string(),
+                ));
+            }
+            // Whatever still points at a page about to be removed would dangle: a
+            // notes slide's list points back at the page it annotates, and a
+            // hyperlink from another page points at the page it jumps to. Both are
+            // refused, naming what stands in the way.
+            let mut dropped_relationship_ids: BTreeSet<String> = BTreeSet::new();
+            for name in &names {
+                if !name.ends_with(".rels") {
+                    continue;
+                }
+                let Some(owner) = pptx_rels_owner(name) else {
+                    continue;
+                };
+                if removed_parts.contains(&owner) {
+                    // The page's own list leaves with the page it describes.
+                    continue;
+                }
+                let xml = archive
+                    .read_control_part(name, MAX_CONTROL_BYTES)
+                    .map_err(package_error)?;
+                for relationship in read_pptx_relationships(&xml, &owner, name)? {
+                    let Some(target) = relationship
+                        .target
+                        .as_ref()
+                        .filter(|target| deleted.contains(*target))
+                    else {
+                        continue;
+                    };
+                    if name == "ppt/_rels/presentation.xml.rels" {
+                        if relationship.id.is_empty() {
+                            return Err(HcdError::InvalidBundle(format!(
+                                "{name} holds a relationship with no Id"
+                            )));
+                        }
+                        dropped_relationship_ids.insert(relationship.id.clone());
+                        continue;
+                    }
+                    return Err(HcdError::Unsupported(format!(
+                        "PPTX slide deletion cannot drop {target} while {name} still points at it; delete whatever named it first or export without --source"
+                    )));
+                }
+            }
+            if dropped_relationship_ids.len() != deleted.len() {
+                return Err(HcdError::InvalidBundle(format!(
+                    "the presentation addresses {} of the {} pages the history deleted",
+                    dropped_relationship_ids.len(),
+                    deleted.len()
+                )));
+            }
+            let mut dropped_slide_ids: BTreeSet<String> = BTreeSet::new();
+            for (id, relationship_id) in &list.entries {
+                if dropped_relationship_ids.contains(relationship_id) {
+                    dropped_slide_ids.insert(id.clone());
+                }
+            }
+            if dropped_slide_ids.len() != deleted.len() {
+                return Err(HcdError::InvalidBundle(
+                    "a deleted slide has no entry in the presentation's slide list".to_string(),
+                ));
+            }
+            // The patch refuses to drop the last page of a deck; this is the same
+            // bound on a package whose list a history would empty, counting only the
+            // pages the source itself carried.
+            if list.entries.len() == dropped_slide_ids.len() {
+                return Err(HcdError::InvalidPatch(
+                    "PPTX presentation must keep one slide".to_string(),
+                ));
+            }
+            let (presentation, dropped) = drop_control_elements(
+                &presentation,
+                "sldIdLst",
+                "sldId",
+                "id",
+                &dropped_slide_ids,
+                "ppt/presentation.xml",
+            )?;
+            if dropped != dropped_slide_ids.len() {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX slide list holds an entry the export could not remove".to_string(),
+                ));
+            }
+            let path = scratch
+                .path()
+                .join(safe_temp_name("removed-presentation.xml"));
+            std::fs::write(&path, presentation)?;
+            replacement_paths.insert("ppt/presentation.xml".to_string(), path);
+
+            let relationships = current_control_part(
+                &mut archive,
+                &replacement_paths,
+                "ppt/_rels/presentation.xml.rels",
+            )?;
+            let (relationships, dropped) = drop_control_elements(
+                &relationships,
+                "Relationships",
+                "Relationship",
+                "Id",
+                &dropped_relationship_ids,
+                "ppt/_rels/presentation.xml.rels",
+            )?;
+            if dropped != dropped_relationship_ids.len() {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX relationship list holds an entry the export could not remove".to_string(),
+                ));
+            }
+            let path = scratch
+                .path()
+                .join(safe_temp_name("removed-presentation.xml.rels"));
+            std::fs::write(&path, relationships)?;
+            replacement_paths.insert("ppt/_rels/presentation.xml.rels".to_string(), path);
+
+            let content_types =
+                current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
+            let part_names: BTreeSet<String> = removal_paths
+                .iter()
+                .map(|part| format!("/{part}"))
+                .collect();
+            let (content_types, _) = drop_control_elements(
+                &content_types,
+                "Types",
+                "Override",
+                "PartName",
+                &part_names,
+                "[Content_Types].xml",
+            )?;
+            // A deck that declares its pages through a Default extension carries no
+            // override to take away, which is why this count is not checked.
+            let path = scratch
+                .path()
+                .join(safe_temp_name("removed-content-types.xml"));
+            std::fs::write(&path, content_types)?;
+            replacement_paths.insert("[Content_Types].xml".to_string(), path);
+        }
+    }
     let mut blank_slides: HashMap<String, PathBuf> = HashMap::new();
     for addition in &added_slides {
+        if cancelled_parts.contains(&addition.slide_part) {
+            continue;
+        }
         if archive.contains(&addition.slide_part) {
             return Err(HcdError::InvalidBundle(format!(
                 "PPTX slide addition {} is already in the source presentation",
@@ -3123,7 +3330,6 @@ pub(crate) fn export_pptx(
         std::fs::write(&path, BLANK_PPTX_SLIDE_XML)?;
         blank_slides.insert(addition.slide_part.clone(), path);
     }
-    let mut replacement_paths = HashMap::new();
     let mut addition_paths: HashMap<String, PathBuf> = HashMap::new();
     for part in replacements
         .keys()
@@ -3263,14 +3469,40 @@ pub(crate) fn export_pptx(
             replacement_paths.insert(part.to_string(), path);
         }
     }
-    let changed = StreamingOxmlRewriter::rewrite_with_additions(
+    let removals: HashSet<String> = removal_paths.iter().cloned().collect();
+    let changed = StreamingOxmlRewriter::rewrite_with_changes(
         source,
         target,
         &replacement_paths,
         &addition_paths,
+        &removals,
         "ppt/presentation.xml",
     )
     .map_err(package_error)?;
+    let mut warnings = manifest.warnings;
+    for part in &removed_parts {
+        // The report tells a page the export cut out of the package from one this
+        // history invented and then dropped again, because only the first of those
+        // has parts the reader will miss.
+        let message = if removal_paths.contains(part.as_str()) {
+            format!("slide {part} was deleted in HCD; the export dropped the page, its relationship, its entry in the presentation's slide list, and its content-type override")
+        } else {
+            format!("slide {part} was created and deleted inside this history; the export wrote no slide part for it")
+        };
+        warnings.push(FidelityWarning {
+            code: "PPTX_SLIDE_DELETE".to_string(),
+            message,
+            node_id: None,
+            source_part: Some(part.clone()),
+        });
+    }
+    let mut flattened = Vec::new();
+    if !addition_paths.is_empty() {
+        flattened.push("a slide created in HCD is written as a slide part the source package never had, on the layout the last existing slide draws from".to_string());
+    }
+    if !removal_paths.is_empty() {
+        flattened.push("a slide deleted in HCD leaves the package with its page entry, its relationship and its content-type override; media, layouts and charts that only that page used stay in the package unreferenced".to_string());
+    }
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if changed.is_empty() {
@@ -3282,15 +3514,9 @@ pub(crate) fn export_pptx(
             "unmodified OOXML entries copied as raw compressed payloads".to_string(),
             "slide geometry, run formatting, media, charts, notes and animations".to_string(),
         ],
-        flattened: if addition_paths.is_empty() {
-            Vec::new()
-        } else {
-            vec![
-                "a slide created in HCD is written as a slide part the source package never had, on the layout the last existing slide draws from".to_string(),
-            ]
-        },
+        flattened,
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
-        warnings: manifest.warnings,
+        warnings,
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
@@ -4423,6 +4649,152 @@ fn resolve_part(source_part: &str, target: &str) -> Result<String, HcdError> {
     }
     Ok(output.to_string_lossy().replace('\\', "/"))
 }
+/// The pages a presentation addresses, and the two features that would be left
+/// pointing at a page the export removes.
+struct PptxSlideList {
+    /// `<p:sldId>` entries of the presentation's own list, in the order the deck
+    /// shows them: the id PowerPoint counts pages by, and the relationship that
+    /// names the page's part.
+    entries: Vec<(String, String)>,
+    /// Whether the deck carries `<p:custShowLst>`, whose shows list slides by that
+    /// same id and would name a page that no longer exists.
+    custom_shows: bool,
+    /// Whether the deck groups pages with `<p:sectionLst>`, which keeps its own
+    /// page lists a deletion has to be kept out of.
+    sections: bool,
+}
+
+/// Read a presentation's own page list. Only the list hanging off
+/// `<p:presentation>` counts: a section carries a nested `<p:sldIdLst>` whose
+/// entries name no relationship, and a deck that has one is refused before these
+/// entries are used.
+fn read_pptx_slide_list(xml: &[u8]) -> Result<PptxSlideList, HcdError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut list = PptxSlideList {
+        entries: Vec::new(),
+        custom_shows: false,
+        sections: false,
+    };
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("PPTX presentation XML: {error}")))?;
+        let opening = matches!(event, Event::Start(_));
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                let name = local_name(element.name().as_ref()).to_string();
+                match name.as_str() {
+                    "custShowLst" => list.custom_shows = true,
+                    "sectionLst" => list.sections = true,
+                    "sldId"
+                        if stack.len() == 2
+                            && stack[0] == "presentation"
+                            && stack[1] == "sldIdLst" =>
+                    {
+                        let id = checked_attribute(element, "id")?.ok_or_else(|| {
+                            HcdError::InvalidBundle("PPTX slide list entry has no id".to_string())
+                        })?;
+                        let relationship_id =
+                            relationship_id_attribute(element).ok_or_else(|| {
+                                HcdError::InvalidBundle(
+                                    "PPTX slide list entry has no relationship".to_string(),
+                                )
+                            })?;
+                        list.entries.push((id, relationship_id));
+                    }
+                    _ => {}
+                }
+                if opening {
+                    stack.push(name);
+                }
+            }
+            Event::End(_) => {
+                stack.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(list)
+}
+
+/// The part a `.rels` entry describes. Relationship targets are written relative
+/// to that part rather than to the relationship file, so a deletion has to know
+/// whose folder `../slides/slide2.xml` climbs out of. The package's own list
+/// names no part and answers with an empty one.
+fn pptx_rels_owner(rels_part: &str) -> Option<String> {
+    if let Some(file) = rels_part.strip_prefix("_rels/") {
+        return file.ends_with(".rels").then(String::new);
+    }
+    let (folder, file) = rels_part.rsplit_once("/_rels/")?;
+    let owner = file.strip_suffix(".rels")?;
+    Some(format!("{folder}/{owner}"))
+}
+
+/// One relationship as the package wrote it.
+struct PptxRelationship {
+    id: String,
+    /// The part it names, resolved against the folder of the part the list
+    /// belongs to. `None` for an external target, which is a address outside the
+    /// package and can never name a part the export drops.
+    target: Option<String>,
+}
+
+/// Read a relationship list. An entry with no `Id` keeps an empty one: the export
+/// only asks for it when the entry is the one it has to take away, and refuses
+/// there rather than dropping a relationship it cannot name.
+fn read_pptx_relationships(
+    xml: &[u8],
+    owner_part: &str,
+    part: &str,
+) -> Result<Vec<PptxRelationship>, HcdError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut output = Vec::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("{part} XML: {error}")))?;
+        if let Event::Empty(ref element) | Event::Start(ref element) = event {
+            if local_name(element.name().as_ref()) == "Relationship" {
+                let mut id = None;
+                let mut target = None;
+                let mut external = false;
+                for attribute in element.attributes().with_checks(false) {
+                    let attribute = attribute.map_err(|error| {
+                        HcdError::InvalidBundle(format!("{part} attribute: {error}"))
+                    })?;
+                    let value = attribute.unescape_value().map_err(|error| {
+                        HcdError::InvalidBundle(format!("{part} value: {error}"))
+                    })?;
+                    match local_name(attribute.key.as_ref()) {
+                        "Id" => id = Some(value.to_string()),
+                        "Target" => target = Some(value.to_string()),
+                        "TargetMode" => external = value.as_ref() == "External",
+                        _ => {}
+                    }
+                }
+                output.push(PptxRelationship {
+                    id: id.unwrap_or_default(),
+                    target: target
+                        .filter(|_| !external)
+                        .map(|target| resolve_part(owner_part, &target))
+                        .transpose()?,
+                });
+            }
+        }
+        if matches!(event, Event::Eof) {
+            break;
+        }
+        buffer.clear();
+    }
+    Ok(output)
+}
 
 fn safe_temp_name(part: &str) -> String {
     part.chars()
@@ -4443,7 +4815,7 @@ mod tests {
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
         PatchOperation, PptxRunFormat, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
         HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
-        HCD_PATCH_SCHEMA_VERSION_30, HCD_PATCH_SCHEMA_VERSION_41,
+        HCD_PATCH_SCHEMA_VERSION_30, HCD_PATCH_SCHEMA_VERSION_41, HCD_PATCH_SCHEMA_VERSION_42,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -4955,6 +5327,256 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("needs a slide layout"), "{error}");
+        assert!(!exported.exists());
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    /// The page chunk that carries a slide's section, named by the source part
+    /// that section points at.
+    fn slide_page_chunk(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> String {
+        (0..manifest.index_page_count)
+            .flat_map(|page_number| {
+                bundle
+                    .read_index_page(manifest, page_number)
+                    .unwrap()
+                    .chunks
+            })
+            .find(|descriptor| {
+                descriptor.region == "slide"
+                    && bundle.read_chunk(descriptor).unwrap().contains(part)
+            })
+            .unwrap_or_else(|| panic!("no page chunk names {part}"))
+            .chunk_id
+    }
+
+    fn drop_slide_patch(document_id: &str, chunk_id: &str, base: u64) -> PatchBatch {
+        PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+            document_id: document_id.to_string(),
+            patch_id: format!("drop-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideDelete {
+                chunk_id: chunk_id.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn deleting_a_slide_writes_a_package_that_no_longer_addresses_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("dropped.pptx");
+        let before = temp.path().join("before.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("drop-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        let result = apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_REMOVED"));
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count - 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        // The revision the deck still had is exported whole: the deletion is a
+        // later revision, and asking for revision 0 asks for the page back.
+        export_pptx(
+            &bundle,
+            &source,
+            &before,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(has_zip_entry(&before, "ppt/slides/slide2.xml"));
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("leaves the package with its page entry")));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_DELETE"
+                && warning
+                    .source_part
+                    .as_deref()
+                    .is_some_and(|part| part == "ppt/slides/slide2.xml")));
+        // The page and the list of relationships it owned are both gone.
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide2.xml"));
+        assert!(!has_zip_entry(
+            &exported,
+            "ppt/slides/_rels/slide2.xml.rels"
+        ));
+        // What addressed the page goes with it, and only that.
+        let presentation = read_zip_entry(&exported, "ppt/presentation.xml");
+        assert!(!presentation.contains("r:id=\"rId2\""), "{presentation}");
+        assert!(presentation.contains("<p:sldId id=\"257\" r:id=\"rId1\"/>"));
+        let relationships = read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels");
+        assert!(
+            !relationships.contains("slides/slide2.xml"),
+            "{relationships}"
+        );
+        assert!(relationships.contains("Target=\"slides/slide1.xml\""));
+        let types = read_zip_entry(&exported, "[Content_Types].xml");
+        assert!(
+            !types.contains(r#"PartName="/ppt/slides/slide2.xml""#),
+            "{types}"
+        );
+        assert!(types.contains(r#"PartName="/ppt/slides/slide1.xml""#));
+        // The image the deleted page alone used stays, unreferenced, and nothing
+        // the deck kept moved.
+        for part in [
+            "ppt/slides/slide1.xml",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/media/image1.png",
+            "ppt/media/image2.png",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+
+        // Re-importing the export keeps the surviving page under the same ID, so
+        // the deck the editor reads again is the deck it wrote.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("drop-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        assert_eq!(reopened.chunk_count, head.chunk_count);
+        assert_eq!(
+            slide_page_chunk(&reopened_bundle, &reopened, "ppt/slides/slide1.xml"),
+            slide_page_chunk(&bundle, &head, "ppt/slides/slide1.xml")
+        );
+    }
+
+    #[test]
+    fn a_page_created_and_deleted_inside_the_history_writes_no_slide_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("cancelled.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("cancel-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "cancel-add".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxSlideAdd {}],
+            },
+            0,
+        )
+        .unwrap();
+        let added = bundle.manifest().unwrap();
+        let page = bundle
+            .read_index_page(&added, added.index_page_count - 1)
+            .unwrap();
+        let added_chunk = page.chunks.last().unwrap().chunk_id.clone();
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &added_chunk, 1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(bundle.manifest().unwrap().chunk_count, manifest.chunk_count);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        // Nothing was written and nothing was dropped, so the package is the one
+        // that arrived.
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert!(report.warnings.iter().any(|warning| warning
+            .message
+            .contains("created and deleted inside this history")));
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide3.xml"));
+        for part in [
+            "ppt/presentation.xml",
+            "ppt/_rels/presentation.xml.rels",
+            "[Content_Types].xml",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_a_slide_whose_notes_point_back_at_it_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("dropped.pptx");
+        create_notes_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("drop-noted-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count - 1);
+        let error = export_pptx(&bundle, &source, &exported, &ExportOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ppt/notesSlides/_rels/notesSlide1.xml.rels"),
+            "{error}"
+        );
+        assert!(error.contains("still points at it"), "{error}");
+        // The refusal is about writing that package, not about the revision: the
+        // page is gone from the deck HCD holds either way, and the deck still
+        // validates so the export can be retried without --source.
         assert!(!exported.exists());
         assert!(validate_bundle(&bundle).unwrap().valid);
     }
@@ -5744,6 +6366,29 @@ mod tests {
         write_zip_fixture(path, &parts);
     }
 
+    /// `create_layout_fixture` with a speaker note on the page that shows last,
+    /// written the way PowerPoint writes notes: the page points at the notes part
+    /// and the notes part points back at the page.
+    fn create_notes_fixture(path: &Path) {
+        let mut parts: Vec<(&str, &str)> = Vec::new();
+        for part in styled_fixture_parts() {
+            match part.0 {
+                "[Content_Types].xml" => parts.push((part.0, NOTES_TYPES_XML)),
+                "ppt/slides/_rels/slide2.xml.rels" => parts.push((part.0, NOTES_SLIDE2_RELS_XML)),
+                _ => parts.push(part),
+            }
+            if part.0 == "ppt/slides/slide1.xml" {
+                parts.push(("ppt/slideLayouts/slideLayout1.xml", SLIDE_LAYOUT_XML));
+                parts.push(("ppt/notesSlides/notesSlide1.xml", NOTES_SLIDE_XML));
+                parts.push((
+                    "ppt/notesSlides/_rels/notesSlide1.xml.rels",
+                    NOTES_SLIDE_RELS_XML,
+                ));
+            }
+        }
+        write_zip_fixture(path, &parts);
+    }
+
     fn write_zip_fixture(path: &Path, parts: &[(&str, &str)]) {
         let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -5823,5 +6468,44 @@ mod tests {
         "</p:spTree></p:cSld>",
         "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>",
         "</p:sldLayout>",
+    );
+
+    const NOTES_TYPES_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>"#,
+        r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#,
+        r#"<Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>"#,
+        "</Types>",
+    );
+
+    /// The page gains the notes relationship PowerPoint writes for it.
+    const NOTES_SLIDE2_RELS_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rIdImage1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>"#,
+        r#"<Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#,
+        r#"<Relationship Id="rIdNotes1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>"#,
+        "</Relationships>",
+    );
+
+    const NOTES_SLIDE_XML: &str = concat!(
+        r#"<?xml version="1.0"?><p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+        "<p:cSld><p:spTree>",
+        r#"<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"#,
+        "<p:grpSpPr/>",
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image"/><p:cNvSpPr/><p:nvPr><p:ph type="sldImg"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="1200"/><a:t>讲稿 😀</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        "</p:spTree></p:cSld>",
+        "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>",
+        "</p:notes>",
+    );
+
+    /// The notes' own list, and the back-reference that makes a deleted page leave
+    /// a relationship pointing at a part the package no longer has.
+    const NOTES_SLIDE_RELS_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rIdSlide1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/slide2.xml"/>"#,
+        "</Relationships>",
     );
 }
