@@ -224,6 +224,10 @@
 .hcd-surface .semantic-workspace .outline-panel nav{display:grid;gap:4px}
 .hcd-surface .semantic-workspace .outline-panel nav button{border:0;background:transparent;text-align:left;color:#324c76;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hcd-surface .semantic-workspace .outline-panel nav button:hover{background:#e9f1ff;color:#0d5bce}
+.hcd-surface .semantic-workspace .outline-panel nav .outline-entry{display:flex;align-items:center;gap:2px}
+.hcd-surface .semantic-workspace .outline-panel nav .outline-entry>button:first-child{flex:1;min-width:0}
+.hcd-surface .semantic-workspace .outline-panel nav button.outline-remove{border:0;background:transparent;color:#8d3434;font-size:11px;padding:3px 6px;border-radius:6px;white-space:nowrap}
+.hcd-surface .semantic-workspace .outline-panel nav button.outline-remove:hover{background:#fbeaea;color:#7a1f1f}
 .hcd-surface .semantic-workspace .outline-panel nav .outline-level-2{padding-left:20px}
 .hcd-surface .semantic-workspace .outline-panel nav .outline-level-3{padding-left:36px}
 .hcd-surface .semantic-workspace .document{min-width:0;width:min(840px,calc(100% - 56px));margin:22px auto 28px;min-height:calc(100vh - 220px);padding:54px clamp(28px,5vw,72px);border:1px solid #dae3f1;border-radius:1px;box-shadow:0 7px 28px #283a5a16}
