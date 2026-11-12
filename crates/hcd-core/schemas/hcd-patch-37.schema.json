@@ -60,7 +60,11 @@
         "precondition": { "$ref": "#/$defs/precondition" }
       }
     },
-    "fontFamily": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9 ._+-]+$" },
+    "fontFamily": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "description": "One font family. Only the characters that would break an HTML attribute or a CSS declaration are refused, so CJK names such as 等线 are allowed. maxLength counts characters; the server caps the value at 128 bytes.",
+      "pattern": "^[^<>\"';:&\\x00-\\x1F\\x7F]+$"
+    },
     "textFont": {
       "type": "object",
       "additionalProperties": false,

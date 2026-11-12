@@ -613,7 +613,10 @@ pub struct VisualPrecondition {
 /// must be present. Values are validated to a plain, safe CSS font-family token
 /// (no quotes, semicolons, `<`, `>`, or control characters) before they reach the
 /// node's inline style. `latin` is the primary face written to `font-family`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// The same three slots describe the face an editor block carries, so a block
+/// font and a pinned run font travel through the code as one type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FontPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]

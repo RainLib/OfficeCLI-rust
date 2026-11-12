@@ -6769,7 +6769,7 @@ fn safe_font_family(value: &str) -> Option<&str> {
     Some(trimmed)
 }
 
-fn validate_font_patch(font: &crate::FontPatch) -> Result<(), HcdError> {
+pub(crate) fn validate_font_patch(font: &crate::FontPatch) -> Result<(), HcdError> {
     let mut provided = 0;
     for (slot, value) in [
         ("latin", font.latin.as_deref()),
@@ -6792,12 +6792,19 @@ fn validate_font_patch(font: &crate::FontPatch) -> Result<(), HcdError> {
     Ok(())
 }
 
-fn apply_node_font(
-    html: &mut String,
-    node_id: &str,
-    font: &crate::FontPatch,
-) -> Result<(), HcdError> {
-    let canonical_marker = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
+/// The presentation a pinned face writes onto an element: the inline CSS and the
+/// `data-hcd-font*` attributes, in a fixed order.
+///
+/// `text.font` uses it to rewrite an existing node, and the editor block model
+/// uses it when it renders a block that carries a face, so the two cannot drift
+/// apart. The export paths read these attributes, so a face set in the model is
+/// indistinguishable from one set by a patch.
+pub(crate) struct FontPresentation {
+    pub(crate) css: BTreeMap<String, String>,
+    pub(crate) attributes: Vec<(&'static str, String)>,
+}
+
+pub(crate) fn font_presentation(font: &crate::FontPatch) -> Result<FontPresentation, HcdError> {
     // latin (falling back to eastAsia then bidi) is the primary face for the
     // node's inline style; every provided slot is also recorded in its
     // data-hcd-font* attribute so source and semantic round-trips can recover
@@ -6816,25 +6823,70 @@ fn apply_node_font(
         ));
     };
 
-    let mut css_properties = BTreeMap::new();
-    css_properties.insert("font-family".to_string(), format!("'{primary}'"));
-    // mark_patched is false so a font change is distinguishable from a
-    // node.style presentation change (which sets data-hcd-style-patched).
-    update_start_tag_style(html, &canonical_marker, &css_properties, false)?;
-
-    // set_element_attribute escapes internally and inserts the attribute when it
-    // is absent, so re-applying the same font is idempotent.
-    set_element_attribute(html, node_id, "data-hcd-font", primary)?;
+    let mut css = BTreeMap::new();
+    css.insert("font-family".to_string(), format!("'{primary}'"));
+    let mut attributes = vec![("data-hcd-font", primary.to_string())];
     if let Some(latin) = font.latin.as_deref().and_then(safe_font_family) {
-        set_element_attribute(html, node_id, "data-hcd-font-latin", latin)?;
+        attributes.push(("data-hcd-font-latin", latin.to_string()));
     }
     if let Some(east_asia) = font.east_asia.as_deref().and_then(safe_font_family) {
-        set_element_attribute(html, node_id, "data-hcd-font-east-asia", east_asia)?;
+        attributes.push(("data-hcd-font-east-asia", east_asia.to_string()));
     }
     if let Some(bidi) = font.bidi.as_deref().and_then(safe_font_family) {
-        set_element_attribute(html, node_id, "data-hcd-font-bidi", bidi)?;
+        attributes.push(("data-hcd-font-bidi", bidi.to_string()));
     }
-    set_element_attribute(html, node_id, "data-hcd-font-patched", "true")?;
+    attributes.push(("data-hcd-font-patched", "true".to_string()));
+    let presentation = FontPresentation { css, attributes };
+    // The check `update_start_tag_style` runs before it writes a style, so the
+    // block renderer cannot write a declaration the patch layer would refuse.
+    crate::html::validate_inline_style(&presentation.style_value())?;
+    Ok(presentation)
+}
+
+impl FontPresentation {
+    /// The inline `style` value this presentation writes, serialized exactly as
+    /// `update_start_tag_style` would for an element with no other declarations,
+    /// so a rendered block and a patched node carry the same CSS.
+    fn style_value(&self) -> String {
+        self.css
+            .iter()
+            .map(|(property, value)| format!("{property}:{value}"))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// The attributes of this presentation as they would appear inside a fresh
+    /// start tag: the style first, then each `data-hcd-font*`, in the order
+    /// `apply_node_font` leaves them on a patched node, with the same escaping.
+    /// The editor block renderer uses this so a block font and a pinned run font
+    /// are written identically.
+    pub(crate) fn attribute_text(&self) -> String {
+        let mut text = String::new();
+        if !self.css.is_empty() {
+            text.push_str(&format!(" style=\"{}\"", self.style_value()));
+        }
+        for (name, value) in &self.attributes {
+            text.push_str(&format!(" {name}=\"{}\"", escape_attribute(value)));
+        }
+        text
+    }
+}
+
+fn apply_node_font(
+    html: &mut String,
+    node_id: &str,
+    font: &crate::FontPatch,
+) -> Result<(), HcdError> {
+    let canonical_marker = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
+    let presentation = font_presentation(font)?;
+    // mark_patched is false so a font change is distinguishable from a
+    // node.style presentation change (which sets data-hcd-style-patched).
+    update_start_tag_style(html, &canonical_marker, &presentation.css, false)?;
+    // set_element_attribute escapes internally and inserts the attribute when it
+    // is absent, so re-applying the same font is idempotent.
+    for (name, value) in presentation.attributes {
+        set_element_attribute(html, node_id, name, &value)?;
+    }
     Ok(())
 }
 
@@ -7829,6 +7881,35 @@ mod tests {
         let after = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
         assert_eq!(after.node.text, "hello world");
         assert_eq!(after.node.node_hash, hash_bytes(b"hello world"));
+    }
+
+    #[test]
+    fn a_patched_node_writes_exactly_the_text_the_block_renderer_writes() {
+        // The renderer in structure.rs builds a start tag from `attribute_text`, so
+        // this is the check that the two ways of pinning a face cannot drift: the
+        // tag apply_node_font leaves behind must be the tag attribute_text describes.
+        let font = crate::FontPatch {
+            latin: Some("Brand Serif".to_string()),
+            east_asia: Some("等线".to_string()),
+            bidi: None,
+        };
+        let node_id = "n_00000000000000000000000000000000";
+        let mut html =
+            format!("<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"h\">Text</span></p>");
+        apply_node_font(&mut html, node_id, &font).unwrap();
+        let expected = format!(
+            "<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"h\"{}>",
+            font_presentation(&font).unwrap().attribute_text()
+        );
+        assert!(html.contains(&expected), "{html}\nexpected {expected}");
+        assert!(
+            expected.contains("style=\"font-family:'Brand Serif'\""),
+            "{expected}"
+        );
+        assert!(
+            expected.contains("data-hcd-font-east-asia=\"等线\""),
+            "{expected}"
+        );
     }
 
     #[test]

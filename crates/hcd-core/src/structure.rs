@@ -4,17 +4,17 @@ use crate::bundle::{
     finalize_root_hash, hash_descriptor, now_epoch_ms, read_json_bounded, INDEX_PAGE_SIZE,
 };
 use crate::{
-    extract_html_text_nodes, hash_bytes, node_bloom, stable_node_id, AnnotationSet, ApplyResult,
-    Bundle, ChunkDescriptor, ChunkIndexPage, ChunkSourceMap, FidelityWarning, HcdError,
-    HcdManifest, NodeMapEntry, RevisionRecord, SourceAnchor, HCD_PATCH_SCHEMA_VERSION_4,
-    HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
-    MAX_REVISION,
+    extract_html_font_nodes, extract_html_text_nodes, hash_bytes, node_bloom, stable_node_id,
+    AnnotationSet, ApplyResult, Bundle, ChunkDescriptor, ChunkIndexPage, ChunkSourceMap,
+    FidelityWarning, HcdError, HcdManifest, HtmlFontNode, NodeMapEntry, RevisionRecord,
+    SourceAnchor, HCD_PATCH_SCHEMA_VERSION_4, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES, MAX_REVISION,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const MAX_BLOCKS: usize = 1_000_000;
 const MAX_INLINE_BYTES: usize = 1024 * 1024;
@@ -50,6 +50,14 @@ pub struct EditorBlockContent {
     pub kind: EditorBlockKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<u8>,
+    /// Faces pinned on the whole block, in the same three script slots a
+    /// `text.font` patch uses. Rendering writes exactly the markers that patch
+    /// writes, so the preview and both export paths treat a model face and a
+    /// pinned run face alike. A block whose runs carry *different* faces cannot
+    /// be expressed here — the projection marks it read-only instead of letting
+    /// a save flatten or drop them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<crate::FontPatch>,
     pub inlines: Vec<EditorInline>,
 }
 
@@ -452,6 +460,7 @@ fn scan_chunk(
             content: EditorBlockContent {
                 kind: EditorBlockKind::Opaque,
                 level: None,
+                font: None,
                 inlines,
             },
             html: html.to_string(),
@@ -476,7 +485,7 @@ fn block_from_raw(
         .filter(|entry| raw.contains(&format!("data-hcd-id=\"{}\"", entry.node_id)))
         .cloned()
         .collect();
-    let inlines = entries
+    let inlines: Vec<EditorInline> = entries
         .iter()
         .filter_map(|entry| {
             nodes.get(&entry.node_id).map(|text| {
@@ -504,10 +513,20 @@ fn block_from_raw(
     } else {
         None
     };
+    let fonts = extract_html_font_nodes(raw)?;
+    let (font, conflicting_faces) = match block_font(&fonts, &inlines) {
+        BlockFont::Uniform(patch) => (Some(patch), false),
+        BlockFont::Conflicting => (None, true),
+        BlockFont::Absent => (None, false),
+    };
     let read_only = descriptor.region != "body"
         || matches!(kind, EditorBlockKind::Opaque)
         || raw.contains("data-hcd-visual-hash=")
-        || raw.contains("<table");
+        || raw.contains("<table")
+        // Runs pinned with different faces, or only some of the runs, are a shape
+        // the block model cannot carry. Replacing such a block would spread one
+        // face over the paragraph or drop the pins, so it stays read-only.
+        || conflicting_faces;
     let fallback = stable_node_id(&[
         document_id,
         &descriptor.chunk_id,
@@ -526,11 +545,56 @@ fn block_from_raw(
         content: EditorBlockContent {
             kind,
             level,
+            font,
             inlines,
         },
         html: raw.to_string(),
         entries,
     })
+}
+
+/// What the pinned faces inside one block mean for the block model.
+enum BlockFont {
+    /// No node in the block carries a pinned face.
+    Absent,
+    /// Every face in the block is the same and covers every text node, so the
+    /// block model can hold it and a rewritten block keeps the same presentation.
+    Uniform(crate::FontPatch),
+    /// The block mixes faces, or carries one on only part of its text. The model
+    /// has no run-level slot, so the block must not be rewritten.
+    Conflicting,
+}
+
+fn block_font(fonts: &BTreeMap<String, HtmlFontNode>, inlines: &[EditorInline]) -> BlockFont {
+    let mut shared: Option<crate::FontPatch> = None;
+    for font in fonts.values() {
+        let patch = crate::FontPatch {
+            latin: font.latin.clone(),
+            east_asia: font.east_asia.clone(),
+            bidi: font.bidi.clone(),
+        };
+        match &shared {
+            None => shared = Some(patch),
+            Some(existing) if *existing == patch => {}
+            Some(_) => return BlockFont::Conflicting,
+        }
+    }
+    let Some(patch) = shared else {
+        return BlockFont::Absent;
+    };
+    // One face on one run of a paragraph is a run pin, not a block font: writing
+    // it into the model would put it on every run the next save regenerates.
+    let uncovered = inlines.iter().any(|inline| {
+        !inline.text.is_empty()
+            && !inline
+                .node_id
+                .as_deref()
+                .is_some_and(|node_id| fonts.contains_key(node_id))
+    });
+    if uncovered {
+        return BlockFont::Conflicting;
+    }
+    BlockFont::Uniform(patch)
 }
 
 type Marks = (bool, bool, Option<String>);
@@ -1007,6 +1071,11 @@ fn validate_content(content: &EditorBlockContent) -> Result<(), HcdError> {
             ))
         }
     }
+    // The block face goes through the same rules as a text.font patch, so a
+    // checkpoint cannot smuggle in a family the patch layer would refuse.
+    if let Some(font) = &content.font {
+        crate::patch::validate_font_patch(font)?;
+    }
     if content.inlines.len() > 1000 {
         return Err(HcdError::ResourceLimit("too many inline spans".to_string()));
     }
@@ -1064,6 +1133,14 @@ fn render_new_block(
             ))
         }
     };
+    // A block face is written onto every text node the block generates, exactly as
+    // a text.font patch would write it on each node: the whole block carries it,
+    // the source-backed export rewrites every run of the paragraph, and the
+    // semantic export remembers the face for the block it belongs to.
+    let font_markers = match content.font.as_ref() {
+        Some(font) => Some(crate::patch::font_presentation(font)?),
+        None => None,
+    };
     let mut html = String::new();
     if let Some(wrapper) = wrapper {
         html.push_str(&format!("<{wrapper} class=\"hcd-editor-list\">"));
@@ -1112,8 +1189,13 @@ fn render_new_block(
         if inline.italic {
             html.push_str("<em>");
         }
+        let mut attributes =
+            format!("data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\"");
+        if let Some(markers) = font_markers.as_ref() {
+            attributes.push_str(&markers.attribute_text());
+        }
         html.push_str(&format!(
-            "<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span>",
+            "<span {attributes}>{}</span>",
             escape_html(&inline.text)
         ));
         if inline.italic {
@@ -1381,6 +1463,7 @@ mod tests {
             content: EditorBlockContent {
                 kind: EditorBlockKind::Paragraph,
                 level: None,
+                font: None,
                 inlines: Vec::new(),
             },
             html: String::new(),
@@ -1550,6 +1633,7 @@ mod tests {
                     block: EditorBlockContent {
                         kind: EditorBlockKind::Paragraph,
                         level: None,
+                        font: None,
                         inlines: vec![EditorInline {
                             text: value.to_string(),
                             node_id: None,
@@ -1623,6 +1707,7 @@ mod tests {
                 block: EditorBlockContent {
                     kind: EditorBlockKind::Paragraph,
                     level: None,
+                    font: None,
                     inlines: vec![EditorInline {
                         text: "unsafe".to_string(),
                         node_id: None,
@@ -1645,6 +1730,288 @@ mod tests {
             Err(HcdError::InvalidPatch(_))
         ));
         assert_eq!(bundle.manifest().unwrap().revision, 1);
+    }
+
+    fn face(latin: Option<&str>, east_asia: Option<&str>, bidi: Option<&str>) -> crate::FontPatch {
+        crate::FontPatch {
+            latin: latin.map(str::to_string),
+            east_asia: east_asia.map(str::to_string),
+            bidi: bidi.map(str::to_string),
+        }
+    }
+
+    fn paragraph(value: &str) -> EditorBlockContent {
+        EditorBlockContent {
+            kind: EditorBlockKind::Paragraph,
+            level: None,
+            font: None,
+            inlines: vec![EditorInline {
+                text: value.to_string(),
+                node_id: None,
+                bold: false,
+                italic: false,
+                link: None,
+            }],
+        }
+    }
+
+    fn replace_with_font(
+        bundle: &Bundle,
+        revision: u64,
+        number: usize,
+        content: EditorBlockContent,
+    ) -> ApplyResult {
+        let projection = editor_projection(bundle, Some(revision)).unwrap();
+        let original = &projection.blocks[number];
+        apply_structure_patch(
+            bundle,
+            &StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.to_string(),
+                document_id: projection.document_id,
+                patch_id: format!("font-{number}-{revision}"),
+                base_revision: revision,
+                operations: vec![StructureOperation::Replace {
+                    block_id: original.block_id.clone(),
+                    block: content,
+                    precondition: BlockPrecondition {
+                        block_hash: original.block_hash.clone(),
+                    },
+                }],
+            },
+            revision,
+        )
+        .unwrap()
+    }
+
+    /// The head-revision chunk HTML that contains `needle`.
+    fn chunk_html_at(bundle: &Bundle, needle: &str) -> String {
+        let manifest = bundle.manifest().unwrap();
+        for page_number in 0..manifest.index_page_count {
+            let page = bundle.read_index_page(&manifest, page_number).unwrap();
+            for descriptor in &page.chunks {
+                let html = bundle.read_chunk(descriptor).unwrap();
+                if html.contains(needle) {
+                    return html;
+                }
+            }
+        }
+        panic!("no chunk at revision {} holds {needle}", manifest.revision);
+    }
+
+    /// A one-chunk map plus a block builder, for HTML the writers never produce.
+    fn hand_map(values: &[&str]) -> ChunkSourceMap {
+        ChunkSourceMap {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            chunk_id: "c_00000000000000000000000000000000".to_string(),
+            entries: values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| NodeMapEntry {
+                    node_id: format!("n_{index:032x}"),
+                    node_hash: hash_bytes(value.as_bytes()),
+                    source: SourceAnchor {
+                        source_cell_ref: None,
+                        created_in_hcd: false,
+                        part: "text/document".to_string(),
+                        text_ordinal: index as u64,
+                        paragraph_id: None,
+                        text_id: None,
+                        node_kind: "line".to_string(),
+                        editable: true,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    fn hand_descriptor() -> ChunkDescriptor {
+        ChunkDescriptor {
+            sequence: 0,
+            chunk_id: "c_00000000000000000000000000000000".to_string(),
+            region: "body".to_string(),
+            html_href: String::new(),
+            html_hash: String::new(),
+            map_href: String::new(),
+            map_hash: String::new(),
+            byte_length: 0,
+            block_count: 1,
+            node_count: 1,
+            text_chars: 0,
+            node_bloom: String::new(),
+            first_node_id: None,
+            last_node_id: None,
+            continuation: false,
+            grid: None,
+        }
+    }
+
+    /// `<span>` with the node id `hand_map` gives index `index`, its hash, and
+    /// any extra attributes.
+    fn hand_span(index: usize, value: &str, extra: &str) -> String {
+        format!(
+            "<span data-hcd-id=\"n_{index:032x}\" data-hcd-node-hash=\"{}\"{extra}>{value}</span>",
+            hash_bytes(value.as_bytes())
+        )
+    }
+
+    /// The same span with a face pinned onto it, as `text.font` writes it.
+    fn pinned_span(index: usize, value: &str, family: &str) -> String {
+        hand_span(
+            index,
+            value,
+            &format!(" data-hcd-font=\"{family}\" data-hcd-font-latin=\"{family}\" data-hcd-font-patched=\"true\""),
+        )
+    }
+
+    #[test]
+    fn a_block_font_renders_the_markers_a_text_font_patch_writes() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let mut content = paragraph("Revenue in yen");
+        content.font = Some(face(Some("Brand Serif"), Some("Brand Gothic"), None));
+        content.inlines.push(EditorInline {
+            text: " report".to_string(),
+            node_id: None,
+            bold: true,
+            italic: false,
+            link: None,
+        });
+        replace_with_font(&bundle, 1, 0, content);
+        let html = chunk_html_at(&bundle, "Revenue in yen");
+        // Every text node the block generates carries the face, the way a patch
+        // writes it on a node: same attributes, same order, same inline style.
+        for attribute in [
+            "data-hcd-font=\"Brand Serif\"",
+            "data-hcd-font-latin=\"Brand Serif\"",
+            "data-hcd-font-east-asia=\"Brand Gothic\"",
+            "data-hcd-font-patched=\"true\"",
+            "style=\"font-family:'Brand Serif'\"",
+        ] {
+            assert_eq!(html.matches(attribute).count(), 2, "{attribute} in {html}");
+        }
+        assert!(
+            !html.contains("data-hcd-style-patched"),
+            "a font is not a style patch"
+        );
+        // And the projection reads it back as the block's own face, so the next
+        // save cannot lose it.
+        let block = editor_projection(&bundle, None)
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|block| {
+                block
+                    .content
+                    .inlines
+                    .iter()
+                    .any(|inline| inline.text == "Revenue in yen")
+            })
+            .expect("rewritten block");
+        assert!(!block.read_only);
+        assert_eq!(
+            block.content.font,
+            Some(face(Some("Brand Serif"), Some("Brand Gothic"), None))
+        );
+    }
+
+    #[test]
+    fn a_font_only_edit_makes_a_revision_and_an_unsafe_face_does_not() {
+        let (_temp, bundle) = fixture();
+        project_editor(&bundle, 0).unwrap();
+        let mut content = paragraph("Paragraph 0");
+        content.font = Some(face(None, None, Some("Brand Naskh")));
+        let result = replace_with_font(&bundle, 1, 0, content);
+        assert_eq!(result.revision, 2);
+        // A bidi-only face still writes its own slot, and becomes the primary
+        // face the inline style falls back to.
+        let html = chunk_html_at(&bundle, "data-hcd-font-bidi=\"Brand Naskh\"");
+        assert!(html.contains("data-hcd-font=\"Brand Naskh\""), "{html}");
+        assert!(
+            html.contains("style=\"font-family:'Brand Naskh'\""),
+            "{html}"
+        );
+        assert!(!html.contains("data-hcd-font-latin"), "{html}");
+        // The same text with no face is still a change, so it also lands: the
+        // block model owns the face, and a client that stops sending one clears it.
+        replace(&bundle, 2, 0, "Paragraph 0");
+        assert_eq!(bundle.manifest().unwrap().revision, 3);
+        for rejected in [
+            &face(Some("Evil;"), None, None),
+            &face(Some(&"x".repeat(129)), None, None),
+            &face(None, None, None),
+        ] {
+            let mut content = paragraph("Unsafe");
+            content.font = Some(rejected.clone());
+            let projection = editor_projection(&bundle, None).unwrap();
+            let original = &projection.blocks[1];
+            let patch = StructurePatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_4.to_string(),
+                document_id: projection.document_id.clone(),
+                patch_id: "rejected-face".to_string(),
+                base_revision: 3,
+                operations: vec![StructureOperation::Replace {
+                    block_id: original.block_id.clone(),
+                    block: content,
+                    precondition: BlockPrecondition {
+                        block_hash: original.block_hash.clone(),
+                    },
+                }],
+            };
+            assert!(
+                matches!(
+                    apply_structure_patch(&bundle, &patch, 3),
+                    Err(HcdError::InvalidPatch(_))
+                ),
+                "{rejected:?} was accepted"
+            );
+        }
+        assert_eq!(bundle.manifest().unwrap().revision, 3);
+    }
+
+    #[test]
+    fn mixed_run_faces_are_read_as_read_only_instead_of_one_block_font() {
+        let values = ["Left", "Right"];
+        let map = hand_map(&values);
+        let describe = |html: String| {
+            scan_chunk(&html, &map, &hand_descriptor(), "faces-test").unwrap()[0].clone()
+        };
+        // One run pinned inside a two-run paragraph: the model has no slot for
+        // that, and writing it as a block font would spread it to the other run.
+        let block = describe(format!(
+            "<p>{}{}</p>",
+            pinned_span(0, "Left", "Brand Serif"),
+            hand_span(1, "Right", "")
+        ));
+        assert!(block.read_only, "a partial pin must not be editable");
+        assert_eq!(block.content.font, None);
+        // Two runs with different faces: also not one block font.
+        let block = describe(format!(
+            "<p>{}{}</p>",
+            pinned_span(0, "Left", "A Serif"),
+            pinned_span(1, "Right", "B Serif")
+        ));
+        assert!(block.read_only);
+        assert_eq!(block.content.font, None);
+        // Both runs pinned to the same face is exactly what the block can carry.
+        let block = describe(format!(
+            "<p>{}{}</p>",
+            pinned_span(0, "Left", "Brand Serif"),
+            pinned_span(1, "Right", "Brand Serif")
+        ));
+        assert!(!block.read_only);
+        assert_eq!(
+            block.content.font,
+            Some(face(Some("Brand Serif"), None, None))
+        );
+        // A face the source document already had carries no patch marker, so it
+        // stays out of the model and the block stays editable.
+        let block = describe(format!(
+            "<p>{}{}</p>",
+            hand_span(0, "Left", " data-hcd-font-latin=\"Body Serif\""),
+            hand_span(1, "Right", "")
+        ));
+        assert!(!block.read_only);
+        assert_eq!(block.content.font, None);
     }
 
     #[test]
