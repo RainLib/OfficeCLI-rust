@@ -558,6 +558,11 @@ pub enum PatchOperation {
     /// the new slide is there to type into with the normal text box right away.
     #[serde(rename = "pptx.slide.add", rename_all = "camelCase")]
     PptxSlideAdd {},
+    /// Drop one slide page, named by the chunk that holds it. The page and every
+    /// text node it carries leave the document, and a source-backed export loses
+    /// the slide part with them. A presentation cannot drop its last slide.
+    #[serde(rename = "pptx.slide.delete", rename_all = "camelCase")]
+    PptxSlideDelete { chunk_id: String },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -629,7 +634,8 @@ impl PatchOperation {
             | Self::XlsxSheetRename { .. }
             | Self::XlsxSheetAdd { .. }
             | Self::XlsxSheetDelete { .. }
-            | Self::PptxSlideAdd {} => None,
+            | Self::PptxSlideAdd {}
+            | Self::PptxSlideDelete { .. } => None,
         }
     }
 
@@ -669,6 +675,7 @@ impl PatchOperation {
                 | Self::XlsxSheetAdd { .. }
                 | Self::XlsxSheetDelete { .. }
                 | Self::PptxSlideAdd { .. }
+                | Self::PptxSlideDelete { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
@@ -849,8 +856,21 @@ pub struct RevisionRecord {
     /// so a source-backed export has to add it rather than rewrite it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slide_additions: Vec<SlideAddition>,
+    /// Slides this revision dropped, named by the part their page pointed at.
+    /// The export takes that part, its relationship, its entry in the slide list,
+    /// and its content-type override out of the package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_removals: Vec<SlideRemoval>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
+}
+
+/// Slide removed at one revision. Only the part travels: the page, its text
+/// nodes, and their history are already recorded elsewhere in the revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideRemoval {
+    pub slide_part: String,
 }
 
 /// Slide created at one revision, named by the part its page points at. The

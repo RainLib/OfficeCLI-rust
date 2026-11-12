@@ -843,6 +843,7 @@ impl BundleWriter {
             sheet_additions: Vec::new(),
             sheet_removals: Vec::new(),
             slide_additions: Vec::new(),
+            slide_removals: Vec::new(),
             structural_change: false,
         };
         atomic_write_json(

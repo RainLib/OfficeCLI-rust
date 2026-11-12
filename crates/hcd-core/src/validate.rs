@@ -920,13 +920,16 @@ fn validate_patch_revision(
     // Deleting one is the same shape turned around: chunks leave the index and
     // their cells go with them, so the revision is content without a source part
     // rewritten in place. A slide addition is the same shape as a worksheet
-    // addition: one new page chunk, no node yet.
+    // addition: one new page chunk, no node yet. A slide deletion is a worksheet
+    // deletion turned around: the page leaves the index and its text nodes leave
+    // with it, and an empty slide leaves neither behind.
     let content_changed = !record.dirty_node_ids.is_empty()
         || !record.dirty_grid_parts.is_empty()
         || !record.sheet_renames.is_empty()
         || !record.sheet_additions.is_empty()
         || !record.sheet_removals.is_empty()
-        || !record.slide_additions.is_empty();
+        || !record.slide_additions.is_empty()
+        || !record.slide_removals.is_empty();
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
             || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())

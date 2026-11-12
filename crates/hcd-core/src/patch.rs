@@ -13,16 +13,16 @@ use crate::{
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
     NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat, PptxShapeGeometry,
-    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SlideAddition, SourceAnchor,
-    TextExtractEntry, TextExtractPage, TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch,
-    XlsxCellNumberFormatPatch, XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION,
-    HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
-    HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
-    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
-    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20,
-    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
-    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    RevisionRecord, SheetAddition, SheetRemoval, SheetRename, SlideAddition, SlideRemoval,
+    SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup, XlsxCellFormatPatch,
+    XlsxCellLayoutPatch, XlsxCellNumberFormatPatch, XlsxGridAction, XlsxGridAxis,
+    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11,
+    HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14,
+    HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17,
+    HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2,
+    HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
+    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
+    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -205,6 +205,32 @@ struct PptxSlideAddTarget {
     height_emu: u64,
 }
 
+/// Slide a patch asks to drop: the page it names, and the part that page points
+/// at, read off the section the bundle already holds rather than the source
+/// package the patch never opens.
+#[derive(Clone)]
+struct PptxSlideRemovalTarget {
+    chunk_id: String,
+    slide_part: String,
+    /// Every chunk that section repeats: a slide whose table is split across
+    /// chunks has more than one, and all of them leave with the page.
+    dropped_chunk_ids: HashSet<String>,
+}
+
+/// What an index rebuild needs after a page or a tab leaves the document:
+/// whether the target was there at all, how many chunks went with it, which
+/// source part held the nodes it took away, and whether the survivors shift a
+/// position because a tab list got one shorter. Slides carry no position in a
+/// package list, so only a worksheet removal asks for the shift.
+struct IndexRemoval {
+    label: &'static str,
+    target_found: bool,
+    dropped_chunks: usize,
+    source_part: String,
+    node_ids: Vec<String>,
+    shift_above: Option<usize>,
+}
+
 #[derive(Clone)]
 struct XlsxSheetRenameTarget {
     sheet_id: String,
@@ -284,6 +310,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxSheetAdd { .. }
                         | PatchOperation::XlsxSheetDelete { .. }
                         | PatchOperation::PptxSlideAdd { .. }
+                        | PatchOperation::PptxSlideDelete { .. }
                         | PatchOperation::XlsxRowInsert { .. }
                         | PatchOperation::XlsxRowDelete { .. }
                         | PatchOperation::XlsxColumnInsert { .. }
@@ -420,6 +447,10 @@ pub fn apply_patch(
     let pptx_slide_add = collect_pptx_slide_add(patch)
         .then(|| resolve_pptx_slide_add(bundle, &manifest))
         .transpose()?;
+    let pptx_slide_removal = collect_pptx_slide_removal(patch)
+        .as_ref()
+        .map(|removal| resolve_pptx_slide_removal(bundle, &manifest, removal))
+        .transpose()?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -479,7 +510,8 @@ pub fn apply_patch(
         || xlsx_sheet_rename.is_some()
         || xlsx_sheet_add.is_some()
         || xlsx_sheet_removal.is_some()
-        || pptx_slide_add.is_some();
+        || pptx_slide_add.is_some()
+        || pptx_slide_removal.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -510,7 +542,7 @@ pub fn apply_patch(
     let mut removed_xlsx_sheet = false;
     let mut dropped_sheet_chunks = 0usize;
     let mut removed_sheet_node_ids: Vec<String> = Vec::new();
-    let mut kept_sheet_descriptors: Vec<crate::ChunkDescriptor> = Vec::new();
+    let mut kept_index_descriptors: Vec<crate::ChunkDescriptor> = Vec::new();
     let mut added_sheet_chunk = xlsx_sheet_add
         .as_ref()
         .map(|addition| mint_xlsx_sheet_chunk(bundle, &manifest, addition))
@@ -523,6 +555,12 @@ pub fn apply_patch(
         .map(|addition| mint_pptx_slide_chunk(bundle, &manifest, addition))
         .transpose()?;
     let mut added_pptx_slide = false;
+    // A deleted slide is the same hole in the index a deleted tab makes, so it
+    // collects its survivors the same way: the page leaves, its text nodes leave
+    // with it, and every chunk behind it moves up one sequence.
+    let mut removed_pptx_slide = false;
+    let mut dropped_slide_chunks = 0usize;
+    let mut removed_slide_node_ids: Vec<String> = Vec::new();
     let mut appended_index_page: Option<crate::ChunkIndexPage> = None;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
@@ -671,6 +709,21 @@ pub fn apply_patch(
                 removed_xlsx_sheet = true;
                 continue;
             }
+            // A page can reach across more than one chunk when a table on it is
+            // split, so the chunks to drop were worked up front, from the part
+            // each section names, instead of matching only the one chunk id.
+            let delete_slide_here = pptx_slide_removal
+                .as_ref()
+                .is_some_and(|removal| removal.dropped_chunk_ids.contains(&descriptor.chunk_id));
+            if delete_slide_here {
+                for entry in bundle.read_map(descriptor)?.entries {
+                    removed_slide_node_ids.push(entry.node_id);
+                }
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+                dropped_slide_chunks += 1;
+                removed_pptx_slide = true;
+                continue;
+            }
             let cell_insertions: Vec<&XlsxCellInsertion> = descriptor
                 .grid
                 .as_ref()
@@ -723,6 +776,7 @@ pub fn apply_patch(
                 // A removal rebuilds the whole index, so every surviving chunk
                 // has to be collected, not just the ones this patch edits.
                 && xlsx_sheet_removal.is_none()
+                && pptx_slide_removal.is_none()
             {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
@@ -1701,8 +1755,8 @@ pub fn apply_patch(
                 descriptor.text_chars = html_nodes.values().map(|text| text.chars().count()).sum();
                 dirty_chunks.insert(descriptor.chunk_id.clone());
             }
-            if xlsx_sheet_removal.is_some() {
-                kept_sheet_descriptors.push(descriptor.clone());
+            if xlsx_sheet_removal.is_some() || pptx_slide_removal.is_some() {
+                kept_index_descriptors.push(descriptor.clone());
             }
             hash_descriptor(&mut root_hasher, descriptor);
         }
@@ -1758,6 +1812,7 @@ pub fn apply_patch(
         // A removal rewrites the index from the chunks it left behind, so pages
         // are not written while their chunk lists still contain the hole.
         if xlsx_sheet_removal.is_none()
+            && pptx_slide_removal.is_none()
             && content_changed
             && (index_root_href.is_none() || page_changed)
         {
@@ -1909,30 +1964,60 @@ pub fn apply_patch(
             "XLSX worksheet rename target disappeared".to_string(),
         ));
     }
-    if let Some(removal) = xlsx_sheet_removal.as_ref() {
-        if !removed_xlsx_sheet {
-            return Err(HcdError::InvalidBundle(
-                "XLSX worksheet deletion target disappeared".to_string(),
-            ));
+    // A slide leaves the index the way a tab does, so one rebuild serves both and
+    // reports the kind it is closing. A patch carries a single operation, so it
+    // never asks for both at once; asking is refused rather than guessed at.
+    let index_removal = match (
+        xlsx_sheet_removal.as_ref().map(|removal| IndexRemoval {
+            label: "XLSX worksheet",
+            target_found: removed_xlsx_sheet,
+            dropped_chunks: dropped_sheet_chunks,
+            source_part: removal.sheet_part.clone(),
+            node_ids: std::mem::take(&mut removed_sheet_node_ids),
+            shift_above: Some(removal.sheet_index),
+        }),
+        pptx_slide_removal.as_ref().map(|removal| IndexRemoval {
+            label: "PPTX slide",
+            target_found: removed_pptx_slide,
+            dropped_chunks: dropped_slide_chunks,
+            source_part: removal.slide_part.clone(),
+            node_ids: std::mem::take(&mut removed_slide_node_ids),
+            shift_above: None,
+        }),
+    ) {
+        (Some(sheet), None) => Some(sheet),
+        (None, slide) => slide,
+        (Some(_), Some(_)) => {
+            return Err(HcdError::InvalidPatch(
+                "one patch removes either a worksheet or a slide, not both".to_string(),
+            ))
         }
-        if kept_sheet_descriptors.len() + dropped_sheet_chunks != manifest.chunk_count {
+    };
+    if let Some(removal) = index_removal.as_ref() {
+        if !removal.target_found {
+            return Err(HcdError::InvalidBundle(format!(
+                "{} deletion target disappeared",
+                removal.label
+            )));
+        }
+        if kept_index_descriptors.len() + removal.dropped_chunks != manifest.chunk_count {
             return Err(HcdError::InvalidBundle(format!(
                 "index pages cover {} chunks, manifest says {}",
-                kept_sheet_descriptors.len() + dropped_sheet_chunks,
+                kept_index_descriptors.len() + removal.dropped_chunks,
                 manifest.chunk_count
             )));
         }
         // The tab is gone from the package as well as from the index, and its
         // cells are gone with it, so the revision records them as removed nodes.
-        for node_id in &removed_sheet_node_ids {
+        for node_id in &removal.node_ids {
             dirty_nodes.insert(node_id.clone());
             removed_nodes.insert(node_id.clone());
         }
         // Naming the source part belongs to that node set: a tab nobody typed into
         // leaves no cell behind, and a revision whose nodes changed must name the
         // parts that held them, so an empty tab keeps both sets empty.
-        if !removed_sheet_node_ids.is_empty() {
-            dirty_parts.insert(removal.sheet_part.clone());
+        if !removal.node_ids.is_empty() {
+            dirty_parts.insert(removal.source_part.clone());
         }
         // Chunks behind the hole move up one slot each, so every one of them is
         // renumbered and lands on a different page. The digest is folded again
@@ -1940,12 +2025,15 @@ pub fn apply_patch(
         // from it: the sequence a descriptor carries is part of that digest.
         let mut rebuilt: Vec<crate::ChunkIndexPage> = Vec::new();
         let mut rebuilt_hasher = Sha256::new();
-        for (sequence, mut descriptor) in kept_sheet_descriptors.into_iter().enumerate() {
+        for (sequence, mut descriptor) in kept_index_descriptors.into_iter().enumerate() {
             descriptor.sequence = sequence;
             // The tab list lost one place, so every tab behind it is one place
             // nearer the front: a chunk finds its worksheet part by that number.
-            if let Some(grid) = descriptor.grid.as_mut() {
-                if grid.sheet_index > removal.sheet_index {
+            // Slides are not numbered by a list position, so a slide removal
+            // leaves the grid metadata it does have alone.
+            if let (Some(sheet_index), Some(grid)) = (removal.shift_above, descriptor.grid.as_mut())
+            {
+                if grid.sheet_index > sheet_index {
                     grid.sheet_index -= 1;
                 }
             }
@@ -2088,6 +2176,12 @@ pub fn apply_patch(
                 node_id: None,
                 source_part: Some(addition.slide_part.clone()),
             }))
+            .chain(pptx_slide_removal.iter().map(|removal| FidelityWarning {
+                code: "PPTX_SLIDE_REMOVED".to_string(),
+                message: "slide is deleted: its shapes and text leave the document, and source-backed export drops the slide part with the page entry, relationship and content type that pointed at it".to_string(),
+                node_id: None,
+                source_part: Some(removal.slide_part.clone()),
+            }))
             .chain(xlsx_number_formats.keys().map(|node_id| FidelityWarning {
                 code: "XLSX_DIRECT_CELL_NUMBER_FORMAT".to_string(),
                 message: "cell number format clones the source style and writes a built-in or custom Excel format code".to_string(),
@@ -2227,6 +2321,13 @@ pub fn apply_patch(
             .into_iter()
             .map(|addition| SlideAddition {
                 slide_part: addition.slide_part.clone(),
+            })
+            .collect(),
+        slide_removals: pptx_slide_removal
+            .as_ref()
+            .into_iter()
+            .map(|removal| SlideRemoval {
+                slide_part: removal.slide_part.clone(),
             })
             .collect(),
         structural_change: false,
@@ -2536,6 +2637,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_35
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_36
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_41
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_42
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -2836,6 +2938,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/41 accepts one PPTX slide addition operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_42
+        && (manifest.source.format != "pptx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::PptxSlideDelete { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/42 accepts one PPTX slide deletion operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -3193,6 +3307,27 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::Unsupported(
                         "pptx.slide.add requires one PPTX operation with hcd-patch/41".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::PptxSlideDelete { chunk_id } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_42
+                    || manifest.source.format != "pptx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "pptx.slide.delete requires one PPTX operation with hcd-patch/42"
+                            .to_string(),
+                    ));
+                }
+                if chunk_id.len() != 34
+                    || !chunk_id.starts_with("c_")
+                    || !chunk_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid PPTX slide deletion target".to_string(),
                     ));
                 }
             }
@@ -5099,33 +5234,11 @@ fn resolve_pptx_slide_add(
             if descriptor.region != "slide" {
                 continue;
             }
-            let html = bundle.read_chunk(&descriptor)?;
-            let tag_end = html.find('>').ok_or_else(|| {
-                HcdError::InvalidBundle("PPTX slide section is not closed".to_string())
-            })?;
-            let tag = &html[..=tag_end];
-            if !tag.starts_with("<section class=\"hcd-slide\"") {
-                return Err(HcdError::InvalidBundle(
-                    "PPTX slide chunk is not a slide section".to_string(),
-                ));
+            let (part, width_emu, height_emu) = pptx_slide_page(&bundle.read_chunk(&descriptor)?)?;
+            if known_parts.insert(part.clone()) {
+                highest_number = highest_number.max(slide_part_number(&part).unwrap_or_default());
             }
-            let part = xlsx_attribute(tag, "data-hcd-source-part").ok_or_else(|| {
-                HcdError::InvalidBundle(
-                    "PPTX slide chunk does not name its source part".to_string(),
-                )
-            })?;
-            if known_parts.insert(part.to_string()) {
-                highest_number = highest_number.max(slide_part_number(part).unwrap_or_default());
-            }
-            let dimension = |name: &str| -> Result<u64, HcdError> {
-                xlsx_attribute(tag, name)
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {name} is missing")))
-            };
-            let page_size = (
-                dimension("data-hcd-width-emu")?,
-                dimension("data-hcd-height-emu")?,
-            );
+            let page_size = (width_emu, height_emu);
             if let Some(seen) = size.filter(|seen| *seen != page_size) {
                 return Err(HcdError::Unsupported(format!(
                     "PPTX slides disagree on the page size ({}x{} and {}x{})",
@@ -5152,6 +5265,95 @@ fn resolve_pptx_slide_add(
         ),
         width_emu,
         height_emu,
+    })
+}
+
+/// What a slide page chunk says about itself: the source part it was imported
+/// from and the page size the deck draws at. Reading it off the section the
+/// bundle already holds is what lets a slide operation work without opening the
+/// source package, which a patch never does.
+fn pptx_slide_page(html: &str) -> Result<(String, u64, u64), HcdError> {
+    let tag_end = html
+        .find('>')
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX slide section is not closed".to_string()))?;
+    let tag = &html[..=tag_end];
+    if !tag.starts_with("<section class=\"hcd-slide\"") {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide chunk is not a slide section".to_string(),
+        ));
+    }
+    let part = xlsx_attribute(tag, "data-hcd-source-part")
+        .map(unescape_attribute)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("PPTX slide chunk does not name its source part".to_string())
+        })?;
+    let dimension = |name: &str| -> Result<u64, HcdError> {
+        xlsx_attribute(tag, name)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {name} is missing")))
+    };
+    Ok((
+        part,
+        dimension("data-hcd-width-emu")?,
+        dimension("data-hcd-height-emu")?,
+    ))
+}
+
+/// Slide a patch asks to drop, named by the page chunk it addresses.
+fn collect_pptx_slide_removal(patch: &PatchBatch) -> Option<PptxSlideRemovalTarget> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::PptxSlideDelete { chunk_id } = operation else {
+            return None;
+        };
+        Some(PptxSlideRemovalTarget {
+            chunk_id: chunk_id.clone(),
+            slide_part: String::new(),
+            dropped_chunk_ids: HashSet::new(),
+        })
+    })
+}
+
+/// Turn the page a deletion names into the part the package loses, and into every
+/// chunk that leaves with it. Two bounds come from the file format rather than
+/// from HCD: the page has to be there to drop, and a presentation with no slides
+/// is not something PowerPoint opens, so the last page survives.
+fn resolve_pptx_slide_removal(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    removal: &PptxSlideRemovalTarget,
+) -> Result<PptxSlideRemovalTarget, HcdError> {
+    let mut pages: HashSet<String> = HashSet::new();
+    let mut dropped_chunk_ids = HashSet::new();
+    let mut slide_part: Option<String> = None;
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            if descriptor.region != "slide" {
+                continue;
+            }
+            let (part, _, _) = pptx_slide_page(&bundle.read_chunk(&descriptor)?)?;
+            pages.insert(part.clone());
+            if descriptor.chunk_id == removal.chunk_id {
+                slide_part = Some(part.clone());
+            }
+            if Some(&part) == slide_part.as_ref() {
+                dropped_chunk_ids.insert(descriptor.chunk_id.clone());
+            }
+        }
+    }
+    let Some(slide_part) = slide_part else {
+        return Err(HcdError::Unsupported(
+            "PPTX slide chunk is not in the HCD index".to_string(),
+        ));
+    };
+    if pages.len() < 2 {
+        return Err(HcdError::InvalidPatch(
+            "PPTX presentation must keep one slide".to_string(),
+        ));
+    }
+    Ok(PptxSlideRemovalTarget {
+        chunk_id: removal.chunk_id.clone(),
+        slide_part,
+        dropped_chunk_ids,
     })
 }
 
@@ -9520,6 +9722,7 @@ fn apply_annotations(
             | PatchOperation::XlsxSheetAdd { .. }
             | PatchOperation::XlsxSheetDelete { .. }
             | PatchOperation::PptxSlideAdd { .. }
+            | PatchOperation::PptxSlideDelete { .. }
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}
@@ -9983,6 +10186,282 @@ mod tests {
         )
         .unwrap();
         assert!(String::from_utf8(rendered).unwrap().contains("changed"));
+    }
+
+    /// Write a deck of `slides` pages, one chunk each, the way the importer
+    /// writes them: a slide section naming its part, carrying one text node.
+    fn slide_deck(path: &std::path::Path, slides: usize) -> crate::Bundle {
+        let mut writer =
+            crate::BundleWriter::create_with_codec(path, crate::StorageCodec::Gzip).unwrap();
+        writer.write_styles("").unwrap();
+        for index in 0..slides {
+            let part = format!("ppt/slides/slide{}.xml", index + 1);
+            let node_id = format!("n_{index:032x}");
+            let chunk_id = format!("c_{index:032x}");
+            let text = format!("page-{index}");
+            let node_hash = hash_bytes(text.as_bytes());
+            let html = format!(
+                "<section class=\"hcd-slide\" data-hcd-source-part=\"{part}\" data-hcd-width-emu=\"9144000\" data-hcd-height-emu=\"5143500\" style=\"position:relative;width:960.00px;height:540.00px\"><p class=\"hcd-slide-text\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{text}</span></p></section>"
+            );
+            writer
+                .write_chunk(
+                    chunk_id.clone(),
+                    "slide".to_string(),
+                    html,
+                    crate::ChunkSourceMap {
+                        schema_version: HCD_SCHEMA_VERSION.to_string(),
+                        chunk_id,
+                        entries: vec![crate::NodeMapEntry {
+                            node_id,
+                            node_hash,
+                            source: crate::SourceAnchor {
+                                source_cell_ref: None,
+                                created_in_hcd: false,
+                                part: part.clone(),
+                                text_ordinal: 1,
+                                paragraph_id: None,
+                                text_id: Some(format!("bytes:{index}:{}", index + 1)),
+                                node_kind: "slide-text".to_string(),
+                                editable: true,
+                            },
+                        }],
+                    },
+                    1,
+                    false,
+                )
+                .unwrap();
+        }
+        writer
+            .finish(crate::HcdManifest {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                storage_codec: crate::StorageCodec::Gzip,
+                document_id: "deck".to_string(),
+                profile: "slide-canvas".to_string(),
+                revision: 0,
+                source: crate::SourceDescriptor {
+                    format: "pptx".to_string(),
+                    sha256: "0".repeat(64),
+                    size_bytes: 1000,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                capabilities: crate::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        crate::Bundle::open(path).unwrap()
+    }
+
+    fn delete_slide(bundle: &crate::Bundle, patch_id: &str, chunk_id: &str) -> crate::HcdError {
+        apply_patch(
+            bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: patch_id.to_string(),
+                base_revision: bundle.manifest().unwrap().revision,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: chunk_id.to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .expect_err("slide deletion was expected to be refused")
+    }
+
+    #[test]
+    fn pptx_slide_deletion_drops_the_page_from_the_index_and_records_the_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 3);
+        assert_eq!(bundle.manifest().unwrap().chunk_count, 3);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "drop-middle".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: "c_00000000000000000000000000000001".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.chunk_count, 2);
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        // The pages behind the hole move up one slot, so the deck still reads in
+        // order and the last page is now the one that was third.
+        assert_eq!(
+            page.chunks
+                .iter()
+                .map(|descriptor| (descriptor.sequence, descriptor.chunk_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "c_00000000000000000000000000000000"),
+                (1, "c_00000000000000000000000000000002"),
+            ]
+        );
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(
+            record.slide_removals,
+            vec![crate::SlideRemoval {
+                slide_part: "ppt/slides/slide2.xml".to_string()
+            }]
+        );
+        assert_eq!(
+            record.dirty_node_ids,
+            vec!["n_00000000000000000000000000000001".to_string()]
+        );
+        assert_eq!(
+            record.removed_node_ids,
+            vec!["n_00000000000000000000000000000001".to_string()]
+        );
+        assert_eq!(
+            record.dirty_source_parts,
+            vec!["ppt/slides/slide2.xml".to_string()]
+        );
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+        let mut rendered = Vec::new();
+        crate::render_standalone_html(
+            &bundle,
+            &crate::HtmlPresentationOptions::default(),
+            &mut rendered,
+        )
+        .unwrap();
+        let html = String::from_utf8(rendered).unwrap();
+        assert!(!html.contains("page-1"));
+        assert!(html.contains("page-0") && html.contains("page-2"));
+    }
+
+    #[test]
+    fn pptx_slide_deletion_empties_the_last_index_page_it_leaves_behind() {
+        let temp = tempfile::tempdir().unwrap();
+        // One chunk past a full page, so the deck starts on two pages and the
+        // removal is what pulls it back to one.
+        let slides = crate::INDEX_PAGE_SIZE + 1;
+        let bundle = slide_deck(&temp.path().join("bundle"), slides);
+        let before = bundle.manifest().unwrap();
+        assert_eq!(before.index_page_count, 2);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "drop-first".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: "c_00000000000000000000000000000000".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.chunk_count, crate::INDEX_PAGE_SIZE);
+        assert_eq!(manifest.index_page_count, 1);
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        assert_eq!(page.revision, 1);
+        assert_eq!(page.chunks[0].sequence, 0);
+        assert_eq!(
+            page.chunks[0].chunk_id,
+            "c_00000000000000000000000000000001"
+        );
+        assert_eq!(
+            bundle.revision(1).unwrap().slide_removals[0].slide_part,
+            "ppt/slides/slide1.xml"
+        );
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+    }
+
+    #[test]
+    fn pptx_slide_deletion_refuses_to_empty_a_deck_or_name_a_page_it_cannot_find() {
+        let temp = tempfile::tempdir().unwrap();
+        // A deck of one is the deck a deletion cannot touch: PowerPoint does not
+        // open a presentation with no slides.
+        let only = slide_deck(&temp.path().join("one"), 1);
+        assert!(matches!(
+            delete_slide(&only, "drop-only", "c_00000000000000000000000000000000"),
+            HcdError::InvalidPatch(_)
+        ));
+        assert_eq!(only.manifest().unwrap().revision, 0);
+
+        let deck = slide_deck(&temp.path().join("three"), 3);
+        // A chunk the index does not hold, and a chunk that is not a page.
+        let error = delete_slide(&deck, "drop-unknown", "c_0000000000000000000000000000ffff");
+        assert!(
+            matches!(error, HcdError::Unsupported(_)),
+            "unexpected: {error:?}"
+        );
+        assert_eq!(deck.manifest().unwrap().revision, 0);
+    }
+
+    #[test]
+    fn pptx_slide_deletion_needs_the_page_version_it_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 2);
+        for (patch_id, schema_version, chunk_id) in [
+            (
+                "wrong-version",
+                crate::HCD_PATCH_SCHEMA_VERSION_41,
+                "c_0".to_string(),
+            ),
+            (
+                "short-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_42,
+                "c_0000000000000000000000000000000".to_string(),
+            ),
+            (
+                "uppercase-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_42,
+                "c_0000000000000000000000000000000A".to_string(),
+            ),
+            (
+                "worksheet-chunk",
+                crate::HCD_PATCH_SCHEMA_VERSION_42,
+                "s_00000000000000000000000000000000".to_string(),
+            ),
+        ] {
+            let error = apply_patch(
+                &bundle,
+                &crate::PatchBatch {
+                    schema_version: schema_version.to_string(),
+                    document_id: "deck".to_string(),
+                    patch_id: patch_id.to_string(),
+                    base_revision: bundle.manifest().unwrap().revision,
+                    actor: BTreeMap::new(),
+                    operations: vec![crate::PatchOperation::PptxSlideDelete {
+                        chunk_id: chunk_id.to_string(),
+                    }],
+                    metadata: BTreeMap::new(),
+                },
+                0,
+            )
+            .expect_err("the patch was expected to be refused");
+            assert!(
+                matches!(error, HcdError::Unsupported(_) | HcdError::InvalidPatch(_)),
+                "{patch_id}: unexpected {error:?}"
+            );
+        }
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(bundle.manifest().unwrap().chunk_count, 2);
     }
 
     #[test]
