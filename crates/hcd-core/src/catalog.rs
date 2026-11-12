@@ -979,9 +979,34 @@ pub fn resolve_document_theme(
     })
 }
 
-/// Build a self-contained stylesheet for HTML presentation.
+/// Whether the document's own stylesheet at this revision already carries the
+/// managed theme region. `pin_document_theme` writes that region into the
+/// bundle as a content revision, so a surface that renders the bundle
+/// stylesheet already has the theme declarations. An unreadable stylesheet
+/// counts as absent: the caller then falls back to sending the declarations,
+/// which is the older behaviour rather than a new failure.
+fn theme_region_in_styles(bundle: &Bundle, revision: Option<u64>) -> Result<bool, HcdError> {
+    let head = bundle.manifest()?;
+    let (manifest, _) = manifest_at_revision(bundle, &head, revision)?;
+    let styles = match bundle.read_styles_part(&manifest.styles_href) {
+        Ok(styles) => styles,
+        Err(HcdError::NotFound(_)) | Err(HcdError::Io(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(styles.lines().any(|line| line.trim() == THEME_REGION_BEGIN))
+}
+
+/// Build the theme part of an HTML presentation stylesheet.
 /// Missing pins return `None`. Font bytes are inlined as data URLs, and faces
 /// larger than 8 MiB are left out. The result is not stored in the bundle.
+///
+/// The variables and the rules that apply them belong to the document: the pin
+/// wrote them into `styles.css` as a content revision, and the presentation
+/// renders that stylesheet, so re-sending them here would mean two stylesheets
+/// claiming one document. Only the font bytes are added, because they cannot
+/// live in the bundle — they are catalog objects addressed by per-deployment
+/// URLs. A document pinned before the region existed still needs the
+/// declarations, and gets them here.
 pub fn theme_presentation_css(
     catalog: &DiskCatalog,
     bundle: &Bundle,
@@ -1026,16 +1051,17 @@ pub fn theme_presentation_css(
             format.css_format()
         ));
     }
-    for line in resolved.theme.css.lines() {
-        if line.contains("@font-face") || line.contains("/v1/embed/") {
-            continue;
+    if !theme_region_in_styles(bundle, revision)? {
+        for line in resolved.theme.css.lines() {
+            if line.contains("@font-face") || line.contains("/v1/embed/") {
+                continue;
+            }
+            css.push_str(line);
+            css.push('\n');
         }
-        css.push_str(line);
+        css.push_str(THEME_SEMANTIC_FLOW_RULE);
         css.push('\n');
     }
-    css.push_str(
-        "body[data-hcd-profile=\"semantic-flow\"]{font-family:var(--hcd-minor-latin,var(--hcd-major-latin))}body[data-hcd-profile=\"semantic-flow\"] :is(h1,h2){font-family:var(--hcd-major-latin,var(--hcd-minor-latin))}\n",
-    );
     if css.contains('<') || css.to_ascii_lowercase().contains("@import") {
         return Err(HcdError::InvalidBundle(
             "theme presentation CSS is unsafe".to_string(),
@@ -1915,53 +1941,71 @@ mod tests {
     }
 
     #[test]
-    fn presentation_css_inlines_the_pinned_theme() {
+    fn presentation_css_adds_fonts_and_leaves_rules_to_the_document() {
         let (_temp, catalog, _font_revision_id, theme_id) = install();
-        let bundle_dir = tempfile::tempdir().unwrap();
-        let root = bundle_dir.path().join("demo.hcd");
-        let writer = BundleWriter::create(&root).unwrap();
-        writer.write_styles("").unwrap();
-        writer
-            .finish(HcdManifest {
-                schema_version: String::new(),
-                storage_codec: StorageCodec::None,
-                document_id: "demo".to_string(),
-                profile: "semantic-flow".to_string(),
-                revision: 0,
-                source: SourceDescriptor {
-                    format: "docx".to_string(),
-                    sha256: "ab".repeat(32),
-                    size_bytes: 1,
-                },
-                root_hash: String::new(),
-                annotation_root_hash: String::new(),
-                annotation_href: None,
-                index_prefix: String::new(),
-                index_root_href: None,
-                index_page_count: 0,
-                chunk_count: 0,
-                styles_href: String::new(),
-                theme_revision_id: None,
-                capabilities: HcdCapabilities::default(),
-                fidelity: None,
-                state: "IMPORTING".to_string(),
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        let bundle = Bundle::open(&root).unwrap();
+        let docs = tempfile::tempdir().unwrap();
+        let bundle = bundle_pinned(docs.path(), "demo", "article { color: #123456; }", None);
         assert!(theme_presentation_css(&catalog, &bundle, None)
             .unwrap()
             .is_none());
+
         pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+        // One copy of the declarations, in the document's own stylesheet.
+        let manifest = bundle.manifest().unwrap();
+        let styles = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert_eq!(
+            styles.matches(THEME_SEMANTIC_FLOW_RULE).count(),
+            1,
+            "the pin wrote the rules once: {styles}"
+        );
+        assert_eq!(styles.matches("--hcd-major-latin:").count(), 1);
+
+        // The presentation adds only the font bytes, which cannot live in the
+        // bundle because they are catalog objects behind service URLs.
         let css = theme_presentation_css(&catalog, &bundle, None)
             .unwrap()
             .unwrap();
         assert!(css.contains("data:font/woff2;base64,"));
         assert!(css.contains("data:font/otf;base64,"));
-        assert!(css.contains("--hcd-major-latin:'Source Han Sans',sans-serif"));
-        assert!(css.contains("body[data-hcd-profile=\"semantic-flow\"]"));
+        assert!(
+            !css.contains("--hcd-major-latin"),
+            "the document stylesheet already declares the variables: {css}"
+        );
+        assert!(
+            !css.contains("body[data-hcd-profile"),
+            "the document stylesheet already applies the families: {css}"
+        );
         assert!(!css.contains("/v1/embed/"));
         assert!(!css.contains('<'));
+    }
+
+    #[test]
+    fn presentation_css_carries_declarations_when_the_document_has_no_region() {
+        // A document pinned before the pin wrote a theme region still gets a
+        // themed presentation: with nothing in its stylesheet, this is the only
+        // copy of the declarations.
+        let (_temp, catalog, _font_revision_id, theme_id) = install();
+        let docs = tempfile::tempdir().unwrap();
+        let bundle = bundle_pinned(
+            docs.path(),
+            "legacy",
+            "article { color: #123456; }",
+            Some(theme_id.clone()),
+        );
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(
+            manifest.theme_revision_id.as_deref(),
+            Some(theme_id.as_str())
+        );
+        let styles = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(!styles.contains(THEME_REGION_BEGIN));
+
+        let css = theme_presentation_css(&catalog, &bundle, None)
+            .unwrap()
+            .unwrap();
+        assert!(css.contains("--hcd-major-latin:"));
+        assert!(css.contains(THEME_SEMANTIC_FLOW_RULE));
+        assert!(css.contains("data:font/"));
     }
 
     fn face_of(font: &FontRevision, index: usize) -> ResolvedFace {
@@ -2081,6 +2125,13 @@ mod tests {
     /// A finished bundle at `{docs_root}/{name}.hcd`, which is how the document
     /// store lays out every service-visible document.
     fn bundle_at(docs_root: &Path, name: &str, styles: &str) -> Bundle {
+        bundle_pinned(docs_root, name, styles, None)
+    }
+
+    /// Like `bundle_at`, but `theme` records a pin on the head manifest without
+    /// touching the stylesheet — exactly the shape a document pinned before the
+    /// pin started writing a theme region into `styles.css` leaves behind.
+    fn bundle_pinned(docs_root: &Path, name: &str, styles: &str, theme: Option<String>) -> Bundle {
         let root = docs_root.join(format!("{name}.hcd"));
         let writer = BundleWriter::create(&root).unwrap();
         writer.write_styles(styles).unwrap();
@@ -2104,7 +2155,7 @@ mod tests {
                 index_page_count: 0,
                 chunk_count: 0,
                 styles_href: String::new(),
-                theme_revision_id: None,
+                theme_revision_id: theme,
                 capabilities: HcdCapabilities::default(),
                 fidelity: None,
                 state: "IMPORTING".to_string(),
