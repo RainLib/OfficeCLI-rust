@@ -5072,16 +5072,6 @@ pub(crate) fn export_xlsx(
             .entries()
             .iter()
             .any(|entry| !entry.is_dir && entry.name.starts_with("xl/charts/"));
-    if !row_insertions.is_empty() || !column_shifts.is_empty() {
-        verify_grid_shift_source(
-            &mut archive,
-            &workbook,
-            &row_insertions,
-            &column_shifts,
-            &drawing_shifts,
-            &added_parts,
-        )?;
-    }
     let edited_cells = collect_edited_xlsx_cells(bundle, &manifest)?;
     let empty_cell_styles = BTreeMap::new();
     let cell_style_indexes = if edited_cells.is_empty() {
@@ -5117,6 +5107,20 @@ pub(crate) fn export_xlsx(
     )?;
     let row_heights = collect_canonical_row_heights(bundle, &manifest, &workbook, &replacements)?;
     let panes = collect_canonical_panes(bundle, &manifest, &workbook, &replacements)?;
+    if !row_insertions.is_empty() || !column_shifts.is_empty() {
+        // Checked once the history's own panes are known: a window list HCD
+        // rewrites carries the source's split away, so only a pane the shift has
+        // to move on its own is measured against what it can follow.
+        verify_grid_shift_source(
+            &mut archive,
+            &workbook,
+            &row_insertions,
+            &column_shifts,
+            &drawing_shifts,
+            &added_parts,
+            &panes,
+        )?;
+    }
     // A worksheet HCD created has no entry in the source package, so it is
     // rebuilt over the blank one the export writes: as the rebuilt file when a
     // cell landed on the new tab, and as the blank file itself otherwise.
@@ -7810,6 +7814,28 @@ fn rewrite_worksheet(
             {
                 let _ = empty;
             }
+            Event::Empty(ref empty)
+                if pane.is_none()
+                    && local_name(empty.name().as_ref()) == "pane"
+                    && (!row_insertions.is_empty() || !column_shifts.is_empty()) =>
+            {
+                // The history never set a pane on this worksheet, so the one the
+                // source workbook froze stays — moved along with the rows and
+                // columns the shift put inside or outside its band. `in_view`
+                // marks a window HCD rewrites, so it is not read here: no
+                // worksheet element is named `pane` outside a window anyway.
+                write_shifted_xlsx_pane(&mut writer, empty, true, row_insertions, column_shifts)?;
+            }
+            Event::Start(ref start)
+                if pane.is_none()
+                    && local_name(start.name().as_ref()) == "pane"
+                    && (!row_insertions.is_empty() || !column_shifts.is_empty()) =>
+            {
+                // A window that writes its pane as an element rather than a
+                // self-closing tag shifts the same way; the end tag arrives with
+                // the copy that follows.
+                write_shifted_xlsx_pane(&mut writer, start, false, row_insertions, column_shifts)?;
+            }
             Event::Start(ref start)
                 if in_view
                     && local_name(start.name().as_ref()) == "selection"
@@ -9045,6 +9071,7 @@ fn verify_grid_shift_source(
     column_shifts: &HashMap<String, Vec<ColumnShift>>,
     drawing_shifts: &DrawingShifts,
     added_parts: &BTreeSet<String>,
+    panes: &HashMap<String, WorksheetPane>,
 ) -> Result<(), HcdError> {
     for entry in archive.entries() {
         let name = entry.name.as_str();
@@ -9105,6 +9132,11 @@ fn verify_grid_shift_source(
     for sheet in &workbook.sheets {
         let target =
             row_insertions.contains_key(&sheet.part) || column_shifts.contains_key(&sheet.part);
+        // Whether the history speaks for this worksheet's window. It does once a
+        // freeze or a release is recorded on its chunks, and then the pane the
+        // source stored leaves with the window list that carried it — whatever
+        // that pane was split by.
+        let pane_owned = panes.contains_key(&sheet.part);
         if added_parts.contains(&sheet.part) {
             // A worksheet HCD created has no source content to hold a
             // cross-sheet formula or a merged range the shift cannot follow.
@@ -9158,6 +9190,7 @@ fn verify_grid_shift_source(
                                         | "dimension"
                                         | "sheetViews"
                                         | "sheetView"
+                                        | "pane"
                                         | "selection"
                                         | "sheetFormatPr"
                                         | "cols"
@@ -9196,6 +9229,16 @@ fn verify_grid_shift_source(
                                 return Err(PackageError::ReadPartError(
                                     "grid shift cannot update an unmapped drawing".to_string(),
                                 ));
+                            }
+                            if target && !pane_owned && tag == "pane" {
+                                // The band a frozen window keeps is counted in rows
+                                // and columns, so the shift can move it. A split
+                                // measured in twips has nothing to move.
+                                if let Some(reason) = xlsx_pane_shift_refusal(element) {
+                                    return Err(PackageError::ReadPartError(format!(
+                                        "grid shift cannot update a worksheet pane {reason}"
+                                    )));
+                                }
                             }
                             if target && tag == "col" && column_shifts.contains_key(&sheet.part) {
                                 for attribute in element.attributes().with_checks(false) {
@@ -9621,6 +9664,143 @@ fn write_worksheet_views(
     writer.write_event(Event::Start(BytesStart::new(views_name.as_str())))?;
     write_worksheet_view(writer, &view_name, frozen)?;
     writer.write_event(Event::End(BytesEnd::new(views_name.as_str())))?;
+    Ok(())
+}
+
+/// What a grid shift cannot follow in a pane a source workbook wrote: a split
+/// kept as a measured distance rather than as rows and columns, or a band count
+/// that is not a whole number to move. `None` means every attribute the pane
+/// carries can be shifted or copied as it arrived.
+fn xlsx_pane_shift_refusal(element: &BytesStart<'_>) -> Option<&'static str> {
+    for attribute in element.attributes().with_checks(false) {
+        let Ok(attribute) = attribute else {
+            return Some("with an attribute that cannot be read");
+        };
+        let field = local_name(attribute.key.as_ref());
+        if matches!(field, "horizontalSplit" | "verticalSplit") {
+            // Twips are neither a row nor a column, so there is nothing to
+            // recompute a moved split line from.
+            return Some("split by a measured distance");
+        }
+        if matches!(
+            field,
+            "xSplit" | "ySplit" | "splitTopRow" | "splitLeftColumn"
+        ) {
+            let Ok(value) = attribute.unescape_value() else {
+                return Some("with an unreadable split count");
+            };
+            if value.trim().parse::<u32>().is_err() {
+                return Some("whose split is not a whole number of rows or columns");
+            }
+        }
+    }
+    None
+}
+
+/// Shift the count of rows or columns a pane holds still. The count names how
+/// many of them stand inside the band, so a row the history inserts at or above
+/// the last frozen one widens the band and a row it removes from inside the band
+/// narrows it, which is how the freeze keeps covering the window it was set on.
+fn shifted_xlsx_pane_rows(mut rows: u32, shifts: &[RowShift]) -> Result<u32, HcdError> {
+    for shift in shifts {
+        match *shift {
+            RowShift::Insert(before) if rows >= before => {
+                rows = checked_pane_split(rows + 1, 1_048_575)?
+            }
+            RowShift::Delete(at) if rows >= at && rows > 0 => rows -= 1,
+            _ => {}
+        }
+    }
+    Ok(rows)
+}
+
+fn shifted_xlsx_pane_columns(mut columns: u32, shifts: &[ColumnShift]) -> Result<u32, HcdError> {
+    for shift in shifts {
+        match *shift {
+            ColumnShift::Insert(before) if columns >= before => {
+                columns = checked_pane_split(columns + 1, 16_383)?
+            }
+            ColumnShift::Delete(at) if columns >= at && columns > 0 => columns -= 1,
+            _ => {}
+        }
+    }
+    Ok(columns)
+}
+
+/// A band cannot grow past the sheet it freezes, so a pane pushed that far is a
+/// pane the export refuses to guess about.
+fn checked_pane_split(count: u32, maximum: u32) -> Result<u32, HcdError> {
+    if count > maximum {
+        return Err(HcdError::Unsupported(
+            "grid shift moves a worksheet pane past the sheet it freezes".to_string(),
+        ));
+    }
+    Ok(count)
+}
+
+/// Write the pane one window keeps after the history moved rows or columns
+/// around the worksheet it belongs to. The band counts and the cell that opens
+/// the moving pane follow the shift; everything a shift says nothing about —
+/// which pane holds the cursor, whether the band is frozen at all — is copied as
+/// it arrived. A pane whose split is measured in twips is refused by
+/// [`xlsx_pane_shift_refusal`], which is also what the export's check pass reads
+/// before it touches the archive.
+fn write_shifted_xlsx_pane(
+    writer: &mut Writer<impl Write>,
+    element: &BytesStart<'_>,
+    empty: bool,
+    row_shifts: &[RowShift],
+    column_shifts: &[ColumnShift],
+) -> Result<(), HcdError> {
+    if let Some(reason) = xlsx_pane_shift_refusal(element) {
+        return Err(HcdError::Unsupported(format!(
+            "grid shift cannot update a worksheet pane {reason}"
+        )));
+    }
+    let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+    let mut rewritten = BytesStart::new(name);
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid XLSX pane attribute: {error}"))
+        })?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        let value = attribute
+            .unescape_value()
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid XLSX pane value: {error}")))?
+            .into_owned();
+        let shifted = match local_name(attribute.key.as_ref()) {
+            "ySplit" | "splitTopRow" => shifted_xlsx_pane_rows(
+                value.trim().parse::<u32>().map_err(|_| {
+                    HcdError::Unsupported(
+                        "grid shift cannot update a worksheet pane whose split is not a whole \
+                         number of rows or columns"
+                            .to_string(),
+                    )
+                })?,
+                row_shifts,
+            )?
+            .to_string(),
+            "xSplit" | "splitLeftColumn" => shifted_xlsx_pane_columns(
+                value.trim().parse::<u32>().map_err(|_| {
+                    HcdError::Unsupported(
+                        "grid shift cannot update a worksheet pane whose split is not a whole \
+                         number of rows or columns"
+                            .to_string(),
+                    )
+                })?,
+                column_shifts,
+            )?
+            .to_string(),
+            "topLeftCell" => shifted_xlsx_view_cell(&value, row_shifts, column_shifts)?,
+            _ => value,
+        };
+        rewritten.push_attribute((key.as_str(), shifted.as_str()));
+    }
+    if empty {
+        writer.write_event(Event::Empty(rewritten))?;
+    } else {
+        writer.write_event(Event::Start(rewritten))?;
+    }
     Ok(())
 }
 
@@ -14577,6 +14757,306 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_the_source_workbook_froze_follows_the_rows_a_shift_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-frozen.xlsx");
+        let bundle_path = temp.path().join("source-frozen.hcd");
+        create_views_rows_fixture(
+            &source,
+            5,
+            "<sheetViews><sheetView workbookViewId=\"0\"><pane xSplit=\"1\" ySplit=\"1\" \
+             topLeftCell=\"B2\" activePane=\"bottomRight\" state=\"frozen\"/></sheetView></sheetViews>",
+        );
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("shift-pane-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        // The freeze counts the rows and columns standing inside its band, so a
+        // shift that moves one of those moves the band with it, and one that
+        // works outside the band leaves it alone.
+        let shifts = [
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 1,
+                },
+                "<pane xSplit=\"1\" ySplit=\"2\" topLeftCell=\"B3\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 4,
+                },
+                "<pane xSplit=\"1\" ySplit=\"2\" topLeftCell=\"B3\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 2,
+                },
+                "<pane xSplit=\"1\" ySplit=\"1\" topLeftCell=\"B2\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+            (
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
+                PatchOperation::XlsxColumnInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_column: 1,
+                },
+                "<pane xSplit=\"2\" ySplit=\"1\" topLeftCell=\"C2\" activePane=\"bottomRight\" state=\"frozen\"/>",
+            ),
+        ];
+        for (index, (schema, operation, expected_pane)) in shifts.into_iter().enumerate() {
+            let revision = index as u64;
+            let patch = PatchBatch {
+                schema_version: schema.to_string(),
+                document_id: "shift-pane-doc".to_string(),
+                patch_id: format!("shift-{index}"),
+                base_revision: revision,
+                actor: BTreeMap::new(),
+                operations: vec![operation],
+                metadata: BTreeMap::new(),
+            };
+            assert_eq!(
+                hcd_core::apply_patch(&bundle, &patch, revision)
+                    .unwrap()
+                    .revision,
+                revision + 1
+            );
+            assert!(validate_bundle(&bundle).unwrap().valid);
+            let exported = temp.path().join(format!("shifted-{revision}.xlsx"));
+            export_xlsx(
+                &bundle,
+                &source,
+                &exported,
+                &ExportOptions {
+                    revision: Some(revision + 1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+            assert!(xml.contains(expected_pane), "r{revision}: {xml}");
+            assert!(
+                xml.contains("<sheetViews><sheetView workbookViewId=\"0\">"),
+                "r{revision}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pane_the_shift_cannot_count_stops_the_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "twips",
+                "<sheetViews><sheetView workbookViewId=\"0\"><pane xSplit=\"1\" ySplit=\"1\" \
+                 horizontalSplit=\"8800\" verticalSplit=\"4400\" topLeftCell=\"B2\" \
+                 activePane=\"bottomRight\" state=\"frozen-split\"/></sheetView></sheetViews>",
+                "split by a measured distance",
+            ),
+            (
+                "fraction",
+                "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1.5\" \
+                 topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>\
+                 <selection pane=\"bottomLeft\" activeCell=\"A2\" sqref=\"A2\"/></sheetView></sheetViews>",
+                "whose split is not a whole number of rows or columns",
+            ),
+        ];
+        for (kind, views, reason) in cases {
+            let source = temp.path().join(format!("{kind}.xlsx"));
+            let bundle_path = temp.path().join(format!("{kind}.hcd"));
+            create_views_rows_fixture(&source, 4, views);
+            let imported = import_xlsx(
+                &source,
+                &bundle_path,
+                &ImportOptions::new("shift-refuse-doc"),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let bundle = Bundle::open(&bundle_path).unwrap();
+            let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+                .grid
+                .as_ref()
+                .unwrap()
+                .sheet_id
+                .clone();
+            // Nothing moved is nothing guessed: the revision before the shift
+            // writes the workbook exactly as it arrived, pane and all.
+            let untouched = temp.path().join(format!("{kind}-head.xlsx"));
+            export_xlsx(&bundle, &source, &untouched, &ExportOptions::default()).unwrap();
+            let xml = read_zip_entry(&untouched, "xl/worksheets/sheet1.xml");
+            assert!(
+                xml.contains("horizontalSplit=\"8800\"") || xml.contains("ySplit=\"1.5\""),
+                "{kind}: {xml}"
+            );
+            let patch = PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+                document_id: "shift-refuse-doc".to_string(),
+                patch_id: format!("shift-{kind}"),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::XlsxRowInsert {
+                    sheet_id,
+                    before_row: 1,
+                }],
+                metadata: BTreeMap::new(),
+            };
+            assert_eq!(
+                hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+                1
+            );
+            let moved = temp.path().join(format!("{kind}-shifted.xlsx"));
+            let error =
+                export_xlsx(&bundle, &source, &moved, &ExportOptions::default()).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!(
+                    "grid shift cannot update a worksheet pane {reason}"
+                )),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pane_a_shift_would_move_off_the_sheet_stops_the_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("full-band.xlsx");
+        let bundle_path = temp.path().join("full-band.hcd");
+        create_views_rows_fixture(
+            &source,
+            3,
+            "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1048575\" \
+             topLeftCell=\"A1048576\" activePane=\"bottomLeft\" state=\"frozen\"/>\
+             </sheetView></sheetViews>",
+        );
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("full-band-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+            document_id: "full-band-doc".to_string(),
+            patch_id: "widen-a-full-band".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id,
+                before_row: 1,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        // The band already holds every row the sheet has, so the shift has nowhere
+        // to grow it and the export says so rather than guessing.
+        let exported = temp.path().join("widened.xlsx");
+        let error =
+            export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("grid shift moves a worksheet pane past the sheet it freezes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_history_freeze_replaces_a_source_pane_a_shift_cannot_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("overridden.xlsx");
+        let bundle_path = temp.path().join("overridden.hcd");
+        create_views_rows_fixture(
+            &source,
+            5,
+            "<sheetViews><sheetView workbookViewId=\"0\"><pane xSplit=\"0\" ySplit=\"0\" \
+             horizontalSplit=\"8800\" verticalSplit=\"4400\" topLeftCell=\"A1\" \
+             activePane=\"bottomRight\" state=\"split\"/></sheetView></sheetViews>",
+        );
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("shift-override-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&imported, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let freeze = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_45.to_string(),
+            document_id: "shift-override-doc".to_string(),
+            patch_id: "freeze-over-split".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxSheetFreeze {
+                sheet_id: sheet_id.clone(),
+                rows: 2,
+                columns: 0,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &freeze, 0).unwrap().revision,
+            1
+        );
+        // The history speaks for this window now, so the split it replaces is
+        // never measured: the shift moves the rows and writes HCD's pane.
+        let insert = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_12.to_string(),
+            patch_id: "insert-under-band".to_string(),
+            base_revision: 1,
+            operations: vec![PatchOperation::XlsxRowInsert {
+                sheet_id,
+                before_row: 4,
+            }],
+            ..freeze
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &insert, 1).unwrap().revision,
+            2
+        );
+        let exported = temp.path().join("override.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(
+            xml.contains("<pane ySplit=\"2\" topLeftCell=\"A3\" activePane=\"bottomLeft\" state=\"frozen\"/>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("horizontalSplit"), "{xml}");
+        assert!(!xml.contains("verticalSplit"), "{xml}");
+        assert!(!xml.contains("state=\"split\""), "{xml}");
+    }
+
+    #[test]
     fn removes_only_empty_appended_xlsx_tail_row() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("tail.xlsx");
@@ -16896,6 +17376,13 @@ mod tests {
     }
 
     fn create_plain_rows_fixture(path: &Path, count: u32) {
+        create_views_rows_fixture(path, count, "");
+    }
+
+    /// A worksheet whose window list is whatever `views` says, written between the
+    /// dimension and the rows. A test hands it a pane the source workbook froze
+    /// itself, which is the shape the history never records.
+    fn create_views_rows_fixture(path: &Path, count: u32, views: &str) {
         let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options =
@@ -16923,7 +17410,7 @@ mod tests {
             zip.write_all(contents.as_bytes()).unwrap();
         }
         zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
-        write!(zip, "<?xml version=\"1.0\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><dimension ref=\"A1:D{count}\"/><sheetData>").unwrap();
+        write!(zip, "<?xml version=\"1.0\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><dimension ref=\"A1:D{count}\"/>{views}<sheetData>").unwrap();
         for row in 1..=count {
             write!(zip, "<row r=\"{row}\"><c r=\"A{row}\" t=\"inlineStr\"><is><t>Row {row}</t></is></c><c r=\"D{row}\" t=\"inlineStr\"><is><t>Right {row}</t></is></c></row>").unwrap();
         }
