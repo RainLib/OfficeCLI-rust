@@ -553,6 +553,17 @@ pub enum PatchOperation {
     /// visible worksheet.
     #[serde(rename = "xlsx.sheet.delete", rename_all = "camelCase")]
     XlsxSheetDelete { sheet_id: String },
+    /// Freeze the first `rows` rows and the first `columns` columns of one
+    /// worksheet, the way Excel's Freeze Panes does. Every window of that
+    /// worksheet gets the same split, so the frozen band stays put whichever
+    /// window it is read in; `0`/`0` unfreezes the worksheet. Cells, widths,
+    /// heights, and styles are untouched.
+    #[serde(rename = "xlsx.sheet.freeze", rename_all = "camelCase")]
+    XlsxSheetFreeze {
+        sheet_id: String,
+        rows: u32,
+        columns: u32,
+    },
     /// Append one blank slide after the last one. HCD mints the slide part the
     /// page will need in the package and one empty page chunk carrying it, so
     /// the new slide is there to type into with the normal text box right away.
@@ -647,6 +658,7 @@ impl PatchOperation {
             | Self::XlsxSheetRename { .. }
             | Self::XlsxSheetAdd { .. }
             | Self::XlsxSheetDelete { .. }
+            | Self::XlsxSheetFreeze { .. }
             | Self::PptxSlideAdd {}
             | Self::PptxSlideDelete { .. }
             | Self::PptxSlideReorder { .. }
@@ -689,6 +701,7 @@ impl PatchOperation {
                 | Self::XlsxSheetRename { .. }
                 | Self::XlsxSheetAdd { .. }
                 | Self::XlsxSheetDelete { .. }
+                | Self::XlsxSheetFreeze { .. }
                 | Self::PptxSlideAdd { .. }
                 | Self::PptxSlideDelete { .. }
                 | Self::PptxSlideReorder { .. }

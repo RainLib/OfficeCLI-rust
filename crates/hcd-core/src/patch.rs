@@ -185,6 +185,16 @@ struct XlsxRowHeight {
     height_points: f64,
 }
 
+/// Pane split a patch asks one worksheet's windows to freeze: the count of rows
+/// and columns that stay put while the rest of the sheet scrolls. `0`/`0` is not
+/// a split at all but a request to release the one the worksheet carries.
+#[derive(Clone)]
+struct XlsxSheetFreeze {
+    sheet_id: String,
+    rows: u32,
+    columns: u32,
+}
+
 /// Worksheet a patch creates. HCD owns the tab's grid identity, the worksheet
 /// part name the package will carry, and the tab position after every worksheet
 /// the bundle already knows.
@@ -408,6 +418,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxSheetRename { .. }
                         | PatchOperation::XlsxSheetAdd { .. }
                         | PatchOperation::XlsxSheetDelete { .. }
+                        | PatchOperation::XlsxSheetFreeze { .. }
                         | PatchOperation::PptxSlideAdd { .. }
                         | PatchOperation::PptxSlideDelete { .. }
                         | PatchOperation::PptxSlideReorder { .. }
@@ -486,6 +497,7 @@ pub fn apply_patch(
     let xlsx_row_removal = collect_xlsx_row_removal(patch);
     let xlsx_column_width = collect_xlsx_column_width(patch);
     let xlsx_row_height = collect_xlsx_row_height(patch);
+    let xlsx_sheet_freeze = collect_xlsx_sheet_freeze(patch);
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
@@ -531,6 +543,18 @@ pub fn apply_patch(
     let xlsx_height_part = xlsx_row_height
         .as_ref()
         .map(|height| find_xlsx_sheet_part(bundle, &manifest, &height.sheet_id))
+        .transpose()?;
+    let xlsx_freeze_part = xlsx_sheet_freeze
+        .as_ref()
+        .map(|freeze| {
+            find_xlsx_sheet_part(bundle, &manifest, &freeze.sheet_id).map_err(|error| match error {
+                HcdError::Unsupported(_) => HcdError::Unsupported(
+                    "XLSX freeze panes require a worksheet window with a known source part"
+                        .to_string(),
+                ),
+                other => other,
+            })
+        })
         .transpose()?;
     let xlsx_sheet_rename = collect_xlsx_sheet_rename(patch)
         .as_ref()
@@ -620,6 +644,7 @@ pub fn apply_patch(
         || xlsx_row_removal.is_some()
         || xlsx_column_width.is_some()
         || xlsx_row_height.is_some()
+        || xlsx_sheet_freeze.is_some()
         || xlsx_sheet_rename.is_some()
         || xlsx_sheet_add.is_some()
         || xlsx_sheet_removal.is_some()
@@ -652,6 +677,11 @@ pub fn apply_patch(
     let mut removed_xlsx_row = false;
     let mut changed_xlsx_column = false;
     let mut changed_xlsx_row_height = false;
+    // A freeze rewrites the pane every window of one worksheet carries, so both
+    // counters add up across those windows: how many this patch read, and how
+    // many of them it actually rewrote.
+    let mut froze_xlsx_sheet_windows = 0usize;
+    let mut froze_xlsx_sheet_reads = 0usize;
     let mut renamed_xlsx_sheet = false;
     // A worksheet removal takes whole chunks out of the index, so the patch
     // collects the chunks that survive instead of editing a page in place: the
@@ -802,6 +832,11 @@ pub fn apply_patch(
                         && grid.row_end.is_some_and(|end| u64::from(height.row) <= end)
                 })
             });
+            let freeze_here = xlsx_sheet_freeze.as_ref().filter(|freeze| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == freeze.sheet_id
+                })
+            });
             let rename_here = xlsx_sheet_rename.as_ref().is_some_and(|rename| {
                 descriptor
                     .grid
@@ -887,6 +922,7 @@ pub fn apply_patch(
                 && !remove_here
                 && width_here.is_none()
                 && height_here.is_none()
+                && freeze_here.is_none()
                 // A rename can touch a formula in any worksheet, so every chunk
                 // is inspected for references to the old tab name.
                 && xlsx_sheet_rename.is_none()
@@ -1835,6 +1871,21 @@ pub fn apply_patch(
                 changed_xlsx_row_height = true;
                 chunk_changed = true;
             }
+            if let Some(freeze) = freeze_here {
+                let (rewritten, read) =
+                    freeze_xlsx_sheet_sections(&mut html, freeze.rows, freeze.columns)?;
+                froze_xlsx_sheet_windows += rewritten;
+                froze_xlsx_sheet_reads += read;
+                if rewritten > 0 {
+                    dirty_grid_parts.insert(
+                        xlsx_freeze_part
+                            .as_ref()
+                            .expect("resolved sheet part")
+                            .clone(),
+                    );
+                    chunk_changed = true;
+                }
+            }
             if let Some(rename) = xlsx_sheet_rename.as_ref() {
                 let mut sheet_changed_here = rename_here;
                 if rename_here {
@@ -2059,6 +2110,26 @@ pub fn apply_patch(
         return Err(HcdError::InvalidBundle(
             "XLSX row height target disappeared".to_string(),
         ));
+    }
+    // A pane request that rewrites nothing is not a silent success: either there
+    // was no freeze to release, or the worksheet already stands at that split.
+    if let Some(freeze) = xlsx_sheet_freeze.as_ref() {
+        if froze_xlsx_sheet_windows == 0 {
+            if froze_xlsx_sheet_reads == 0 {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX worksheet freeze target disappeared".to_string(),
+                ));
+            }
+            if freeze.rows == 0 && freeze.columns == 0 {
+                return Err(HcdError::Unsupported(
+                    "XLSX worksheet has no frozen panes to release".to_string(),
+                ));
+            }
+            return Err(HcdError::Unsupported(format!(
+                "XLSX worksheet already freezes {} rows and {} columns",
+                freeze.rows, freeze.columns
+            )));
+        }
     }
     if xlsx_sheet_add.is_some() && !added_xlsx_sheet {
         return Err(HcdError::InvalidBundle(
@@ -2836,6 +2907,7 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_42
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_43
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_44
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_45
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -3172,6 +3244,18 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/44 accepts one PPTX slide copy operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_45
+        && (manifest.source.format != "xlsx"
+            || patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxSheetFreeze { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/45 accepts one XLSX worksheet freeze operation only".to_string(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -3519,6 +3603,39 @@ fn validate_patch_identity(
                 {
                     return Err(HcdError::InvalidPatch(
                         "invalid XLSX worksheet deletion target".to_string(),
+                    ));
+                }
+            }
+            PatchOperation::XlsxSheetFreeze {
+                sheet_id,
+                rows,
+                columns,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_45
+                    || manifest.source.format != "xlsx"
+                    || patch.operations.len() != 1
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.sheet.freeze requires one XLSX operation with hcd-patch/45"
+                            .to_string(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX worksheet freeze target".to_string(),
+                    ));
+                }
+                // A frozen pane always leaves a scrolling corner, so the last row
+                // and the last column can never be frozen away.
+                if *rows > 1_048_575 || *columns > 16_383 {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX freeze panes must leave at least one row and one column free"
+                            .to_string(),
                     ));
                 }
             }
@@ -5199,6 +5316,24 @@ fn collect_xlsx_row_height(patch: &PatchBatch) -> Option<XlsxRowHeight> {
     })
 }
 
+fn collect_xlsx_sheet_freeze(patch: &PatchBatch) -> Option<XlsxSheetFreeze> {
+    patch.operations.iter().find_map(|operation| {
+        let PatchOperation::XlsxSheetFreeze {
+            sheet_id,
+            rows,
+            columns,
+        } = operation
+        else {
+            return None;
+        };
+        Some(XlsxSheetFreeze {
+            sheet_id: sheet_id.clone(),
+            rows: *rows,
+            columns: *columns,
+        })
+    })
+}
+
 fn set_xlsx_row_height(html: &mut String, row: u32, height: f64) -> Result<(), HcdError> {
     let marker = format!("<tr data-hcd-row=\"{row}\"");
     let start = html.find(&marker).ok_or_else(|| {
@@ -5235,6 +5370,107 @@ fn set_xlsx_row_height(html: &mut String, row: u32, height: f64) -> Result<(), H
         .map(|offset| start + offset)
         .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
     set_attribute_in_range(html, start, end, "data-hcd-height-edited", "true")?;
+    Ok(())
+}
+
+/// Write the frozen pane every worksheet window in this chunk names, so the
+/// sheet shows the same split whichever window it is read in. `0`/`0` takes the
+/// pane out instead of putting one in. Returns how many window tags this rewrote
+/// and how many windows it read, which is what lets a request that would change
+/// nothing be refused instead of recorded as a revision.
+fn freeze_xlsx_sheet_sections(
+    html: &mut String,
+    rows: u32,
+    columns: u32,
+) -> Result<(usize, usize), HcdError> {
+    const MARKER: &str = "<section class=\"hcd-sheet\"";
+    let mut output = String::with_capacity(html.len());
+    let mut cursor = 0usize;
+    let mut rewritten = 0usize;
+    let mut seen = 0usize;
+    while let Some(offset) = html[cursor..].find(MARKER) {
+        let start = cursor + offset;
+        let gap = html[start..].find('>').ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX worksheet window is not closed".to_string())
+        })?;
+        let end = start + gap;
+        let tag = &html[start..=end];
+        output.push_str(&html[cursor..start]);
+        seen += 1;
+        let rewritten_tag = rewrite_pane_attributes(tag, rows, columns)?;
+        if rewritten_tag != tag {
+            rewritten += 1;
+        }
+        output.push_str(&rewritten_tag);
+        cursor = end + 1;
+    }
+    output.push_str(&html[cursor..]);
+    *html = output;
+    Ok((rewritten, seen))
+}
+
+/// One worksheet window's pane attributes, rebuilt for the requested split. A
+/// frozen pane writes the split as row and column counts, the cell the scrolling
+/// corner starts at, and the corner itself; releasing it leaves none of those
+/// behind. A split pane the source workbook scrolled by hand is described in
+/// twips, and a freeze replaces it rather than carrying it along.
+fn rewrite_pane_attributes(tag: &str, rows: u32, columns: u32) -> Result<String, HcdError> {
+    let mut pane = tag.to_string();
+    for name in [
+        "data-hcd-pane-state",
+        "data-hcd-pane-top-left-cell",
+        "data-hcd-active-pane",
+        "data-hcd-frozen-rows",
+        "data-hcd-frozen-columns",
+        "data-hcd-split-x-twips",
+        "data-hcd-split-y-twips",
+    ] {
+        drop_tag_attribute(&mut pane, name)?;
+    }
+    // The marker is what tells a source-backed export that this window speaks for
+    // its worksheet: a pane the source workbook wrote is left alone until a patch
+    // rewrites it, and a release has to be written too, not just left blank.
+    set_tag_attribute(&mut pane, "data-hcd-pane-edited", "true");
+    if rows == 0 && columns == 0 {
+        return Ok(pane);
+    }
+    set_tag_attribute(&mut pane, "data-hcd-pane-state", "frozen");
+    set_tag_attribute(
+        &mut pane,
+        "data-hcd-pane-top-left-cell",
+        &format!("{}{}", xlsx_column_name(columns + 1), u64::from(rows) + 1),
+    );
+    set_tag_attribute(
+        &mut pane,
+        "data-hcd-active-pane",
+        match (rows, columns) {
+            (0, _) => "top-right",
+            (_, 0) => "bottom-left",
+            _ => "bottom-right",
+        },
+    );
+    // Excel names only the split it makes, so a freeze that holds the first row
+    // writes no column count. Reading it back the same way keeps the window
+    // attributes a patch writes the same as the ones an import collected.
+    if columns > 0 {
+        set_tag_attribute(&mut pane, "data-hcd-frozen-columns", &columns.to_string());
+    }
+    if rows > 0 {
+        set_tag_attribute(&mut pane, "data-hcd-frozen-rows", &rows.to_string());
+    }
+    Ok(pane)
+}
+
+fn drop_tag_attribute(tag: &mut String, name: &str) -> Result<(), HcdError> {
+    let marker = format!(" {name}=\"");
+    let Some(start) = tag.find(&marker) else {
+        return Ok(());
+    };
+    let value_start = start + marker.len();
+    let value_end = tag[value_start..]
+        .find('"')
+        .ok_or_else(|| HcdError::InvalidBundle(format!("attribute {name} is not closed")))?;
+    tag.replace_range(start..value_start + value_end + 1, "");
     Ok(())
 }
 
@@ -10423,6 +10659,7 @@ fn apply_annotations(
             | PatchOperation::XlsxSheetRename { .. }
             | PatchOperation::XlsxSheetAdd { .. }
             | PatchOperation::XlsxSheetDelete { .. }
+            | PatchOperation::XlsxSheetFreeze { .. }
             | PatchOperation::PptxSlideAdd { .. }
             | PatchOperation::PptxSlideDelete { .. }
             | PatchOperation::PptxSlideReorder { .. }
