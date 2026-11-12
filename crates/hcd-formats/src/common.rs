@@ -6,7 +6,7 @@ use hcd_core::{
 use oxml::{PackageError, StreamingOxmlArchive};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Bytes a package control part — content types, relationships, the workbook or
@@ -831,6 +831,87 @@ fn write_control_children(
         writer.write_event(Event::Empty(element))?;
     }
     Ok(())
+}
+
+/// Read one attribute of a control-part element. A value the reader cannot
+/// unescape is refused rather than skipped: an entry whose name cannot be read
+/// is an entry the export cannot safely keep or drop, and guessing wrong there
+/// leaves a package with a dangling reference.
+pub(crate) fn checked_attribute(
+    element: &BytesStart<'_>,
+    wanted: &str,
+) -> Result<Option<String>, HcdError> {
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute
+            .map_err(|error| HcdError::InvalidBundle(format!("control part attribute: {error}")))?;
+        if local_name(attribute.key.as_ref()) != wanted {
+            continue;
+        }
+        let value = attribute
+            .unescape_value()
+            .map_err(|error| HcdError::InvalidBundle(format!("control part value: {error}")))?;
+        return Ok(Some(value.to_string()));
+    }
+    Ok(None)
+}
+
+/// Copy a control list without the empty children whose attribute names an entry
+/// this export removes: a sheet list loses its tab, a relationship list loses its
+/// pointer, `[Content_Types].xml` loses its override, and a presentation loses the
+/// `<p:sldId>` of a deleted slide. Everything else is written as the source had
+/// it, so a package that drops one entry keeps the bytes it wrote for the rest.
+/// Returns the new bytes and how many children were dropped.
+pub(crate) fn drop_control_elements(
+    source: &[u8],
+    parent: &str,
+    element: &str,
+    attribute: &str,
+    values: &BTreeSet<String>,
+    part: &str,
+) -> Result<(Vec<u8>, usize), HcdError> {
+    let mut reader = Reader::from_reader(source);
+    reader.config_mut().check_end_names = true;
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut open_depth: Option<usize> = None;
+    let mut depth = 0usize;
+    let mut dropped = 0usize;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("{part} XML: {error}")))?;
+        match event {
+            Event::Start(ref element) => {
+                if open_depth.is_none() && local_name(element.name().as_ref()) == parent {
+                    open_depth = Some(depth);
+                }
+                depth += 1;
+                writer.write_event(event.into_owned())?;
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if open_depth == Some(depth) {
+                    open_depth = None;
+                }
+                writer.write_event(event.into_owned())?;
+            }
+            Event::Empty(ref candidate)
+                if open_depth.is_some() && local_name(candidate.name().as_ref()) == element =>
+            {
+                if checked_attribute(candidate, attribute)?
+                    .is_some_and(|value| values.contains(&value))
+                {
+                    dropped += 1;
+                } else {
+                    writer.write_event(event.into_owned())?;
+                }
+            }
+            Event::Eof => break,
+            other => writer.write_event(other.into_owned())?,
+        }
+        buffer.clear();
+    }
+    Ok((writer.into_inner(), dropped))
 }
 
 #[cfg(test)]
