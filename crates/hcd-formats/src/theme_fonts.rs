@@ -4,10 +4,15 @@
 //! and the face is at most 8 MiB. Otherwise the family name is registered and
 //! the reason is returned for the fidelity report. Excel never receives font
 //! bytes.
+//!
+//! A PDF export of the document's own source gets one step more: the faces are
+//! embedded, then the text the file already carries is pointed at them where
+//! that can be proven safe, run by run. Everything the pass refused, and why,
+//! comes back in the same report.
 
 use hcd_core::{FontStyle, HcdError, ThemeFontAction, ThemeFontDecision};
 use oxml::{OxmlPackage, PackageError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -16,20 +21,31 @@ pub struct ThemeFontApplication {
     pub warnings: Vec<String>,
 }
 
-/// Write the pinned theme's faces into an exported file.
+/// What a PDF export already did with the faces, and what it allows next.
 ///
-/// `pdf_face_drawn_by_writer` is the index in `plan` of a face a semantic PDF
-/// export already drew its text with, through the print engine. That face's
-/// bytes are in the file once and must not be appended a second time — an
-/// eleven-megabyte CJK face duplicated into one PDF is a real cost — while the
-/// rest of the plan is reported exactly as it would be otherwise. Nothing else
-/// reads the parameter: docx, pptx and xlsx carry their faces here, in the
-/// theme part and the font table, because there is no writer that did it first.
+/// Both facts are about a PDF only: docx, pptx and xlsx carry their faces in
+/// the theme part and the font table, and no writer got there first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PdfFaceOptions {
+    /// The index in `plan` of a face a semantic PDF export already drew its
+    /// text with, through the print engine. That face's bytes are in the file
+    /// once and must not be appended a second time — an eleven-megabyte CJK
+    /// face duplicated into one PDF is a real cost — while the rest of the plan
+    /// is reported exactly as it would be otherwise.
+    pub drawn_by_writer: Option<usize>,
+    /// The file is the document's own PDF, so the text it carries may be
+    /// re-pointed at the faces that were just embedded. A semantic or raster
+    /// export leaves this off: there the writer chose the body face itself, and
+    /// rewriting its runs would fight that choice run by run.
+    pub retarget_existing_text: bool,
+}
+
+/// Write the pinned theme's faces into an exported file.
 pub fn apply_theme_fonts(
     target: &Path,
     format: &str,
     plan: &[ThemeFontDecision],
-    pdf_face_drawn_by_writer: Option<usize>,
+    pdf: PdfFaceOptions,
 ) -> Result<ThemeFontApplication, HcdError> {
     if plan.is_empty() {
         return Ok(ThemeFontApplication::default());
@@ -38,7 +54,7 @@ pub fn apply_theme_fonts(
         "docx" => apply_ooxml(target, plan, OfficeKind::Word),
         "pptx" => apply_ooxml(target, plan, OfficeKind::PowerPoint),
         "xlsx" => apply_ooxml(target, plan, OfficeKind::Excel),
-        "pdf" => apply_pdf(target, plan, pdf_face_drawn_by_writer),
+        "pdf" => apply_pdf(target, plan, pdf),
         _ => Ok(ThemeFontApplication::default()),
     }
 }
@@ -175,15 +191,20 @@ fn note_license(report: &mut ThemeFontApplication, decision: &ThemeFontDecision)
 fn apply_pdf(
     target: &Path,
     plan: &[ThemeFontDecision],
-    drawn: Option<usize>,
+    pdf: PdfFaceOptions,
 ) -> Result<ThemeFontApplication, HcdError> {
     let mut report = ThemeFontApplication::default();
     let mut index = 0;
+    // Faces that made it into the file, so the text already on the page can be
+    // pointed at them: slot priority, plan position (for a stable tie), name,
+    // and the family the report should call it.
+    let mut carried: Vec<(u8, usize, String)> = Vec::new();
+    let mut families: HashMap<String, (String, String)> = HashMap::new();
     for (position, decision) in plan.iter().enumerate() {
         match &decision.action {
             ThemeFontAction::RegisterOnly { reason } => report.warnings.push(reason.clone()),
             ThemeFontAction::Embed { bytes, .. } => {
-                if drawn == Some(position) {
+                if pdf.drawn_by_writer == Some(position) {
                     // The print engine put these bytes in the file already, as
                     // the face the document's text was drawn with. Appending the
                     // same face a second time would only double the export.
@@ -200,10 +221,18 @@ fn apply_pdf(
                 match pdf_handler::font_embedder::embed_font_file(target, &name, bytes) {
                     Ok(()) => {
                         report.preserved.push(format!(
-                            "embedded theme font {} {} in the PDF; existing text keeps its original font encoding",
-                            decision.family, decision.subfamily
+                            "embedded theme font {} {} in the PDF;{}",
+                            decision.family,
+                            decision.subfamily,
+                            if pdf.retarget_existing_text {
+                                " the text the file carries is re-pointed at it wherever that can be proven safe"
+                            } else {
+                                " existing text keeps its original font encoding"
+                            }
                         ));
                         note_license(&mut report, decision);
+                        carried.push((slot_priority(&decision.slots), position, name.clone()));
+                        families.insert(name, (decision.family.clone(), decision.subfamily.clone()));
                     }
                     Err(error) => report.warnings.push(format!(
                         "{} {} was not embedded because {error}; the PDF text keeps its original fonts",
@@ -213,7 +242,104 @@ fn apply_pdf(
             }
         }
     }
+    if pdf.retarget_existing_text && !carried.is_empty() {
+        carried.sort_by_key(|(priority, position, _)| (*priority, *position));
+        let faces: Vec<String> = carried.iter().map(|(_, _, name)| name.clone()).collect();
+        match pdf_handler::font_retarget::retarget_text_fonts(target, &faces) {
+            Ok(moved) => report_retarget(&mut report, &moved, &families),
+            Err(error) => report.warnings.push(format!(
+                "the PDF's own text was not re-pointed at the pinned theme faces because {error}; it keeps the fonts that wrote it"
+            )),
+        }
+    }
     Ok(report)
+}
+
+/// Fold one retarget pass into the fidelity report: what moved, and every run
+/// that stayed, by the reason it stayed.
+fn report_retarget(
+    report: &mut ThemeFontApplication,
+    moved: &pdf_handler::font_retarget::TextRetargetReport,
+    families: &HashMap<String, (String, String)>,
+) {
+    if moved.runs_retargeted > 0 {
+        let faces: Vec<String> = moved
+            .faces
+            .iter()
+            .map(|(name, runs)| {
+                let (family, subfamily) = families
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| (name.clone(), String::new()));
+                format!("{family} {subfamily} in {runs} run{}", plural(*runs))
+            })
+            .collect();
+        report.preserved.push(format!(
+            "{} text run{} in the PDF now draws with the pinned theme font: {}; each run keeps the width it had, held with horizontal scaling, so kerning inside a moved run is not carried over",
+            moved.runs_retargeted,
+            plural(moved.runs_retargeted),
+            faces.join(", ")
+        ));
+    }
+    // The reasons name the run or runs they apply to, so they read right at one
+    // and at a hundred.
+    let kept: Vec<(usize, &str, String)> = vec![
+        (
+            moved.runs_kept_unreadable,
+            "text run",
+            "because that font does not say what its character codes spell".to_string(),
+        ),
+        (
+            moved.runs_kept_uncovered,
+            "text run",
+            format!(
+                "because no pinned theme font can draw every character of {}",
+                if moved.runs_kept_uncovered == 1 {
+                    "it"
+                } else {
+                    "them"
+                }
+            ),
+        ),
+        (
+            moved.runs_kept_unfittable,
+            "text run",
+            "because the swap would need the glyphs squeezed past twice their width, or down to half".to_string(),
+        ),
+        (
+            moved.forms_left_alone,
+            "form xobject",
+            "whose operators live in another stream, which this export does not touch".to_string(),
+        ),
+        (
+            moved.pages_with_split_content,
+            "page",
+            "whose text is split over more than one content stream".to_string(),
+        ),
+    ];
+    for (count, noun, reason) in kept {
+        if count > 0 {
+            report.warnings.push(format!(
+                "{count} {noun}{} in the PDF keeps the font that drew it {reason}",
+                plural(count)
+            ));
+        }
+    }
+    if moved.runs_kept_already_theme > 0 {
+        report.preserved.push(format!(
+            "{} text run{} were already drawn with a pinned theme font",
+            moved.runs_kept_already_theme,
+            plural(moved.runs_kept_already_theme)
+        ));
+    }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn apply_ooxml(
@@ -1150,7 +1276,13 @@ mod tests {
         });
         denied.family = "License Denied".to_string();
         denied.slots = vec!["minor-latin".to_string()];
-        let report = apply_theme_fonts(&path, "docx", &[embedded, denied], None).unwrap();
+        let report = apply_theme_fonts(
+            &path,
+            "docx",
+            &[embedded, denied],
+            PdfFaceOptions::default(),
+        )
+        .unwrap();
         assert!(report
             .warnings
             .iter()
@@ -1207,7 +1339,13 @@ mod tests {
                 r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#,
             )],
         );
-        let report = apply_theme_fonts(&path, "docx", &[regular, bold, denied], None).unwrap();
+        let report = apply_theme_fonts(
+            &path,
+            "docx",
+            &[regular, bold, denied],
+            PdfFaceOptions::default(),
+        )
+        .unwrap();
         assert_eq!(
             report.warnings.iter().filter(|seen| **seen == note).count(),
             1,
@@ -1257,7 +1395,7 @@ mod tests {
                 format: FontFileFormat::Ttf,
                 bytes: bytes.to_vec(),
             })],
-            None,
+            PdfFaceOptions::default(),
         )
         .unwrap();
         assert_eq!(part(&path, "ppt/fonts/font1.fntdata"), bytes);
@@ -1299,7 +1437,7 @@ mod tests {
                 reason: "xlsx export registers the font name and does not embed font bytes"
                     .to_string(),
             })],
-            None,
+            PdfFaceOptions::default(),
         )
         .unwrap();
         assert!(report
@@ -1384,10 +1522,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let both = dir.path().join("both.pdf");
         write_empty_pdf(&both);
-        let carried = apply_pdf(&both, &[body_face(), other_face()], None).unwrap();
+        let carried = apply_pdf(
+            &both,
+            &[body_face(), other_face()],
+            PdfFaceOptions::default(),
+        )
+        .unwrap();
         let drawn = dir.path().join("drawn.pdf");
         write_empty_pdf(&drawn);
-        let told = apply_pdf(&drawn, &[body_face(), other_face()], Some(0)).unwrap();
+        let told = apply_pdf(
+            &drawn,
+            &[body_face(), other_face()],
+            PdfFaceOptions {
+                drawn_by_writer: Some(0),
+                ..PdfFaceOptions::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(carried.preserved.len(), 2, "{:?}", carried.preserved);
         assert!(carried
@@ -1538,5 +1689,194 @@ mod tests {
             pdf_body_face(&[only_breaks], "\n\t\r"),
             PdfBodyFace::Draw { plan_index: 0, .. }
         ));
+    }
+
+    /// A PDF whose text was written by somebody else: one page, one plain
+    /// WinAnsi TrueType run, no `ToUnicode`. That is what a source-backed
+    /// export hands to this module.
+    fn write_source_pdf(path: &Path, text: &str) {
+        use lopdf::{dictionary, Dictionary, Document, Object, Stream};
+        let mut document = Document::with_version("1.5");
+        let font = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "CourierLike",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 32i64,
+            "LastChar" => 126i64,
+            "Widths" => Object::Array((32..=126u32).map(|_| Object::Integer(600)).collect()),
+        });
+        let fonts_id = document.add_object(Dictionary::new());
+        if let Ok(entry) = document.get_object_mut(fonts_id) {
+            entry
+                .as_dict_mut()
+                .unwrap()
+                .set(b"F1", Object::Reference(font));
+        }
+        let resources_id = document.add_object(dictionary! {
+            "Font" => Object::Reference(fonts_id)
+        });
+        let content = format!("BT\n/F1 12 Tf\n1 0 0 1 72 720 Tm\n({text}) Tj\nET\n");
+        let content_id =
+            document.add_object(Stream::new(Dictionary::new(), content.as_bytes().to_vec()));
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Resources" => Object::Reference(resources_id),
+            "Contents" => Object::Array(vec![Object::Reference(content_id)]),
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => 1,
+            }),
+        );
+        let catalog = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        document.trailer.set("Root", Object::Reference(catalog));
+        document.save(path).unwrap();
+    }
+
+    fn page_text(path: &Path) -> String {
+        use lopdf::Document;
+        let document = Document::load(path).unwrap();
+        let page = *document.get_pages().values().next().unwrap();
+        String::from_utf8_lossy(&document.get_page_content(page).unwrap()).to_string()
+    }
+
+    fn retargeting() -> PdfFaceOptions {
+        PdfFaceOptions {
+            retarget_existing_text: true,
+            ..PdfFaceOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_source_pdf_export_points_the_text_it_carries_at_the_pinned_face() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.pdf");
+        write_source_pdf(&path, "Quarterly report");
+        let face = slotted(
+            &["minor-latin"],
+            "Brand Sans SC",
+            embedded(pdf_handler::font_embedder::bundled_noto_sans_sc()),
+        );
+
+        let report = apply_pdf(&path, &[face], retargeting()).unwrap();
+        let sentence = report
+            .preserved
+            .iter()
+            .find(|line| line.contains("now draws with the pinned theme font"))
+            .expect("the runs that moved have to be reported");
+        assert!(sentence.contains("1 text run"), "{sentence}");
+        assert!(sentence.contains("Brand Sans SC"), "{sentence});");
+        assert!(
+            sentence.contains("kerning inside a moved run is not carried over"),
+            "{sentence}"
+        );
+
+        let content = page_text(&path);
+        assert!(content.contains("/HcdBrandSansSC 12 Tf"), "{content}");
+        assert!(content.contains("/F1 12 Tf"), "{content}");
+        // The face the run moved to is the one embedded above, so the bytes are
+        // in the file exactly once.
+        let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        assert_eq!(
+            raw.matches("/FontFile2").count(),
+            1,
+            "the run must move onto the carried face, not a second copy"
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|line| line.contains("keeps the font")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_semantic_pdf_export_leaves_the_text_its_own_writer_drew_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("semantic.pdf");
+        write_source_pdf(&path, "Quarterly report");
+        let before = page_text(&path);
+        let face = slotted(
+            &["minor-latin"],
+            "Brand Sans SC",
+            embedded(pdf_handler::font_embedder::bundled_noto_sans_sc()),
+        );
+
+        let report = apply_pdf(&path, &[face], PdfFaceOptions::default()).unwrap();
+        assert!(report
+            .preserved
+            .iter()
+            .any(|line| line.contains("existing text keeps its original font encoding")));
+        assert!(!report
+            .preserved
+            .iter()
+            .any(|line| line.contains("now draws with the pinned theme font")));
+        assert_eq!(page_text(&path), before, "no re-encode was asked for");
+    }
+
+    #[test]
+    fn a_pinned_face_that_cannot_draw_the_page_says_which_runs_stayed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("emoji.pdf");
+        write_source_pdf(&path, "Quarterly report");
+        let before = page_text(&path);
+        // A brand face that is all emoji cannot take a Latin sentence, and the
+        // operator asking why needs the count, not a silent substitution.
+        let face = slotted(
+            &["minor-latin"],
+            "Brand Emoji",
+            embedded(pdf_handler::font_embedder::bundled_noto_emoji()),
+        );
+
+        let report = apply_pdf(&path, &[face], retargeting()).unwrap();
+        let stayed = report
+            .warnings
+            .iter()
+            .find(|line| line.contains("keeps the font that drew it"))
+            .expect("a refused run is reported");
+        assert!(stayed.contains("1 text run"), "{stayed}");
+        assert!(
+            stayed.contains("can draw every character of it"),
+            "{stayed}"
+        );
+        assert!(report
+            .preserved
+            .iter()
+            .any(|line| line.contains("the text the file carries is re-pointed")));
+        assert_eq!(page_text(&path), before);
+    }
+
+    #[test]
+    fn the_slot_that_comes_first_is_the_one_the_text_moves_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("priority.pdf");
+        write_source_pdf(&path, "Quarterly report");
+        let face = pdf_handler::font_embedder::bundled_noto_sans_sc();
+        // The east-Asian entry is first in the plan, so it gets embedded first
+        // and named first, but the Latin slot is what a run is offered.
+        let east_asia = slotted(&["minor-east-asia"], "Brand CJK", embedded(face));
+        let latin = slotted(&["minor-latin"], "Brand Body", embedded(face));
+
+        let report = apply_pdf(&path, &[east_asia, latin], retargeting()).unwrap();
+        let sentence = report
+            .preserved
+            .iter()
+            .find(|line| line.contains("now draws with the pinned theme font"))
+            .expect("the runs that moved have to be reported");
+        assert!(sentence.contains("Brand Body"), "{sentence}");
+        assert!(!sentence.contains("Brand CJK"), "{sentence}");
+        assert!(page_text(&path).contains("/HcdBrandBody 12 Tf"));
     }
 }

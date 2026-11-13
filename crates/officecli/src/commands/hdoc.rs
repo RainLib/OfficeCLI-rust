@@ -6,7 +6,7 @@ use hcd_core::{
     HtmlPresentationOptions, PatchBatch, StorageCodec, ThemeEmbedKind, ThemeFontDecision,
     HCD_SCHEMA_VERSION,
 };
-use hcd_formats::{apply_theme_fonts, ExportOptions, ImportOptions, PdfRasterMode};
+use hcd_formats::{apply_theme_fonts, ExportOptions, ImportOptions, PdfFaceOptions, PdfRasterMode};
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -1263,10 +1263,14 @@ fn export(
     )?;
     let mut theme = ThemeExport {
         plan: &theme_plan,
-        drawn_body_face: None,
+        pdf: PdfFaceOptions::default(),
     };
     let mut report = match command.source.as_deref() {
         Some(source) if target == source_format => {
+            // The file is the document's own PDF, so the text on its pages is
+            // real text the pinned faces can take over where that is provably
+            // safe. A semantic export writes that text itself and says so.
+            theme.pdf.retarget_existing_text = target == "pdf";
             hcd_formats::export_document(&command.bundle, source, &command.output, &options)
                 .map_err(handler_error)?
         }
@@ -1328,12 +1332,12 @@ fn theme_faces(
 /// The plan is resolved once, before the file is written: the semantic PDF path
 /// lays its body text out in one of these faces, and the same plan is what
 /// [`apply_theme_fonts`] writes into the file's font tables afterwards.
-/// `drawn_body_face` is how the first fact reaches the second — the plan
-/// position of the face the body was drawn with, so its bytes are carried once
-/// instead of twice.
+/// What the writer already did with the faces, and what it may do next, rides
+/// along as [`PdfFaceOptions`].
+#[derive(Default)]
 struct ThemeExport<'a> {
     plan: &'a [ThemeFontDecision],
-    drawn_body_face: Option<usize>,
+    pdf: PdfFaceOptions,
 }
 
 /// Write the pinned theme's faces into the file that was just exported.
@@ -1346,8 +1350,8 @@ fn attach_theme_fonts(
     if theme.plan.is_empty() {
         return Ok(());
     }
-    let applied = apply_theme_fonts(output, target, theme.plan, theme.drawn_body_face)
-        .map_err(handler_error)?;
+    let applied =
+        apply_theme_fonts(output, target, theme.plan, theme.pdf).map_err(handler_error)?;
     report.preserved.extend(applied.preserved);
     report
         .warnings
@@ -1494,7 +1498,7 @@ fn semantic_export(
     let image_count = summary.image_count;
     let embedded_image_count = summary.embedded_image_count;
     let conversion_engine = summary.engine;
-    theme.drawn_body_face = summary.pdf_body_face;
+    theme.pdf.drawn_by_writer = summary.pdf_body_face;
 
     let mut warnings = vec![FidelityWarning {
         code: "HCD_CROSS_FORMAT_SEMANTIC_EXPORT".to_string(),

@@ -12,7 +12,9 @@ use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
 pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
-pub use theme_fonts::{apply_theme_fonts, pdf_body_face, PdfBodyFace, ThemeFontApplication};
+pub use theme_fonts::{
+    apply_theme_fonts, pdf_body_face, PdfBodyFace, PdfFaceOptions, ThemeFontApplication,
+};
 
 /// Expand presentation-only Markdown features without changing canonical HCD.
 /// The transform is bounded to one chunk and safe to call after every revision.
