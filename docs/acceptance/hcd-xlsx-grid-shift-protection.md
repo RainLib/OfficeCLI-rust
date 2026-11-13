@@ -135,7 +135,7 @@ HCD 写的窗格换掉源的那一套（这里源根本没有窗格），移位�
 这一片不碰的：
 
 - `protectedRanges`/`protectedRange/@sqref` —— 保护主题下剩下的那条地址墙，接法同验证区，独立一片。
-- `Overview` 的物化窗口（`insert before a materialized XLSX row`，补丁侧）—— 按指示留给再下一片，这一片一个字没动它。所以 `budget-tracker.xlsx` 现在是**三张表里两张能插删行/列**（`Transactions`、`Settings`），还差 `Overview`。
+- `Overview` 的物化窗口（`insert before a materialized XLSX row`，补丁侧）—— 按指示留给再下一片，这一片一个字没动它。记这一片时 `budget-tracker.xlsx` 是三张表里两张能插删行/列（`Transactions`、`Settings`）；`Overview` 那条紧接着也关了，见 [XLSX 行移位落进源文件没写出来的那一行](hcd-xlsx-grid-shift-gap-rows.md)，现在三张表都插得出行。
 - **表格部件、超链接、批注 `legacyDrawing`**：硬拒绝清单三条不变。
 - 整窗重建把 `mergeCells` 按记录顺序重排那条边界照旧（见 `docs/acceptance/hcd-xlsx-sheet-freeze.md`），指示里也点了名这一片不动它。
 - 这一轮实测顺手记下的一条既有偏差（与保护无关，本片没改）：上面 r4 把行列都挪回原位，`xl/workbook.xml` 已经逐字节回原，`sheet3.xml` 却还差一点 —— 源写 `width="18"`，移位重排 `<cols>` 时按 `{:.*2}` 重写成 `width="18.00"`（`crates/hcd-formats/src/xlsx.rs` 的列宽写入处，改动前即如此，本片的 diff 不含任何 width 相关行）。值等价，不是错文件，但“插了又删要回得去原字节”这条在列宽上还没成立，留给列宽那一族自己处理。

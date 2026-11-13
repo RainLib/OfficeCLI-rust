@@ -109,7 +109,7 @@ Error: unsupported mode: failed to read part: grid shift cannot update worksheet
 | 表 | 命令 | 结果 |
 |----|------|------|
 | `Settings` | `hdoc apply` + `hdoc export` | 补丁通过，导出报 `failed to read part: grid shift cannot update worksheet element sheetProtection`（记的是本片当时实测，那条墙已在下一片关掉） |
-| `Overview` | `hdoc apply` | `Error: unsupported mode: insert before a materialized XLSX row`（补丁那趟，与筛选无关） |
+| `Overview` | `hdoc apply` | `Error: unsupported mode: insert before a materialized XLSX row`（补丁那趟，与筛选无关；同样是本片当时的实测，那条墙最后关掉，见 [XLSX 行移位落进源文件没写出来的那一行](hcd-xlsx-grid-shift-gap-rows.md)） |
 
 ## 跟着走的地址，和跟着数的那一列
 
@@ -168,7 +168,7 @@ Error: unsupported mode: failed to read part: grid shift cannot update worksheet
 
 这一片不碰的：
 
-- `sheetProtection` —— 记这一片的时候 `Settings` 还插不出一行，那是紧跟的下一片；现在已放行，见 [XLSX 行/列移位放行受保护的工作表](hcd-xlsx-grid-shift-protection.md)。物化窗口的 `Overview` 照旧（补丁侧拒绝）。
+- `sheetProtection` —— 记这一片的时候 `Settings` 还插不出一行，那是紧跟的下一片；现在已放行，见 [XLSX 行/列移位放行受保护的工作表](hcd-xlsx-grid-shift-protection.md)。`Overview` 的物化窗口（补丁侧拒绝）也在这之后关掉，见 [XLSX 行移位落进源文件没写出来的那一行](hcd-xlsx-grid-shift-gap-rows.md)。
 - **加/删/改筛选**本身，以及排序条件的编辑、验证规则的新增。这一片只搬已经写下来的地址，没有新的补丁操作、没有新的 schema。
 - 表格部件（`tableParts` 指向的 `xl/tables/*.xml`）、超链接、批注 `legacyDrawing`：它们要动这张表以外的部件，仍然硬拒绝。
 - 扩展列表里有内容的筛选/验证（Excel 的 `x14` 重复条件）：拒绝，不做“只改主区、留着扩展区”的半改。
