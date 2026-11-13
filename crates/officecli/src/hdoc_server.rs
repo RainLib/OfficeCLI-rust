@@ -2450,9 +2450,7 @@ async fn catalog_audit(
     }
     if let (Some(first), Some(last)) = (&from, &to) {
         if first > last {
-            return Err(bad(format!(
-                "audit window from {first} is after to {last}"
-            )));
+            return Err(bad(format!("audit window from {first} is after to {last}")));
         }
     }
     let page = state
@@ -4420,7 +4418,13 @@ mod tests {
             assert_eq!(answer["entries"].as_array().unwrap().len(), 5);
         }
 
-        for rejected in ["2026-02-30", "2023-02-29", "2026-13-01", "2026-2-1", "next-tuesday"] {
+        for rejected in [
+            "2026-02-30",
+            "2023-02-29",
+            "2026-13-01",
+            "2026-2-1",
+            "next-tuesday",
+        ] {
             let error = read(AuditQuery {
                 limit: None,
                 from: Some(rejected.to_string()),
@@ -4430,7 +4434,10 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.0, StatusCode::BAD_REQUEST, "{rejected} accepted");
             let message = error.1.to_string();
-            assert!(message.contains("from") && message.contains(rejected), "{message}");
+            assert!(
+                message.contains("from") && message.contains(rejected),
+                "{message}"
+            );
 
             let error = read(AuditQuery {
                 limit: None,
@@ -4439,7 +4446,11 @@ mod tests {
             })
             .await
             .unwrap_err();
-            assert_eq!(error.0, StatusCode::BAD_REQUEST, "{rejected} accepted as `to`");
+            assert_eq!(
+                error.0,
+                StatusCode::BAD_REQUEST,
+                "{rejected} accepted as `to`"
+            );
             assert!(error.1.to_string().contains("to"), "{}", error.1);
         }
 

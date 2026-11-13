@@ -3532,13 +3532,13 @@ mod tests {
         record(&catalog, audit_action::THEME_PUT, "abc", "admin:will", "");
 
         for rejected in [
-            "2026-02-30",          // February has no 30th
-            "2023-02-29",          // not a leap year
-            "2100-02-29",          // century years need /400
-            "2026-13-01",          // no such month
+            "2026-02-30", // February has no 30th
+            "2023-02-29", // not a leap year
+            "2100-02-29", // century years need /400
+            "2026-13-01", // no such month
             "2026-00-10",
-            "2026-04-31",          // April has 30
-            "2026-2-1",            // not zero-padded
+            "2026-04-31", // April has 30
+            "2026-2-1",   // not zero-padded
             "",
             "2026-1-1",
             "20260101",
