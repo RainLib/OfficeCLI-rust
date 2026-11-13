@@ -51,7 +51,7 @@ pub fn font_file_missing_chars(
             path.display()
         ))
     })?;
-    font_bytes_missing_chars(&font_bytes, chars_needed).map_err(|error| {
+    first_face_missing_chars(&font_bytes, chars_needed).map_err(|error| {
         HandlerError::OperationFailed(format!(
             "failed to parse font file '{}': {error}",
             path.display()
@@ -63,11 +63,27 @@ pub fn font_file_missing_chars(
 pub fn bundled_font_missing_chars(
     chars_needed: &HashSet<char>,
 ) -> Result<HashSet<char>, HandlerError> {
-    font_bytes_missing_chars(BUNDLED_NOTO, chars_needed)
+    first_face_missing_chars(BUNDLED_NOTO, chars_needed)
         .map_err(|error| HandlerError::OperationFailed(format!("bundled font: {error}")))
 }
 
-fn font_bytes_missing_chars(
+/// Return the requested characters that the first face in these font bytes cannot draw.
+///
+/// A renderer that lays a whole document out in one family has to ask this
+/// before it commits: a character the face cannot draw comes out as a blank
+/// box, and the pure-Rust print backend has no per-glyph fallback to another
+/// registered family. Glyph 0 — the notdef outline — counts as *not* drawable,
+/// because a mapped-but-empty glyph is exactly the hole this question is asked
+/// to avoid.
+pub fn font_bytes_missing_chars(
+    font_bytes: &[u8],
+    chars_needed: &HashSet<char>,
+) -> Result<HashSet<char>, HandlerError> {
+    first_face_missing_chars(font_bytes, chars_needed)
+        .map_err(|error| HandlerError::OperationFailed(format!("font bytes: {error}")))
+}
+
+fn first_face_missing_chars(
     font_bytes: &[u8],
     chars_needed: &HashSet<char>,
 ) -> Result<HashSet<char>, String> {
@@ -75,7 +91,10 @@ fn font_bytes_missing_chars(
     Ok(chars_needed
         .iter()
         .copied()
-        .filter(|character| face.glyph_index(*character).is_none())
+        .filter(|character| {
+            face.glyph_index(*character)
+                .is_none_or(|glyph| glyph.0 == 0)
+        })
         .collect())
 }
 
