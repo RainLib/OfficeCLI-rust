@@ -309,6 +309,19 @@ pub struct AuditEntry {
     pub detail: String,
 }
 
+/// An inclusive UTC-day window for reading the audit log.
+///
+/// Both ends are optional; `from` alone means "since that day", `to` alone means
+/// "up to and including that day". The strings are compared as day names, which
+/// is chronological because [`utc_day_name`] always writes zero-padded
+/// `YYYY-MM-DD`, so a bound is checked for being a real calendar day rather than
+/// normalized first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuditWindow<'a> {
+    pub from: Option<&'a str>,
+    pub to: Option<&'a str>,
+}
+
 /// A page read back from the audit log.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuditPage {
@@ -318,6 +331,11 @@ pub struct AuditPage {
     /// crash, or the fragment cut off by the tail read of a very large day.
     /// Reported so a short list is never mistaken for the whole trail.
     pub unreadable: usize,
+    /// The page stopped at its limit with unread lines left inside the window,
+    /// so older operations exist that are not listed here. Distinct from
+    /// [`AuditPage::unreadable`]: those lines could not be read, these were not
+    /// read.
+    pub truncated: bool,
 }
 
 /// Scan `{docs_root}/*.hcd` for documents pinning `theme_revision_id`, on the
@@ -1067,7 +1085,38 @@ impl DiskCatalog {
     /// silently: a torn final line from a crash, or a fragment cut off by the
     /// tail bound, must not turn into "nothing else happened".
     pub fn audit_entries(&self, limit: usize) -> Result<AuditPage, HcdError> {
+        self.audit_entries_in(AuditWindow::default(), limit)
+    }
+
+    /// Read the newest audit entries inside a UTC-day window, most recent first,
+    /// across at most `limit` lines (clamped to `1..=MAX_AUDIT_LIMIT`).
+    ///
+    /// A bound that is not a real calendar day is refused rather than treated as
+    /// open: `from=2026-02-30` excludes every day that exists, and answering
+    /// "nothing happened" to that would be a false statement about the past.
+    /// Bounds that invert (`from` after `to`) are refused for the same reason.
+    ///
+    /// Days are scanned newest-first, so the window's newest end is what the
+    /// limit spends: the entries not returned are the older ones, and
+    /// [`AuditPage::truncated`] says they are there.
+    pub fn audit_entries_in(
+        &self,
+        window: AuditWindow<'_>,
+        limit: usize,
+    ) -> Result<AuditPage, HcdError> {
         let limit = limit.clamp(1, MAX_AUDIT_LIMIT);
+        for (name, bound) in [("from", window.from), ("to", window.to)] {
+            if let Some(day) = bound {
+                require_audit_bound(day, name)?;
+            }
+        }
+        if let (Some(from), Some(to)) = (window.from, window.to) {
+            if from > to {
+                return Err(HcdError::InvalidBundle(format!(
+                    "audit window from {from} is after to {to}"
+                )));
+            }
+        }
         let mut days: Vec<String> = Vec::new();
         match fs::read_dir(self.root.join("audit")) {
             Ok(entries) => {
@@ -1080,9 +1129,16 @@ impl DiskCatalog {
                         .file_stem()
                         .and_then(|value| value.to_str())
                         .unwrap_or_default();
-                    if is_audit_day(stem) {
-                        days.push(stem.to_string());
+                    if !is_audit_day(stem) {
+                        continue;
                     }
+                    if window.from.is_some_and(|from| stem < from) {
+                        continue;
+                    }
+                    if window.to.is_some_and(|to| stem > to) {
+                        continue;
+                    }
+                    days.push(stem.to_string());
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1093,10 +1149,7 @@ impl DiskCatalog {
         days.sort();
         days.reverse();
         let mut page = AuditPage::default();
-        for day in days {
-            if page.entries.len() >= limit {
-                break;
-            }
+        'days: for day in days {
             let path = self.audit_path(&day)?;
             let (bytes, dropped_front) = read_audit_tail(&path, MAX_AUDIT_FILE_BYTES)?;
             if dropped_front {
@@ -1109,8 +1162,11 @@ impl DiskCatalog {
                 .collect();
             lines.reverse();
             for line in lines {
+                // Checked per line, not per day, so a full page followed by an
+                // empty older day is not reported as if something were missing.
                 if page.entries.len() >= limit {
-                    break;
+                    page.truncated = true;
+                    break 'days;
                 }
                 match serde_json::from_str::<AuditEntry>(line) {
                     Ok(entry) => page.entries.push(entry),
@@ -1969,6 +2025,51 @@ fn is_audit_day(value: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+/// Whether `value` names a day that exists: the [`is_audit_day`] shape plus a
+/// real month and day-of-month, leap years included.
+///
+/// Exported because an HTTP layer needs the same answer to send 400 rather than
+/// the 500 this crate's own error mapping would give a caller for a typo in a
+/// query string.
+pub fn is_audit_calendar_day(value: &str) -> bool {
+    if !is_audit_day(value) {
+        return false;
+    }
+    let Ok(month) = value[5..7].parse::<u8>() else {
+        return false;
+    };
+    let Ok(day) = value[8..10].parse::<u8>() else {
+        return false;
+    };
+    let Ok(year) = value[0..4].parse::<i16>() else {
+        return false;
+    };
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    day >= 1 && day <= days_in_month(year, month)
+}
+
+fn days_in_month(year: i16, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// A window bound as an error, naming which bound was wrong.
+fn require_audit_bound(day: &str, name: &str) -> Result<(), HcdError> {
+    if is_audit_calendar_day(day) {
+        return Ok(());
+    }
+    Err(HcdError::InvalidBundle(format!(
+        "audit {name} must name a real UTC day as YYYY-MM-DD, got {day}"
+    )))
 }
 
 /// The UTC calendar day for an epoch-millisecond timestamp, used as the audit
@@ -3292,5 +3393,275 @@ mod tests {
                 "actor": "admin:will",
             })
         );
+    }
+
+    /// A line written by hand for one planted day.
+    fn planted(day: &str, ordinal: u32) -> String {
+        let epoch = utc_day_start_ms(day);
+        serde_json::json!({
+            "at": epoch + u64::from(ordinal) * 1_000,
+            "action": "theme.put",
+            "target": format!("{day}-{ordinal}"),
+            "actor": "admin:will",
+            "detail": " planted",
+        })
+        .to_string()
+    }
+
+    /// Midnight UTC for one test day, counted forward from 1970 so the planted
+    /// lines carry the timestamps their day name claims. Checked against
+    /// [`utc_day_name`] by `planted_timestamps_land_on_the_day_they_name`.
+    fn utc_day_start_ms(day: &str) -> u64 {
+        let year: i16 = day[0..4].parse().unwrap();
+        let month: u8 = day[5..7].parse().unwrap();
+        let date: u8 = day[8..10].parse().unwrap();
+        let mut days: i64 = 0;
+        for counted in 1970..year {
+            // 366 days does not fit a u8, so the year totals as u16.
+            days += i64::from(
+                (1..=12u8)
+                    .map(|month| u16::from(days_in_month(counted, month)))
+                    .sum::<u16>(),
+            );
+        }
+        for counted in 1..month {
+            days += i64::from(days_in_month(year, counted));
+        }
+        days += i64::from(date - 1);
+        u64::try_from(days).expect("test day after 1970") * 86_400_000
+    }
+
+    #[test]
+    fn audit_window_keeps_only_the_days_it_names() {
+        let (_temp, catalog) = audit_catalog();
+        plant_audit_lines(&catalog, "2020-09-13", &[&planted("2020-09-13", 1)]);
+        plant_audit_lines(&catalog, "2023-11-14", &[&planted("2023-11-14", 1)]);
+        plant_audit_lines(&catalog, "2024-12-31", &[&planted("2024-12-31", 1)]);
+
+        let page = catalog
+            .audit_entries_in(
+                AuditWindow {
+                    from: Some("2023-01-01"),
+                    to: Some("2023-12-31"),
+                },
+                MAX_AUDIT_LIMIT,
+            )
+            .unwrap();
+        assert_eq!(page.entries.len(), 1, "only 2023 is inside the window");
+        assert_eq!(page.entries[0].target, "2023-11-14-1");
+        assert!(!page.truncated);
+
+        // Both ends are inclusive, so a single-day window reads that day whole.
+        let one_day = catalog
+            .audit_entries_in(
+                AuditWindow {
+                    from: Some("2023-11-14"),
+                    to: Some("2023-11-14"),
+                },
+                MAX_AUDIT_LIMIT,
+            )
+            .unwrap();
+        assert_eq!(one_day.entries.len(), 1);
+
+        // An open end means "since" or "up to", never "nothing".
+        let since = catalog
+            .audit_entries_in(
+                AuditWindow {
+                    from: Some("2023-01-01"),
+                    to: None,
+                },
+                MAX_AUDIT_LIMIT,
+            )
+            .unwrap();
+        assert_eq!(
+            since
+                .entries
+                .iter()
+                .map(|entry| entry.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2024-12-31-1", "2023-11-14-1"],
+            "newest first inside the window"
+        );
+        let up_to = catalog
+            .audit_entries_in(
+                AuditWindow {
+                    from: None,
+                    to: Some("2023-12-31"),
+                },
+                MAX_AUDIT_LIMIT,
+            )
+            .unwrap();
+        assert_eq!(
+            up_to
+                .entries
+                .iter()
+                .map(|entry| entry.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2023-11-14-1", "2020-09-13-1"]
+        );
+
+        // A window nobody has written in reads as empty, not as an error, and a
+        // limit still spends itself inside the window only.
+        let empty = catalog
+            .audit_entries_in(
+                AuditWindow {
+                    from: Some("2015-01-01"),
+                    to: Some("2016-01-01"),
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(empty.entries.len(), 0);
+        assert!(!empty.truncated, "an empty window has nothing left to say");
+        let bounded = catalog
+            .audit_entries_in(
+                AuditWindow {
+                    from: Some("2020-01-01"),
+                    to: Some("2024-12-31"),
+                },
+                2,
+            )
+            .unwrap();
+        assert_eq!(bounded.entries.len(), 2);
+        assert!(bounded.truncated, "2020 is inside the window and unread");
+    }
+
+    #[test]
+    fn audit_window_refuses_names_that_are_not_days() {
+        let (_temp, catalog) = audit_catalog();
+        record(&catalog, audit_action::THEME_PUT, "abc", "admin:will", "");
+
+        for rejected in [
+            "2026-02-30",          // February has no 30th
+            "2023-02-29",          // not a leap year
+            "2100-02-29",          // century years need /400
+            "2026-13-01",          // no such month
+            "2026-00-10",
+            "2026-04-31",          // April has 30
+            "2026-2-1",            // not zero-padded
+            "",
+            "2026-1-1",
+            "20260101",
+            "../../etc/passwd",
+            "2026-01-01 ",
+            "x026-01-01",
+        ] {
+            for name in ["from", "to"] {
+                let window = match name {
+                    "from" => AuditWindow {
+                        from: Some(rejected),
+                        to: None,
+                    },
+                    _ => AuditWindow {
+                        from: None,
+                        to: Some(rejected),
+                    },
+                };
+                let error = catalog.audit_entries_in(window, 10).unwrap_err();
+                let message = error.to_string();
+                assert!(
+                    message.contains(name) && message.contains(rejected),
+                    "{name}={rejected:?} refused with {message}"
+                );
+            }
+        }
+
+        // A bound that exists but leaves nothing behind it is a mistake, not a
+        // question, and an empty answer would read as "nothing happened".
+        let error = catalog
+            .audit_entries_in(
+                AuditWindow {
+                    from: Some("2026-06-01"),
+                    to: Some("2026-05-01"),
+                },
+                10,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("2026-06-01"),
+            "inverted window: {error}"
+        );
+
+        for accepted in [
+            "2024-02-29", // leap
+            "2000-02-29", // century divisible by 400
+            "1970-01-01",
+            "2026-12-31",
+            "2026-01-01",
+        ] {
+            assert!(is_audit_calendar_day(accepted), "{accepted} rejected");
+            let page = catalog
+                .audit_entries_in(
+                    AuditWindow {
+                        from: None,
+                        to: Some(accepted),
+                    },
+                    10,
+                )
+                .unwrap();
+            assert!(page.entries.len() <= 1, "{accepted} read odd");
+        }
+    }
+
+    #[test]
+    fn truncation_only_says_what_is_really_left_behind() {
+        let (_temp, catalog) = audit_catalog();
+        let busy = [
+            planted("2024-05-06", 1),
+            planted("2024-05-06", 2),
+            planted("2024-05-06", 3),
+        ];
+        plant_audit_lines(
+            &catalog,
+            "2024-05-06",
+            &busy.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+
+        // The page fills exactly with the newest day and nothing older exists.
+        let exact = catalog.audit_entries_in(AuditWindow::default(), 3).unwrap();
+        assert_eq!(exact.entries.len(), 3);
+        assert!(!exact.truncated, "no unread day follows this page");
+
+        // One line fewer does leave unread lines in the same file.
+        let short = catalog.audit_entries_in(AuditWindow::default(), 2).unwrap();
+        assert!(short.truncated);
+
+        // A full page that ends on a day boundary is only truncated when an
+        // older day still holds lines: an empty one must not claim otherwise.
+        plant_audit_lines(&catalog, "2024-05-05", &[]);
+        let boundary = catalog.audit_entries_in(AuditWindow::default(), 3).unwrap();
+        assert_eq!(boundary.entries.len(), 3);
+        assert!(
+            !boundary.truncated,
+            "the older day is empty, nothing was left behind"
+        );
+
+        // Now it genuinely is.
+        plant_audit_lines(&catalog, "2024-05-04", &[&planted("2024-05-04", 1)]);
+        let older = catalog.audit_entries_in(AuditWindow::default(), 3).unwrap();
+        assert!(older.truncated);
+        let all = catalog.audit_entries_in(AuditWindow::default(), 4).unwrap();
+        assert!(!all.truncated, "the whole trail was read");
+        assert_eq!(all.entries.len(), 4);
+    }
+
+    /// The planted lines above claim a timestamp inside the day their file is
+    /// named for, so keep that claim checked: a helper that drifted would make
+    /// the window tests pass against data no real day file could contain.
+    #[test]
+    fn planted_timestamps_land_on_the_day_they_name() {
+        for day in [
+            "1970-01-01",
+            "2000-02-29",
+            "2020-09-13",
+            "2023-11-14",
+            "2024-02-29",
+            "2024-05-06",
+            "2024-12-31",
+            "2026-12-31",
+        ] {
+            assert_eq!(utc_day_name(utc_day_start_ms(day)), day);
+            assert_eq!(utc_day_name(utc_day_start_ms(day) + 86_399_999), day);
+        }
     }
 }
