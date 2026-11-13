@@ -14,13 +14,13 @@ use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, audit_action, detect_font_format, editor_projection,
     hash_file, list_documents, manifest_at_revision, pin_document_theme, project_editor,
-    resolve_document_theme, restore_revision, search_bundle, theme_documents, theme_font_report,
-    unpin_document_theme, AuditRecord, BlockPrecondition, Bundle, DiskCatalog, DocumentSummary,
-    EditorBlockContent, EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense,
-    FontRevision, FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
-    StructurePatchBatch, ThemeDocumentRef, ThemeEmbedKind, ThemeFontSlots, ThemeRevision,
-    FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, LICENSE_WARN_WINDOW_DAYS, MAX_AUDIT_LIMIT,
-    MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
+    resolve_document_theme, restore_revision, search_bundle, theme_documents, theme_font_plan,
+    theme_font_report, unpin_document_theme, AuditRecord, BlockPrecondition, Bundle, DiskCatalog,
+    DocumentSummary, EditorBlockContent, EditorInline, FontDeleteReport, FontFace, FontFileFormat,
+    FontLicense, FontRevision, FontScript, FontStretch, FontStyle, HcdError, PatchBatch,
+    StructureOperation, StructurePatchBatch, ThemeDocumentRef, ThemeEmbedKind, ThemeFontSlots,
+    ThemeRevision, FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, LICENSE_WARN_WINDOW_DAYS,
+    MAX_AUDIT_LIMIT, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -1712,7 +1712,139 @@ async fn document_font_plan(
         // page never has to guess how soon "soon" is.
         "licenseWarnWindowDays": LICENSE_WARN_WINDOW_DAYS,
         "entries": entries,
+        // Only a PDF carries somebody else's rendered text for a pin to move, so
+        // only a PDF export has a run cost to show before the pin.
+        "textForecast": if kind_id == ThemeEmbedKind::Pdf {
+            pdf_text_forecast_payload(&state, &id, &bundle, &head, &manifest, revision)
+        } else {
+            Value::Null
+        },
     })))
+}
+
+/// How large a stored source the forecast will copy and parse for one request.
+///
+/// A forecast is a whole-file job — the copy, the face embeds and the page walk —
+/// so it is capped well below the 512 MiB an upload accepts. Past the cap the
+/// answer says so instead of stalling the console on a number nobody asked for.
+const MAX_FORECAST_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What a source-backed PDF export would do to the text the file already carries.
+///
+/// The face list says which files go in; this says how many runs those files
+/// would actually take and which ones stay, in the export's own words
+/// (`hcd_formats::pdf_text_forecast`), so the operator sees the cost of a pin
+/// before committing it rather than in the report afterwards.
+///
+/// The forecast reads the source the server holds, which is the file
+/// `POST /v1/import` stored — a bundle imported from the command line has no
+/// copy here, and inventing "0 runs would move" for it would read as a clean
+/// bill. Every state that is not `ready` names what is missing instead:
+/// `noTheme` (this revision carries no pin), `otherFormat` (the source is not a
+/// PDF), `noSource`, `tooLarge`, `unreadable`, `catalogError` and `unavailable`.
+///
+/// `sourceMatches` says whether the stored file still hashes to what the
+/// manifest recorded. The export would use the stored file either way, so the
+/// forecast runs and counts it, but the page can say the file on disk is not the
+/// one this document was imported from.
+fn pdf_text_forecast_payload(
+    state: &ServerState,
+    id: &str,
+    bundle: &Bundle,
+    head: &hcd_core::HcdManifest,
+    manifest: &hcd_core::HcdManifest,
+    revision: u64,
+) -> Value {
+    let refused =
+        |state_name: &str, message: String| json!({"state": state_name, "message": message});
+    if manifest.theme_revision_id.is_none() {
+        return refused(
+            "noTheme",
+            format!(
+                "revision {revision} carries no managed theme, so the export would leave the PDF's own text on the fonts that drew it"
+            ),
+        );
+    }
+    if head.source.format != "pdf" {
+        return refused(
+            "otherFormat",
+            format!(
+                "this document was imported from {}, which has no rendered PDF text of its own for a theme to re-point",
+                head.source.format
+            ),
+        );
+    }
+    let source = state
+        .root
+        .join("sources")
+        .join(format!("{id}.{}", head.source.format));
+    let Ok(metadata) = std::fs::metadata(&source) else {
+        return refused(
+            "noSource",
+            "this server holds no copy of the document's source PDF — a bundle imported from the command line, for instance, exports from whichever file the caller passes — so the run-by-run cost can only be read from that export's report".to_string(),
+        );
+    };
+    let bytes = metadata.len();
+    if bytes > MAX_FORECAST_SOURCE_BYTES {
+        return refused(
+            "tooLarge",
+            format!(
+                "the stored source PDF is {bytes} bytes, over the {} MiB a font forecast reads per request",
+                MAX_FORECAST_SOURCE_BYTES / (1024 * 1024)
+            ),
+        );
+    }
+    let source_matches = match hash_file(&source) {
+        Ok(hash) => hash == head.source.sha256,
+        Err(error) => {
+            return refused(
+                "unreadable",
+                format!("the stored source PDF could not be read for the font forecast: {error}"),
+            )
+        }
+    };
+
+    let plan = match theme_font_plan(&state.catalog, bundle, Some(revision), ThemeEmbedKind::Pdf) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return refused(
+                "catalogError",
+                format!("the pinned theme could not be resolved for the font forecast: {error}"),
+            )
+        }
+    };
+    let staged = match tempfile::tempdir() {
+        Ok(staged) => staged,
+        Err(error) => {
+            return refused(
+                "unavailable",
+                format!("the font forecast could not be prepared on this server: {error}"),
+            )
+        }
+    };
+    match hcd_formats::pdf_text_forecast(&source, &staged.path().join("forecast.pdf"), &plan) {
+        Ok(forecast) => match serde_json::to_value(forecast) {
+            Ok(mut payload) => {
+                payload["state"] = json!("ready");
+                payload["sourceBytes"] = json!(bytes);
+                payload["sourceMatches"] = json!(source_matches);
+                if !source_matches {
+                    payload["message"] = json!(
+                        "the stored source PDF does not match the digest this document was imported with, so these are the runs of the file on disk"
+                    );
+                }
+                payload
+            }
+            Err(error) => refused(
+                "unreadable",
+                format!("the font forecast could not be reported: {error}"),
+            ),
+        },
+        Err(error) => refused(
+            "unreadable",
+            format!("the stored source PDF could not be read for the font forecast: {error}"),
+        ),
+    }
 }
 
 /// Which token may ask what a document's export would carry.
@@ -3782,6 +3914,22 @@ mod tests {
 
     /// Write a bundle the way a finished import leaves it: revision zero, its own pin or none.
     fn imported_bundle(path: &std::path::Path, id: &str, theme_revision_id: Option<String>) {
+        imported_bundle_from(path, id, theme_revision_id, "docx", "ab".repeat(32), 1);
+    }
+
+    /// The same, with the source the import recorded.
+    ///
+    /// The font forecast reads `{root}/sources/{id}.{format}` and checks it
+    /// against this descriptor, so a test that wants a `ready` answer has to write
+    /// the file and the manifest as a pair.
+    fn imported_bundle_from(
+        path: &std::path::Path,
+        id: &str,
+        theme_revision_id: Option<String>,
+        format: &str,
+        sha256: String,
+        size_bytes: u64,
+    ) {
         let writer = hcd_core::BundleWriter::create(path).unwrap();
         writer.write_styles("article { color: #222222; }").unwrap();
         writer
@@ -3792,9 +3940,9 @@ mod tests {
                 profile: "semantic-flow".to_string(),
                 revision: 0,
                 source: hcd_core::SourceDescriptor {
-                    format: "docx".to_string(),
-                    sha256: "ab".repeat(32),
-                    size_bytes: 1,
+                    format: format.to_string(),
+                    sha256,
+                    size_bytes,
                 },
                 root_hash: String::new(),
                 annotation_root_hash: String::new(),
@@ -3811,6 +3959,444 @@ mod tests {
                 warnings: Vec::new(),
             })
             .unwrap();
+    }
+
+    /// A one-run PDF, written the way another toolchain would: its own font, its
+    /// own operators, ASCII text in a WinAnsi TrueType face.
+    fn write_source_pdf(path: &std::path::Path, text: &str) {
+        use lopdf::{dictionary, Dictionary, Document, Object, Stream};
+        let mut document = Document::with_version("1.5");
+        let font = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "CourierLike",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 32i64,
+            "LastChar" => 126i64,
+            "Widths" => Object::Array((32..=126u32).map(|_| Object::Integer(600)).collect()),
+        });
+        let fonts_id = document.add_object(dictionary! { "F1" => Object::Reference(font) });
+        let resources_id = document.add_object(dictionary! {
+            "Font" => Object::Reference(fonts_id)
+        });
+        let content = format!("BT\n/F1 12 Tf\n1 0 0 1 72 720 Tm\n({text}) Tj\nET\n");
+        let content_id =
+            document.add_object(Stream::new(Dictionary::new(), content.as_bytes().to_vec()));
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Resources" => Object::Reference(resources_id),
+            "Contents" => Object::Array(vec![Object::Reference(content_id)]),
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => 1,
+            }),
+        );
+        let catalog = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        document.trailer.set("Root", Object::Reference(catalog));
+        document.compress();
+        document.save(path).unwrap();
+    }
+
+    /// A stored source plus the bundle whose manifest points at it, as a pair.
+    /// The file's bytes come back, so a test that swaps the source can put the
+    /// real one — and the pin it has since added on top of it — back in place.
+    fn pdf_document(root: &std::path::Path, id: &str, text: &str) -> Vec<u8> {
+        let sources = root.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let source = sources.join(format!("{id}.pdf"));
+        write_source_pdf(&source, text);
+        let sha256 = hash_file(&source).unwrap();
+        let size = std::fs::metadata(&source).unwrap().len();
+        imported_bundle_from(
+            &root.join(format!("{id}.hcd")),
+            id,
+            None,
+            "pdf",
+            sha256,
+            size,
+        );
+        std::fs::read(source).unwrap()
+    }
+
+    /// Upload a real TrueType face whose license allows PDF embedding, and pin it
+    /// as the body font.
+    ///
+    /// The forecast embeds faces into a copy of the source before judging a run,
+    /// so a made-up blob cannot stand in here the way it does for the face list:
+    /// `bundled_noto_emoji` is a face the 8 MiB gate lets through, and
+    /// `bundled_noto_sans_sc` is one it does not, which is the pair worth having.
+    async fn seed_pdf_font(
+        state: &ServerState,
+        secret: &[u8],
+        font_id: &str,
+        family: &str,
+        bytes: &[u8],
+    ) -> String {
+        let admin = bearer(secret, "*", "admin");
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::copy_from_slice(bytes),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: family.to_string(),
+                faces: vec![UploadedFace {
+                    subfamily: "Regular".to_string(),
+                    weight: 400,
+                    style: FontStyle::Normal,
+                    stretch: FontStretch::Normal,
+                    scripts: vec![FontScript::Latin, FontScript::Hans],
+                    format: FontFileFormat::Ttf,
+                    sha256,
+                    byte_length: bytes.len() as u64,
+                }],
+                license: FontLicense {
+                    name: "OFL-1.1".to_string(),
+                    web_preview: true,
+                    ooxml_embed: true,
+                    pdf_embed: true,
+                    redistribution: true,
+                    expires_at_epoch_ms: None,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin,
+            Json(NewThemeBody {
+                name: "Brand body".to_string(),
+                major: ThemeFontSlots::default(),
+                minor: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: font_id.to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["sans-serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        theme.0.theme_revision_id
+    }
+
+    async fn plan(state: &ServerState, secret: &[u8], id: &str, kind: &str) -> Value {
+        document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: kind.to_string(),
+                revision: None,
+            }),
+            bearer(secret, "*", "admin"),
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    /// The whole point of the forecast is that an operator sees the cost of a pin
+    /// before making it, and that a server which cannot answer says which of the
+    /// reasons it has instead of reporting an uneventful zero.
+    #[tokio::test]
+    async fn font_plan_route_forecasts_the_pdf_text_a_pin_would_touch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, root);
+        let admin = bearer(secret, "*", "admin");
+        // A face small enough to embed, and one that cannot draw the page's
+        // Latin — so the pass runs, counts the run, and says why it stays.
+        let theme = seed_pdf_font(
+            &state,
+            secret,
+            "emoji-body",
+            "Emoji Body",
+            pdf_handler::font_embedder::bundled_noto_emoji(),
+        )
+        .await;
+
+        // Nothing pinned yet: the export would leave every run on its own font,
+        // and that is the answer, not an empty list.
+        let original = pdf_document(root, "doc-f", "Quarterly report");
+        let before = plan(&state, secret, "doc-f", "pdf").await;
+        assert_eq!(before["textForecast"]["state"], "noTheme", "{before}");
+
+        // A format with no PDF text of its own does not get an answer at all.
+        assert!(before["textForecast"].is_object());
+        let word = plan(&state, secret, "doc-f", "docx").await;
+        assert!(word["textForecast"].is_null(), "{word}");
+
+        // Pin it. The same request now counts the runs.
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-f".to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+        let after = plan(&state, secret, "doc-f", "pdf").await;
+        let forecast = &after["textForecast"];
+        assert_eq!(forecast["state"], "ready", "{after}");
+        assert_eq!(forecast["sourceMatches"], true, "{forecast}");
+        assert!(forecast["sourceBytes"].as_u64().unwrap() > 0, "{forecast}");
+        assert_eq!(forecast["runsSeen"].as_u64().unwrap(), 1, "{forecast}");
+        assert_eq!(forecast["lines"].as_array().unwrap().len(), 1, "{forecast}");
+        let stayed = &forecast["lines"][0];
+        assert_eq!(stayed["bucket"], "uncovered", "{stayed}");
+        assert_eq!(stayed["count"].as_u64().unwrap(), 1);
+        assert_eq!(stayed["warning"], true);
+        assert!(
+            stayed["sentence"]
+                .as_str()
+                .unwrap()
+                .contains("can draw every character of it"),
+            "{stayed}"
+        );
+        // The face list and the run count are the same answer seen twice.
+        assert_eq!(after["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(after["entries"][0]["embeds"], true, "{after}");
+        assert_eq!(after["entries"][0]["family"], "Emoji Body");
+        // Reading a forecast must not put a byte into the document's source.
+        assert_eq!(
+            std::fs::read(root.join("sources/doc-f.pdf")).unwrap(),
+            original
+        );
+
+        // An old revision predates the pin, and the forecast follows the revision.
+        let r0 = document_font_plan(
+            State(state.clone()),
+            Path("doc-f".to_string()),
+            Query(FontPlanQuery {
+                kind: "pdf".to_string(),
+                revision: Some(0),
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(r0["textForecast"]["state"], "noTheme", "{r0}");
+
+        // The file on disk is no longer the one the manifest recorded. The export
+        // would still use it, so the count stays and says what it counted.
+        write_source_pdf(&root.join("sources/doc-f.pdf"), "A different file entirely");
+        let swapped = plan(&state, secret, "doc-f", "pdf").await;
+        let swapped = &swapped["textForecast"];
+        assert_eq!(swapped["state"], "ready", "{swapped}");
+        assert_eq!(swapped["sourceMatches"], false, "{swapped}");
+        assert!(
+            swapped["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not match"),
+            "{swapped}"
+        );
+        assert_eq!(swapped["runsSeen"].as_u64().unwrap(), 1);
+        std::fs::write(root.join("sources/doc-f.pdf"), &original).unwrap();
+
+        // A source the server does not hold is the command line's case, and it is
+        // the one answer that must never come back as a quiet zero.
+        std::fs::remove_file(root.join("sources/doc-f.pdf")).unwrap();
+        let missing = plan(&state, secret, "doc-f", "pdf").await;
+        let absent = &missing["textForecast"];
+        assert_eq!(absent["state"], "noSource", "{missing}");
+        assert!(
+            absent["message"].as_str().unwrap().contains("command line"),
+            "{absent}"
+        );
+        // Without the file the run cost is unknown, so nothing pretends to know it.
+        assert!(absent.get("runsRetargeted").is_none(), "{absent}");
+
+        // A document imported from something that is not a PDF has no runs to move.
+        imported_bundle(&root.join("doc-w.hcd"), "doc-w", None);
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-w".to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+        let word_pdf = plan(&state, secret, "doc-w", "pdf").await;
+        assert_eq!(
+            word_pdf["textForecast"]["state"], "otherFormat",
+            "{word_pdf}"
+        );
+        assert!(
+            word_pdf["textForecast"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("docx"),
+            "{word_pdf}"
+        );
+
+        // Too big to read for a number nobody needs yet. A sparse file keeps the
+        // test off the disk.
+        pdf_document(root, "doc-t", "Quarterly report");
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-t".to_string()),
+            admin,
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+        let big = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(root.join("sources/doc-t.pdf"))
+            .unwrap();
+        big.set_len(MAX_FORECAST_SOURCE_BYTES + 1).unwrap();
+        let oversized = plan(&state, secret, "doc-t", "pdf").await;
+        assert_eq!(
+            oversized["textForecast"]["state"], "tooLarge",
+            "{oversized}"
+        );
+        assert!(
+            oversized["textForecast"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("64 MiB"),
+            "{oversized}"
+        );
+    }
+
+    /// A face the PDF gate will not carry has no runs to take, and the forecast
+    /// says that instead of counting a page against a font that never goes in.
+    #[tokio::test]
+    async fn font_plan_route_forecasts_nothing_to_move_when_no_face_will_embed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, root);
+        // 11 MiB, over the 8 MiB the PDF export will carry.
+        let theme = seed_pdf_font(
+            &state,
+            secret,
+            "big-body",
+            "Brand Body",
+            pdf_handler::font_embedder::bundled_noto_sans_sc(),
+        )
+        .await;
+        let original = pdf_document(root, "doc-g", "Quarterly report");
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-g".to_string()),
+            bearer(secret, "*", "admin"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+
+        let answer = plan(&state, secret, "doc-g", "pdf").await;
+        assert_eq!(answer["entries"][0]["embeds"], false, "{answer}");
+        assert!(
+            answer["entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("8 MiB"),
+            "{answer}"
+        );
+        let forecast = &answer["textForecast"];
+        assert_eq!(forecast["state"], "ready", "{answer}");
+        assert_eq!(forecast["runsRetargeted"], 0, "{forecast}");
+        assert!(forecast["faces"].as_array().unwrap().is_empty());
+        assert_eq!(forecast["lines"].as_array().unwrap().len(), 1, "{forecast}");
+        assert_eq!(forecast["lines"][0]["bucket"], "noFace", "{forecast}");
+        assert!(
+            forecast["lines"][0]["sentence"]
+                .as_str()
+                .unwrap()
+                .contains("would be embedded in this PDF"),
+            "{}",
+            forecast["lines"][0]
+        );
+        assert_eq!(
+            std::fs::read(root.join("sources/doc-g.pdf")).unwrap(),
+            original
+        );
+    }
+
+    /// A source that is present but is not a readable PDF gets the embedding
+    /// failure the pass really hit, never a claim that runs moved.
+    #[tokio::test]
+    async fn font_plan_route_says_when_the_stored_source_cannot_be_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, root);
+        let theme = seed_pdf_font(
+            &state,
+            secret,
+            "emoji-bad",
+            "Emoji Body",
+            pdf_handler::font_embedder::bundled_noto_emoji(),
+        )
+        .await;
+
+        std::fs::create_dir_all(root.join("sources")).unwrap();
+        std::fs::write(root.join("sources/doc-x.pdf"), b"not a pdf at all").unwrap();
+        let sha256 = hash_file(root.join("sources/doc-x.pdf")).unwrap();
+        imported_bundle_from(
+            &root.join("doc-x.hcd"),
+            "doc-x",
+            Some(theme),
+            "pdf",
+            sha256,
+            15,
+        );
+        let answer = plan(&state, secret, "doc-x", "pdf").await;
+        let forecast = &answer["textForecast"];
+        assert_eq!(forecast["state"], "ready", "{answer}");
+        assert_eq!(forecast["runsRetargeted"], 0, "{forecast}");
+        assert_eq!(forecast["lines"][0]["bucket"], "noFace", "{forecast}");
+        assert!(
+            forecast["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|line| line["bucket"] == "notEmbedded"),
+            "{forecast}"
+        );
     }
 
     #[test]
