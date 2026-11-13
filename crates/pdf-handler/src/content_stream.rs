@@ -227,6 +227,11 @@ pub struct TextStyle {
     pub fill_color: Option<PdfColor>,
     pub char_spacing: f32,
     pub word_spacing: f32,
+    /// `Tz` horizontal scaling in percent, as it stood when this run was
+    /// written. 100 means the glyphs were not squeezed. A caller that swaps the
+    /// font underneath a run has to fold this in, or it fits the width of an
+    /// unsqueezed run and moves the line.
+    pub horizontal_scaling: f32,
     pub bg_color: Option<PdfColor>,
 }
 
@@ -239,6 +244,7 @@ impl Default for TextStyle {
             fill_color: None,
             char_spacing: 0.0,
             word_spacing: 0.0,
+            horizontal_scaling: 100.0,
             bg_color: None,
         }
     }
@@ -1344,6 +1350,125 @@ pub fn encode_pdf_text_with_font(
     Ok(encode_pdf_string(text))
 }
 
+fn page_font_dictionary<'a>(
+    doc: &'a LopdfDocument,
+    page_id: ObjectId,
+    font_name: &str,
+) -> Option<&'a Dictionary> {
+    let fonts = doc.get_page_fonts(page_id).ok()?;
+    fonts
+        .into_iter()
+        .find(|(name, _)| String::from_utf8_lossy(name) == font_name)
+        .map(|(_, dictionary)| dictionary)
+}
+
+fn font_is_cid(dictionary: &Dictionary) -> bool {
+    dictionary
+        .get(b"Subtype")
+        .ok()
+        .and_then(|value| value.as_name_str().ok())
+        == Some("Type0")
+}
+
+/// The font's own answer to "what do your codes spell", if it gives one.
+fn to_unicode_of(doc: &LopdfDocument, dictionary: &Dictionary) -> Option<HashMap<u32, String>> {
+    let reference = dictionary.get(b"ToUnicode").ok()?.as_reference().ok()?;
+    let Object::Stream(stream) = doc.get_object(reference).ok()? else {
+        return None;
+    };
+    let bytes = decoded_stream_content_with_limit(
+        stream,
+        Some(MAX_EMBEDDED_FACE_BYTES),
+        "PDF ToUnicode CMap",
+    )
+    .ok()?;
+    let cmap = parse_to_unicode_cmap(&String::from_utf8_lossy(&bytes));
+    (!cmap.is_empty()).then_some(cmap)
+}
+
+/// Read one `Tj` or `TJ` operand back as text with the font that drew it.
+///
+/// `None` when the operand is not a string or array of strings. A caller that
+/// is about to rewrite a run needs this: the page parser merges adjacent runs
+/// that share a font, size and colour into a single block whose text spans
+/// several operands, so the block's text is more than the operand at its head
+/// and writing the whole block there would print the tail twice.
+pub fn decode_operand_with_font(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    font_name: &str,
+    operand: &str,
+) -> Option<String> {
+    let dictionary = page_font_dictionary(doc, page_id, font_name)?;
+    let encoding = dictionary.get_font_encoding(doc).ok();
+    let custom = to_unicode_of(doc, dictionary);
+    let trimmed = operand.trim();
+    if trimmed.starts_with('[') {
+        decode_pdf_array_text(
+            trimmed,
+            encoding.as_ref(),
+            custom.as_ref(),
+            font_is_cid(dictionary),
+        )
+    } else {
+        decode_pdf_string(
+            trimmed,
+            encoding.as_ref(),
+            custom.as_ref(),
+            font_is_cid(dictionary),
+        )
+    }
+}
+
+/// Whether this font's codes can be read back as the characters they spell.
+///
+/// `Tj` bytes are glyph addresses, not text, so re-pointing a run at another
+/// font starts by asking the original font what it meant. Two answers are
+/// reliable:
+///
+/// * the font carries a `ToUnicode` CMap, which is its own statement of what
+///   each code spells;
+/// * the font is a one-byte font whose codes fall in the range every standard
+///   encoding agrees on — printable ASCII — which covers the plain Helvetica
+///   and Times runs that predate `ToUnicode`. A font with `/Differences`, or a
+///   CID font whose codes are glyph ids, gets no such pass: the codes above
+///   0x20 mean something only that font knows.
+///
+/// `text` is the decoded run; the ASCII branch looks at it because that is the
+/// only way to know the codes stayed inside the agreed range.
+pub fn page_font_decodes_trustably(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    font_name: &str,
+    text: &str,
+) -> bool {
+    let Some(dictionary) = page_font_dictionary(doc, page_id, font_name) else {
+        return false;
+    };
+    if to_unicode_of(doc, dictionary).is_some() {
+        return true;
+    }
+    if font_is_cid(dictionary) {
+        return false;
+    }
+    if !text
+        .chars()
+        .all(|character| (0x20..=0x7e).contains(&(character as u32)))
+    {
+        return false;
+    }
+    match dictionary.get(b"Encoding") {
+        // No /Encoding on a one-byte font is the PDF default, StandardEncoding.
+        Err(_) => true,
+        Ok(Object::Name(name)) => matches!(
+            name.as_slice(),
+            b"StandardEncoding" | b"WinAnsiEncoding" | b"MacRomanEncoding" | b"PDFDocEncoding"
+        ),
+        // /Differences, or a CID CMap: the codes are this font's own.
+        _ => false,
+    }
+}
+
 /// Parse a numeric value from a PDF content stream operand string.
 fn parse_float(s: &str) -> f32 {
     s.trim().parse::<f32>().unwrap_or(0.0)
@@ -1756,6 +1881,7 @@ fn add_or_merge_text_block(
                 fill_color: state.fill_color.clone(),
                 char_spacing: state.char_spacing,
                 word_spacing: state.word_spacing,
+                horizontal_scaling: state.horizontal_scale * 100.0,
                 bg_color,
             },
             bt_start_line: state.bt_start_line,
