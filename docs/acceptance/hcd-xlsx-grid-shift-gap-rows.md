@@ -116,6 +116,42 @@ unsupported mode: delete an existing XLSX row
 
 同表 21 个 `t="s"` 的共享字符串格子不受影响，`xl/sharedStrings.xml` 也不在 changed 清单里。
 
+## 编辑器里按下去
+
+这一片一个字没改编辑器，所以 UI 这边不需要新按钮，只需要把那两个本来就在的按钮按到空行上。跑的是仓库里的开发栈（按 `examples/hdoc/editor/README.md` 顶部那一套：`hdoc serve` + 协作 sidecar + Vite，`budget-tracker.xlsx` 以 `accept-xlsx` 导入 demo 根），界面语言选英文，起始 r0：
+
+```bash
+cargo build -p officecli
+mkdir -p /tmp/hcd-gap-demo/sources
+cp assets/showcase/budget-tracker.xlsx /tmp/hcd-gap-demo/sources/accept-xlsx.xlsx
+target/debug/officecli hdoc import assets/showcase/budget-tracker.xlsx \
+  --output /tmp/hcd-gap-demo/accept-xlsx.hcd --document-id accept-xlsx
+SECRET="$(openssl rand -hex 32)"
+HCD_TOKEN_SECRET="$SECRET" target/debug/officecli hdoc serve \
+  --root /tmp/hcd-gap-demo --bind 127.0.0.1:8766
+cd examples/hdoc/editor            # npm ci 之后
+HCD_TOKEN_SECRET="$SECRET" npm run sidecar
+HCD_DEMO_ROOT=/tmp/hcd-gap-demo HCD_TOKEN_SECRET="$SECRET" \
+  npm run dev -- --port 8767 --strictPort
+# 打开 http://127.0.0.1:8767/ → 点 XLSX「成绩册」卡片 → Overview
+# 两次按下之后，服务端写的就是这个包，直接从它导出那两修订：
+for rev in 1 2; do
+  target/debug/officecli hdoc export /tmp/hcd-gap-demo/accept-xlsx.hcd \
+    --source /tmp/hcd-gap-demo/sources/accept-xlsx.xlsx --revision $rev \
+    --output /tmp/hcd-gap-ui-r$rev.xlsx --fidelity-report /tmp/hcd-gap-ui-fid$rev.txt
+done
+```
+
+| 步 | 选中 | 按下 | 编辑器状态行 | 落到的修订 |
+|----|------|------|--------------|------------|
+| 0 | `A1`（`Overview`） | — | `revision 0 · Canvas loads near the viewport`，右上 `Saved` | r0 |
+| 1 | `A2`（编辑栏是空的 —— 源没写出这一行） | 插入页 →「在选中行前插入 1 行」 | `revision 1 · At 2 rowbeforeinserted empty rows` | r1 |
+| 2 | `A3`（上一步把源第 3 行顶成第 4 行，第 3 行成了新的空行） | 插入页 →「删除选中行」→ 弹窗确认 | `Revision 2 · Deleted row 3` | r2 |
+
+两步都直接落修订，右上角回到 `Saved`，没有报错条。第 1 步按的就是扫描表里改之前被拒的「插 2」；第 2 步删的第 3 行不是源里那一行，而是第 1 步插完之后自己空出来的那一行（下面夹具表里 r5 同一条形状：窗口覆盖它、字面上没有它），所以这两次按下正好把放宽的两条路径各走了一遍。导出对得上：r1 的 `xl/worksheets/sheet1.xml` 是 `dimension A1:H16`、行 `1,2,4,5,8…16`，r2 回到 `A1:H15`、行 `1,2,3,4,7…15`，两份 fidelity 都是 `HIGH`。
+
+顺带记一条与这一片无关的既有毛病（没改）：第 1 步的状态行在英文界面下是拼出来的。`sourceLocale.tsx` 对 `revision N · 已(删除|新增|撤销)第 M 行/列` 有一条整句正则（第 322 行），所以第 2 步显示成通顺的 `Revision 2 · Deleted row 3`；`已在第 2 行前插入空行` 这条句式不在任何整句正则里，只能落到片段表（第 295 行的 `' · 已在第 '`、`'插入空行'`）上逐个替换，出来是 `At 2 rowbeforeinserted empty rows`。数字和内容都对，词序不顺，要改的是词条，不是补丁侧，也不是这一片带来的。
+
 ## 回不到原字节那条，不是这一片带来的
 
 `Overview` 满是共享公式（源里 `t="shared"` 出现 21 次），任何行移位都会把它们摊平成普通 `<f>`+`<v/>`，所以“插了又删要回得去原字节”这一条在这张表上本来就不成立。为了把这片的责任划清，跑了三组对照：
