@@ -22,6 +22,11 @@
 //! stream, with its own resources, and the count is reported instead. Kerning
 //! from a `TJ` array is lost when such a run moves — the whole run goes out as
 //! one string at the width the page had before.
+//!
+//! [`plan_text_retarget`] answers the same questions without writing: it walks
+//! the same gates and builds the same splices, then throws them away, so an
+//! operator can see the price of a theme before pinning it and get the counts
+//! the export will later report.
 
 use crate::content_stream::{
     decode_operand_with_font, encode_chunk_with_font, estimate_text_width, face_char_to_cid,
@@ -87,16 +92,56 @@ pub fn retarget_text_fonts(
     path: &Path,
     faces: &[String],
 ) -> Result<TextRetargetReport, HandlerError> {
+    let mut document = load_document(path)?;
+    let report = walk(&mut document, faces, true)?;
+    if report.pages_changed > 0 {
+        document.save(path).map_err(|error| {
+            HandlerError::OperationFailed(format!(
+                "failed to save PDF after retargeting text fonts: {error}"
+            ))
+        })?;
+    }
+    Ok(report)
+}
+
+/// Say what [`retarget_text_fonts`] would do to a file, and change nothing.
+///
+/// Whoever pins a theme wants to know the price before the export runs: how
+/// many of the page's own runs would move, and how many would stay in the font
+/// that wrote them. This answers from the same gates, in the same order, over
+/// the same parser as the pass itself, so the counts cannot drift from what the
+/// export later reports. The splices are even built and thrown away — that is
+/// what proves a run really would move.
+///
+/// `pages_changed` is always 0 here, because no page was changed.
+pub fn plan_text_retarget(
+    path: &Path,
+    faces: &[String],
+) -> Result<TextRetargetReport, HandlerError> {
+    let mut document = load_document(path)?;
+    walk(&mut document, faces, false)
+}
+
+fn load_document(path: &Path) -> Result<LopdfDocument, HandlerError> {
+    LopdfDocument::load(path).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to open PDF for font retarget: {error}"))
+    })
+}
+
+/// One walk over every page. `write` decides whether the rewrites land in the
+/// document; the counting is the same either way.
+fn walk(
+    document: &mut LopdfDocument,
+    faces: &[String],
+    write: bool,
+) -> Result<TextRetargetReport, HandlerError> {
     let mut report = TextRetargetReport::default();
     if faces.is_empty() {
         return Ok(report);
     }
-    let mut document = LopdfDocument::load(path).map_err(|error| {
-        HandlerError::OperationFailed(format!("failed to open PDF for font retarget: {error}"))
-    })?;
     let pages: Vec<ObjectId> = document.get_pages().values().copied().collect();
     for page_id in pages {
-        let outcome = retarget_page(&document, page_id, faces)?;
+        let outcome = retarget_page(document, page_id, faces)?;
         report.runs_retargeted += outcome.retargeted;
         report.runs_kept_unreadable += outcome.unreadable;
         report.runs_kept_uncovered += outcome.uncovered;
@@ -107,17 +152,12 @@ pub fn retarget_text_fonts(
         for (name, runs) in outcome.faces {
             tally(&mut report.faces, name, runs);
         }
-        if let Some(content) = outcome.content {
-            write_content_to_page(&mut document, page_id, content.as_bytes())?;
-            report.pages_changed += 1;
+        if write {
+            if let Some(content) = outcome.content {
+                write_content_to_page(document, page_id, content.as_bytes())?;
+                report.pages_changed += 1;
+            }
         }
-    }
-    if report.pages_changed > 0 {
-        document.save(path).map_err(|error| {
-            HandlerError::OperationFailed(format!(
-                "failed to save PDF after retargeting text fonts: {error}"
-            ))
-        })?;
     }
     Ok(report)
 }
@@ -872,5 +912,61 @@ mod tests {
             assert_eq!(report.runs_retargeted, 0);
             assert_eq!(body_line(&path), before, "width {width}");
         }
+    }
+
+    /// Four runs, four different answers, one file: the forecast is only worth
+    /// reading if it is the pass. Same gates, same order, same counts.
+    #[test]
+    fn a_plan_counts_the_same_runs_the_pass_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "BT\n/F1 12 Tf\n1 0 0 1 72 720 Tm\n(Quarterly report) Tj\nET\n\
+                       BT\n/F1 12 Tf\n1 0 0 1 72 700 Tm\n<436166E9> Tj\nET\n\
+                       BT\n/F1 12 Tf\n1 0 0 1 72 680 Tm\n(Alpha) Tj (Beta) Tj\nET\n\
+                       BT\n/HcdSans 12 Tf\n1 0 0 1 72 660 Tm\n(Brand line) Tj\nET\n";
+        let path = write_page(dir.path(), "plan.pdf", content, vec![("F1", plain_font())]);
+        // A plan runs against a file the faces are already in, exactly as the
+        // export does: whoever forecasts first puts the bytes in, then asks.
+        embed_font_file(&path, "HcdSans", bundled_noto_sans_sc()).unwrap();
+
+        let planned = plan_text_retarget(&path, &["HcdSans".to_string()]).unwrap();
+        assert_eq!(planned.runs_retargeted, 1, "{planned:?}");
+        assert_eq!(planned.runs_kept_unreadable, 2, "{planned:?}");
+        assert_eq!(planned.runs_kept_already_theme, 1, "{planned:?}");
+        assert_eq!(planned.faces, vec![("HcdSans".to_string(), 1)]);
+        assert_eq!(planned.runs_seen(), 4);
+        assert_eq!(planned.pages_changed, 0, "a plan changes nothing");
+
+        let applied_path = dir.path().join("applied.pdf");
+        std::fs::copy(&path, &applied_path).unwrap();
+        let mut applied = retarget_text_fonts(&applied_path, &["HcdSans".to_string()]).unwrap();
+        assert_eq!(applied.pages_changed, 1, "{applied:?}");
+        applied.pages_changed = 0;
+        assert_eq!(
+            planned, applied,
+            "the counts an operator reads before pinning must be the counts the export writes"
+        );
+    }
+
+    #[test]
+    fn a_plan_leaves_the_file_it_read_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_page(
+            dir.path(),
+            "quiet.pdf",
+            "BT\n/F1 12 Tf\n1 0 0 1 72 720 Tm\n(Quarterly report) Tj\nET\n",
+            vec![("F1", plain_font())],
+        );
+        embed_font_file(&path, "HcdSans", bundled_noto_sans_sc()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let content = body_line(&path);
+
+        let planned = plan_text_retarget(&path, &["HcdSans".to_string()]).unwrap();
+        assert_eq!(planned.runs_retargeted, 1, "{planned:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(body_line(&path), content);
+        assert_eq!(
+            blocks(&path),
+            vec![("Quarterly report".to_string(), "F1".to_string())]
+        );
     }
 }
