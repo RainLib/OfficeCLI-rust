@@ -171,6 +171,13 @@ export interface FontPlanEntry {
   byteLength: number;
   embeds: boolean;
   reason?: string;
+  /** The day the license stops allowing this face, when it has an end date. */
+  expiresAtEpochMs?: number;
+  /**
+   * The exporter's own renewal sentence, present only for a face whose bytes go
+   * into the file while its license is about to run out.
+   */
+  warning?: string;
 }
 
 export interface FontPlan {
@@ -180,6 +187,8 @@ export interface FontPlan {
   /** Null when that revision carries no pinned theme. */
   themeRevisionId: string | null;
   kind: ExportKind;
+  /** How soon "about to run out" is, straight from the exporter. */
+  licenseWarnWindowDays: number;
   entries: FontPlanEntry[];
 }
 

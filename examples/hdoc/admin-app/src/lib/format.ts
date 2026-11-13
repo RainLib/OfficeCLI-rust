@@ -145,6 +145,28 @@ export function licenseExpired(license: FontLicense): boolean {
   return Date.now() > license.expiresAtEpochMs;
 }
 
+/**
+ * Whole days left on a license, counting any part of a day as one day, or null
+ * when the license has no end date. A license due tomorrow is `1`, never `0` —
+ * a date already past is not "0 days left", it is expired.
+ */
+export function licenseDaysLeft(license: FontLicense): number | null {
+  if (license.expiresAtEpochMs === undefined) return null;
+  const left = license.expiresAtEpochMs - Date.now();
+  return Math.max(0, Math.ceil(left / 86_400_000));
+}
+
+/**
+ * The window the exporter itself warns on, mirroring `LICENSE_WARN_WINDOW_DAYS`
+ * in `hcd-core`. The 体检 answer carries the server's copy of this number, so a
+ * page that shows the exporter's sentence never restates it; this constant is
+ * only what the catalog-wide filters and the overview default to.
+ */
+export const LICENSE_WARN_WINDOW_DAYS = 30;
+
+/** Windows offered for the expiring-soon count; the default is the exporter's. */
+export const LICENSE_WINDOWS = [7, LICENSE_WARN_WINDOW_DAYS, 90];
+
 export function faceLabel(face: FontFace): string {
   const scripts = face.scripts.join("/");
   return `${face.subfamily} ${face.weight} ${face.style}${face.stretch === "normal" ? "" : ` ${face.stretch}`} · ${scripts}`;

@@ -3503,6 +3503,12 @@ mod tests {
         assert!(html.contains("/font-plan"));
         assert!(html.contains("字体落地体检"));
         assert!(html.contains("只登记名字"));
+        // A license that is about to run out is the one thing the check must
+        // raise before any export loses the font: the server's own window read
+        // off the response, the count in 概览, and the day count on the font row.
+        assert!(html.contains("licenseWarnWindowDays"));
+        assert!(html.contains("许可证到期提醒的窗口"));
+        assert!(html.contains("天内到期"));
     }
 
     #[tokio::test]

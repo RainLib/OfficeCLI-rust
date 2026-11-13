@@ -19,15 +19,17 @@ import {
 import { Select } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import {
+  LICENSE_WARN_WINDOW_DAYS,
   formatBytes,
   formatExactBytes,
+  licenseDaysLeft,
   licenseExpired,
 } from "@/lib/format";
 import type { CatalogFont, FontRevision, ThemeRevision } from "@/lib/types";
 import { useCatalog } from "@/state/CatalogProvider";
 import { cn } from "@/lib/utils";
 
-type Scope = "all" | "ooxml" | "pdf" | "web" | "expired" | "unreferenced";
+type Scope = "all" | "ooxml" | "pdf" | "web" | "due" | "expired" | "unreferenced";
 type Sort = "fontId" | "revisions" | "bytes";
 
 /** themeRevisionId → the fontIds its six slots cite. */
@@ -99,6 +101,11 @@ export function FontsView({ onNavigate }: { onNavigate: (route: string) => void 
           return true;
         case "unreferenced":
           return ![...refs.values()].some((fonts) => fonts.has(font.fontId));
+        case "due":
+          return revisions.some((revision) => {
+            const left = licenseDaysLeft(revision.license);
+            return left !== null && left > 0 && left <= LICENSE_WARN_WINDOW_DAYS;
+          });
         case "expired":
           return revisions.some((revision) => licenseExpired(revision.license));
         case "ooxml":
@@ -207,6 +214,7 @@ export function FontsView({ onNavigate }: { onNavigate: (route: string) => void 
           <option value="ooxml">可 OOXML 嵌入</option>
           <option value="pdf">可 PDF 嵌入</option>
           <option value="web">可网页预览</option>
+          <option value="due">许可证即将到期</option>
           <option value="expired">许可证已过期</option>
         </Select>
         <Select
@@ -283,6 +291,14 @@ export function FontsView({ onNavigate }: { onNavigate: (route: string) => void 
                 const licenses = new Set(
                   font.revisions.map((revision) => revision.license.name),
                 );
+                // The row badge names the soonest revision, because that is the
+                // one an operator has to act on first. A revision already past
+                // its date is the 已过期 badge's business, not this one.
+                const dueIn = font.revisions.reduce((soonest, revision) => {
+                  const left = licenseDaysLeft(revision.license);
+                  if (left === null || left <= 0) return soonest;
+                  return soonest === null ? left : Math.min(soonest, left);
+                }, null as number | null);
                 return (
                   <React.Fragment key={font.fontId}>
                     <TableRow>
@@ -318,6 +334,14 @@ export function FontsView({ onNavigate }: { onNavigate: (route: string) => void 
                               {name}
                             </Badge>
                           ))}
+                          {dueIn !== null && dueIn <= LICENSE_WARN_WINDOW_DAYS ? (
+                            <Badge
+                              variant="warning"
+                              title={`还有 ${dueIn} 天到期，到期后导出只登记字体名`}
+                            >
+                              {dueIn} 天内到期
+                            </Badge>
+                          ) : null}
                           {font.revisions.some((revision) =>
                             licenseExpired(revision.license),
                           ) ? (

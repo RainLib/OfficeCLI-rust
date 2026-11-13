@@ -12,8 +12,16 @@ import { PageHeader } from "@/components/Page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { formatBytes, licenseExpired } from "@/lib/format";
+import {
+  LICENSE_WARN_WINDOW_DAYS,
+  LICENSE_WINDOWS,
+  formatDate,
+  formatBytes,
+  licenseDaysLeft,
+  licenseExpired,
+} from "@/lib/format";
 import { tokenStore } from "@/lib/api";
 import { unreferencedFonts } from "@/state/catalogSelectors";
 import { useCatalog } from "@/state/CatalogProvider";
@@ -54,12 +62,17 @@ export function OverviewView({
   onNavigate: (route: string) => void;
 }) {
   const { fonts, themes, retired, documents, loaded } = useCatalog();
+  // How far ahead "about to expire" reaches. The exporter warns on 30, so that
+  // is where the picker starts; the wider windows are for planning a renewal
+  // before the warning ever fires.
+  const [windowDays, setWindowDays] = React.useState(LICENSE_WARN_WINDOW_DAYS);
 
   const totals = React.useMemo(() => {
     let revisions = 0;
     let faces = 0;
     let bytes = 0;
     const expired: string[] = [];
+    const due: string[] = [];
     for (const font of fonts) {
       revisions += font.revisions.length;
       for (const revision of font.revisions) {
@@ -71,16 +84,28 @@ export function OverviewView({
               revision.license.name
             }）`,
           );
+          continue;
+        }
+        const left = licenseDaysLeft(revision.license);
+        const expires = revision.license.expiresAtEpochMs;
+        if (left !== null && expires !== undefined && left <= windowDays) {
+          due.push(
+            `${font.fontId} · ${revision.family}（${
+              revision.license.name
+            } · ${formatDate(expires)} · 还有 ${left} 天）`,
+          );
         }
       }
     }
-    return { revisions, faces, bytes, expired };
-  }, [fonts]);
+    due.sort((left, right) => left.localeCompare(right, "zh-CN"));
+    return { revisions, faces, bytes, expired, due };
+  }, [fonts, windowDays]);
 
   const unreferenced = unreferencedFonts(fonts, themes);
   const unpinned = (documents ?? []).filter((doc) => !doc.themeRevisionId);
   const hasRisks =
     totals.expired.length > 0 ||
+    totals.due.length > 0 ||
     unreferenced.length > 0 ||
     unpinned.length > 0 ||
     retired.length > 0;
@@ -131,14 +156,39 @@ export function OverviewView({
             <CardTitle>要处理的事</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-3">
+            <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              许可证到期提醒的窗口
+              <Select
+                aria-label="许可证到期提醒的窗口"
+                value={String(windowDays)}
+                onChange={(event) => setWindowDays(Number(event.target.value))}
+                className="h-7 w-28 text-xs"
+              >
+                {LICENSE_WINDOWS.map((days) => (
+                  <option key={days} value={String(days)}>
+                    {days} 天内
+                  </option>
+                ))}
+              </Select>
+            </label>
             {!loaded ? (
               <p className="text-xs text-muted-foreground">目录还在加载…</p>
             ) : null}
             {loaded && !hasRisks ? (
               <p className="flex items-center gap-2 text-xs text-success">
                 <CheckCircle2 className="size-4" />
-                没有过期许可证、没有孤立字体、文档都已钉主题。
+                没有过期或即将到期的许可证、没有孤立字体、文档都已钉主题。
               </p>
+            ) : null}
+            {totals.due.length ? (
+              <Risk
+                tone="warning"
+                title={`${totals.due.length} 个修订的许可证将在 ${windowDays} 天内到期`}
+                detail="到期后预览和导出都不再写入字面，只登记字体名。趁现在续许可证或换字面；文档「体检」里那句提醒来自导出自己。"
+                items={totals.due}
+                action={() => onNavigate("fonts")}
+                actionLabel="查看字体"
+              />
             ) : null}
             {totals.expired.length ? (
               <Risk

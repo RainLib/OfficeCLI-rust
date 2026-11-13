@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ScanSearch } from "lucide-react";
+import { AlertTriangle, ScanSearch } from "lucide-react";
 
 import { EmptyState, LoadState } from "@/components/Page";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +33,9 @@ import type { ExportKind, FontPlan } from "@/lib/types";
  * The server answers from the catalog records and never streams a font, so this
  * stays cheap enough to open from a table row — and it keeps answering when the
  * bytes themselves cannot be read, which is when the question usually gets
- * asked. Every `reason` is the sentence the export report writes.
+ * asked. Every `reason` is the sentence the export report writes, and so is the
+ * note for a license that is about to run out: the file is fine today, and the
+ * banner says for how long.
  */
 export function FontPlanDialog({
   open,
@@ -93,6 +95,15 @@ export function FontPlanDialog({
   }, [open, documentId, kind, revision, badRevision, nonce]);
 
   const embedded = plan?.entries.filter((entry) => entry.embeds).length ?? 0;
+  // One license covers every face of a revision, so the same sentence can come
+  // back for Regular and Bold alike; the operator needs to hear it once.
+  const due = React.useMemo(() => {
+    const seen: string[] = [];
+    for (const entry of plan?.entries ?? []) {
+      if (entry.warning && !seen.includes(entry.warning)) seen.push(entry.warning);
+    }
+    return seen;
+  }, [plan]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -167,6 +178,22 @@ export function FontPlanDialog({
 
         {plan && plan.entries.length > 0 ? (
           <>
+            {due.length ? (
+              <div className="grid gap-1 rounded-lg border border-warning/40 bg-warning/5 p-3">
+                <p className="flex items-center gap-2 text-xs font-medium text-warning">
+                  <AlertTriangle className="size-4" />
+                  {due.length} 个字面的许可证将在 {plan.licenseWarnWindowDays} 天内到期
+                </p>
+                {due.map((warning) => (
+                  <p key={warning} className="text-[11px] text-muted-foreground">
+                    {warning}
+                  </p>
+                ))}
+                <p className="text-[11px] text-muted-foreground">
+                  这几天里导出照常写入字库字节，过了那一天就只登记字体名。趁还能嵌，换字面或续许可证。
+                </p>
+              </div>
+            ) : null}
             <div className="max-h-[50vh] overflow-auto rounded-xl border">
               <Table>
                 <TableHeader>
