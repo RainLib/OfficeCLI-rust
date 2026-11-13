@@ -9303,6 +9303,21 @@ fn verify_grid_shift_source(
                                         | "formula1"
                                         | "formula2"
                                         | "extLst"
+                                        // What a sheet protects is a list of switches
+                                        // and a password hash, never an address: which
+                                        // commands the interactive user may run, and
+                                        // nothing about where a cell sits. So the
+                                        // element carries along exactly as the workbook
+                                        // wrote it — a shift that re-spelled a hash or
+                                        // quietly lifted a switch would be changing the
+                                        // protection, not the grid. The protection
+                                        // shapes that *do* name cells are refused by
+                                        // this same check until something can move
+                                        // them: any element written inside the
+                                        // protection, and the `protectedRanges` list of
+                                        // ranges a protected sheet still lets the user
+                                        // edit.
+                                        | "sheetProtection"
                                         | "drawing"
                                         | "headerFooter"
                                         | "oddHeader"
@@ -14907,6 +14922,246 @@ mod tests {
     }
 
     #[test]
+    fn a_shift_moves_a_protected_sheet_and_leaves_the_protection_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("protected.xlsx");
+        let bundle_path = temp.path().join("protected.hcd");
+        create_filter_validation_fixture(&source, WORKBOOK_PROTECTION_BLOCK);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("protected-grid-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle
+            .read_index_page(&imported, 0)
+            .unwrap()
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_name == "Data")
+            })
+            .and_then(|chunk| chunk.grid.as_ref())
+            .map(|grid| grid.sheet_id.clone())
+            .unwrap();
+        // A sheet the workbook protects is still a grid: a revision that moves no
+        // rows exports the protected part exactly as the workbook wrote it.
+        let head = temp.path().join("protected-head.xlsx");
+        export_xlsx(&bundle, &source, &head, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&head, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml")
+        );
+        let history = [
+            (
+                "row",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 3,
+                },
+                ["<dimension ref=\"A1:C13\"", "<c r=\"A13\""],
+            ),
+            (
+                "column",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_13,
+                PatchOperation::XlsxColumnInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_column: 2,
+                },
+                ["<dimension ref=\"A1:D13\"", "<c r=\"D13\""],
+            ),
+            (
+                "undo",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 3,
+                },
+                ["<dimension ref=\"A1:D12\"", "<c r=\"D12\""],
+            ),
+        ];
+        for (index, (kind, schema, operation, expectations)) in history.into_iter().enumerate() {
+            let revision = index as u64;
+            assert_eq!(
+                hcd_core::apply_patch(
+                    &bundle,
+                    &PatchBatch {
+                        schema_version: schema.to_string(),
+                        document_id: "protected-grid-doc".to_string(),
+                        patch_id: format!("protected-shift-{kind}"),
+                        base_revision: revision,
+                        actor: BTreeMap::new(),
+                        operations: vec![operation],
+                        metadata: BTreeMap::new(),
+                    },
+                    revision,
+                )
+                .unwrap()
+                .revision,
+                revision + 1
+            );
+            let exported = temp.path().join(format!("protected-{kind}.xlsx"));
+            export_xlsx(
+                &bundle,
+                &source,
+                &exported,
+                &ExportOptions {
+                    revision: Some(revision + 1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let sheet = read_zip_entry(&exported, "xl/worksheets/sheet2.xml");
+            for expected in expectations {
+                assert!(sheet.contains(expected), "{kind}: {expected}\n{sheet}");
+            }
+            // The switches and the hash are the protection: not one character of
+            // them is a coordinate, so a shift that moved rows has nothing to
+            // re-count here and leaves the element byte for byte — lifting a switch
+            // or re-spelling a hash would be editing the protection, not the grid.
+            assert!(
+                sheet.contains(WORKBOOK_PROTECTION_BLOCK),
+                "{kind}:\n{sheet}"
+            );
+            // Only the tab that moved is rewritten; the rest of the workbook keeps
+            // every byte the workbook wrote, protection and all.
+            for kept in [
+                "xl/worksheets/sheet1.xml",
+                "xl/worksheets/sheet3.xml",
+                "[Content_Types].xml",
+                "xl/workbook.xml",
+                "xl/_rels/workbook.xml.rels",
+            ] {
+                assert_eq!(
+                    read_zip_entry(&exported, kept),
+                    read_zip_entry(&source, kept),
+                    "{kind}: {kept}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_protection_that_names_cells_still_stops_the_shift() {
+        let temp = tempfile::tempdir().unwrap();
+        // A worksheet block a workbook might carry under the switches, the shift to
+        // ask of it, and the message the shift must answer with.
+        struct BlockedProtection {
+            kind: &'static str,
+            schema: &'static str,
+            shift: fn(&str) -> PatchOperation,
+            block: &'static str,
+            refusal: &'static str,
+        }
+        let row = |sheet_id: &str| PatchOperation::XlsxRowInsert {
+            sheet_id: sheet_id.to_string(),
+            before_row: 3,
+        };
+        let cases = [
+            BlockedProtection {
+                kind: "edit-range",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                shift: row,
+                // The ranges a protected sheet still lets the user edit are the one
+                // protection shape made of addresses; nothing moves them yet.
+                block: r#"<sheetProtection sheet="1" objects="1" scenarios="1"/><protectedRanges><protectedRange sqref="B2:B100" name="Editable"/></protectedRanges>"#,
+                refusal: "grid shift cannot update worksheet element protectedRanges",
+            },
+            BlockedProtection {
+                kind: "nested",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                shift: row,
+                // A producer that writes what it protects inside the element rather
+                // than beside it puts something under the switches that is not a
+                // switch, and this pass reads no address in there.
+                block: r#"<sheetProtection sheet="1"><allowed range="A1:C3"/></sheetProtection>"#,
+                refusal: "grid shift cannot update worksheet element allowed",
+            },
+            BlockedProtection {
+                kind: "scenario",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                shift: row,
+                // The `scenarios` switch says nothing; the scenario list beside it
+                // holds a formula per scenario and rows it hides.
+                block: r#"<sheetProtection sheet="1" scenarios="1"/><scenarios count="1"><scenario name="Low" locked="1" hidden="1" comment="rows 5 to 9"><formula>Sheet1!$A$5:$A$9</formula></scenario></scenarios>"#,
+                refusal: "grid shift cannot update worksheet element scenarios",
+            },
+        ];
+        for case in cases {
+            let BlockedProtection {
+                kind,
+                schema,
+                shift,
+                block,
+                refusal,
+            } = case;
+            let source = temp.path().join(format!("{kind}.xlsx"));
+            let bundle_path = temp.path().join(format!("{kind}.hcd"));
+            create_filter_validation_fixture(&source, block);
+            let imported = import_xlsx(
+                &source,
+                &bundle_path,
+                &ImportOptions::new("protected-blocked-doc"),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let bundle = Bundle::open(&bundle_path).unwrap();
+            let sheet_id = bundle
+                .read_index_page(&imported, 0)
+                .unwrap()
+                .chunks
+                .iter()
+                .find(|chunk| {
+                    chunk
+                        .grid
+                        .as_ref()
+                        .is_some_and(|grid| grid.sheet_name == "Data")
+                })
+                .and_then(|chunk| chunk.grid.as_ref())
+                .map(|grid| grid.sheet_id.clone())
+                .unwrap();
+            // Nothing asked of the grid is nothing refused: the protected workbook
+            // exports whole until a shift wants a range moved.
+            let head = temp.path().join(format!("{kind}-head.xlsx"));
+            export_xlsx(&bundle, &source, &head, &ExportOptions::default()).unwrap();
+            assert_eq!(
+                read_zip_entry(&head, "xl/worksheets/sheet2.xml"),
+                read_zip_entry(&source, "xl/worksheets/sheet2.xml"),
+                "{kind}"
+            );
+            hcd_core::apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: schema.to_string(),
+                    document_id: "protected-blocked-doc".to_string(),
+                    patch_id: format!("protected-blocked-{kind}"),
+                    base_revision: 0,
+                    actor: BTreeMap::new(),
+                    operations: vec![shift(&sheet_id)],
+                    metadata: BTreeMap::new(),
+                },
+                0,
+            )
+            .unwrap();
+            let blocked = temp.path().join(format!("{kind}-blocked.xlsx"));
+            let error = export_xlsx(&bundle, &source, &blocked, &ExportOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refusal), "{kind}: {error}");
+            assert!(
+                !blocked.exists(),
+                "{kind}: a refused shift still wrote a file"
+            );
+        }
+    }
+
+    #[test]
     fn middle_row_insertion_shifts_across_chunk_windows() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("long.xlsx");
@@ -19393,6 +19648,14 @@ mod tests {
     /// validation rules — one picking from a list spelled out in the formula, one
     /// comparing against a cell of its own tab.
     const WORKBOOK_FILTER_BLOCK: &str = r#"<autoFilter ref="A1:C12" xmlns:etc="http://www.wps.cn/officeDocument/2017/etCustomData" etc:filterBottomFollowUsedRange="0"><filterColumn colId="1"><filters><filter val="Sales"/></filters></filterColumn><extLst/></autoFilter><sortState ref="A2:C12"><sortCondition ref="C2:C12"/></sortState><dataValidations count="2"><dataValidation type="list" allowBlank="1" promptTitle="Dept &amp; Cat" prompt="Pick a &quot;list&quot;" sqref="B2:B100"><formula1>&quot;Engineering,Marketing,R&amp;D&quot;</formula1></dataValidation><dataValidation type="whole" operator="greaterThan" sqref="A2 A5:A6"><formula1>$C$5</formula1></dataValidation></dataValidations>"#;
+
+    /// Sheet protection the way a workbook that came from `budget-tracker.xlsx`
+    /// writes it: the switches say what the interactive user may not do, and the
+    /// password is kept twice over — the legacy hash for readers that still ask for
+    /// it, the modern algorithm, salt, spin count and digest for the ones that do.
+    /// Not one of those values is an address, and the digest is full of the
+    /// characters a writer is tempted to escape.
+    const WORKBOOK_PROTECTION_BLOCK: &str = r#"<sheetProtection sheet="1" objects="1" scenarios="1" formatCells="0" insertRows="0" password="8C2E" algorithmName="SHA-512" hashValue="qk7+2p0V1Y/5gJnZQ==" saltValue="3vL1fM2+xw==" spinCount="100000"/>"#;
 
     /// Three worksheets, the middle one holding twelve rows across three columns
     /// and whatever the caller puts after them. The first and the third carry no
