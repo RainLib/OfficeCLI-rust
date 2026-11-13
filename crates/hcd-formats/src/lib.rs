@@ -13,7 +13,8 @@ use std::path::Path;
 
 pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
 pub use theme_fonts::{
-    apply_theme_fonts, pdf_body_face, PdfBodyFace, PdfFaceOptions, ThemeFontApplication,
+    apply_theme_fonts, pdf_body_face, pdf_text_forecast, PdfBodyFace, PdfFaceOptions,
+    PdfForecastFace, PdfRetargetLine, PdfTextForecast, ThemeFontApplication,
 };
 
 /// Expand presentation-only Markdown features without changing canonical HCD.

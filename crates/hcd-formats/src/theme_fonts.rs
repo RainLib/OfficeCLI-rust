@@ -194,7 +194,7 @@ fn apply_pdf(
     pdf: PdfFaceOptions,
 ) -> Result<ThemeFontApplication, HcdError> {
     let mut report = ThemeFontApplication::default();
-    let mut index = 0;
+    let mut naming = PdfFaceNaming::default();
     // Faces that made it into the file, so the text already on the page can be
     // pointed at them: slot priority, plan position (for a stable tie), name,
     // and the family the report should call it.
@@ -215,9 +215,7 @@ fn apply_pdf(
                     note_license(&mut report, decision);
                     continue;
                 }
-                index += 1;
-                let name =
-                    pdf_resource_name(&decision.family, decision.weight, decision.style, index);
+                let name = naming.next(&decision.family, decision.weight, decision.style);
                 match pdf_handler::font_embedder::embed_font_file(target, &name, bytes) {
                     Ok(()) => {
                         report.preserved.push(format!(
@@ -255,33 +253,53 @@ fn apply_pdf(
     Ok(report)
 }
 
-/// Fold one retarget pass into the fidelity report: what moved, and every run
-/// that stayed, by the reason it stayed.
-fn report_retarget(
-    report: &mut ThemeFontApplication,
+/// One outcome of a retarget pass, as a sentence and as data.
+///
+/// The export's fidelity report and the console's pre-pin forecast both read
+/// [`retarget_lines`], so an operator cannot be shown one number before pinning
+/// a theme and a different one in the report afterwards. `bucket` is the stable
+/// key for a page that wants to group lines; `sentence` is the wording a person
+/// gets in the downloaded file's report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfRetargetLine {
+    /// `moved`, `unreadable`, `uncovered`, `unfittable`, `form`,
+    /// `splitContent`, `alreadyTheme` or `noFace`.
+    pub bucket: &'static str,
+    pub count: usize,
+    /// True when the export writes it as a warning: text that did not move.
+    pub warning: bool,
+    pub sentence: String,
+}
+
+/// What a source-backed PDF export would do to the text the file already has.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfTextForecast {
+    /// Every text run the pass looked at, moved or not.
+    pub runs_seen: usize,
+    pub runs_retargeted: usize,
+    /// The faces that would draw the moved text, in the order the pass offers
+    /// them, with how many runs each would take.
+    pub faces: Vec<PdfForecastFace>,
+    /// Every outcome, moved and kept, in the wording the export reports.
+    pub lines: Vec<PdfRetargetLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfForecastFace {
+    pub family: String,
+    pub subfamily: String,
+    pub runs: usize,
+}
+
+/// Turn one pass's counters into the lines a person reads.
+fn retarget_lines(
     moved: &pdf_handler::font_retarget::TextRetargetReport,
     families: &HashMap<String, (String, String)>,
-) {
-    if moved.runs_retargeted > 0 {
-        let faces: Vec<String> = moved
-            .faces
-            .iter()
-            .map(|(name, runs)| {
-                let (family, subfamily) = families
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| (name.clone(), String::new()));
-                format!("{family} {subfamily} in {runs} run{}", plural(*runs))
-            })
-            .collect();
-        report.preserved.push(format!(
-            "{} text run{} in the PDF now {} with the pinned theme font: {}; each run keeps the width it had, held with horizontal scaling, so kerning inside a moved run is not carried over",
-            moved.runs_retargeted,
-            plural(moved.runs_retargeted),
-            if moved.runs_retargeted == 1 { "draws" } else { "draw" },
-            faces.join(", ")
-        ));
-    }
+) -> Vec<PdfRetargetLine> {
+    let mut lines = Vec::new();
     // Every line counts itself, so its verb, its pronoun and its reason read
     // right at one run and at a hundred.
     let object = |count: usize| if count == 1 { "it" } else { "them" };
@@ -297,60 +315,131 @@ fn report_retarget(
         )
     };
 
+    if moved.runs_retargeted > 0 {
+        let faces: Vec<String> = moved
+            .faces
+            .iter()
+            .map(|(name, runs)| {
+                let (family, subfamily) = families
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| (name.clone(), String::new()));
+                format!("{family} {subfamily} in {runs} run{}", plural(*runs))
+            })
+            .collect();
+        lines.push(PdfRetargetLine {
+            bucket: "moved",
+            count: moved.runs_retargeted,
+            warning: false,
+            sentence: format!(
+                "{} text run{} in the PDF now {} with the pinned theme font: {}; each run keeps the width it had, held with horizontal scaling, so kerning inside a moved run is not carried over",
+                moved.runs_retargeted,
+                plural(moved.runs_retargeted),
+                if moved.runs_retargeted == 1 { "draws" } else { "draw" },
+                faces.join(", ")
+            ),
+        });
+    }
+
     if moved.runs_kept_unreadable > 0 {
         let count = moved.runs_kept_unreadable;
-        report.warnings.push(format!(
-            "{} because {} does not say what {} character codes spell",
-            held(count),
-            if count == 1 {
-                "that font"
-            } else {
-                "those fonts"
-            },
-            possessive(count)
-        ));
+        lines.push(PdfRetargetLine {
+            bucket: "unreadable",
+            count,
+            warning: true,
+            sentence: format!(
+                "{} because {} does not say what {} character codes spell",
+                held(count),
+                if count == 1 {
+                    "that font"
+                } else {
+                    "those fonts"
+                },
+                possessive(count)
+            ),
+        });
     }
     if moved.runs_kept_uncovered > 0 {
         let count = moved.runs_kept_uncovered;
-        report.warnings.push(format!(
-            "{} because no pinned theme font can draw every character of {}",
-            held(count),
-            object(count)
-        ));
+        lines.push(PdfRetargetLine {
+            bucket: "uncovered",
+            count,
+            warning: true,
+            sentence: format!(
+                "{} because no pinned theme font can draw every character of {}",
+                held(count),
+                object(count)
+            ),
+        });
     }
     if moved.runs_kept_unfittable > 0 {
-        report.warnings.push(format!(
-            "{} because the swap would need the glyphs squeezed past twice their width, or down to half",
-            held(moved.runs_kept_unfittable)
-        ));
+        let count = moved.runs_kept_unfittable;
+        lines.push(PdfRetargetLine {
+            bucket: "unfittable",
+            count,
+            warning: true,
+            sentence: format!(
+                "{} because the swap would need the glyphs squeezed past twice their width, or down to half",
+                held(count)
+            ),
+        });
     }
     if moved.forms_left_alone > 0 {
         let count = moved.forms_left_alone;
-        report.warnings.push(format!(
-            "{count} form xobject{} in the PDF {} {} own text, whose operators live in another stream, which this export does not touch",
-            plural(count),
-            verb(count),
-            possessive(count)
-        ));
+        lines.push(PdfRetargetLine {
+            bucket: "form",
+            count,
+            warning: true,
+            sentence: format!(
+                "{count} form xobject{} in the PDF {} {} own text, whose operators live in another stream, which this export does not touch",
+                plural(count),
+                verb(count),
+                possessive(count)
+            ),
+        });
     }
     if moved.pages_with_split_content > 0 {
         let count = moved.pages_with_split_content;
-        report.warnings.push(format!(
-            "{count} page{} in the PDF {} every font it already carried, because the text is split over more than one content stream and this export rewrites only the first",
-            plural(count), verb(count)
-        ));
+        lines.push(PdfRetargetLine {
+            bucket: "splitContent",
+            count,
+            warning: true,
+            sentence: format!(
+                "{count} page{} in the PDF {} every font it already carried, because the text is split over more than one content stream and this export rewrites only the first",
+                plural(count), verb(count)
+            ),
+        });
     }
     if moved.runs_kept_already_theme > 0 {
-        report.preserved.push(format!(
-            "{} text run{} {} already drawn with a pinned theme font",
-            moved.runs_kept_already_theme,
-            plural(moved.runs_kept_already_theme),
-            if moved.runs_kept_already_theme == 1 {
-                "was"
-            } else {
-                "were"
-            }
-        ));
+        let count = moved.runs_kept_already_theme;
+        lines.push(PdfRetargetLine {
+            bucket: "alreadyTheme",
+            count,
+            warning: false,
+            sentence: format!(
+                "{} text run{} {} already drawn with a pinned theme font",
+                count,
+                plural(count),
+                if count == 1 { "was" } else { "were" }
+            ),
+        });
+    }
+    lines
+}
+
+/// Fold one retarget pass into the fidelity report: what moved, and every run
+/// that stayed, by the reason it stayed.
+fn report_retarget(
+    report: &mut ThemeFontApplication,
+    moved: &pdf_handler::font_retarget::TextRetargetReport,
+    families: &HashMap<String, (String, String)>,
+) {
+    for line in retarget_lines(moved, families) {
+        if line.warning {
+            report.warnings.push(line.sentence);
+        } else {
+            report.preserved.push(line.sentence);
+        }
     }
 }
 
@@ -360,6 +449,122 @@ fn plural(count: usize) -> &'static str {
     } else {
         "s"
     }
+}
+
+/// The resource names a PDF export gives the faces it puts in the file.
+///
+/// One owner for the numbering, because a forecast that names a face
+/// differently would go looking for a font the export never registered.
+#[derive(Default)]
+struct PdfFaceNaming {
+    embedded: usize,
+}
+
+impl PdfFaceNaming {
+    /// The next face the export embeds takes the next name. A face the print
+    /// engine already wrote is never asked for one: its bytes were in the file
+    /// before this naming began.
+    fn next(&mut self, family: &str, weight: u16, style: FontStyle) -> String {
+        self.embedded += 1;
+        pdf_resource_name(family, weight, style, self.embedded)
+    }
+}
+
+/// Answer "what would this theme cost the text my PDF already carries".
+///
+/// `staging` is a path the caller owns and may delete: this makes a private
+/// copy of `source` there and writes the faces into it exactly as
+/// [`apply_theme_fonts`] writes them, because a run can only be judged against
+/// a face the page can actually reach. `source` itself is only read.
+///
+/// The plan must be the one the export would use ([`hcd_core::theme_font_plan`]
+/// for the same revision and `ThemeEmbedKind::Pdf`), so a face the license will
+/// not carry, an expired one and one over the size limit are missing from the
+/// forecast for the same reason they are missing from the file. The lines come
+/// out of [`retarget_lines`], the builder the fidelity report uses.
+///
+/// Only a source-backed export is forecast here. In a semantic export the print
+/// engine picks the body face itself ([`pdf_body_face`]) and there is no run of
+/// somebody else's text to re-point.
+pub fn pdf_text_forecast(
+    source: &Path,
+    staging: &Path,
+    plan: &[ThemeFontDecision],
+) -> Result<PdfTextForecast, HcdError> {
+    std::fs::copy(source, staging)?;
+    let mut naming = PdfFaceNaming::default();
+    let mut carried: Vec<(u8, usize, String)> = Vec::new();
+    let mut families: HashMap<String, (String, String)> = HashMap::new();
+    let mut refused: Vec<String> = Vec::new();
+    for (position, decision) in plan.iter().enumerate() {
+        let ThemeFontAction::Embed { bytes, .. } = &decision.action else {
+            continue;
+        };
+        let name = naming.next(&decision.family, decision.weight, decision.style);
+        match pdf_handler::font_embedder::embed_font_file(staging, &name, bytes) {
+            Ok(()) => {
+                carried.push((slot_priority(&decision.slots), position, name.clone()));
+                families.insert(name, (decision.family.clone(), decision.subfamily.clone()));
+            }
+            // The same sentence the export writes: a face that cannot go into
+            // the file cannot take any text either.
+            Err(error) => refused.push(format!(
+                "{} {} was not embedded because {error}; the PDF text keeps its original fonts",
+                decision.family, decision.subfamily
+            )),
+        }
+    }
+
+    let mut forecast = if carried.is_empty() {
+        PdfTextForecast {
+            lines: vec![PdfRetargetLine {
+                bucket: "noFace",
+                count: 0,
+                warning: true,
+                sentence: if refused.is_empty() {
+                    "no pinned theme font would be embedded in this PDF, so none of its text would move".to_string()
+                } else {
+                    "no pinned theme font could be embedded in this PDF, so none of its text would move".to_string()
+                },
+            }],
+            ..PdfTextForecast::default()
+        }
+    } else {
+        carried.sort_by_key(|(priority, position, _)| (*priority, *position));
+        let names: Vec<String> = carried.iter().map(|(_, _, name)| name.clone()).collect();
+        let moved =
+            pdf_handler::font_retarget::plan_text_retarget(staging, &names).map_err(|error| {
+                HcdError::SourceMismatch(format!(
+                    "the document's own PDF could not be read for the font forecast: {error}"
+                ))
+            })?;
+        PdfTextForecast {
+            runs_seen: moved.runs_seen(),
+            runs_retargeted: moved.runs_retargeted,
+            faces: moved
+                .faces
+                .iter()
+                .filter_map(|(name, runs)| {
+                    let (family, subfamily) = families.get(name)?.clone();
+                    Some(PdfForecastFace {
+                        family,
+                        subfamily,
+                        runs: *runs,
+                    })
+                })
+                .collect(),
+            lines: retarget_lines(&moved, &families),
+        }
+    };
+    for sentence in refused {
+        forecast.lines.push(PdfRetargetLine {
+            bucket: "notEmbedded",
+            count: 1,
+            warning: true,
+            sentence,
+        });
+    }
+    Ok(forecast)
 }
 
 fn apply_ooxml(
@@ -1950,6 +2155,178 @@ mod tests {
         assert!(
             !kept.contains("1 text run in the PDF keep the fonts"),
             "{kept}"
+        );
+    }
+
+    /// The forecast is only worth showing before a pin if the export writes the
+    /// same sentence afterwards: same plan, same faces, same builder.
+    #[test]
+    fn a_forecast_line_is_the_sentence_the_export_would_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.pdf");
+        write_source_pdf(&source, "Quarterly report");
+        let face = slotted(
+            &["minor-latin"],
+            "Brand Sans SC",
+            embedded(pdf_handler::font_embedder::bundled_noto_sans_sc()),
+        );
+
+        let forecast = pdf_text_forecast(
+            &source,
+            &dir.path().join("staging.pdf"),
+            std::slice::from_ref(&face),
+        )
+        .unwrap();
+        assert_eq!(forecast.runs_seen, 1, "{forecast:?}");
+        assert_eq!(forecast.runs_retargeted, 1, "{forecast:?}");
+        assert_eq!(
+            forecast.faces,
+            vec![PdfForecastFace {
+                family: "Brand Sans SC".to_string(),
+                subfamily: "Regular".to_string(),
+                runs: 1,
+            }]
+        );
+        assert_eq!(forecast.lines[0].bucket, "moved", "{:?}", forecast.lines);
+        assert!(!forecast.lines[0].warning);
+
+        let export = dir.path().join("export.pdf");
+        std::fs::copy(&source, &export).unwrap();
+        let report = apply_pdf(
+            &export,
+            &[face],
+            PdfFaceOptions {
+                retarget_existing_text: true,
+                ..PdfFaceOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            report.preserved.contains(&forecast.lines[0].sentence),
+            "{:?}",
+            report.preserved
+        );
+        // And the run really did move, so the forecast was not a story.
+        assert!(page_text(&export).contains("/HcdBrandSansSC 12 Tf"));
+    }
+
+    #[test]
+    fn a_forecast_counts_the_runs_its_face_cannot_draw() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("emoji.pdf");
+        write_source_pdf(&source, "Quarterly report");
+        let face = slotted(
+            &["minor-latin"],
+            "Brand Emoji",
+            embedded(pdf_handler::font_embedder::bundled_noto_emoji()),
+        );
+
+        let forecast = pdf_text_forecast(
+            &source,
+            &dir.path().join("staging.pdf"),
+            std::slice::from_ref(&face),
+        )
+        .unwrap();
+        assert_eq!(forecast.runs_seen, 1, "{forecast:?}");
+        assert_eq!(forecast.runs_retargeted, 0);
+        assert!(forecast.faces.is_empty(), "{:?}", forecast.faces);
+        let kept = forecast
+            .lines
+            .iter()
+            .find(|line| line.bucket == "uncovered")
+            .expect("the run the face cannot draw has to be counted");
+        assert!(kept.warning);
+        assert!(
+            kept.sentence.contains("can draw every character of it"),
+            "{}",
+            kept.sentence
+        );
+
+        let export = dir.path().join("export.pdf");
+        std::fs::copy(&source, &export).unwrap();
+        let report = apply_pdf(
+            &export,
+            &[face],
+            PdfFaceOptions {
+                retarget_existing_text: true,
+                ..PdfFaceOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            report.warnings.contains(&kept.sentence),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_forecast_with_nothing_to_embed_says_so_instead_of_a_bare_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("denied.pdf");
+        write_source_pdf(&source, "Quarterly report");
+        let before = std::fs::read(&source).unwrap();
+        let denied = slotted(
+            &["minor-latin"],
+            "Brand Sans SC",
+            ThemeFontAction::RegisterOnly {
+                reason: "许可证不允许嵌入字面".to_string(),
+            },
+        );
+
+        let forecast =
+            pdf_text_forecast(&source, &dir.path().join("staging.pdf"), &[denied]).unwrap();
+        assert_eq!(forecast.runs_seen, 0, "{forecast:?}");
+        assert_eq!(forecast.lines.len(), 1, "{:?}", forecast.lines);
+        assert_eq!(forecast.lines[0].bucket, "noFace");
+        assert!(
+            forecast.lines[0]
+                .sentence
+                .contains("none of its text would move"),
+            "{}",
+            forecast.lines[0].sentence
+        );
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            before,
+            "a forecast reads the document's own PDF and never edits it"
+        );
+    }
+
+    #[test]
+    fn the_forecast_offers_the_slots_in_the_order_the_export_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("order.pdf");
+        write_source_pdf(&source, "Quarterly report");
+        let face = pdf_handler::font_embedder::bundled_noto_sans_sc();
+        // Listed first, so named first, but the east-Asian slot is offered after
+        // the body Latin one — the same order the export uses.
+        let east_asia = slotted(&["minor-east-asia"], "Brand Emoji", embedded(face));
+        let latin = slotted(&["minor-latin"], "Brand Body", embedded(face));
+
+        let forecast = pdf_text_forecast(
+            &source,
+            &dir.path().join("staging.pdf"),
+            &[east_asia, latin],
+        )
+        .unwrap();
+        assert_eq!(
+            forecast.faces,
+            vec![PdfForecastFace {
+                family: "Brand Body".to_string(),
+                subfamily: "Regular".to_string(),
+                runs: 1,
+            }],
+            "{forecast:?}"
+        );
+        assert!(
+            forecast.lines[0].sentence.contains("Brand Body"),
+            "{}",
+            forecast.lines[0].sentence
+        );
+        assert!(
+            !page_text(&dir.path().join("staging.pdf")).contains("/HcdBrandBody"),
+            "a forecast must not leave its splices in the copy it staged"
         );
     }
 }
