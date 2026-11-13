@@ -2412,6 +2412,10 @@ async fn catalog_delete_theme(
 #[derive(Deserialize)]
 struct AuditQuery {
     limit: Option<usize>,
+    /// Inclusive first UTC day, `YYYY-MM-DD`.
+    from: Option<String>,
+    /// Inclusive last UTC day, `YYYY-MM-DD`.
+    to: Option<String>,
 }
 
 /// The catalog operation log: who uploaded or deleted a font, who retired or
@@ -2419,6 +2423,13 @@ struct AuditQuery {
 ///
 /// The log only ever records what this service did through these routes; it is
 /// admin-only because it names documents and operators.
+///
+/// `from` and `to` are inclusive UTC days, so `?from=&to=` answers "what
+/// happened last week" without paging by hand. An empty bound is an open one —
+/// a query string the browser left half-filled — but a bound that does not name
+/// a real day is refused with 400 rather than treated as open: `from=2026-02-30`
+/// matches no day file, and answering "nothing happened" to that would be a
+/// false statement about the past. The same goes for `from` after `to`.
 async fn catalog_audit(
     State(state): State<ServerState>,
     Query(query): Query<AuditQuery>,
@@ -2426,11 +2437,43 @@ async fn catalog_audit(
 ) -> Result<Json<Value>, ApiError> {
     authorize_admin(&state, &headers)?;
     let limit = query.limit.unwrap_or(100).clamp(1, MAX_AUDIT_LIMIT);
-    let page = state.catalog.audit_entries(limit).map_err(hcd_error)?;
+    let from = query.from.filter(|value| !value.trim().is_empty());
+    let to = query.to.filter(|value| !value.trim().is_empty());
+    for (name, bound) in [("from", &from), ("to", &to)] {
+        if let Some(day) = bound {
+            if !hcd_core::is_audit_calendar_day(day) {
+                return Err(bad(format!(
+                    "audit {name} must name a real UTC day as YYYY-MM-DD, got {day}"
+                )));
+            }
+        }
+    }
+    if let (Some(first), Some(last)) = (&from, &to) {
+        if first > last {
+            return Err(bad(format!(
+                "audit window from {first} is after to {last}"
+            )));
+        }
+    }
+    let page = state
+        .catalog
+        .audit_entries_in(
+            hcd_core::AuditWindow {
+                from: from.as_deref(),
+                to: to.as_deref(),
+            },
+            limit,
+        )
+        .map_err(hcd_error)?;
     Ok(Json(json!({
         "entries": page.entries,
         "unreadable": page.unreadable,
+        // Older lines inside the window that this page did not return, as
+        // opposed to `unreadable`: those exist, they were just not read.
+        "truncated": page.truncated,
         "limit": limit,
+        "from": from,
+        "to": to,
     })))
 }
 
@@ -4096,7 +4139,11 @@ mod tests {
         assert_eq!(
             catalog_audit(
                 State(state.clone()),
-                Query(AuditQuery { limit: None }),
+                Query(AuditQuery {
+                    limit: None,
+                    from: None,
+                    to: None,
+                }),
                 HeaderMap::new(),
             )
             .await
@@ -4113,7 +4160,11 @@ mod tests {
         ] {
             let error = catalog_audit(
                 State(state.clone()),
-                Query(AuditQuery { limit: None }),
+                Query(AuditQuery {
+                    limit: None,
+                    from: None,
+                    to: None,
+                }),
                 bearer(secret, doc, scope),
             )
             .await
@@ -4125,7 +4176,11 @@ mod tests {
         let admin = bearer(secret, "*", "admin");
         let empty = catalog_audit(
             State(state.clone()),
-            Query(AuditQuery { limit: None }),
+            Query(AuditQuery {
+                limit: None,
+                from: None,
+                to: None,
+            }),
             admin.clone(),
         )
         .await
@@ -4140,7 +4195,11 @@ mod tests {
         assert_eq!(
             catalog_audit(
                 State(state.clone()),
-                Query(AuditQuery { limit: Some(0) }),
+                Query(AuditQuery {
+                    limit: Some(0),
+                    from: None,
+                    to: None,
+                }),
                 admin.clone()
             )
             .await
@@ -4152,7 +4211,11 @@ mod tests {
         assert_eq!(
             catalog_audit(
                 State(state.clone()),
-                Query(AuditQuery { limit: Some(9_999) }),
+                Query(AuditQuery {
+                    limit: Some(9_999),
+                    from: None,
+                    to: None,
+                }),
                 admin.clone()
             )
             .await
@@ -4167,7 +4230,11 @@ mod tests {
         let theme = seed_theme(&state, secret, "demo-serif").await;
         let page = catalog_audit(
             State(state),
-            Query(AuditQuery { limit: None }),
+            Query(AuditQuery {
+                limit: None,
+                from: None,
+                to: None,
+            }),
             bearer(secret, "*", "admin"),
         )
         .await
@@ -4203,6 +4270,202 @@ mod tests {
             times.windows(2).all(|pair| pair[0] >= pair[1]),
             "{times:?} is not newest first"
         );
+    }
+
+    /// The window is what lets the console answer "上周谁动过" without someone
+    /// paging through the log by hand, so a bound that cannot be honoured has to
+    /// fail loudly: an empty result for `from=2026-02-30` would read as a
+    /// statement about the past.
+    #[tokio::test]
+    async fn audit_route_reads_a_utc_day_window_and_refuses_bounds_that_are_not_days() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let read = |query: AuditQuery| {
+            let state = state.clone();
+            let admin = admin.clone();
+            async move { catalog_audit(State(state), Query(query), admin).await }
+        };
+
+        // The writer always stamps the current day, so an older day has to come
+        // off disk: two lines in January 2020, newest first as appended.
+        let older = state.catalog.root().join("audit").join("2020-01-01.jsonl");
+        std::fs::create_dir_all(older.parent().unwrap()).unwrap();
+        std::fs::write(
+            &older,
+            [
+                json!({
+                    // Appended oldest first, as the writer does: 2020-01-01 UTC.
+                    "at": 1_577_836_800_000u64,
+                    "action": audit_action::THEME_PUT,
+                    "target": "old-theme",
+                    "actor": "admin:*",
+                    "detail": "一个老主题",
+                }),
+                json!({
+                    "at": 1_577_836_860_000u64,
+                    "action": audit_action::FONT_BYTES_PUT,
+                    "target": "old-serif",
+                    "actor": "admin:*",
+                }),
+            ]
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+            .as_bytes(),
+        )
+        .unwrap();
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        // No window reads across the files, newest day first.
+        let all = read(AuditQuery {
+            limit: None,
+            from: None,
+            to: None,
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            all["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["action"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                audit_action::THEME_PUT,
+                audit_action::FONT_REVISION_PUT,
+                audit_action::FONT_BYTES_PUT,
+                audit_action::FONT_BYTES_PUT,
+                audit_action::THEME_PUT,
+            ],
+            "the days are not stitched together newest-first"
+        );
+        assert_eq!(all["entries"][0]["target"], json!(theme));
+        assert_eq!(all["entries"][4]["target"], json!("old-theme"));
+        assert_eq!(all["from"], Value::Null, "an open bound stays open");
+        assert_eq!(all["to"], Value::Null);
+        assert_eq!(all["truncated"], json!(false), "five lines fit one page");
+
+        // Both ends are inclusive, and the answer names the window it applied.
+        let past = read(AuditQuery {
+            limit: None,
+            from: Some("2020-01-01".to_string()),
+            to: Some("2020-01-01".to_string()),
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(past["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(past["from"], json!("2020-01-01"));
+        assert_eq!(past["to"], json!("2020-01-01"));
+
+        // A window with nothing in it is an honest empty, not an error.
+        let quiet = read(AuditQuery {
+            limit: None,
+            from: Some("2015-01-01".to_string()),
+            to: Some("2016-01-01".to_string()),
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(quiet["entries"], json!([]));
+        assert_eq!(quiet["truncated"], json!(false));
+
+        // `from` alone means "since", so the older day drops out.
+        let since = read(AuditQuery {
+            limit: None,
+            from: Some("2024-01-01".to_string()),
+            to: None,
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(since["entries"].as_array().unwrap().len(), 3);
+        assert_eq!(since["from"], json!("2024-01-01"));
+        assert_eq!(since["to"], Value::Null);
+
+        // A limit that spends itself inside a window says so, because the rows
+        // not shown are real rows the caller asked for.
+        let tight = read(AuditQuery {
+            limit: Some(1),
+            from: Some("2020-01-01".to_string()),
+            to: None,
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(tight["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(tight["truncated"], json!(true));
+
+        // Half-filled query strings are the browser leaving a bound open, not a
+        // request about a day that does not exist.
+        for open in ["", "   "] {
+            let answer = read(AuditQuery {
+                limit: None,
+                from: Some(open.to_string()),
+                to: None,
+            })
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(answer["from"], Value::Null, "{open:?} closed the window");
+            assert_eq!(answer["entries"].as_array().unwrap().len(), 5);
+        }
+
+        for rejected in ["2026-02-30", "2023-02-29", "2026-13-01", "2026-2-1", "next-tuesday"] {
+            let error = read(AuditQuery {
+                limit: None,
+                from: Some(rejected.to_string()),
+                to: None,
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST, "{rejected} accepted");
+            let message = error.1.to_string();
+            assert!(message.contains("from") && message.contains(rejected), "{message}");
+
+            let error = read(AuditQuery {
+                limit: None,
+                from: None,
+                to: Some(rejected.to_string()),
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST, "{rejected} accepted as `to`");
+            assert!(error.1.to_string().contains("to"), "{}", error.1);
+        }
+
+        let inverted = read(AuditQuery {
+            limit: None,
+            from: Some("2024-06-01".to_string()),
+            to: Some("2024-05-01".to_string()),
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(inverted.0, StatusCode::BAD_REQUEST);
+        assert!(
+            inverted.1.to_string().contains("2024-06-01"),
+            "{}",
+            inverted.1
+        );
+
+        // A wrong window is still admin-only: the bounds are not read before the
+        // caller is identified.
+        let unauthorized = catalog_audit(
+            State(state.clone()),
+            Query(AuditQuery {
+                limit: None,
+                from: Some("nonsense".to_string()),
+                to: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unauthorized.0, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
