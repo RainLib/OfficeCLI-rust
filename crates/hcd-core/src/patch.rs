@@ -7110,6 +7110,10 @@ fn find_xlsx_row_insert_target(
         ));
     }
     let mut target = None;
+    // A row the source never wrote is not in any window, but it is still a row
+    // of the sheet: its number sits inside a window that stops short of it. That
+    // window owns the insertion, so keep it apart from the row that is present.
+    let mut gap_target = None;
     let mut part = None;
     for page_number in 0..manifest.index_page_count {
         for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
@@ -7149,22 +7153,29 @@ fn find_xlsx_row_insert_target(
                     .find(|entry| entry.source.node_kind == "cell")
                     .map(|entry| entry.source.part);
             }
-            if grid
+            let covers = grid
                 .row_start
                 .is_some_and(|start| start <= u64::from(insert.before_row))
                 && grid
                     .row_end
-                    .is_some_and(|end| end >= u64::from(insert.before_row))
-                && html.contains(&format!("<tr data-hcd-row=\"{}\"", insert.before_row))
-                && target.replace(descriptor.chunk_id).is_some()
-            {
-                return Err(HcdError::InvalidBundle(
-                    "duplicate XLSX row insertion target".to_string(),
-                ));
+                    .is_some_and(|end| end >= u64::from(insert.before_row));
+            if covers {
+                let slot = if html.contains(&format!("<tr data-hcd-row=\"{}\"", insert.before_row))
+                {
+                    &mut target
+                } else {
+                    &mut gap_target
+                };
+                if slot.replace(descriptor.chunk_id.clone()).is_some() {
+                    return Err(HcdError::InvalidBundle(
+                        "duplicate XLSX row insertion target".to_string(),
+                    ));
+                }
             }
         }
     }
     let target = target
+        .or(gap_target)
         .or_else(|| (u64::from(insert.before_row) == last_row + 1).then_some(tail))
         .ok_or_else(|| {
             HcdError::Unsupported("insert before a materialized XLSX row".to_string())
@@ -7187,6 +7198,10 @@ fn find_xlsx_row_delete_target(
         ));
     }
     let mut target = None;
+    // The same gap the insertion above looks through: a row the source never
+    // wrote still occupies its number, and deleting it moves everything below
+    // it up one, so the window that covers it owns the deletion.
+    let mut gap_target = None;
     let mut part = None;
     for page_number in 0..manifest.index_page_count {
         for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
@@ -7213,12 +7228,21 @@ fn find_xlsx_row_delete_target(
                     .find(|entry| entry.source.node_kind == "cell")
                     .map(|entry| entry.source.part);
             }
-            if html.contains(&format!("<tr data-hcd-row=\"{}\"", delete.row))
-                && target.replace(descriptor.chunk_id).is_some()
-            {
-                return Err(HcdError::InvalidBundle(
-                    "duplicate XLSX row deletion target".to_string(),
-                ));
+            let covers = grid
+                .row_start
+                .is_some_and(|start| start <= u64::from(delete.row))
+                && grid.row_end.is_some_and(|end| end >= u64::from(delete.row));
+            if covers {
+                let slot = if html.contains(&format!("<tr data-hcd-row=\"{}\"", delete.row)) {
+                    &mut target
+                } else {
+                    &mut gap_target
+                };
+                if slot.replace(descriptor.chunk_id.clone()).is_some() {
+                    return Err(HcdError::InvalidBundle(
+                        "duplicate XLSX row deletion target".to_string(),
+                    ));
+                }
             }
         }
     }
@@ -7226,7 +7250,9 @@ fn find_xlsx_row_delete_target(
         part.ok_or_else(|| {
             HcdError::Unsupported("XLSX sheet has no mapped source cells".to_string())
         })?,
-        target.ok_or_else(|| HcdError::Unsupported("delete an existing XLSX row".to_string()))?,
+        target
+            .or(gap_target)
+            .ok_or_else(|| HcdError::Unsupported("delete an existing XLSX row".to_string()))?,
     ))
 }
 
@@ -7543,11 +7569,11 @@ fn shift_xlsx_row_window(
         }
         cursor = end + 1;
     }
-    if insert_here && !rows.contains(&before_row) {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX insertion row disappeared".to_string(),
-        ));
-    }
+    // The row the new one goes in front of is the lowest one at or after the
+    // insertion point, present or not: a gap row has no row of its own, so its
+    // successor is the first row further down the sheet, and that is where the
+    // new row lands.
+    let successor = insert_here.then(|| rows.first().copied()).flatten();
     for row in rows.into_iter().rev() {
         let next = row
             .checked_add(1)
@@ -7607,10 +7633,19 @@ fn shift_xlsx_row_window(
         *html = html.replacen(&before, &format!(" {name}=\"{new}\""), 1);
     }
     if insert_here {
-        let marker = format!("<tr data-hcd-row=\"{}\"", before_row + 1);
-        let position = html.find(&marker).ok_or_else(|| {
-            HcdError::InvalidBundle("shifted XLSX insertion row is missing".to_string())
-        })?;
+        // In front of the successor the gap row now sits, or at the bottom of
+        // the window when the source stopped writing rows above its own end.
+        let position = match successor {
+            Some(successor) => {
+                let marker = format!("<tr data-hcd-row=\"{}\"", successor + 1);
+                html.find(&marker).ok_or_else(|| {
+                    HcdError::InvalidBundle("shifted XLSX insertion row is missing".to_string())
+                })?
+            }
+            None => html.find("</tbody>").ok_or_else(|| {
+                HcdError::InvalidBundle("XLSX sheet has no table body".to_string())
+            })?,
+        };
         html.insert_str(
             position,
             &format!("<tr data-hcd-row=\"{before_row}\"></tr>"),
@@ -7715,11 +7750,10 @@ fn delete_xlsx_row_window(
         cursor = end;
     }
     rebuilt.push_str(&html[cursor..]);
-    if old_start <= u64::from(deleted_row) && !removed_row {
-        return Err(HcdError::InvalidBundle(
-            "XLSX deletion row is missing".to_string(),
-        ));
-    }
+    // A window that covers the deleted row without carrying it is the source
+    // having skipped that row, not a bundle that disagrees with itself: the
+    // rows below still move up one, which is the whole of the deletion. The
+    // window bounds rewritten just below are what a disagreement trips on.
     let mut removed = Vec::new();
     source_map.entries.retain_mut(|entry| {
         if entry.source.node_kind != "cell" {

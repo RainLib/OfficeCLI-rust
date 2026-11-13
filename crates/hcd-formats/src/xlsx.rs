@@ -15162,6 +15162,314 @@ mod tests {
     }
 
     #[test]
+    fn a_row_the_source_never_wrote_still_takes_its_place_in_the_grid() {
+        fn row_numbers(xml: &str) -> Vec<u32> {
+            let mut rows = Vec::new();
+            let mut cursor = 0usize;
+            while let Some(offset) = xml[cursor..].find("<row r=\"") {
+                let start = cursor + offset + "<row r=\"".len();
+                let end = start + xml[start..].find('"').unwrap();
+                rows.push(xml[start..end].parse::<u32>().unwrap());
+                cursor = end;
+            }
+            rows
+        }
+
+        fn tr_numbers(html: &str) -> Vec<u32> {
+            let mut rows = Vec::new();
+            let mut cursor = 0usize;
+            while let Some(offset) = html[cursor..].find("<tr data-hcd-row=\"") {
+                let start = cursor + offset + "<tr data-hcd-row=\"".len();
+                let end = start + html[start..].find('"').unwrap();
+                rows.push(html[start..end].parse::<u32>().unwrap());
+                cursor = end;
+            }
+            rows
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("gaps.xlsx");
+        let bundle_path = temp.path().join("gaps.hcd");
+        create_gap_row_fixture(&source);
+        let imported = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("gap-row-doc"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let page = bundle.read_index_page(&imported, 0).unwrap();
+        let gaps = page
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk.grid.as_ref().is_some_and(|grid| {
+                    grid.sheet_name == "Gaps" && grid.kind == GridChunkKind::Cells
+                })
+            })
+            .unwrap();
+        let window = gaps.grid.clone().unwrap();
+        let sheet_id = window.sheet_id.clone();
+        // The gap is real in the index too, and the window stops at the last
+        // row the source wrote: no element stands for 2 or 6 inside it, and 8
+        // and 9 are past the end of the sheet as the index sees it.
+        assert_eq!((window.row_start, window.row_end), (Some(1), Some(7)));
+        assert_eq!(
+            tr_numbers(&bundle.read_chunk(gaps).unwrap()),
+            vec![1, 3, 4, 5, 7]
+        );
+        let head = temp.path().join("gap-head.xlsx");
+        export_xlsx(&bundle, &source, &head, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&head, "xl/worksheets/sheet1.xml"),
+            read_zip_entry(&source, "xl/worksheets/sheet1.xml")
+        );
+
+        // Five revisions that all name a row the workbook never wrote. The first
+        // inserts in front of a gap that has a row below it, the second writes
+        // into the row that insertion made, the third deletes the last row so
+        // the window ends on a number nothing stands for, the fourth inserts
+        // there with no successor to go in front of, and the fifth deletes a gap
+        // the shifts themselves left behind.
+        struct GapShift {
+            kind: &'static str,
+            schema: &'static str,
+            operation: fn(&str) -> PatchOperation,
+            rows: Vec<u32>,
+            expectations: &'static [&'static str],
+            forbidden: &'static [&'static str],
+            index_rows: Vec<u32>,
+            window_end: u64,
+        }
+        let cases = [
+            GapShift {
+                // Row 2 was never written. The rows below it move down and the
+                // gap becomes the inserted row, in front of its successor.
+                kind: "insert-in-gap",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                operation: |sheet_id| PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.to_string(),
+                    before_row: 2,
+                },
+                rows: vec![1, 2, 4, 5, 6, 8],
+                expectations: &[
+                    "<dimension ref=\"A1:D9\"",
+                    "<row r=\"2\"/>",
+                    "<c r=\"A4\" t=\"inlineStr\"><is><t>Row 3</t></is></c>",
+                    "<c r=\"A8\" t=\"inlineStr\"><is><t>Row 7</t></is></c>",
+                ],
+                forbidden: &["<c r=\"A7\""],
+                index_rows: vec![1, 2, 4, 5, 6, 8],
+                window_end: 8,
+            },
+            GapShift {
+                // The row the gap became is an ordinary row now: it takes a
+                // cell, and the workbook gains it as a written row.
+                kind: "write-into-gap",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_11,
+                operation: |sheet_id| PatchOperation::XlsxCellSet {
+                    sheet_id: sheet_id.to_string(),
+                    row: 2,
+                    column: 1,
+                    text: "Written into the gap".to_string(),
+                },
+                rows: vec![1, 2, 4, 5, 6, 8],
+                expectations: &[
+                    "<dimension ref=\"A1:D9\"",
+                    "<c r=\"A2\" t=\"inlineStr\"><is><t>Written into the gap</t></is></c>",
+                ],
+                forbidden: &[],
+                index_rows: vec![1, 2, 4, 5, 6, 8],
+                window_end: 8,
+            },
+            GapShift {
+                // Deleting the last written row leaves the window ending on a
+                // number no row stands for any more.
+                kind: "delete-last",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                operation: |sheet_id| PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.to_string(),
+                    row: 8,
+                },
+                rows: vec![1, 2, 4, 5, 6],
+                expectations: &["<dimension ref=\"A1:D6\""],
+                forbidden: &["Row 7", "<c r=\"A8\""],
+                index_rows: vec![1, 2, 4, 5, 6],
+                window_end: 7,
+            },
+            GapShift {
+                // Inserting in front of that bottom gap has no successor to
+                // stand in front of, so the row lands at the end of the window.
+                kind: "insert-bottom-gap",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                operation: |sheet_id| PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.to_string(),
+                    before_row: 7,
+                },
+                rows: vec![1, 2, 4, 5, 6, 7],
+                expectations: &[
+                    "<dimension ref=\"A1:D7\"",
+                    "<row r=\"7\"/>",
+                    "<c r=\"A6\" t=\"inlineStr\"><is><t>Row 5</t></is></c>",
+                ],
+                forbidden: &["Row 7", "<c r=\"A8\""],
+                index_rows: vec![1, 2, 4, 5, 6, 7],
+                window_end: 8,
+            },
+            GapShift {
+                // And a gap the shifts left behind deletes like any other row:
+                // everything below it moves up into it.
+                kind: "delete-gap",
+                schema: hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                operation: |sheet_id| PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.to_string(),
+                    row: 3,
+                },
+                rows: vec![1, 2, 3, 4, 5, 6],
+                expectations: &[
+                    "<dimension ref=\"A1:D6\"",
+                    "<c r=\"A3\" t=\"inlineStr\"><is><t>Row 3</t></is></c>",
+                    "<c r=\"D5\" t=\"inlineStr\"><is><t>Right 5</t></is></c>",
+                    "<c r=\"A2\" t=\"inlineStr\"><is><t>Written into the gap</t></is></c>",
+                ],
+                forbidden: &["Row 7", "<c r=\"A7\""],
+                index_rows: vec![1, 2, 3, 4, 5, 6],
+                window_end: 7,
+            },
+        ];
+        for (index, case) in cases.into_iter().enumerate() {
+            let GapShift {
+                kind,
+                schema,
+                operation,
+                rows,
+                expectations,
+                forbidden,
+                index_rows,
+                window_end,
+            } = case;
+            let revision = index as u64;
+            assert_eq!(
+                hcd_core::apply_patch(
+                    &bundle,
+                    &PatchBatch {
+                        schema_version: schema.to_string(),
+                        document_id: "gap-row-doc".to_string(),
+                        patch_id: format!("gap-shift-{kind}"),
+                        base_revision: revision,
+                        actor: BTreeMap::new(),
+                        operations: vec![operation(&sheet_id)],
+                        metadata: BTreeMap::new(),
+                    },
+                    revision,
+                )
+                .unwrap()
+                .revision,
+                revision + 1,
+                "{kind}"
+            );
+            let exported = temp.path().join(format!("gap-{kind}.xlsx"));
+            export_xlsx(
+                &bundle,
+                &source,
+                &exported,
+                &ExportOptions {
+                    revision: Some(revision + 1),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{kind}: {error}"));
+            let sheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+            assert_eq!(row_numbers(&sheet), rows, "{kind}:\n{sheet}");
+            for expected in expectations {
+                assert!(sheet.contains(expected), "{kind}: {expected}\n{sheet}");
+            }
+            for absent in forbidden {
+                assert!(!sheet.contains(absent), "{kind}: {absent}\n{sheet}");
+            }
+            // What the index says about the sheet agrees with what the archive
+            // says: the gap row became a row, in order, and the window grew by
+            // exactly the rows the shifts added.
+            let manifest = bundle.manifest().unwrap();
+            let page = bundle.read_index_page(&manifest, 0).unwrap();
+            let chunk = page
+                .chunks
+                .iter()
+                .find(|chunk| {
+                    chunk.grid.as_ref().is_some_and(|grid| {
+                        grid.sheet_name == "Gaps" && grid.kind == GridChunkKind::Cells
+                    })
+                })
+                .unwrap();
+            let html = bundle.read_chunk(chunk).unwrap();
+            assert_eq!(tr_numbers(&html), index_rows, "{kind}:\n{html}");
+            assert_eq!(
+                chunk.grid.as_ref().and_then(|grid| grid.row_end),
+                Some(window_end),
+                "{kind}"
+            );
+            // Only the tab that was shifted changes: the other one keeps every
+            // byte the workbook wrote, and so does the package inventory.
+            for kept in [
+                "xl/worksheets/sheet2.xml",
+                "[Content_Types].xml",
+                "xl/_rels/workbook.xml.rels",
+            ] {
+                assert_eq!(
+                    read_zip_entry(&exported, kept),
+                    read_zip_entry(&source, kept),
+                    "{kind}: {kept}"
+                );
+            }
+        }
+
+        // What the sheet has no row for at all is still out of reach. The window
+        // stops where the source stopped writing rows, and past that end the only
+        // number that takes an insertion is the next row of the sheet.
+        for (patch_id, schema, operation, message) in [
+            (
+                "gap-insert-past-the-end",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_12,
+                PatchOperation::XlsxRowInsert {
+                    sheet_id: sheet_id.clone(),
+                    before_row: 99,
+                },
+                "insert at or before the next XLSX row",
+            ),
+            (
+                "gap-delete-past-the-end",
+                hcd_core::HCD_PATCH_SCHEMA_VERSION_14,
+                PatchOperation::XlsxRowDelete {
+                    sheet_id: sheet_id.clone(),
+                    row: 99,
+                },
+                "XLSX row selection extends beyond the materialized sheet",
+            ),
+        ] {
+            let error = hcd_core::apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: schema.to_string(),
+                    document_id: "gap-row-doc".to_string(),
+                    patch_id: patch_id.to_string(),
+                    base_revision: 5,
+                    actor: BTreeMap::new(),
+                    operations: vec![operation],
+                    metadata: BTreeMap::new(),
+                },
+                5,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{patch_id}: should still be refused"));
+            assert!(
+                matches!(&error, HcdError::Unsupported(text) if text == message),
+                "{patch_id}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn middle_row_insertion_shifts_across_chunk_windows() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("long.xlsx");
@@ -19703,6 +20011,58 @@ mod tests {
             (
                 "xl/worksheets/sheet3.xml",
                 r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Tail</t></is></c></row></sheetData></worksheet>"#,
+            ),
+        ];
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Two worksheets. The first is a dashboard the producer left rows in: it
+    /// declares `A1:D9` and writes only rows 1, 3, 4, 5 and 7, so 2 and 6
+    /// are rows of the sheet that no `<row>` element, and no index row, ever
+    /// stood for. The second is written row per row and never shifted, so it can
+    /// be compared against the source byte for byte.
+    fn create_gap_row_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let rows = [1u32, 3, 4, 5, 7]
+            .into_iter()
+            .map(|row| {
+                format!(
+                    "<row r=\"{row}\"><c r=\"A{row}\" t=\"inlineStr\"><is><t>Row {row}</t></is></c><c r=\"D{row}\" t=\"inlineStr\"><is><t>Right {row}</t></is></c></row>"
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("");
+        let gaps = format!(
+            r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D9"/><sheetData>{rows}</sheetData></worksheet>"#
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Gaps" sheetId="1" r:id="rId1"/><sheet name="Plain" sheetId="2" r:id="rId2"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            ),
+            ("xl/worksheets/sheet1.xml", gaps.as_str()),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Kept</t></is></c><c r="B1"><v>4</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Also</t></is></c><c r="B2"><v>7</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Untouched</t></is></c><c r="B3"><v>9</v></c></row></sheetData></worksheet>"#,
             ),
         ];
         for (name, contents) in parts {
