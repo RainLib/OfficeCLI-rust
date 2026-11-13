@@ -189,10 +189,15 @@ export const api = {
    * Ask, face by face, what an export of this document would carry: the font
    * bytes written into the file, or only its name, and why.
    *
-   * Read-only and byte-free — the server answers from the catalog records — so
-   * it stays available even when the font itself cannot be read at the moment.
-   * `revision` asks about an older one, which is the version a file already
-   * downloaded was made from; left out, the head answers.
+   * The face list is byte-free — the server answers from the catalog records —
+   * so it stays available even when the font itself cannot be read at the
+   * moment. `revision` asks about an older one, which is the version a file
+   * already downloaded was made from; left out, the head answers.
+   *
+   * For `kind=pdf` the answer also carries `textForecast`: how many runs of the
+   * source PDF's own text the pinned theme would take, and which ones stay with
+   * the reason. That part does read the stored source, so it names the case
+   * when this server holds no copy of it instead of reporting no runs moved.
    */
   fontPlan: (documentId: string, kind: ExportKind, revision?: number) => {
     const params = new URLSearchParams({ kind });

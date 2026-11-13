@@ -190,6 +190,61 @@ export interface FontPlan {
   /** How soon "about to run out" is, straight from the exporter. */
   licenseWarnWindowDays: number;
   entries: FontPlanEntry[];
+  /**
+   * What a PDF export would do to the text the source file already carries.
+   * Only `kind=pdf` gets an answer; every other format is null because there is
+   * no rendered text of somebody else's to move.
+   */
+  textForecast: TextForecast | null;
+}
+
+/**
+ * Why a forecast answered the way it did. Anything but `ready` names what was
+ * missing: the server can only count runs in a source PDF it actually holds.
+ */
+export type ForecastState =
+  | "ready"
+  | "noTheme"
+  | "otherFormat"
+  | "noSource"
+  | "tooLarge"
+  | "unreadable"
+  | "catalogError"
+  | "unavailable";
+
+/** One outcome of the pass — a run that moves, or a reason one does not. */
+export interface ForecastLine {
+  /**
+   * `moved`, `unreadable`, `uncovered`, `unfittable`, `form`, `splitContent`,
+   * `alreadyTheme`, `noFace` or `notEmbedded`.
+   */
+  bucket: string;
+  count: number;
+  /** True when the export files this sentence among its warnings. */
+  warning: boolean;
+  /** The wording the export report writes, verbatim. */
+  sentence: string;
+}
+
+/** A face that would draw moved runs, and how many it would take. */
+export interface ForecastFace {
+  family: string;
+  subfamily: string;
+  runs: number;
+}
+
+export interface TextForecast {
+  state: ForecastState;
+  /** What the answer means, for every state and for a swapped source. */
+  message?: string;
+  /** Ready: every run the pass looked at, moved or not. */
+  runsSeen?: number;
+  runsRetargeted?: number;
+  faces?: ForecastFace[];
+  lines?: ForecastLine[];
+  sourceBytes?: number;
+  /** False when the stored source no longer hashes to what the manifest recorded. */
+  sourceMatches?: boolean;
 }
 
 /** A face picked off disk, before its bytes are stored as a blob. */
