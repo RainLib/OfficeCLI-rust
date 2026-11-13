@@ -7,6 +7,7 @@
 
 use hcd_core::{FontStyle, HcdError, ThemeFontAction, ThemeFontDecision};
 use oxml::{OxmlPackage, PackageError};
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -15,10 +16,20 @@ pub struct ThemeFontApplication {
     pub warnings: Vec<String>,
 }
 
+/// Write the pinned theme's faces into an exported file.
+///
+/// `pdf_face_drawn_by_writer` is the index in `plan` of a face a semantic PDF
+/// export already drew its text with, through the print engine. That face's
+/// bytes are in the file once and must not be appended a second time — an
+/// eleven-megabyte CJK face duplicated into one PDF is a real cost — while the
+/// rest of the plan is reported exactly as it would be otherwise. Nothing else
+/// reads the parameter: docx, pptx and xlsx carry their faces here, in the
+/// theme part and the font table, because there is no writer that did it first.
 pub fn apply_theme_fonts(
     target: &Path,
     format: &str,
     plan: &[ThemeFontDecision],
+    pdf_face_drawn_by_writer: Option<usize>,
 ) -> Result<ThemeFontApplication, HcdError> {
     if plan.is_empty() {
         return Ok(ThemeFontApplication::default());
@@ -27,9 +38,116 @@ pub fn apply_theme_fonts(
         "docx" => apply_ooxml(target, plan, OfficeKind::Word),
         "pptx" => apply_ooxml(target, plan, OfficeKind::PowerPoint),
         "xlsx" => apply_ooxml(target, plan, OfficeKind::Excel),
-        "pdf" => apply_pdf(target, plan),
+        "pdf" => apply_pdf(target, plan, pdf_face_drawn_by_writer),
         _ => Ok(ThemeFontApplication::default()),
     }
+}
+
+/// The family the pure-Rust print engine should lay a semantic PDF's body text
+/// out with, chosen from an already resolved theme plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PdfBodyFace {
+    /// Draw the body with these bytes. `plan_index` is this face's position in
+    /// the plan, so [`apply_theme_fonts`] can report it as carried once instead
+    /// of appending the same bytes a second time.
+    Draw {
+        plan_index: usize,
+        family: String,
+        subfamily: String,
+        bytes: Vec<u8>,
+    },
+    /// A theme face was available but could not draw this document, so the
+    /// built-in body face stays. `note` is the sentence for the fidelity
+    /// report: an operator asking why the downloaded PDF is not in their brand
+    /// font gets the answer instead of a silent substitution.
+    KeptFallback(String),
+    /// Nothing in the plan could be drawn with — every entry is register-only,
+    /// or the bytes did not parse. [`apply_theme_fonts`] already says why for
+    /// each face, so there is nothing to add.
+    KeptSilently,
+}
+
+/// Choose the print engine's body face for a document whose drawn text is `text`.
+///
+/// The engine registers several families but does not fall back per glyph from
+/// one authored family to another, so a theme face may replace the built-in body
+/// face only when it can draw *every* character of this document: half a brand
+/// font is a run of blank boxes, which is worse than no brand font at all.
+/// Candidates are tried in slot priority order — the minor (body) Latin slot
+/// first, then major Latin, then any other Latin slot, then east-Asian, then
+/// complex-script — so a Latin document pinned to a Latin face gets that face,
+/// and a Chinese document falls through to the face that actually covers 中文.
+/// A face whose bytes the license will not carry is skipped: it was never going
+/// to draw, and its reason is already in the report.
+pub fn pdf_body_face(plan: &[ThemeFontDecision], text: &str) -> PdfBodyFace {
+    let needed: HashSet<char> = text
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    let mut ordered: Vec<usize> = (0..plan.len()).collect();
+    ordered.sort_by_key(|index| (slot_priority(&plan[*index].slots), *index));
+
+    let mut rejection = None;
+    for plan_index in ordered {
+        let decision = &plan[plan_index];
+        let ThemeFontAction::Embed { bytes, .. } = &decision.action else {
+            continue;
+        };
+        let Ok(missing) = pdf_handler::font_embedder::font_bytes_missing_chars(bytes, &needed)
+        else {
+            // A face the exporter cannot read cannot be blamed for the layout;
+            // the append path in `apply_pdf` already reports what it could not
+            // do with these bytes.
+            continue;
+        };
+        if missing.is_empty() {
+            return PdfBodyFace::Draw {
+                plan_index,
+                family: decision.family.clone(),
+                subfamily: decision.subfamily.clone(),
+                bytes: bytes.clone(),
+            };
+        }
+        rejection.get_or_insert_with(|| undrawable(decision, &missing));
+    }
+
+    match rejection {
+        Some(note) => PdfBodyFace::KeptFallback(note),
+        None => PdfBodyFace::KeptSilently,
+    }
+}
+
+/// Lower priority means the face is the likelier body face for a whole document.
+fn slot_priority(slots: &[String]) -> u8 {
+    let has = |name: &str| slots.iter().any(|slot| slot == name);
+    if has("minor-latin") {
+        0
+    } else if has("major-latin") {
+        1
+    } else if slots.iter().any(|slot| slot.ends_with("-latin")) {
+        2
+    } else if slots.iter().any(|slot| slot.ends_with("-east-asia")) {
+        3
+    } else {
+        4
+    }
+}
+
+fn undrawable(decision: &ThemeFontDecision, missing: &HashSet<char>) -> String {
+    let mut examples: Vec<char> = missing.iter().copied().collect();
+    examples.sort_unstable();
+    let shown: String = examples.iter().take(8).collect();
+    let more = match examples.len().saturating_sub(8) {
+        0 => String::new(),
+        rest => format!(", and {rest} more"),
+    };
+    format!(
+        "the pinned theme font {} {} cannot draw {} character{} of this document ({shown}{more}), so the PDF body text was laid out with the built-in face",
+        decision.family,
+        decision.subfamily,
+        examples.len(),
+        if examples.len() == 1 { "" } else { "s" },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -54,13 +172,28 @@ fn note_license(report: &mut ThemeFontApplication, decision: &ThemeFontDecision)
     }
 }
 
-fn apply_pdf(target: &Path, plan: &[ThemeFontDecision]) -> Result<ThemeFontApplication, HcdError> {
+fn apply_pdf(
+    target: &Path,
+    plan: &[ThemeFontDecision],
+    drawn: Option<usize>,
+) -> Result<ThemeFontApplication, HcdError> {
     let mut report = ThemeFontApplication::default();
     let mut index = 0;
-    for decision in plan {
+    for (position, decision) in plan.iter().enumerate() {
         match &decision.action {
             ThemeFontAction::RegisterOnly { reason } => report.warnings.push(reason.clone()),
             ThemeFontAction::Embed { bytes, .. } => {
+                if drawn == Some(position) {
+                    // The print engine put these bytes in the file already, as
+                    // the face the document's text was drawn with. Appending the
+                    // same face a second time would only double the export.
+                    report.preserved.push(format!(
+                        "the PDF body was drawn with the pinned theme font {} {} instead of the built-in fallback, so its bytes are carried once",
+                        decision.family, decision.subfamily
+                    ));
+                    note_license(&mut report, decision);
+                    continue;
+                }
                 index += 1;
                 let name =
                     pdf_resource_name(&decision.family, decision.weight, decision.style, index);
@@ -1017,7 +1150,7 @@ mod tests {
         });
         denied.family = "License Denied".to_string();
         denied.slots = vec!["minor-latin".to_string()];
-        let report = apply_theme_fonts(&path, "docx", &[embedded, denied]).unwrap();
+        let report = apply_theme_fonts(&path, "docx", &[embedded, denied], None).unwrap();
         assert!(report
             .warnings
             .iter()
@@ -1074,7 +1207,7 @@ mod tests {
                 r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#,
             )],
         );
-        let report = apply_theme_fonts(&path, "docx", &[regular, bold, denied]).unwrap();
+        let report = apply_theme_fonts(&path, "docx", &[regular, bold, denied], None).unwrap();
         assert_eq!(
             report.warnings.iter().filter(|seen| **seen == note).count(),
             1,
@@ -1124,6 +1257,7 @@ mod tests {
                 format: FontFileFormat::Ttf,
                 bytes: bytes.to_vec(),
             })],
+            None,
         )
         .unwrap();
         assert_eq!(part(&path, "ppt/fonts/font1.fntdata"), bytes);
@@ -1165,6 +1299,7 @@ mod tests {
                 reason: "xlsx export registers the font name and does not embed font bytes"
                     .to_string(),
             })],
+            None,
         )
         .unwrap();
         assert!(report
@@ -1203,5 +1338,205 @@ mod tests {
             ),
             original
         );
+    }
+
+    /// A one-page PDF with nothing on it, so the only font objects in the file
+    /// are the ones this module adds.
+    fn write_empty_pdf(path: &Path) {
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (id, body) in [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (
+                3,
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>",
+            ),
+        ] {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{id} 0 obj\n{body}\nendobj\n").as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF").as_bytes(),
+        );
+        std::fs::write(path, pdf).unwrap();
+    }
+
+    #[test]
+    fn a_face_the_print_engine_drew_with_is_not_written_twice() {
+        let face = pdf_handler::font_embedder::bundled_noto_emoji();
+        let body_face = || {
+            decision(ThemeFontAction::Embed {
+                format: FontFileFormat::Ttf,
+                bytes: face.to_vec(),
+            })
+        };
+        let other_face = || ThemeFontDecision {
+            family: "Brand Emoji".to_string(),
+            ..body_face()
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let both = dir.path().join("both.pdf");
+        write_empty_pdf(&both);
+        let carried = apply_pdf(&both, &[body_face(), other_face()], None).unwrap();
+        let drawn = dir.path().join("drawn.pdf");
+        write_empty_pdf(&drawn);
+        let told = apply_pdf(&drawn, &[body_face(), other_face()], Some(0)).unwrap();
+
+        assert_eq!(carried.preserved.len(), 2, "{:?}", carried.preserved);
+        assert!(carried
+            .preserved
+            .iter()
+            .all(|line| line.contains("existing text keeps its original font encoding")));
+        let sentence = told
+            .preserved
+            .iter()
+            .find(|line| line.contains("drawn with the pinned theme font"))
+            .expect("the face the text was drawn with should say so");
+        assert!(
+            sentence.contains("Source Han Sans") && sentence.contains("carried once"),
+            "{sentence}"
+        );
+        assert!(
+            told.preserved
+                .iter()
+                .any(|line| line.contains("Brand Emoji")
+                    && line.contains("existing text keeps its original font encoding")),
+            "a face nobody drew with is still carried: {:?}",
+            told.preserved
+        );
+
+        let both_bytes = std::fs::metadata(&both).unwrap().len();
+        let drawn_bytes = std::fs::metadata(&drawn).unwrap().len();
+        assert!(
+            drawn_bytes + 100_000 < both_bytes,
+            "the face the document was drawn with must not be embedded again:              {drawn_bytes} bytes against {both_bytes}"
+        );
+    }
+
+    fn slotted(slots: &[&str], family: &str, action: ThemeFontAction) -> ThemeFontDecision {
+        ThemeFontDecision {
+            slots: slots.iter().map(|slot| slot.to_string()).collect(),
+            family: family.to_string(),
+            ..decision(action)
+        }
+    }
+
+    fn embedded(bytes: &[u8]) -> ThemeFontAction {
+        ThemeFontAction::Embed {
+            format: hcd_core::FontFileFormat::Ttf,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn the_body_face_is_the_one_that_can_draw_every_character() {
+        let latin_only = slotted(
+            &["minor-latin"],
+            "Brand Emoji",
+            embedded(pdf_handler::font_embedder::bundled_noto_emoji()),
+        );
+        let cjk = slotted(
+            &["minor-east-asia"],
+            "Brand Sans SC",
+            embedded(pdf_handler::font_embedder::bundled_noto_sans_sc()),
+        );
+
+        // The engine has no per-glyph fallback, so the Latin slot's face cannot
+        // take a document with 中文 in it just because it is listed first.
+        match pdf_body_face(&[latin_only, cjk], "Hello 世界") {
+            PdfBodyFace::Draw {
+                plan_index,
+                family,
+                subfamily,
+                ..
+            } => {
+                assert_eq!(plan_index, 1, "the face that covers the text wins");
+                assert_eq!(
+                    (family.as_str(), subfamily.as_str()),
+                    ("Brand Sans SC", "Regular")
+                );
+            }
+            other => panic!("expected a drawable face, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_minor_latin_slot_is_preferred_when_it_covers_the_text() {
+        let major = slotted(
+            &["major-latin"],
+            "Brand Display",
+            embedded(pdf_handler::font_embedder::bundled_noto_sans_sc()),
+        );
+        let minor = slotted(
+            &["minor-latin"],
+            "Brand Text",
+            embedded(pdf_handler::font_embedder::bundled_noto_sans_sc()),
+        );
+
+        match pdf_body_face(&[major, minor], "Hello world") {
+            PdfBodyFace::Draw {
+                plan_index, family, ..
+            } => {
+                assert_eq!(plan_index, 1, "the body slot is the minor face");
+                assert_eq!(family, "Brand Text");
+            }
+            other => panic!("expected a drawable face, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_face_that_cannot_draw_the_text_says_so_instead_of_failing_silently() {
+        let latin_only = slotted(
+            &["minor-latin"],
+            "Brand Emoji",
+            embedded(pdf_handler::font_embedder::bundled_noto_emoji()),
+        );
+
+        match pdf_body_face(&[latin_only], "中文 Hello") {
+            PdfBodyFace::KeptFallback(note) => {
+                assert!(note.contains("Brand Emoji"), "{note}");
+                assert!(note.contains("cannot draw"), "{note}");
+                assert!(note.contains("built-in face"), "{note}");
+                // The count is what an operator acts on, so it must be there.
+                assert!(note.contains("character"), "{note}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plan_with_no_drawable_face_has_nothing_to_report() {
+        let denied = slotted(
+            &["minor-latin"],
+            "Brand Serif",
+            ThemeFontAction::RegisterOnly {
+                reason: "the license does not allow PDF embedding".to_string(),
+            },
+        );
+        assert_eq!(pdf_body_face(&[denied], "Hello"), PdfBodyFace::KeptSilently);
+        assert_eq!(pdf_body_face(&[], "Hello"), PdfBodyFace::KeptSilently);
+    }
+
+    #[test]
+    fn characters_no_face_is_asked_to_draw_are_not_the_invisible_ones() {
+        let only_breaks = slotted(
+            &["minor-latin"],
+            "Brand Emoji",
+            embedded(pdf_handler::font_embedder::bundled_noto_emoji()),
+        );
+
+        // Line breaks and tabs reach here as text but need no glyph: counting
+        // them would refuse a brand face on an empty document.
+        assert!(matches!(
+            pdf_body_face(&[only_breaks], "\n\t\r"),
+            PdfBodyFace::Draw { plan_index: 0, .. }
+        ));
     }
 }

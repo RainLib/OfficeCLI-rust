@@ -43,6 +43,14 @@ pub(crate) struct HtmlConversionSummary {
     pub pinned_font_paragraphs: usize,
     /// Slide paragraphs that had to be split by line to carry different faces.
     pub pinned_font_split_paragraphs: usize,
+    /// Position in the pinned theme's plan of the face this PDF's body text was
+    /// drawn with, when a theme face replaced the built-in one. The exporter
+    /// carries those bytes once instead of appending them again.
+    pub pdf_body_face: Option<usize>,
+    /// Why the pinned theme face did not draw the PDF body text, when one was
+    /// available and could not. Nothing to report when the theme had no face
+    /// fit to draw with: the exporter already says that for each face.
+    pub pdf_body_face_note: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -554,14 +562,21 @@ pub(crate) fn convert_html(
     output: &Path,
     output_format: &str,
 ) -> Result<HtmlConversionSummary, HandlerError> {
-    convert_html_with_assets(input, output, output_format, HashMap::new())
+    convert_html_with_assets(input, output, output_format, HashMap::new(), &[])
 }
 
+/// Rebuild an HCD presentation page as an Office or PDF file.
+///
+/// `theme_faces` is the pinned theme's export plan, already resolved against
+/// the catalog for this target. Only the PDF path reads it, to lay the body
+/// text out in the theme's own face; the other formats carry the plan through
+/// the exporter that writes their font tables.
 pub(crate) fn convert_html_with_assets(
     input: &Path,
     output: &Path,
     output_format: &str,
     assets: HashMap<String, SemanticAsset>,
+    theme_faces: &[hcd_core::ThemeFontDecision],
 ) -> Result<HtmlConversionSummary, HandlerError> {
     let metadata = std::fs::metadata(input).map_err(HandlerError::IoError)?;
     if metadata.len() > MAX_HTML_BYTES {
@@ -605,12 +620,20 @@ pub(crate) fn convert_html_with_assets(
         && std::env::var("OFFICECLI_HTML_PDF_MODE")
             .is_ok_and(|mode| mode.eq_ignore_ascii_case("semantic"));
     let mut pinning = SemanticFontPinning::default();
+    let mut body_face = PdfBodyFaceChoice::default();
     let conversion = match output_format {
         "docx" => export_docx(&document, &temporary, &mut pinning),
         "xlsx" => export_xlsx(&document, &temporary),
         "pptx" => export_pptx(&document, &temporary, &mut pinning),
         "pdf" if legacy_pdf => export_pdf(&mut document, &temporary),
-        "pdf" => export_pdf_css(&source, input, &document.assets, &temporary),
+        "pdf" => export_pdf_css(
+            &source,
+            input,
+            &document,
+            &temporary,
+            theme_faces,
+            &mut body_face,
+        ),
         "md" => export_textual(&document, &temporary, true),
         "txt" => export_textual(&document, &temporary, false),
         other => Err(HandlerError::UnsupportedMode(format!(
@@ -683,16 +706,59 @@ pub(crate) fn convert_html_with_assets(
         embedded_image_count,
         pinned_font_paragraphs: pinning.pinned_paragraphs,
         pinned_font_split_paragraphs: pinning.split_paragraphs,
+        pdf_body_face: body_face.drawn,
+        pdf_body_face_note: body_face.note,
         warnings: document.warnings.into_iter().collect(),
     })
+}
+
+/// What the print engine decided about the pinned theme's body face.
+#[derive(Debug, Default)]
+struct PdfBodyFaceChoice {
+    /// Plan position of the face the body was drawn with, so the exporter
+    /// carries those bytes once.
+    drawn: Option<usize>,
+    /// The sentence explaining a theme face that could not draw this document.
+    note: Option<String>,
+}
+
+/// The bytes the print engine registers as its one body family.
+///
+/// A pinned theme wins over `OFFICECLI_HTML_PDF_PRIMARY_FONT_FILE` when it can
+/// draw this document: the override repairs the built-in face for everyone,
+/// while the theme is what this particular document says its text should look
+/// like. When no theme face covers every character the override stays in
+/// charge, because half a brand font is a run of blank boxes.
+fn pdf_primary_font(
+    faces: &[hcd_core::ThemeFontDecision],
+    text: &str,
+    configured: Option<PathBuf>,
+    body_face: &mut PdfBodyFaceChoice,
+) -> Vec<u8> {
+    match hcd_formats::pdf_body_face(faces, text) {
+        hcd_formats::PdfBodyFace::Draw {
+            plan_index, bytes, ..
+        } => {
+            body_face.drawn = Some(plan_index);
+            bytes
+        }
+        hcd_formats::PdfBodyFace::KeptFallback(note) => {
+            body_face.note = Some(note);
+            html_pdf_primary_font_from(configured)
+        }
+        hcd_formats::PdfBodyFace::KeptSilently => html_pdf_primary_font_from(configured),
+    }
 }
 
 fn export_pdf_css(
     source: &str,
     input: &Path,
-    assets: &HashMap<String, SemanticAsset>,
+    document: &SemanticHtml,
     output: &Path,
+    faces: &[hcd_core::ThemeFontDecision],
+    body_face: &mut PdfBodyFaceChoice,
 ) -> Result<usize, HandlerError> {
+    let assets = &document.assets;
     let embedded = assets
         .iter()
         .filter(|(href, asset)| {
@@ -701,7 +767,16 @@ fn export_pdf_css(
         })
         .count();
     let (html, resource_root) = print_html_with_assets(source, input, assets)?;
-    let font = html_pdf_primary_font();
+    // A pinned theme has to change the body text, not just the file's font
+    // table, or the downloaded PDF still reads as the built-in face. The engine
+    // lays out the whole document in one family without per-glyph fallback, so
+    // a theme face is used only when it covers every character.
+    let font = pdf_primary_font(
+        faces,
+        &semantic_pdf_text(document),
+        html_pdf_configured_primary_font(),
+        body_face,
+    );
     let mut converter = HtmlConverter::new()
         .page_size(PageSize::A4)
         .margin(Margin::uniform(40.0))
@@ -876,10 +951,13 @@ fn is_print_emoji_grapheme(grapheme: &str) -> bool {
         .any(|character| matches!(character as u32, 0x20E3 | 0xFE0F | 0x1F000..=0x1FAFF))
 }
 
-fn html_pdf_primary_font() -> Vec<u8> {
-    html_pdf_primary_font_from(
-        std::env::var_os("OFFICECLI_HTML_PDF_PRIMARY_FONT_FILE").map(PathBuf::from),
-    )
+/// The operator's own body face for PDF output, when one is configured.
+///
+/// This repairs the built-in face's metrics for every document on the machine;
+/// a document's pinned theme outranks it, and only when it can draw the whole
+/// text — see [`pdf_primary_font`].
+fn html_pdf_configured_primary_font() -> Option<PathBuf> {
+    std::env::var_os("OFFICECLI_HTML_PDF_PRIMARY_FONT_FILE").map(PathBuf::from)
 }
 
 fn html_pdf_primary_font_from(configured: Option<PathBuf>) -> Vec<u8> {
@@ -2169,11 +2247,13 @@ fn export_pptx(
     Ok(embedded)
 }
 
-fn export_pdf(document: &mut SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
-    let output = output.to_string_lossy();
-    super::create::create_blank_pdf(&output)?;
-    let handler = PdfHandler::open(&output, true)?;
-    let font_characters: String = document
+/// The distinct characters a PDF export has to draw for this document.
+///
+/// Images are skipped: an embedded image contributes no glyph, and alt text is
+/// not laid out as text by either PDF backend. Both PDF paths ask this one
+/// question so a face judged fit for one cannot be unfit for the other.
+fn semantic_pdf_text(document: &SemanticHtml) -> String {
+    document
         .blocks
         .iter()
         .filter(|block| {
@@ -2188,7 +2268,14 @@ fn export_pdf(document: &mut SemanticHtml, output: &Path) -> Result<usize, Handl
         .filter(|character| !character.is_control())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .collect();
+        .collect()
+}
+
+fn export_pdf(document: &mut SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
+    let output = output.to_string_lossy();
+    super::create::create_blank_pdf(&output)?;
+    let handler = PdfHandler::open(&output, true)?;
+    let font_characters = semantic_pdf_text(document);
     let font_plan = semantic_pdf_font_plan(&font_characters)?;
     if !font_plan.missing.is_empty() {
         document.warnings.insert(format!(
@@ -4664,6 +4751,117 @@ mod tests {
         let font = temp.path().join("brand.ttf");
         std::fs::write(&font, b"brand-font").unwrap();
         assert_eq!(html_pdf_primary_font_from(Some(font)), b"brand-font");
+    }
+
+    fn theme_plan(bytes: &[u8], slots: &[&str]) -> Vec<hcd_core::ThemeFontDecision> {
+        vec![hcd_core::ThemeFontDecision {
+            slots: slots.iter().map(|slot| slot.to_string()).collect(),
+            family: "Brand Serif".to_string(),
+            subfamily: "Regular".to_string(),
+            weight: 400,
+            style: hcd_core::FontStyle::Normal,
+            action: hcd_core::ThemeFontAction::Embed {
+                format: hcd_core::FontFileFormat::Ttf,
+                bytes: bytes.to_vec(),
+            },
+            warning: None,
+        }]
+    }
+
+    #[test]
+    fn a_theme_face_that_can_draw_the_text_beats_the_configured_pdf_body_face() {
+        let temp = tempfile::tempdir().unwrap();
+        let configured = temp.path().join("operator.ttf");
+        std::fs::write(&configured, b"operator-face").unwrap();
+
+        // The machine-wide override repairs the built-in face for everyone; the
+        // document's own pinned theme says what this text should look like, and
+        // wins when it can draw all of it.
+        let theme = theme_plan(
+            pdf_handler::font_embedder::bundled_noto_sans_sc(),
+            &["minor-latin"],
+        );
+        let mut chosen = PdfBodyFaceChoice::default();
+        let bytes = pdf_primary_font(
+            &theme,
+            "\u{4e2d}\u{6587} Hello",
+            Some(configured.clone()),
+            &mut chosen,
+        );
+        assert_eq!(bytes, pdf_handler::font_embedder::bundled_noto_sans_sc());
+        assert_eq!(
+            chosen.drawn,
+            Some(0),
+            "the exporter must carry these bytes once, not append them again"
+        );
+        assert!(chosen.note.is_none(), "{:?}", chosen.note);
+
+        // An emoji-only theme face is not a body face for Chinese text: the
+        // operator's file stays in charge, and the report says why.
+        let emoji = theme_plan(
+            pdf_handler::font_embedder::bundled_noto_emoji(),
+            &["minor-latin"],
+        );
+        let mut refused = PdfBodyFaceChoice::default();
+        let bytes = pdf_primary_font(
+            &emoji,
+            "\u{4e2d}\u{6587} Hello",
+            Some(configured),
+            &mut refused,
+        );
+        assert_eq!(bytes, b"operator-face");
+        assert_eq!(refused.drawn, None);
+        let note = refused
+            .note
+            .expect("an unusable theme face must be explained");
+        assert!(
+            note.contains("Brand Serif") && note.contains("cannot draw"),
+            "{note}"
+        );
+
+        // Nothing pinned, nothing to explain.
+        let mut bare = PdfBodyFaceChoice::default();
+        assert_eq!(
+            pdf_primary_font(&[], "\u{4e2d}\u{6587} Hello", None, &mut bare),
+            pdf_handler::font_embedder::bundled_noto_sans_sc()
+        );
+        assert!(bare.drawn.is_none() && bare.note.is_none());
+    }
+
+    #[test]
+    fn a_semantic_pdf_export_reports_the_theme_face_its_body_was_drawn_with() {
+        let temp = tempfile::tempdir().unwrap();
+        let html = temp.path().join("doc.html");
+        std::fs::write(
+            &html,
+            "<!doctype html><html><head><title>t</title></head><body><h1>\u{6807}\u{9898}</h1><p>\u{4e2d}\u{6587} Hello</p></body></html>",
+        )
+        .unwrap();
+
+        let theme = theme_plan(
+            pdf_handler::font_embedder::bundled_noto_sans_sc(),
+            &["minor-latin"],
+        );
+        let drawn = temp.path().join("drawn.pdf");
+        let summary =
+            convert_html_with_assets(&html, &drawn, "pdf", HashMap::new(), &theme).unwrap();
+        assert_eq!(summary.pdf_body_face, Some(0));
+        assert_eq!(summary.pdf_body_face_note, None);
+        assert!(drawn.exists(), "the engine must still build the file");
+
+        let emoji = theme_plan(
+            pdf_handler::font_embedder::bundled_noto_emoji(),
+            &["minor-latin"],
+        );
+        let kept = temp.path().join("kept.pdf");
+        let summary =
+            convert_html_with_assets(&html, &kept, "pdf", HashMap::new(), &emoji).unwrap();
+        assert_eq!(summary.pdf_body_face, None);
+        let note = summary
+            .pdf_body_face_note
+            .expect("the substitution was refused");
+        assert!(note.contains("cannot draw"), "{note}");
+        assert!(kept.exists());
     }
 
     #[test]
