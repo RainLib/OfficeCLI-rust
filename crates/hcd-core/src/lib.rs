@@ -19,12 +19,12 @@ pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
 pub use catalog::{
     audit_action, detect_font_format, is_audit_calendar_day, list_documents, pin_document_theme,
     resolve_document_theme, theme_document_css, theme_documents, theme_font_plan,
-    theme_presentation_css, unpin_document_theme, AuditEntry, AuditPage, AuditRecord, AuditWindow,
-    DiskCatalog, DocumentSummary, DocumentThemeResolution, FontDeleteReport, FontFace,
-    FontFileFormat, FontLicense, FontRef, FontRevision, FontScript, FontStretch, FontStyle,
-    ResolvedFace, ResolvedTheme, ThemeDocumentRef, ThemeEmbedKind, ThemeFontAction,
-    ThemeFontDecision, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA, MAX_AUDIT_LIMIT,
-    MAX_FONT_BYTES, THEME_SCHEMA,
+    theme_font_report, theme_presentation_css, unpin_document_theme, AuditEntry, AuditPage,
+    AuditRecord, AuditWindow, DiskCatalog, DocumentSummary, DocumentThemeResolution,
+    FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRef, FontRevision, FontScript,
+    FontStretch, FontStyle, ResolvedFace, ResolvedTheme, ThemeDocumentRef, ThemeEmbedKind,
+    ThemeFontAction, ThemeFontDecision, ThemeFontReport, ThemeFontSlots, ThemeRevision,
+    FONT_CATALOG_SCHEMA, MAX_AUDIT_LIMIT, MAX_FONT_BYTES, THEME_SCHEMA,
 };
 pub use error::HcdError;
 pub use hash::{

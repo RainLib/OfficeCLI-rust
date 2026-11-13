@@ -1413,6 +1413,25 @@ pub struct ThemeFontDecision {
     pub action: ThemeFontAction,
 }
 
+/// One face of [`theme_font_report`]: the same verdict with no bytes attached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeFontReport {
+    pub slots: Vec<String>,
+    pub family: String,
+    pub subfamily: String,
+    pub weight: u16,
+    pub style: FontStyle,
+    pub format: FontFileFormat,
+    pub sha256: String,
+    pub byte_length: u64,
+    /// True when the export would write these bytes into the file.
+    pub embeds: bool,
+    /// Why the bytes stay in the catalog. Absent when they are embedded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Choose which pinned faces can be embedded.
 ///
 /// A face over 8 MiB is not embedded. A woff2 face is preview-only. When
@@ -1425,6 +1444,81 @@ pub fn theme_font_plan(
     revision: Option<u64>,
     kind: ThemeEmbedKind,
 ) -> Result<Vec<ThemeFontDecision>, HcdError> {
+    let mut decisions = Vec::new();
+    for (slots, face) in theme_face_groups(catalog, bundle, revision)? {
+        let font = catalog.font_revision(&face.font_id, &face.font_revision_id)?;
+        let mut action = decide_face(kind, &font, &face);
+        if matches!(action, ThemeFontAction::Embed { .. }) {
+            let bytes = catalog.read_blob(&face.sha256, face.format)?;
+            let format = face.format;
+            if bytes.len() as u64 != face.byte_length {
+                return Err(HcdError::InvalidBundle(format!(
+                    "embed face {} does not match its descriptor",
+                    face.sha256
+                )));
+            }
+            action = ThemeFontAction::Embed { format, bytes };
+        }
+        decisions.push(ThemeFontDecision {
+            slots,
+            family: face.family,
+            subfamily: face.subfamily,
+            weight: face.weight,
+            style: face.style,
+            action,
+        });
+    }
+    Ok(decisions)
+}
+
+/// Say what an export would do with each pinned face, without reading a byte.
+///
+/// `theme_font_plan` hands the exporter font bytes; whoever asks "why did the
+/// downloaded file not carry this face" needs only the verdict, and asking it
+/// should not cost a walk over the blob store. The reason text is the one the
+/// export writes, because both call `decide_face`, so the answer cannot drift
+/// from what the exporter does — and it stays available even when the bytes
+/// themselves are missing or unreadable.
+pub fn theme_font_report(
+    catalog: &DiskCatalog,
+    bundle: &Bundle,
+    revision: Option<u64>,
+    kind: ThemeEmbedKind,
+) -> Result<Vec<ThemeFontReport>, HcdError> {
+    let mut entries = Vec::new();
+    for (slots, face) in theme_face_groups(catalog, bundle, revision)? {
+        let font = catalog.font_revision(&face.font_id, &face.font_revision_id)?;
+        let (embeds, reason) = match decide_face(kind, &font, &face) {
+            ThemeFontAction::Embed { .. } => (true, None),
+            ThemeFontAction::RegisterOnly { reason } => (false, Some(reason)),
+        };
+        entries.push(ThemeFontReport {
+            slots,
+            family: face.family,
+            subfamily: face.subfamily,
+            weight: face.weight,
+            style: face.style,
+            format: face.format,
+            sha256: face.sha256,
+            byte_length: face.byte_length,
+            embeds,
+            reason,
+        });
+    }
+    Ok(entries)
+}
+
+/// The faces a pinned theme resolves to, with every slot that shares one face.
+///
+/// `major-latin` and `minor-latin` often point at the same bytes, and an export
+/// places those bytes once, so the grouping lives here: the plan and the report
+/// cannot disagree about what one face is, or in which order they list them.
+/// A document with no theme pinned has no faces to group and comes back empty.
+fn theme_face_groups(
+    catalog: &DiskCatalog,
+    bundle: &Bundle,
+    revision: Option<u64>,
+) -> Result<Vec<(Vec<String>, ResolvedFace)>, HcdError> {
     let resolved = match resolve_document_theme(catalog, bundle, revision, |_, _, _| {
         "about:blank".to_string()
     }) {
@@ -1453,31 +1547,7 @@ pub fn theme_font_plan(
             }
         }
     }
-    let mut decisions = Vec::new();
-    for ((font_id, font_revision_id, _, _, _), (slots, face)) in grouped {
-        let font = catalog.font_revision(&font_id, &font_revision_id)?;
-        let mut action = decide_face(kind, &font, &face);
-        if matches!(action, ThemeFontAction::Embed { .. }) {
-            let bytes = catalog.read_blob(&face.sha256, face.format)?;
-            let format = face.format;
-            if bytes.len() as u64 != face.byte_length {
-                return Err(HcdError::InvalidBundle(format!(
-                    "embed face {} does not match its descriptor",
-                    face.sha256
-                )));
-            }
-            action = ThemeFontAction::Embed { format, bytes };
-        }
-        decisions.push(ThemeFontDecision {
-            slots,
-            family: face.family,
-            subfamily: face.subfamily,
-            weight: face.weight,
-            style: face.style,
-            action,
-        });
-    }
-    Ok(decisions)
+    Ok(grouped.into_values().collect())
 }
 
 fn decide_face(kind: ThemeEmbedKind, font: &FontRevision, face: &ResolvedFace) -> ThemeFontAction {
@@ -2560,6 +2630,75 @@ mod tests {
         assert!(workbook
             .iter()
             .all(|decision| matches!(decision.action, ThemeFontAction::RegisterOnly { .. })));
+    }
+
+    #[test]
+    fn the_font_report_answers_the_same_question_the_export_asks() {
+        let (_temp, catalog, _revision_id, theme_id) = install();
+        let bundle_dir = tempfile::tempdir().unwrap();
+        let bundle = complete_bundle(&bundle_dir, "");
+        assert!(
+            theme_font_report(&catalog, &bundle, None, ThemeEmbedKind::Ooxml)
+                .unwrap()
+                .is_empty()
+        );
+        pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+
+        let report = theme_font_report(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).unwrap();
+        let plan = theme_font_plan(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).unwrap();
+        assert_eq!(report.len(), plan.len(), "报告和导出分了不同的字面");
+        for (entry, decision) in report.iter().zip(&plan) {
+            assert_eq!(entry.slots, decision.slots);
+            assert_eq!(entry.weight, decision.weight);
+            // Word for word the note the export writes, so the two cannot drift.
+            match &decision.action {
+                ThemeFontAction::Embed { .. } => {
+                    assert!(entry.embeds);
+                    assert_eq!(entry.reason, None);
+                }
+                ThemeFontAction::RegisterOnly { reason } => {
+                    assert!(!entry.embeds);
+                    assert_eq!(entry.reason.as_deref(), Some(reason.as_str()));
+                }
+            }
+        }
+        let preview = report
+            .iter()
+            .find(|entry| entry.format == FontFileFormat::Woff2)
+            .expect("报告里找不到 woff2 字面");
+        assert_eq!(
+            preview.slots,
+            ["major-latin".to_string(), "major-east-asia".to_string()],
+            "两个槽位共用一份字面，就该列在一起"
+        );
+        assert!(!preview.embeds, "woff2 只用于预览，不该写进 Office 文件");
+        let embedded = report
+            .iter()
+            .find(|entry| entry.embeds)
+            .expect("许可证允许的字面应当可以嵌入");
+        assert_eq!(embedded.format, FontFileFormat::Otf);
+        assert_eq!(embedded.byte_length, b"fake-otf-bold".len() as u64);
+
+        let workbook =
+            theme_font_report(&catalog, &bundle, None, ThemeEmbedKind::Spreadsheet).unwrap();
+        assert!(workbook.iter().all(|entry| !entry.embeds));
+        assert!(workbook.iter().all(|entry| {
+            entry
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("does not embed font bytes"))
+        }));
+
+        // A damaged blob stops the export and does not stop the answer: the
+        // report reads the catalog records, so it can still say what the
+        // license allows while the file itself cannot be produced.
+        let path = catalog
+            .blob_path(&embedded.sha256, FontFileFormat::Otf)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let report = theme_font_report(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).unwrap();
+        assert!(report.iter().any(|entry| entry.embeds));
+        assert!(theme_font_plan(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).is_err());
     }
 
     fn complete_bundle(root_dir: &tempfile::TempDir, styles: &str) -> Bundle {
