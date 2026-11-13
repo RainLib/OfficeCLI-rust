@@ -132,8 +132,21 @@ export interface AuditPage {
   entries: AuditEntry[];
   /** Lines that could not be read as records, so a short list is not the whole trail. */
   unreadable: number;
+  /**
+   * Lines the window contained and this page did not return. Different from
+   * `unreadable`: those exist and were merely not read.
+   */
+  truncated?: boolean;
   /** The limit the server actually applied. */
   limit: number;
+  /**
+   * The window the server applied, or null for an open end. Compared against
+   * what was asked: an older build ignores both parameters and answers with
+   * the newest lines, which must not be shown as if it were the requested
+   * week.
+   */
+  from?: string | null;
+  to?: string | null;
 }
 
 /** A face picked off disk, before its bytes are stored as a blob. */

@@ -107,8 +107,20 @@ export const api = {
   /**
    * The catalog operation log, newest first. The server applies its own ceiling,
    * so a large `limit` asks for the tail of the trail rather than all of it.
+   *
+   * `from` and `to` are inclusive UTC days. An empty one is left out of the
+   * query string entirely rather than sent as `from=`, so the request means
+   * "open-ended" and never arrives as a bound the server would have to guess.
    */
-  audit: (limit = 100) => json<AuditPage>(`/v1/catalog/audit?limit=${limit}`),
+  audit: (options: { limit?: number; from?: string; to?: string } = {}) => {
+    const params = new URLSearchParams();
+    params.set("limit", String(options.limit ?? 100));
+    const from = options.from?.trim() ?? "";
+    const to = options.to?.trim() ?? "";
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    return json<AuditPage>(`/v1/catalog/audit?${params.toString()}`);
+  },
 
   /** Store one font binary; the catalog answers with its sha256. */
   putBlob: (

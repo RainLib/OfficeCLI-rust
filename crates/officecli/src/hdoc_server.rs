@@ -3410,6 +3410,11 @@ mod tests {
         assert!(html.contains("/v1/catalog/audit"));
         assert!(html.contains("操作记录"));
         assert!(html.contains("留痕"));
+        // The window picker and the export are the reason the route grew `from`
+        // and `to`, so the shipped bundle has to carry both halves.
+        assert!(html.contains("导出 CSV"));
+        assert!(html.contains("hcd-audit-"));
+        assert!(html.contains("区间里还有更早的记录没列出"));
     }
 
     #[tokio::test]

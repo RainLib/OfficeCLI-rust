@@ -125,3 +125,16 @@ export function subfamilyOf(name: string): string {
 export function idTitle(value: string): string {
   return value;
 }
+
+/**
+ * The UTC calendar day `offsetDays` back, as the audit window names it.
+ *
+ * Measured in UTC because that is how the log is split: `audit/2026-11-13.jsonl`
+ * holds the lines the server wrote between 00:00 and 23:59 UTC, so a picker
+ * keyed to the local calendar would silently ask for a window offset by the
+ * timezone. `input[type=date]` carries a bare day with no zone at all, which is
+ * exactly what the route expects.
+ */
+export function utcDay(offsetDays = 0): string {
+  return new Date(Date.now() - offsetDays * 86_400_000).toISOString().slice(0, 10);
+}
