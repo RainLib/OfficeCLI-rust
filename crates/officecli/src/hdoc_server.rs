@@ -19,8 +19,8 @@ use hcd_core::{
     EditorBlockContent, EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense,
     FontRevision, FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
     StructurePatchBatch, ThemeDocumentRef, ThemeEmbedKind, ThemeFontSlots, ThemeRevision,
-    FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, MAX_AUDIT_LIMIT, MAX_FONT_BYTES,
-    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
+    FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, LICENSE_WARN_WINDOW_DAYS, MAX_AUDIT_LIMIT,
+    MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -1708,6 +1708,9 @@ async fn document_font_plan(
         "revision": revision,
         "themeRevisionId": manifest.theme_revision_id,
         "kind": kind,
+        // The line the exporter warns on, answered from the Rust constant, so a
+        // page never has to guess how soon "soon" is.
+        "licenseWarnWindowDays": LICENSE_WARN_WINDOW_DAYS,
         "entries": entries,
     })))
 }
@@ -5102,6 +5105,127 @@ mod tests {
             .0,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// The point of the renewal note is to reach the operator before the document
+    /// loses its font, so an expiring license comes back as the exporter's own
+    /// sentence and the date it names — not as a flag the page would have to
+    /// interpret, and not as a window the page would have to guess.
+    #[tokio::test]
+    async fn font_plan_route_names_a_license_that_is_about_to_expire() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("due-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let expires = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3 * 86_400_000;
+        let mut due = license();
+        due.expires_at_epoch_ms = Some(expires);
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("due-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Due Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: due,
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Due brand".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "due-serif".to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        let id = "doc-a";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.0.theme_revision_id.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1);
+
+        let plan = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(plan["licenseWarnWindowDays"], LICENSE_WARN_WINDOW_DAYS);
+        let entry = &plan["entries"][0];
+        assert_eq!(entry["embeds"], true, "{plan}");
+        assert_eq!(entry["expiresAtEpochMs"], expires, "{entry}");
+        assert!(entry.get("reason").is_none(), "{entry}");
+        let warning = entry["warning"].as_str().unwrap();
+        assert!(warning.contains("Due Serif"), "{warning}");
+        assert!(warning.contains("in 3 days"), "{warning}");
+        assert!(warning.contains("can no longer be embedded"), "{warning}");
+
+        // This license still allows OOXML and refuses PDF, so the PDF answer is
+        // one sentence, not two: a face that stays out of the file says why, and
+        // is not also told to renew. The date itself is still reported, because it
+        // is a fact about the face whatever the export does with its bytes.
+        let pdf = document_font_plan(
+            State(state),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "pdf".to_string(),
+                revision: None,
+            }),
+            admin,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(pdf["entries"][0]["embeds"], false);
+        assert!(pdf["entries"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("pdfEmbed is false"));
+        assert!(pdf["entries"][0].get("warning").is_none(), "{pdf}");
+        assert_eq!(pdf["entries"][0]["expiresAtEpochMs"], expires);
     }
 
     #[tokio::test]
