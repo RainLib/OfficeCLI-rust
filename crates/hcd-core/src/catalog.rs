@@ -20,6 +20,13 @@ pub const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CATALOG_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_FACES: usize = 32;
 const MAX_PRESENTATION_FACE_BYTES: u64 = 8 * 1024 * 1024;
+/// A license that ends inside this window still allows the export today, and the
+/// export says so out loud while it writes the bytes (`license_expiry_warning`).
+/// Thirty days leaves a real chance to renew the
+/// license or swap the face before the next export of the same document would
+/// silently lose the font. Public because the service answers with it, so a
+/// caller never has to guess the line the exporter warns on.
+pub const LICENSE_WARN_WINDOW_DAYS: u64 = 30;
 
 /// Bounds for one audit line. A day file is read from its end, so a log that
 /// grows past `MAX_AUDIT_FILE_BYTES` still answers with its newest entries
@@ -1411,6 +1418,10 @@ pub struct ThemeFontDecision {
     pub weight: u16,
     pub style: FontStyle,
     pub action: ThemeFontAction,
+    /// A note the exporter writes into the fidelity warnings even though it did
+    /// embed these bytes: the license runs out within
+    /// [`LICENSE_WARN_WINDOW_DAYS`] days. `None` when there is nothing due.
+    pub warning: Option<String>,
 }
 
 /// One face of [`theme_font_report`]: the same verdict with no bytes attached.
@@ -1430,6 +1441,16 @@ pub struct ThemeFontReport {
     /// Why the bytes stay in the catalog. Absent when they are embedded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The day the license stops allowing this face, when it has an end date at
+    /// all — including a date already past, whose story `reason` tells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_epoch_ms: Option<u64>,
+    /// The one sentence [`theme_font_plan`] gives the exporter for a face it
+    /// embeds anyway while its license is about to run out. Absent for a face
+    /// that is not embedded and for a license with no date due soon, so an
+    /// operator reading this knows the file is fine today and for how long.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Choose which pinned faces can be embedded.
@@ -1438,6 +1459,10 @@ pub struct ThemeFontReport {
 /// `ooxmlEmbed` or `pdfEmbed` is false, or the license is expired, the bytes
 /// stay in the catalog and the family name is registered instead. Workbook
 /// export always registers the name and does not embed bytes.
+///
+/// A face that IS embedded still gets a `warning` when its license ends within
+/// [`LICENSE_WARN_WINDOW_DAYS`] days: the file is correct today and the operator
+/// hears about it before the same export starts dropping the font.
 pub fn theme_font_plan(
     catalog: &DiskCatalog,
     bundle: &Bundle,
@@ -1459,6 +1484,7 @@ pub fn theme_font_plan(
             }
             action = ThemeFontAction::Embed { format, bytes };
         }
+        let warning = license_expiry_warning(&font, &action);
         decisions.push(ThemeFontDecision {
             slots,
             family: face.family,
@@ -1466,6 +1492,7 @@ pub fn theme_font_plan(
             weight: face.weight,
             style: face.style,
             action,
+            warning,
         });
     }
     Ok(decisions)
@@ -1478,7 +1505,8 @@ pub fn theme_font_plan(
 /// should not cost a walk over the blob store. The reason text is the one the
 /// export writes, because both call `decide_face`, so the answer cannot drift
 /// from what the exporter does — and it stays available even when the bytes
-/// themselves are missing or unreadable.
+/// themselves are missing or unreadable. The same holds for `warning`, so the
+/// page can raise an expiring license before the file starts losing it.
 pub fn theme_font_report(
     catalog: &DiskCatalog,
     bundle: &Bundle,
@@ -1488,10 +1516,14 @@ pub fn theme_font_report(
     let mut entries = Vec::new();
     for (slots, face) in theme_face_groups(catalog, bundle, revision)? {
         let font = catalog.font_revision(&face.font_id, &face.font_revision_id)?;
-        let (embeds, reason) = match decide_face(kind, &font, &face) {
-            ThemeFontAction::Embed { .. } => (true, None),
-            ThemeFontAction::RegisterOnly { reason } => (false, Some(reason)),
+        let action = decide_face(kind, &font, &face);
+        let embeds = matches!(action, ThemeFontAction::Embed { .. });
+        let reason = match &action {
+            ThemeFontAction::RegisterOnly { reason } => Some(reason.clone()),
+            ThemeFontAction::Embed { .. } => None,
         };
+        let warning = license_expiry_warning(&font, &action);
+        let expires_at_epoch_ms = font.license.expires_at_epoch_ms;
         entries.push(ThemeFontReport {
             slots,
             family: face.family,
@@ -1503,6 +1535,8 @@ pub fn theme_font_report(
             byte_length: face.byte_length,
             embeds,
             reason,
+            expires_at_epoch_ms,
+            warning,
         });
     }
     Ok(entries)
@@ -1610,6 +1644,37 @@ fn license_block_reason(font: &FontRevision, kind: ThemeEmbedKind) -> Option<Str
         ));
     }
     None
+}
+
+/// Warn about a face the export is embedding anyway, because its license is due
+/// to end within [`LICENSE_WARN_WINDOW_DAYS`] days.
+///
+/// The check only fires on an [`ThemeFontAction::Embed`]: a face that stays in
+/// the catalog already carries a reason saying why, and a license that has run
+/// out is not one that is about to. The date is written out as well as the count
+/// of days, because the day matters more to a renewal than the number does — and
+/// a whole day still counts as one day, so a license due tomorrow is not
+/// reported as "in 0 days".
+fn license_expiry_warning(font: &FontRevision, action: &ThemeFontAction) -> Option<String> {
+    if !matches!(action, ThemeFontAction::Embed { .. }) {
+        return None;
+    }
+    const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
+    let expires = font.license.expires_at_epoch_ms?;
+    let now = now_epoch_ms();
+    if expires <= now {
+        return None;
+    }
+    let days = (expires - now).div_ceil(MS_PER_DAY);
+    if days > LICENSE_WARN_WINDOW_DAYS {
+        return None;
+    }
+    Some(format!(
+        "{} license expires on {} (in {days} day{}), after which these font bytes can no longer be embedded; renew the license or swap the face before then",
+        font.family,
+        utc_day_name(expires),
+        if days == 1 { "" } else { "s" },
+    ))
 }
 
 /// Pin a catalog theme to the document as a real content revision.
@@ -2699,6 +2764,157 @@ mod tests {
         let report = theme_font_report(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).unwrap();
         assert!(report.iter().any(|entry| entry.embeds));
         assert!(theme_font_plan(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).is_err());
+    }
+
+    #[test]
+    fn a_license_due_soon_is_named_while_the_bytes_still_go_in() {
+        const DAY_MS: u64 = 86_400_000;
+        let now = now_epoch_ms();
+        let mut font = sample_font(&"ab".repeat(32), 12);
+        let embed = || ThemeFontAction::Embed {
+            format: FontFileFormat::Otf,
+            bytes: Vec::new(),
+        };
+
+        // No end date, or one a year out: the export is not going to change its
+        // mind, so it says nothing.
+        assert_eq!(license_expiry_warning(&font, &embed()), None);
+        font.license.expires_at_epoch_ms = Some(now + 365 * DAY_MS);
+        assert_eq!(license_expiry_warning(&font, &embed()), None);
+
+        // Three days out is the case worth hearing: embedded today, refused on
+        // the next export after the date. The day itself is written out, because
+        // that is what a renewal conversation needs.
+        font.license.expires_at_epoch_ms = Some(now + 3 * DAY_MS);
+        let warning = license_expiry_warning(&font, &embed()).unwrap();
+        assert!(
+            warning.starts_with("Source Han Sans license expires on "),
+            "{warning}"
+        );
+        assert!(
+            warning.contains(&utc_day_name(now + 3 * DAY_MS)),
+            "{warning}"
+        );
+        assert!(warning.contains("in 3 days"), "{warning}");
+        assert!(warning.contains("swap the face"), "{warning}");
+
+        // A part of a day is still a day: a license with a day and an hour left
+        // is not reported as expiring in one day, and never as "in 0 days".
+        font.license.expires_at_epoch_ms = Some(now + DAY_MS + 3_600_000);
+        assert!(license_expiry_warning(&font, &embed())
+            .unwrap()
+            .contains("in 2 days"));
+        font.license.expires_at_epoch_ms = Some(now + DAY_MS);
+        assert!(
+            license_expiry_warning(&font, &embed())
+                .unwrap()
+                .contains("(in 1 day)"),
+            "一天的说法不该带复数"
+        );
+
+        // The window itself, and what a face that is not embedded gets instead.
+        font.license.expires_at_epoch_ms = Some(now + LICENSE_WARN_WINDOW_DAYS * DAY_MS);
+        assert!(license_expiry_warning(&font, &embed()).is_some());
+        font.license.expires_at_epoch_ms = Some(now + (LICENSE_WARN_WINDOW_DAYS + 1) * DAY_MS);
+        assert_eq!(license_expiry_warning(&font, &embed()), None);
+        font.license.expires_at_epoch_ms = Some(now + 3 * DAY_MS);
+        assert_eq!(
+            license_expiry_warning(
+                &font,
+                &ThemeFontAction::RegisterOnly {
+                    reason: "not embedded".to_string()
+                }
+            ),
+            None,
+            "只登记名字的字面已经有 reason，不该再来一句"
+        );
+
+        // Already past is not "about to": the reason says the bytes stayed out.
+        font.license.expires_at_epoch_ms = Some(1);
+        assert_eq!(license_expiry_warning(&font, &embed()), None);
+    }
+
+    /// The 体检 page and the exported file must not disagree about an expiring
+    /// license, so the sentence is composed once and both read that one.
+    #[test]
+    fn the_report_and_the_export_say_the_same_thing_about_a_license_due_soon() {
+        const DAY_MS: u64 = 86_400_000;
+        let (_temp, catalog, font_revision_id, _theme_id) = install();
+        let expires = now_epoch_ms() + 3 * DAY_MS;
+        let mut font = catalog
+            .font_revision("source-han-sans", &font_revision_id)
+            .unwrap();
+        font.license.expires_at_epoch_ms = Some(expires);
+        font.font_id = "source-han-sans-due".to_string();
+        catalog.put_font_revision(&font).unwrap();
+        let due_revision = content_id(
+            &FontRevision {
+                font_revision_id: String::new(),
+                ..font
+            },
+            "fontRevisionId",
+        )
+        .unwrap();
+        let theme_id = catalog
+            .put_theme(&ThemeRevision {
+                schema_version: THEME_SCHEMA.to_string(),
+                theme_revision_id: String::new(),
+                name: "Due soon".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "source-han-sans-due".to_string(),
+                        font_revision_id: due_revision.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "source-han-sans-due".to_string(),
+                        font_revision_id: due_revision,
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["sans-serif".to_string()],
+            })
+            .unwrap();
+        let bundle_dir = tempfile::tempdir().unwrap();
+        let bundle = complete_bundle(&bundle_dir, "");
+        pin_document_theme(&catalog, &bundle, &theme_id).unwrap();
+
+        let report = theme_font_report(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).unwrap();
+        let plan = theme_font_plan(&catalog, &bundle, None, ThemeEmbedKind::Ooxml).unwrap();
+        assert_eq!(report.len(), plan.len());
+        assert!(
+            report
+                .iter()
+                .all(|entry| entry.expires_at_epoch_ms == Some(expires)),
+            "许可证的到期日是这份字面的事实，每个槽位都该带上"
+        );
+
+        let mut warned = 0;
+        for (entry, decision) in report.iter().zip(&plan) {
+            assert_eq!(entry.warning, decision.warning, "体检和导出说的不是同一句");
+            if entry.embeds {
+                let warning = entry.warning.as_deref().expect("嵌入的字面该提醒到期");
+                assert!(warning.contains("in 3 days"), "{warning}");
+                assert!(warning.contains("expires on "), "{warning}");
+                warned += 1;
+            } else {
+                assert_eq!(entry.warning, None, "没嵌入的字面由 reason 说明");
+            }
+        }
+        assert_eq!(warned, 1, "该只有一句到期提醒，落在真正嵌入的字面上");
+
+        // A workbook embeds nothing, so it gets no renewal note either — the
+        // license line only speaks where bytes actually leave the catalog.
+        let workbook =
+            theme_font_report(&catalog, &bundle, None, ThemeEmbedKind::Spreadsheet).unwrap();
+        assert!(workbook.iter().all(|entry| entry.warning.is_none()));
+        assert!(workbook
+            .iter()
+            .all(|entry| entry.expires_at_epoch_ms == Some(expires)));
     }
 
     fn complete_bundle(root_dir: &tempfile::TempDir, styles: &str) -> Bundle {

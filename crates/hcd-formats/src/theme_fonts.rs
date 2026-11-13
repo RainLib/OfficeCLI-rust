@@ -39,6 +39,21 @@ enum OfficeKind {
     Excel,
 }
 
+/// Record the exporter's "this license is about to run out" note for a face whose
+/// bytes did go into the file.
+///
+/// One license covers every face of a revision, so Regular and Bold of the same
+/// family would otherwise repeat the same sentence twice in one fidelity report,
+/// where it reads like a bug instead of a warning.
+fn note_license(report: &mut ThemeFontApplication, decision: &ThemeFontDecision) {
+    let Some(warning) = &decision.warning else {
+        return;
+    };
+    if !report.warnings.iter().any(|seen| seen == warning) {
+        report.warnings.push(warning.clone());
+    }
+}
+
 fn apply_pdf(target: &Path, plan: &[ThemeFontDecision]) -> Result<ThemeFontApplication, HcdError> {
     let mut report = ThemeFontApplication::default();
     let mut index = 0;
@@ -50,10 +65,13 @@ fn apply_pdf(target: &Path, plan: &[ThemeFontDecision]) -> Result<ThemeFontAppli
                 let name =
                     pdf_resource_name(&decision.family, decision.weight, decision.style, index);
                 match pdf_handler::font_embedder::embed_font_file(target, &name, bytes) {
-                    Ok(()) => report.preserved.push(format!(
-                        "embedded theme font {} {} in the PDF; existing text keeps its original font encoding",
-                        decision.family, decision.subfamily
-                    )),
+                    Ok(()) => {
+                        report.preserved.push(format!(
+                            "embedded theme font {} {} in the PDF; existing text keeps its original font encoding",
+                            decision.family, decision.subfamily
+                        ));
+                        note_license(&mut report, decision);
+                    }
                     Err(error) => report.warnings.push(format!(
                         "{} {} was not embedded because {error}; the PDF text keeps its original fonts",
                         decision.family, decision.subfamily
@@ -200,6 +218,7 @@ fn embed_word_fonts(
                     "embedded theme font {} {} in the Word font table",
                     decision.family, decision.subfamily
                 ));
+                note_license(report, decision);
                 sequence += 1;
             }
         }
@@ -265,6 +284,7 @@ fn embed_powerpoint_fonts(
                     "embedded theme font {} {} in the presentation",
                     decision.family, decision.subfamily
                 ));
+                note_license(report, decision);
                 sequence += 1;
             }
         }
@@ -933,6 +953,7 @@ mod tests {
             weight: 400,
             style: FontStyle::Normal,
             action,
+            warning: None,
         }
     }
 
@@ -1018,6 +1039,55 @@ mod tests {
             .unwrap()
             .contains(&format!("w:fontKey=\"{{{key}}}\"")));
         assert!(!zip_names(&path).iter().any(|name| name.contains("License")));
+    }
+
+    /// The renewal note is a warning the exporter raises while it embeds, not a
+    /// second reason: one license that covers Regular and Bold of the same
+    /// revision is still one sentence in the report, not the same line twice.
+    #[test]
+    fn an_expiring_license_is_warned_about_once_per_file() {
+        let note = "Source Han Sans license expires on 2027-01-04 (in 3 days), after which these font bytes can no longer be embedded; renew the license or swap the face before then".to_string();
+        let mut regular = decision(ThemeFontAction::Embed {
+            format: FontFileFormat::Ttf,
+            bytes: b"fake-ttf-regular-bytes-0123456789".to_vec(),
+        });
+        regular.warning = Some(note.clone());
+        let mut bold = decision(ThemeFontAction::Embed {
+            format: FontFileFormat::Ttf,
+            bytes: b"fake-ttf-bold-bytes-0123456789012".to_vec(),
+        });
+        bold.weight = 700;
+        bold.subfamily = "Bold".to_string();
+        bold.warning = Some(note.clone());
+        // A face the license keeps out of the file carries its own reason and no
+        // renewal note, and must not pick one up here either.
+        let denied = decision(ThemeFontAction::RegisterOnly {
+            reason: "License Denied license pdfEmbed is false".to_string(),
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("expiring.docx");
+        write_zip(
+            &path,
+            &[(
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#,
+            )],
+        );
+        let report = apply_theme_fonts(&path, "docx", &[regular, bold, denied]).unwrap();
+        assert_eq!(
+            report.warnings.iter().filter(|seen| **seen == note).count(),
+            1,
+            "同一份许可证的两个字面不该重复提醒"
+        );
+        assert_eq!(report.preserved.len(), 2, "两个 Embed 都该写进文件");
+        assert_eq!(
+            zip_names(&path)
+                .iter()
+                .filter(|name| name.starts_with("word/fonts/"))
+                .count(),
+            2
+        );
     }
 
     #[test]

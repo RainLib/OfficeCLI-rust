@@ -24,7 +24,7 @@ pub use catalog::{
     FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRef, FontRevision, FontScript,
     FontStretch, FontStyle, ResolvedFace, ResolvedTheme, ThemeDocumentRef, ThemeEmbedKind,
     ThemeFontAction, ThemeFontDecision, ThemeFontReport, ThemeFontSlots, ThemeRevision,
-    FONT_CATALOG_SCHEMA, MAX_AUDIT_LIMIT, MAX_FONT_BYTES, THEME_SCHEMA,
+    FONT_CATALOG_SCHEMA, LICENSE_WARN_WINDOW_DAYS, MAX_AUDIT_LIMIT, MAX_FONT_BYTES, THEME_SCHEMA,
 };
 pub use error::HcdError;
 pub use hash::{
