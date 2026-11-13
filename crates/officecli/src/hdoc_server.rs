@@ -14,13 +14,13 @@ use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, audit_action, detect_font_format, editor_projection,
     hash_file, list_documents, manifest_at_revision, pin_document_theme, project_editor,
-    resolve_document_theme, restore_revision, search_bundle, theme_documents, unpin_document_theme,
-    AuditRecord, BlockPrecondition, Bundle, DiskCatalog, DocumentSummary, EditorBlockContent,
-    EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRevision,
-    FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
-    StructurePatchBatch, ThemeDocumentRef, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
-    HCD_PATCH_SCHEMA_VERSION_4, MAX_AUDIT_LIMIT, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES,
-    THEME_SCHEMA,
+    resolve_document_theme, restore_revision, search_bundle, theme_documents, theme_font_report,
+    unpin_document_theme, AuditRecord, BlockPrecondition, Bundle, DiskCatalog, DocumentSummary,
+    EditorBlockContent, EditorInline, FontDeleteReport, FontFace, FontFileFormat, FontLicense,
+    FontRevision, FontScript, FontStretch, FontStyle, HcdError, PatchBatch, StructureOperation,
+    StructurePatchBatch, ThemeDocumentRef, ThemeEmbedKind, ThemeFontSlots, ThemeRevision,
+    FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, MAX_AUDIT_LIMIT, MAX_FONT_BYTES,
+    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -175,6 +175,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             "/v1/documents/{id}/theme/files/{sha256}",
             get(document_theme_file),
         )
+        .route("/v1/documents/{id}/font-plan", get(document_font_plan))
         .route("/v1/themes/{theme_revision_id}", get(theme_revision))
         .route(
             "/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}",
@@ -1647,6 +1648,86 @@ async fn document_theme(
         }
     }
     Ok(Json(resolved))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FontPlanQuery {
+    /// Which export to answer for. `docx` and `pptx` share the OOXML rules, `pdf`
+    /// has its own flag, and `xlsx` registers names and never carries bytes.
+    kind: String,
+    /// Ask about one revision — the version the file in hand was exported from.
+    /// Absent means the head.
+    revision: Option<u64>,
+}
+
+/// Which set of embedding rules a requested format lives under.
+fn embed_kind(format: &str) -> Option<ThemeEmbedKind> {
+    match format {
+        "docx" | "pptx" => Some(ThemeEmbedKind::Ooxml),
+        "pdf" => Some(ThemeEmbedKind::Pdf),
+        "xlsx" => Some(ThemeEmbedKind::Spreadsheet),
+        _ => None,
+    }
+}
+
+/// Say, face by face, whether an export would embed the font file or only write
+/// its name, and why.
+///
+/// The answer comes from the same decision the exporter makes, but nothing is
+/// read out of the blob store, so it stays cheap enough to open from a table row
+/// and it still answers when a face cannot be produced. The document's own read
+/// token is the audience — this names the same faces, sizes and license flags
+/// `GET /v1/documents/{id}/theme` already shows it — and the operator token reads
+/// it as well, because telling someone why the downloaded file has no Chinese
+/// font is the management console's job.
+///
+/// A document with no theme pinned answers an empty list rather than 404:
+/// carrying no managed theme *is* the answer, and the export really does fall
+/// back to the faces the document brings.
+async fn document_font_plan(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<FontPlanQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let kind = query.kind.trim();
+    let Some(kind_id) = embed_kind(kind) else {
+        return Err(bad(format!(
+            "unknown font plan kind {kind}; ask for docx, pptx, pdf or xlsx"
+        )));
+    };
+    authorize_theme_read(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let (manifest, revision) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+    let entries =
+        theme_font_report(&state.catalog, &bundle, Some(revision), kind_id).map_err(hcd_error)?;
+    Ok(Json(json!({
+        "documentId": id,
+        "revision": revision,
+        "themeRevisionId": manifest.theme_revision_id,
+        "kind": kind,
+        "entries": entries,
+    })))
+}
+
+/// Which token may ask what a document's export would carry.
+///
+/// Reading a face list, its size and its license flags is what a document read
+/// token already buys, so the document's own reader stays the primary audience.
+/// The console only holds the operator token, and an operator is the one whoever
+/// asks this question, so that token reads it too. Anything else is refused the
+/// way the theme routes refuse it.
+fn authorize_theme_read(
+    state: &ServerState,
+    headers: &HeaderMap,
+    id: &str,
+) -> Result<(), ApiError> {
+    if authorize_admin(state, headers).is_ok() {
+        return Ok(());
+    }
+    authorize(state, headers, id, false)
 }
 
 #[derive(Deserialize)]
@@ -4826,6 +4907,194 @@ mod tests {
             .unwrap_err()
             .0,
             StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn font_plan_route_answers_what_each_export_would_carry() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        // The seeded license allows OOXML and refuses PDF, which is the split an
+        // operator otherwise has to guess at.
+        let theme = seed_theme(&state, secret, "plan-serif").await;
+        let id = "doc-a";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+        let admin = bearer(secret, "*", "admin");
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1);
+
+        let plan = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(plan["documentId"], id);
+        assert_eq!(plan["revision"], 1);
+        assert_eq!(plan["themeRevisionId"], theme);
+        assert_eq!(plan["kind"], "docx");
+        let entries = plan["entries"].as_array().unwrap().clone();
+        assert_eq!(entries.len(), 1, "{plan}");
+        let word = &entries[0];
+        assert_eq!(word["slots"], serde_json::json!(["major-latin"]));
+        assert_eq!(word["family"], "Demo Serif");
+        assert_eq!(word["format"], "ttf");
+        assert_eq!(word["byteLength"], TTF.len() as u64);
+        assert_eq!(word["embeds"], true);
+        // Nothing to explain, so no reason field at all rather than an empty one.
+        assert!(word.get("reason").is_none(), "{word}");
+
+        let pdf = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "pdf".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(pdf["entries"][0]["embeds"], false);
+        assert!(
+            pdf["entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("pdfEmbed is false"),
+            "{pdf}"
+        );
+
+        let workbook = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "xlsx".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(workbook["entries"][0]["embeds"], false);
+        assert!(
+            workbook["entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("does not embed font bytes"),
+            "{workbook}"
+        );
+
+        // Revision 0 predates the pin. Whoever holds a file exported from it has
+        // to be told the document was not carrying a managed theme then, instead
+        // of being shown the head's answer.
+        let before = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: Some(0),
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(before["revision"], 0);
+        assert!(before["themeRevisionId"].is_null(), "{before}");
+        assert!(before["entries"].as_array().unwrap().is_empty(), "{before}");
+
+        // A document that was never pinned answers the same way, and with 200:
+        // carrying no theme is a fact about the export, not a missing record.
+        imported_bundle(&temp.path().join("doc-b.hcd"), "doc-b", None);
+        let unpinned = document_font_plan(
+            State(state.clone()),
+            Path("doc-b".to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: None,
+            }),
+            bearer(secret, "doc-b", "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(unpinned["themeRevisionId"].is_null());
+        assert!(unpinned["entries"].as_array().unwrap().is_empty());
+
+        // A format with no embedding rules of its own is refused by name.
+        let error = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "odt".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("docx, pptx, pdf or xlsx"), "{}", error.1);
+
+        // Tokens: the document's own reader, or the operator token. Nothing else.
+        assert!(document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "pptx".to_string(),
+                revision: None,
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .is_ok());
+        assert_eq!(
+            document_font_plan(
+                State(state.clone()),
+                Path(id.to_string()),
+                Query(FontPlanQuery {
+                    kind: "docx".to_string(),
+                    revision: None,
+                }),
+                bearer(secret, "doc-b", "read"),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            document_font_plan(
+                State(state),
+                Path(id.to_string()),
+                Query(FontPlanQuery {
+                    kind: "docx".to_string(),
+                    revision: None,
+                }),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::UNAUTHORIZED
         );
     }
 
