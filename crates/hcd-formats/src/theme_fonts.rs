@@ -275,61 +275,81 @@ fn report_retarget(
             })
             .collect();
         report.preserved.push(format!(
-            "{} text run{} in the PDF now draws with the pinned theme font: {}; each run keeps the width it had, held with horizontal scaling, so kerning inside a moved run is not carried over",
+            "{} text run{} in the PDF now {} with the pinned theme font: {}; each run keeps the width it had, held with horizontal scaling, so kerning inside a moved run is not carried over",
             moved.runs_retargeted,
             plural(moved.runs_retargeted),
+            if moved.runs_retargeted == 1 { "draws" } else { "draw" },
             faces.join(", ")
         ));
     }
-    // The reasons name the run or runs they apply to, so they read right at one
-    // and at a hundred.
-    let kept: Vec<(usize, &str, String)> = vec![
-        (
-            moved.runs_kept_unreadable,
-            "text run",
-            "because that font does not say what its character codes spell".to_string(),
-        ),
-        (
-            moved.runs_kept_uncovered,
-            "text run",
-            format!(
-                "because no pinned theme font can draw every character of {}",
-                if moved.runs_kept_uncovered == 1 {
-                    "it"
-                } else {
-                    "them"
-                }
-            ),
-        ),
-        (
-            moved.runs_kept_unfittable,
-            "text run",
-            "because the swap would need the glyphs squeezed past twice their width, or down to half".to_string(),
-        ),
-        (
-            moved.forms_left_alone,
-            "form xobject",
-            "whose operators live in another stream, which this export does not touch".to_string(),
-        ),
-        (
-            moved.pages_with_split_content,
-            "page",
-            "whose text is split over more than one content stream".to_string(),
-        ),
-    ];
-    for (count, noun, reason) in kept {
-        if count > 0 {
-            report.warnings.push(format!(
-                "{count} {noun}{} in the PDF keeps the font that drew it {reason}",
-                plural(count)
-            ));
-        }
+    // Every line counts itself, so its verb, its pronoun and its reason read
+    // right at one run and at a hundred.
+    let object = |count: usize| if count == 1 { "it" } else { "them" };
+    let possessive = |count: usize| if count == 1 { "its" } else { "their" };
+    let verb = |count: usize| if count == 1 { "keeps" } else { "keep" };
+    let held = |count: usize| {
+        format!(
+            "{count} text run{} in the PDF {} the font{} that drew {}",
+            plural(count),
+            verb(count),
+            plural(count),
+            object(count)
+        )
+    };
+
+    if moved.runs_kept_unreadable > 0 {
+        let count = moved.runs_kept_unreadable;
+        report.warnings.push(format!(
+            "{} because {} does not say what {} character codes spell",
+            held(count),
+            if count == 1 {
+                "that font"
+            } else {
+                "those fonts"
+            },
+            possessive(count)
+        ));
+    }
+    if moved.runs_kept_uncovered > 0 {
+        let count = moved.runs_kept_uncovered;
+        report.warnings.push(format!(
+            "{} because no pinned theme font can draw every character of {}",
+            held(count),
+            object(count)
+        ));
+    }
+    if moved.runs_kept_unfittable > 0 {
+        report.warnings.push(format!(
+            "{} because the swap would need the glyphs squeezed past twice their width, or down to half",
+            held(moved.runs_kept_unfittable)
+        ));
+    }
+    if moved.forms_left_alone > 0 {
+        let count = moved.forms_left_alone;
+        report.warnings.push(format!(
+            "{count} form xobject{} in the PDF {} {} own text, whose operators live in another stream, which this export does not touch",
+            plural(count),
+            verb(count),
+            possessive(count)
+        ));
+    }
+    if moved.pages_with_split_content > 0 {
+        let count = moved.pages_with_split_content;
+        report.warnings.push(format!(
+            "{count} page{} in the PDF {} every font it already carried, because the text is split over more than one content stream and this export rewrites only the first",
+            plural(count), verb(count)
+        ));
     }
     if moved.runs_kept_already_theme > 0 {
         report.preserved.push(format!(
-            "{} text run{} were already drawn with a pinned theme font",
+            "{} text run{} {} already drawn with a pinned theme font",
             moved.runs_kept_already_theme,
-            plural(moved.runs_kept_already_theme)
+            plural(moved.runs_kept_already_theme),
+            if moved.runs_kept_already_theme == 1 {
+                "was"
+            } else {
+                "were"
+            }
         ));
     }
 }
@@ -1878,5 +1898,58 @@ mod tests {
         assert!(sentence.contains("Brand Body"), "{sentence}");
         assert!(!sentence.contains("Brand CJK"), "{sentence}");
         assert!(page_text(&path).contains("/HcdBrandBody 12 Tf"));
+    }
+
+    /// The report lines are read by a person deciding whether to ship a file,
+    /// so they have to stay grammatical at one run and at several.
+    #[test]
+    fn refusal_lines_read_right_at_one_run_and_at_several() {
+        let mut report = ThemeFontApplication::default();
+        let moved = pdf_handler::font_retarget::TextRetargetReport {
+            pages_changed: 2,
+            runs_retargeted: 3,
+            runs_kept_unreadable: 1,
+            runs_kept_uncovered: 2,
+            runs_kept_unfittable: 1,
+            runs_kept_already_theme: 1,
+            forms_left_alone: 4,
+            pages_with_split_content: 1,
+            faces: vec![("HcdBrandSansSC".to_string(), 3)],
+        };
+        let families = HashMap::from([(
+            "HcdBrandSansSC".to_string(),
+            ("Brand Sans SC".to_string(), "Regular".to_string()),
+        )]);
+
+        report_retarget(&mut report, &moved, &families);
+
+        assert!(report
+            .preserved
+            .iter()
+            .any(|line| line.starts_with("3 text runs in the PDF now draw with")));
+        assert!(report
+            .preserved
+            .iter()
+            .any(|line| line.starts_with("1 text run was already drawn")));
+        let kept = report.warnings.join("\n");
+        assert!(kept.contains("1 text run in the PDF keeps the font that drew it because that font does not say what its character codes spell"), "{kept}");
+        assert!(kept.contains("2 text runs in the PDF keep the fonts that drew them because no pinned theme font can draw every character of them"), "{kept}");
+        assert!(
+            kept.contains("1 text run in the PDF keeps the font that drew it because the swap"),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("4 form xobjects in the PDF keep their own text"),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("1 page in the PDF keeps every font it already carried"),
+            "{kept}"
+        );
+        assert!(!kept.contains("3 text runs in the PDF keeps"), "{kept}");
+        assert!(
+            !kept.contains("1 text run in the PDF keep the fonts"),
+            "{kept}"
+        );
     }
 }
