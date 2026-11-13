@@ -23,6 +23,104 @@ type ReverseCmapCacheKey = (ObjectId, u64, usize);
 thread_local! {
     static REVERSE_CMAP_CACHE: RefCell<HashMap<ReverseCmapCacheKey, Rc<HashMap<char, u32>>>> =
         RefCell::new(HashMap::new());
+    /// Character maps read off embedded faces, keyed like the CMap cache above.
+    static FACE_CHAR_CACHE: RefCell<HashMap<ReverseCmapCacheKey, Rc<HashMap<char, u32>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The largest face this crate will decompress to ask what it can draw. A real
+/// full-coverage CJK face is a few megabytes; anything past this is treated as
+/// unreadable rather than as a reason to allocate.
+const MAX_EMBEDDED_FACE_BYTES: usize = 64 * 1024 * 1024;
+
+/// A cache key for an embedded face: which object holds it, how long it is, and
+/// a digest of both ends of its bytes.
+///
+/// Reading a character map off a face is paid once per font, but asking that map
+/// whether it covers a character comes up once per run of text, so the key
+/// cannot afford to hash an eleven-megabyte face on every question. A face that
+/// keeps its object number, its length and its first and last 64 KiB answers the
+/// same questions as before.
+fn face_stream_key(object_id: ObjectId, stream: &lopdf::Stream) -> ReverseCmapCacheKey {
+    const SAMPLE: usize = 64 * 1024;
+    let head = &stream.content[..stream.content.len().min(SAMPLE)];
+    let tail = &stream.content[stream.content.len().saturating_sub(SAMPLE)..];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    head.hash(&mut hasher);
+    tail.hash(&mut hasher);
+    (object_id, hasher.finish(), stream.content.len())
+}
+
+/// Every character the face embedded in this CID font can draw, mapped to the
+/// code that draws it.
+///
+/// This is not the same question as the font's ToUnicode CMap answers. A CMap
+/// replies to one glyph with one string, so a face that maps both U+0020 and
+/// U+00A0 to the same glyph can only name one of them, and a writer that
+/// believed that map would report a plain space as unprintable. The face's own
+/// character map has room for every character that reaches the same glyph,
+/// which is what "can this font draw this text, and with which code" needs.
+///
+/// Only a CID font whose CIDs *are* glyph ids qualifies. Without
+/// `/CIDToGIDMap /Identity` there is nothing that says a glyph id may be
+/// written as its own code, so the answer is no map rather than a wrong one.
+pub(crate) fn face_char_to_cid(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+) -> Option<Rc<HashMap<char, u32>>> {
+    if font.get(b"Subtype").ok()?.as_name_str().ok()? != "Type0" {
+        return None;
+    }
+    let descendant = font
+        .get(b"DescendantFonts")
+        .ok()?
+        .as_array()
+        .ok()?
+        .first()?
+        .as_reference()
+        .ok()?;
+    let cidfont = doc.get_object(descendant).ok()?.as_dict().ok()?;
+    if cidfont.get(b"CIDToGIDMap").ok()?.as_name_str().ok()? != "Identity" {
+        return None;
+    }
+    let descriptor_id = cidfont.get(b"FontDescriptor").ok()?.as_reference().ok()?;
+    let descriptor = doc.get_object(descriptor_id).ok()?.as_dict().ok()?;
+    let file_id = descriptor
+        .get(b"FontFile2")
+        .or_else(|_| descriptor.get(b"FontFile3"))
+        .ok()?
+        .as_reference()
+        .ok()?;
+    let Object::Stream(stream) = doc.get_object(file_id).ok()? else {
+        return None;
+    };
+
+    let key = face_stream_key(file_id, stream);
+    Some(FACE_CHAR_CACHE.with(|cache| {
+        if let Some(cached) = cache.borrow().get(&key) {
+            return Rc::clone(cached);
+        }
+        let map = Rc::new(
+            decoded_stream_content_with_limit(
+                stream,
+                Some(MAX_EMBEDDED_FACE_BYTES),
+                "embedded font",
+            )
+            .ok()
+            .and_then(|bytes| {
+                ttf_parser::Face::parse(&bytes, 0)
+                    .ok()
+                    .map(|face| crate::font_embedder::face_bmp_char_to_cid(&face))
+            })
+            .unwrap_or_default(),
+        );
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(key, Rc::clone(&map));
+        map
+    }))
 }
 
 fn decoded_stream_content(stream: &lopdf::Stream) -> Cow<'_, [u8]> {
@@ -950,11 +1048,35 @@ pub fn encode_chunk_with_font(
             }
         }
 
-        if let Some(ref unicode_to_cid) = custom_unicode_to_cid {
+        // A CMap names one character per glyph, so a face that shares one glyph
+        // between, say, U+0020 and U+00A0 can only answer for one of them. The
+        // face itself knows about both. Subsets are excluded here for the same
+        // reason [pick_fonts_for_text] excludes them: their character map still
+        // names characters the surviving glyph list cannot draw.
+        let subset = font
+            .get(b"BaseFont")
+            .ok()
+            .and_then(|value| value.as_name_str().ok())
+            .is_some_and(|base| base.contains('+'));
+        let face_unicode_to_cid = if subset {
+            None
+        } else {
+            face_char_to_cid(doc, font).filter(|map| !map.is_empty())
+        };
+
+        if custom_unicode_to_cid.is_some() || face_unicode_to_cid.is_some() {
             let mut bytes = Vec::with_capacity(text.len() * 2);
             let mut missing = String::new();
             for ch in text.chars() {
-                if let Some(cid) = unicode_to_cid.get(&ch).copied() {
+                let cid = custom_unicode_to_cid
+                    .as_ref()
+                    .and_then(|map| map.get(&ch).copied())
+                    .or_else(|| {
+                        face_unicode_to_cid
+                            .as_ref()
+                            .and_then(|map| map.get(&ch).copied())
+                    });
+                if let Some(cid) = cid {
                     bytes.push((cid >> 8) as u8);
                     bytes.push((cid & 0xFF) as u8);
                 } else {
@@ -1046,6 +1168,10 @@ pub fn pick_fonts_for_text(
     let mut font_original_chars: HashMap<String, HashSet<char>> = HashMap::new();
     let mut is_subset_font: HashMap<String, bool> = HashMap::new();
     let mut page_fonts: HashMap<String, &Dictionary> = HashMap::new();
+    // Whole faces embedded on this page, and what each can draw. A CMap names
+    // one character per glyph, so this is where a character that shares its
+    // glyph with another still has an answer.
+    let mut face_unicode_to_cid: HashMap<String, Rc<HashMap<char, u32>>> = HashMap::new();
 
     // Parse content stream to gather original text characters for each font
     if let Ok(content_bytes) = doc.get_page_content(page_id) {
@@ -1072,6 +1198,17 @@ pub fn pick_fonts_for_text(
                 .unwrap_or(false);
             is_subset_font.insert(font_name.clone(), is_sub);
             page_fonts.insert(font_name.clone(), font);
+
+            // A whole face says what can be drawn, including the characters that
+            // share a glyph with another and so never appear in a CMap. A subset
+            // is excluded: its character map still names glyphs that were cut.
+            if !is_sub {
+                if let Some(map) = face_char_to_cid(doc, font) {
+                    if !map.is_empty() {
+                        face_unicode_to_cid.insert(font_name.clone(), map);
+                    }
+                }
+            }
 
             if let Ok(to_unicode) = font.get(b"ToUnicode") {
                 if let Ok(ref_id) = to_unicode.as_reference() {
@@ -1108,7 +1245,13 @@ pub fn pick_fonts_for_text(
             return false;
         }
 
-        // 3. If not subsetted, check via standard encoding
+        // 3. If not subsetted, ask the embedded face itself, then the encoding.
+        if face_unicode_to_cid
+            .get(font_name)
+            .is_some_and(|map| map.contains_key(&ch))
+        {
+            return true;
+        }
         if let Some(font_dict) = page_fonts.get(font_name) {
             if font_dict.type_is(b"Font") {
                 if let Ok(encoding) = font_dict.get_font_encoding(doc) {
