@@ -3494,6 +3494,12 @@ mod tests {
         assert!(html.contains("导出 CSV"));
         assert!(html.contains("hcd-audit-"));
         assert!(html.contains("区间里还有更早的记录没列出"));
+        // The export font check is the third question the console answers without
+        // running an export: the route it calls, the dialog title, and the verdict
+        // an operator has to be able to tell apart.
+        assert!(html.contains("/font-plan"));
+        assert!(html.contains("字体落地体检"));
+        assert!(html.contains("只登记名字"));
     }
 
     #[tokio::test]

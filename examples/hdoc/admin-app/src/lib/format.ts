@@ -1,4 +1,10 @@
-import type { FontFace, FontFormat, FontLicense, FontScript } from "./types";
+import type {
+  ExportKind,
+  FontFace,
+  FontFormat,
+  FontLicense,
+  FontScript,
+} from "./types";
 
 export const GROUP_NAMES: Record<"major" | "minor", string> = {
   major: "标题",
@@ -12,6 +18,42 @@ export const SLOT_NAMES: Record<(typeof SLOT_KEYS)[number], string> = {
   eastAsia: "东亚",
   bidi: "双向",
 };
+
+/** The four export targets the font plan answers for. */
+export const EXPORT_KINDS: ExportKind[] = ["docx", "pptx", "pdf", "xlsx"];
+
+export const EXPORT_KIND_NAMES: Record<ExportKind, string> = {
+  docx: "Word (.docx)",
+  pptx: "PowerPoint (.pptx)",
+  pdf: "PDF",
+  xlsx: "Excel (.xlsx)",
+};
+
+/**
+ * The slot suffix the theme records use: `eastAsia` in the theme itself,
+ * `east-asia` in the name a resolved face carries.
+ */
+const SLOT_SUFFIX_NAMES: Record<string, string> = {
+  latin: "西文",
+  "east-asia": "东亚",
+  bidi: "双向",
+};
+
+/**
+ * `major-east-asia` becomes 标题 · 东亚. A slot this build has no name for is
+ * shown as itself rather than guessed away, because the plan is read straight
+ * from the catalog and a newer theme may carry a slot nobody has named yet.
+ */
+export function slotName(slot: string): string {
+  const cut = slot.indexOf("-");
+  if (cut < 0) return slot;
+  const group = slot.slice(0, cut);
+  const suffix = slot.slice(cut + 1);
+  const groupName = group === "major" || group === "minor" ? GROUP_NAMES[group] : null;
+  const suffixName = SLOT_SUFFIX_NAMES[suffix];
+  if (!groupName || !suffixName) return slot;
+  return `${groupName} · ${suffixName}`;
+}
 
 export const SCRIPT_OPTIONS: FontScript[] = [
   "latin",

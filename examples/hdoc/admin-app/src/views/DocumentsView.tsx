@@ -1,5 +1,5 @@
 import * as React from "react";
-import { FileText, Info, ShieldOff } from "lucide-react";
+import { FileText, Info, ScanSearch, ShieldOff } from "lucide-react";
 
 import { EmptyState, LoadState, PageHeader, Toolbar } from "@/components/Page";
 import { IdChip } from "@/components/IdChip";
@@ -20,6 +20,7 @@ import {
 import { Select } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import type { DocumentSummary } from "@/lib/types";
+import { FontPlanDialog } from "@/views/FontPlanDialog";
 import { useCatalog } from "@/state/CatalogProvider";
 
 type Filter = "all" | "pinned" | "unpinned";
@@ -32,6 +33,8 @@ export function DocumentsView() {
   const [filter, setFilter] = React.useState<Filter>("all");
   const [choice, setChoice] = React.useState<Record<string, string>>({});
   const [busy, setBusy] = React.useState<string | null>(null);
+  // Which document's export font check is open, by id.
+  const [planFor, setPlanFor] = React.useState<string | null>(null);
   const [bulkTarget, setBulkTarget] = React.useState("");
   const [bulkRunning, setBulkRunning] = React.useState(false);
   const [bulkResult, setBulkResult] = React.useState<{
@@ -355,6 +358,15 @@ export function DocumentsView() {
                     ) : null}
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title="问一遍这个文档导出时每个字体怎么落地，不用真的导出"
+                          onClick={() => setPlanFor(document.documentId)}
+                        >
+                          <ScanSearch />
+                          体检
+                        </Button>
                         <Select
                           aria-label={`给 ${document.documentId} 选主题`}
                           value={selected}
@@ -447,12 +459,30 @@ curl -X PUT ".../theme" -H "Authorization: Bearer <管理令牌>" \\
             历史修订仍指向当时钉的主题。已退役的主题不能再钉上，但已钉住它的文档仍可正常解析。
           </p>
           <p>
+            「体检」读 <code className="font-mono">GET /v1/documents/&lt;documentId&gt;/font-plan?kind=docx|pptx|pdf|xlsx</code>，
+            答案来自目录记录和许可证，不读字库字节：导出前就能看清哪些字面会把字节写进文件、哪些只登记字体名，
+            填上修订号还能问历史修订——手上那份文件出自哪一次导出，就按那一次问。文档自己的读令牌也能读它。
+          </p>
+          <p>
             「批量钉上」只碰当前搜索和筛选里<span className="text-foreground">还没钉主题</span>的文档，
             一个一个写；已经钉着主题的不会被覆盖，那要在行上单独换。还在导入的文档会被跳过，
             因为服务端本来就拒绝给未完成的 bundle 钉版。
           </p>
         </CardContent>
       </Card>
+
+      {planFor ? (
+        <FontPlanDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setPlanFor(null);
+          }}
+          documentId={planFor}
+          headRevision={
+            (documents ?? []).find((item) => item.documentId === planFor)?.revision ?? 0
+          }
+        />
+      ) : null}
 
       {node}
     </>

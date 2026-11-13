@@ -149,6 +149,40 @@ export interface AuditPage {
   to?: string | null;
 }
 
+/**
+ * Which export to ask about. `docx` and `pptx` share the OOXML embedding flag,
+ * `pdf` has its own, and `xlsx` registers names without ever carrying bytes.
+ */
+export type ExportKind = "docx" | "pptx" | "pdf" | "xlsx";
+
+/**
+ * One face of a pinned theme, as the export would treat it. `reason` is the
+ * sentence the export report writes, so the console cannot invent its own
+ * explanation; it is absent exactly when the bytes go into the file.
+ */
+export interface FontPlanEntry {
+  slots: string[];
+  family: string;
+  subfamily: string;
+  weight: number;
+  style: FontStyle;
+  format: FontFormat;
+  sha256: string;
+  byteLength: number;
+  embeds: boolean;
+  reason?: string;
+}
+
+export interface FontPlan {
+  documentId: string;
+  /** The revision the answer is about, resolved by the server. */
+  revision: number;
+  /** Null when that revision carries no pinned theme. */
+  themeRevisionId: string | null;
+  kind: ExportKind;
+  entries: FontPlanEntry[];
+}
+
 /** A face picked off disk, before its bytes are stored as a blob. */
 export interface PendingFace {
   name: string;

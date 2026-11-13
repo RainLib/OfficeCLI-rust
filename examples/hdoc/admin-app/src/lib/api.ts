@@ -2,9 +2,11 @@ import type {
   AuditPage,
   CatalogFont,
   DocumentSummary,
+  ExportKind,
   FontDeleteReport,
   FontFace,
   FontLicense,
+  FontPlan,
   FontRevision,
   ResolvedTheme,
   ThemeDocumentRef,
@@ -182,6 +184,21 @@ export const api = {
       `/v1/documents/${encode(documentId)}/theme`,
       { themeRevisionId },
     ),
+
+  /**
+   * Ask, face by face, what an export of this document would carry: the font
+   * bytes written into the file, or only its name, and why.
+   *
+   * Read-only and byte-free — the server answers from the catalog records — so
+   * it stays available even when the font itself cannot be read at the moment.
+   * `revision` asks about an older one, which is the version a file already
+   * downloaded was made from; left out, the head answers.
+   */
+  fontPlan: (documentId: string, kind: ExportKind, revision?: number) => {
+    const params = new URLSearchParams({ kind });
+    if (revision !== undefined) params.set("revision", String(revision));
+    return json<FontPlan>(`/v1/documents/${encode(documentId)}/font-plan?${params.toString()}`);
+  },
 
   /** A web-preview face, fetched with the same token and turned into a blob URL. */
   faceObjectUrl: async (href: string): Promise<string> => {
