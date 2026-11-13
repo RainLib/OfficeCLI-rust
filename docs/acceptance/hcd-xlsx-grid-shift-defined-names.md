@@ -166,7 +166,7 @@ Error: unsupported mode: XLSX grid shift cannot update a defined name on the edi
   | `Settings` | 同上 | `failed to read part: grid shift cannot update worksheet element sheetProtection` |
   | `Overview` | `invalid argument: insert before a materialized XLSX row`（补丁那趟，与命名区域无关） | 同一条 |
 
-  命名区域不再是这两张表的原因了。这一片落盘时 `Transactions`、`Settings` 都还插不出行，能一路走通的是 `product-catalog.xlsx`；`autoFilter` 那条紧接着在下一片关掉了（见 [XLSX 行/列移位把自动筛选和数据验证一起带走](hcd-xlsx-grid-shift-filter-validation.md)），`Transactions` 现在能插能删，留在原地的还有 `Settings` 的 `sheetProtection` 和 `Overview` 的物化窗口这两条。
+  命名区域不再是这两张表的原因了。这张表记的是本片刚落盘时的实测：那时 `Transactions`、`Settings` 都还插不出行，能一路走通的是 `product-catalog.xlsx`。`autoFilter` 那条紧接着在下一片关掉了（见 [XLSX 行/列移位把自动筛选和数据验证一起带走](hcd-xlsx-grid-shift-filter-validation.md)），`sheetProtection` 再下一片也关掉了（见 [XLSX 行/列移位放行受保护的工作表](hcd-xlsx-grid-shift-protection.md)），所以这两张表现在都插得出行；照旧不动的是 `Overview` 那条补丁侧的物化窗口。
 - 图表、表格（`tableParts`）、超链接的坐标引用仍旧按各自的规则改或拒绝；命名区域跟它们不是同一条路径。数据验证后来也接上了（见 [XLSX 行/列移位把自动筛选和数据验证一起带走](hcd-xlsx-grid-shift-filter-validation.md)），共用这一片的地址表读法。
 - 整窗重建把 `mergeCells` 按记录顺序重排那条边界照旧（见 `docs/acceptance/hcd-xlsx-sheet-freeze.md`），内容条数一条不差、顺序不同。
 - 没有源文件走 `--to xlsx` 的语义导出，本来就不读 `xl/workbook.xml`，与这一片无关。
