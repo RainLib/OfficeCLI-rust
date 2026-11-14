@@ -9,7 +9,6 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, audit_action, detect_font_format, editor_projection,
@@ -23,7 +22,6 @@ use hcd_core::{
     MAX_AUDIT_LIMIT, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -44,6 +42,33 @@ struct ServerState {
     default_theme: Option<String>,
     collaboration_lock: Arc<Mutex<()>>,
     downloads: Arc<Mutex<HashMap<String, DownloadTicket>>>,
+    agents: Arc<Mutex<HashMap<(String, String), AgentActivity>>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentActivity {
+    agent_id: String,
+    name: String,
+    status: String,
+    node_id: Option<String>,
+    block_id: Option<String>,
+    chunk_sequence: Option<usize>,
+    message: String,
+    revision: u64,
+    collaboration_epoch: u64,
+    updated_at_epoch_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentFocus {
+    status: String,
+    node_id: Option<String>,
+    block_id: Option<String>,
+    chunk_sequence: Option<usize>,
+    message: Option<String>,
+    expected_revision: u64,
 }
 
 #[derive(Clone)]
@@ -146,6 +171,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         default_theme,
         collaboration_lock: Arc::new(Mutex::new(())),
         downloads: Arc::new(Mutex::new(HashMap::new())),
+        agents: Arc::new(Mutex::new(HashMap::new())),
     };
     let router = Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true})) }))
@@ -165,6 +191,15 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/index/{page}", get(index_page))
         .route("/v1/documents/{id}/chunks/{sequence}", get(chunk))
         .route("/v1/documents/{id}/search", get(search))
+        .route("/v1/documents/{id}/nodes/{node_id}", get(text_node))
+        .route(
+            "/v1/documents/{id}/agents",
+            get(agent_list).post(agent_focus),
+        )
+        .route(
+            "/v1/documents/{id}/collaboration/pending",
+            post(collaboration_pending),
+        )
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
         .route(
@@ -952,6 +987,11 @@ async fn check_collaboration_epoch(
 
 async fn reset_collaboration(state: &ServerState, id: &str) -> Result<u64, ApiError> {
     let _guard = state.collaboration_lock.lock().await;
+    reset_collaboration_locked(state, id).await
+}
+
+/// Caller holds collaboration_lock across the content commit and epoch reset.
+async fn reset_collaboration_locked(state: &ServerState, id: &str) -> Result<u64, ApiError> {
     if let Some(remote) = &state.remote {
         return remote.collaboration_reset(id).await.map_err(internal);
     }
@@ -1140,6 +1180,268 @@ async fn search(
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
+async fn text_node(
+    State(state): State<ServerState>,
+    Path((id, node_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let node = hcd_core::get_text_node(&open(&state, &id)?, &node_id).map_err(hcd_error)?;
+    Ok(Json(serde_json::to_value(node).map_err(internal)?))
+}
+
+fn agent_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn agent_list(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    open(&state, &id)?;
+    let epoch = collaboration_epoch(&state, &id).await?;
+    let mut agents = state.agents.lock().await;
+    let now = agent_now();
+    agents.retain(|_, item| now.saturating_sub(item.updated_at_epoch_ms) < 15_000);
+    let mut current: Vec<_> = agents
+        .iter()
+        .filter(|((doc, _), activity)| doc == &id && activity.collaboration_epoch == epoch)
+        .map(|(_, activity)| activity.clone())
+        .collect();
+    current.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    Ok(Json(
+        json!({"documentId":id,"collaborationEpoch":epoch,"agents":current}),
+    ))
+}
+
+async fn agent_focus(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(focus): Json<AgentFocus>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    let agent_id = actor
+        .sub
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .ok_or_else(|| bad("agent token requires a distinct user-id"))?;
+    let _guard = state.collaboration_lock.lock().await;
+    let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
+    let bundle = open(&state, &id)?;
+    let manifest = bundle.manifest().map_err(hcd_error)?;
+    if manifest.revision != focus.expected_revision {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "agent focus revision changed; reread document".into(),
+        ));
+    }
+    if !["locating", "reading", "editing", "idle"].contains(&focus.status.as_str())
+        || focus
+            .message
+            .as_ref()
+            .is_some_and(|m| m.chars().count() > 160)
+    {
+        return Err(bad("invalid agent status or message"));
+    }
+    if focus.node_id.is_some() && focus.block_id.is_some() {
+        return Err(bad("choose nodeId or blockId"));
+    }
+    if let Some(node_id) = &focus.node_id {
+        if hcd_core::get_text_node(&bundle, node_id).is_err() {
+            hcd_core::get_image_node(&bundle, node_id).map_err(hcd_error)?;
+        }
+    }
+    if let Some(block_id) = &focus.block_id {
+        if !editor_projection(&bundle, None)
+            .map_err(hcd_error)?
+            .blocks
+            .iter()
+            .any(|block| &block.block_id == block_id)
+        {
+            return Err(bad("unknown agent blockId"));
+        }
+    }
+    if focus
+        .chunk_sequence
+        .is_some_and(|n| n >= manifest.chunk_count)
+    {
+        return Err(bad("agent chunkSequence out of bounds"));
+    }
+    let mut agents = state.agents.lock().await;
+    agents.retain(|_, item| agent_now().saturating_sub(item.updated_at_epoch_ms) < 15_000);
+    if focus.status == "idle" {
+        agents.remove(&(id.clone(), agent_id));
+        return Ok(Json(json!({"ok":true})));
+    }
+    if agents.len() >= 1024 && !agents.contains_key(&(id.clone(), agent_id.clone())) {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "agent activity capacity reached".into(),
+        ));
+    }
+    let activity = AgentActivity {
+        name: actor
+            .name
+            .unwrap_or_else(|| agent_id.clone())
+            .chars()
+            .take(64)
+            .collect(),
+        agent_id: agent_id.clone(),
+        status: focus.status,
+        node_id: focus.node_id,
+        block_id: focus.block_id,
+        chunk_sequence: focus.chunk_sequence,
+        message: focus.message.unwrap_or_default(),
+        revision: manifest.revision,
+        collaboration_epoch: epoch,
+        updated_at_epoch_ms: agent_now(),
+    };
+    agents.insert((id, agent_id), activity.clone());
+    Ok(Json(serde_json::to_value(activity).map_err(internal)?))
+}
+
+async fn agent_result(
+    state: &ServerState,
+    id: &str,
+    actor: &Claims,
+    status: &str,
+    revision: u64,
+    target: Option<Value>,
+) -> Result<(), ApiError> {
+    let Some(agent) = &actor.sub else {
+        return Ok(());
+    };
+    let epoch = collaboration_epoch(state, id).await?;
+    if let Some(activity) = state
+        .agents
+        .lock()
+        .await
+        .get_mut(&(id.to_string(), agent.clone()))
+    {
+        activity.status = status.into();
+        activity.revision = revision;
+        activity.collaboration_epoch = epoch;
+        activity.updated_at_epoch_ms = agent_now();
+        // A commit can affect a different target from the last reading focus.
+        // Show its first addressed operation rather than highlighting stale focus.
+        if let Some(target) = target {
+            let node = target.get("nodeId").and_then(Value::as_str);
+            let block = target.get("blockId").and_then(Value::as_str);
+            if node.is_some() || block.is_some() {
+                activity.node_id = node.map(str::to_string);
+                activity.block_id = block.map(str::to_string);
+                activity.chunk_sequence = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PendingCollaboration {
+    dirty: bool,
+    sequence: u64,
+}
+
+async fn collaboration_pending(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(pending): Json<PendingCollaboration>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    if actor.sub.as_deref() != Some("hcd-collaboration") {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "collaboration service identity required".into(),
+        ));
+    }
+    let _guard = state.collaboration_lock.lock().await;
+    let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
+    open(&state, &id)?;
+    let path = state
+        .root
+        .join("collaboration")
+        .join(format!("{id}.{epoch}.pending"));
+    if let Ok(bytes) = tokio::fs::read(&path).await {
+        let previous: PendingCollaboration = serde_json::from_slice(&bytes).map_err(internal)?;
+        if previous.sequence >= pending.sequence {
+            return Ok(Json(json!({"ok":true})));
+        }
+    }
+    tokio::fs::create_dir_all(path.parent().expect("collaboration directory"))
+        .await
+        .map_err(internal)?;
+    tokio::fs::write(path, serde_json::to_vec(&pending).map_err(internal)?)
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn agent_edit_preflight(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+    actor: &Claims,
+) -> Result<(), ApiError> {
+    if headers
+        .get("x-hcd-agent-edit")
+        .and_then(|h| h.to_str().ok())
+        != Some("true")
+    {
+        return Ok(());
+    }
+    if actor.sub.as_ref().is_none_or(|id| id.is_empty()) {
+        return Err(bad("agent edit requires a distinct user-id"));
+    }
+    let epoch = check_collaboration_epoch(state, id, headers).await?;
+    let path = state
+        .root
+        .join("collaboration")
+        .join(format!("{id}.{epoch}.pending"));
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let pending: PendingCollaboration = serde_json::from_slice(&bytes).map_err(internal)?;
+            if pending.dirty {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "collaborators have unsaved edits; wait for a checkpoint, reread and replan"
+                        .into(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(internal(error)),
+    }
+    Ok(())
+}
+
+async fn check_agent_patch(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+    actor: &Claims,
+) -> Result<(), ApiError> {
+    let result = async {
+        if headers.contains_key("x-hcd-collaboration-epoch") {
+            check_collaboration_epoch(state, id, headers).await?;
+        }
+        agent_edit_preflight(state, id, headers, actor).await
+    }
+    .await;
+    if result.is_err() {
+        let revision = open(state, id)?.manifest().map_err(hcd_error)?.revision;
+        agent_result(state, id, actor, "conflict", revision, None).await?;
+    }
+    result
+}
+
 async fn project(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -1161,16 +1463,44 @@ async fn patch(
     Json(patch): Json<StructurePatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
+    check_agent_patch(&state, &id, &headers, &actor).await?;
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
     let bundle = open(&state, &id)?;
-    let result = apply_structure_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
+    let result = match apply_structure_patch(&bundle, &patch, patch.base_revision) {
+        Ok(result) => result,
+        Err(error) => {
+            agent_result(
+                &state,
+                &id,
+                &actor,
+                "conflict",
+                bundle.manifest().map_err(hcd_error)?.revision,
+                None,
+            )
+            .await?;
+            return Err(hcd_error(error));
+        }
+    };
     if !result.idempotent_replay {
         stamp_revision_author(&bundle, result.revision, &actor)?;
         publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
-        reset_collaboration(&state, &id).await?;
+        reset_collaboration_locked(&state, &id).await?;
     }
+    agent_result(
+        &state,
+        &id,
+        &actor,
+        "applied",
+        result.revision,
+        patch
+            .operations
+            .first()
+            .and_then(|op| serde_json::to_value(op).ok()),
+    )
+    .await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
@@ -1181,6 +1511,8 @@ async fn node_patch(
     Json(patch): Json<PatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
+    check_agent_patch(&state, &id, &headers, &actor).await?;
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
@@ -1189,11 +1521,37 @@ async fn node_patch(
     if !matches!(format.as_str(), "pdf" | "pptx" | "xlsx") {
         return Err(bad("node patch endpoint accepts PDF, PPTX or XLSX bundles"));
     }
-    let result = apply_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
+    let result = match apply_patch(&bundle, &patch, patch.base_revision) {
+        Ok(result) => result,
+        Err(error) => {
+            agent_result(
+                &state,
+                &id,
+                &actor,
+                "conflict",
+                bundle.manifest().map_err(hcd_error)?.revision,
+                None,
+            )
+            .await?;
+            return Err(hcd_error(error));
+        }
+    };
     if !result.idempotent_replay {
         stamp_revision_author(&bundle, result.revision, &actor)?;
         publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
     }
+    agent_result(
+        &state,
+        &id,
+        &actor,
+        "applied",
+        result.revision,
+        patch
+            .operations
+            .first()
+            .and_then(|op| serde_json::to_value(op).ok()),
+    )
+    .await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
@@ -2861,78 +3219,19 @@ async fn export_document_inner(
         tokio::fs::read(output).await.map_err(internal)?
     } else if format == "html" {
         let mut output = Vec::new();
-        let assets = bundle
-            .read_asset_index_for_revision(requested)
-            .map_err(bad)?;
-        let known: HashMap<String, _> = assets
-            .into_iter()
-            .map(|asset| (asset.hash.clone(), asset))
-            .collect();
-        let pattern = Regex::new(r"asset://sha256/([0-9a-f]{64})").map_err(internal)?;
-        let mut cache = HashMap::<String, String>::new();
         let theme_stylesheet =
             hcd_core::theme_presentation_css(&state.catalog, &bundle, Some(requested))
                 .map_err(hcd_error)?;
-        let options = hcd_core::HtmlPresentationOptions {
-            revision: Some(requested),
-            max_output_bytes: 256 * 1024 * 1024,
-            theme_stylesheet,
-            ..Default::default()
-        };
-        hcd_core::render_standalone_html_with_transform(&bundle, &options, &mut output, |html| {
-            let mut transformed = String::with_capacity(html.len());
-            let mut previous = 0;
-            for matched in pattern.captures_iter(html) {
-                let full = matched.get(0).expect("regex match");
-                let hash = matched.get(1).expect("regex hash").as_str();
-                transformed.push_str(&html[previous..full.start()]);
-                if !cache.contains_key(hash) {
-                    let asset = known.get(hash).ok_or_else(|| {
-                        hcd_core::HcdError::InvalidBundle(format!("unknown asset {hash}"))
-                    })?;
-                    if asset.byte_length > 64 * 1024 * 1024 {
-                        return Err(hcd_core::HcdError::ResourceLimit(
-                            "asset exceeds HTML export limit".to_string(),
-                        ));
-                    }
-                    let path = bundle.resolve_href(&asset.href)?;
-                    if hash_file(&path)? != hash {
-                        return Err(hcd_core::HcdError::InvalidBundle(format!(
-                            "asset {hash} hash mismatch"
-                        )));
-                    }
-                    let bytes = std::fs::read(&path)?;
-                    if bytes.len() as u64 != asset.byte_length {
-                        return Err(hcd_core::HcdError::InvalidBundle(format!(
-                            "asset {hash} length mismatch"
-                        )));
-                    }
-                    let mime = match path
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or_default()
-                    {
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        "svg" => "image/svg+xml",
-                        _ => "application/octet-stream",
-                    };
-                    cache.insert(
-                        hash.to_string(),
-                        format!(
-                            "data:{mime};base64,{}",
-                            base64::engine::general_purpose::STANDARD.encode(bytes)
-                        ),
-                    );
-                }
-                transformed.push_str(&cache[hash]);
-                previous = full.end();
-            }
-            transformed.push_str(&html[previous..]);
-            Ok(transformed)
-        })
+        crate::commands::hdoc_html::render(
+            &bundle,
+            &hcd_core::HtmlPresentationOptions {
+                revision: Some(requested),
+                max_output_bytes: 256 * 1024 * 1024,
+                theme_stylesheet,
+                ..Default::default()
+            },
+            &mut output,
+        )
         .map_err(bad)?;
         output
     } else {
@@ -2999,6 +3298,194 @@ mod tests {
 
     const TTF: &[u8] = b"\x00\x01\x00\x00glyh font";
 
+    #[tokio::test]
+    async fn agents_are_isolated_and_concurrent_edits_conflict_without_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"agent-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "Original paragraph\n").unwrap();
+        let id = "agent-document";
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = open(&state, id).unwrap();
+        project_editor(&bundle, 0).unwrap();
+        let original = editor_projection(&bundle, None).unwrap();
+        let block = original
+            .blocks
+            .iter()
+            .find(|b| !b.read_only && b.region == "body")
+            .unwrap();
+        let headers = |agent| {
+            let mut headers = bearer_as(secret, id, "write", Some(agent), Some(agent));
+            headers.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+            headers.insert("x-hcd-agent-edit", "true".parse().unwrap());
+            headers
+        };
+        let focus = || AgentFocus {
+            status: "editing".into(),
+            node_id: None,
+            block_id: Some(block.block_id.clone()),
+            chunk_sequence: None,
+            message: Some("Working".into()),
+            expected_revision: original.revision,
+        };
+        let mut readonly = bearer_as(secret, id, "read", Some("readonly"), None);
+        readonly.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+        assert_eq!(
+            agent_focus(
+                State(state.clone()),
+                Path(id.into()),
+                readonly,
+                Json(focus())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        for agent in ["agent-a", "agent-b"] {
+            let _ = agent_focus(
+                State(state.clone()),
+                Path(id.into()),
+                headers(agent),
+                Json(focus()),
+            )
+            .await
+            .unwrap();
+        }
+        let listed = agent_list(
+            State(state.clone()),
+            Path(id.into()),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed["agents"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            bundle.manifest().unwrap().revision,
+            original.revision,
+            "activity must not edit content"
+        );
+        assert_eq!(
+            agent_list(
+                State(state.clone()),
+                Path(id.into()),
+                bearer(secret, "other-document", "read")
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let make_patch = |agent: &str| -> StructurePatchBatch {
+            serde_json::from_value(json!({
+            "schemaVersion":HCD_PATCH_SCHEMA_VERSION_4,"documentId":id,"patchId":agent,"baseRevision":original.revision,
+            "operations":[{"op":"block.replace","blockId":block.block_id,"block":{"kind":"paragraph","inlines":[{"text":agent}]},"precondition":{"blockHash":block.block_hash}}]
+        })).unwrap()
+        };
+        let mut service = bearer_as(secret, id, "write", Some("hcd-collaboration"), None);
+        service.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            service.clone(),
+            Json(PendingCollaboration {
+                dirty: true,
+                sequence: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        let refused = patch(
+            State(state.clone()),
+            Path(id.into()),
+            headers("agent-a"),
+            Json(make_patch("agent-a")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert_eq!(bundle.manifest().unwrap().revision, original.revision);
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            service,
+            Json(PendingCollaboration {
+                dirty: false,
+                sequence: 2,
+            }),
+        )
+        .await
+        .unwrap();
+        let (a, b) = tokio::join!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("agent-a"),
+                Json(make_patch("agent-a"))
+            ),
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("agent-b"),
+                Json(make_patch("agent-b"))
+            )
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        assert_eq!(
+            a.as_ref().err().or(b.as_ref().err()).unwrap().0,
+            StatusCode::CONFLICT
+        );
+        let current = editor_projection(&bundle, None).unwrap();
+        assert_eq!(current.revision, original.revision + 1);
+        let text: String = current
+            .blocks
+            .iter()
+            .flat_map(|block| {
+                block
+                    .content
+                    .inlines
+                    .iter()
+                    .map(|inline| inline.text.as_str())
+            })
+            .collect();
+        assert!(text == "agent-a" || text == "agent-b");
+        let listed = agent_list(
+            State(state.clone()),
+            Path(id.into()),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        let statuses: Vec<_> = listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["status"].as_str().unwrap())
+            .collect();
+        assert!(statuses.contains(&"applied") && statuses.contains(&"conflict"));
+        for activity in state.agents.lock().await.values_mut() {
+            activity.updated_at_epoch_ms = 0;
+        }
+        assert!(
+            agent_list(State(state), Path(id.into()), bearer(secret, id, "read"))
+                .await
+                .unwrap()
+                .0["agents"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     fn test_state(secret: &[u8], root: &std::path::Path) -> ServerState {
         ServerState {
             root: root.to_path_buf(),
@@ -3008,6 +3495,7 @@ mod tests {
             default_theme: None,
             collaboration_lock: Arc::new(Mutex::new(())),
             downloads: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

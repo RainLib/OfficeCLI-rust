@@ -307,7 +307,7 @@ fn handle_unwatch(cmd: commands::UnwatchCommand) -> Result<String, HandlerError>
 fn handle_mcp(cmd: commands::McpCommand) -> Result<String, HandlerError> {
     match cmd.args.as_slice() {
         [] => mcp::run_server()
-            .map(|_| "MCP server stopped".to_string())
+            .map(|_| String::new())
             .map_err(|e| HandlerError::OperationFailed(e.to_string())),
         [action] if action.eq_ignore_ascii_case("list") => mcp_list(),
         [target] => mcp_install(target),

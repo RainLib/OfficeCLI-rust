@@ -9,6 +9,7 @@ mod extract_text;
 mod format_handler_session;
 mod get;
 pub(crate) mod hdoc;
+pub(crate) mod hdoc_html;
 mod hdoc_raster_pdf;
 mod help;
 mod html_convert;

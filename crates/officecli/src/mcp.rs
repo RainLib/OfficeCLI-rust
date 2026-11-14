@@ -16,6 +16,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
+#[path = "mcp_hcd.rs"]
+mod hcd;
+
 // ─── JSON-RPC 2.0 types ────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,7 +33,6 @@ struct JsonRpcRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcResponse {
     jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
@@ -75,11 +77,12 @@ impl JsonRpcResponse {
 struct ToolDefinition {
     name: String,
     description: String,
+    #[serde(rename = "inputSchema")]
     input_schema: Value,
 }
 
 fn get_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    let mut definitions = vec![
         ToolDefinition {
             name: "view".to_string(),
             description:
@@ -270,12 +273,17 @@ fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["file"]
             }),
         },
-    ]
+    ];
+    definitions.extend(hcd::definitions());
+    definitions
 }
 
 // ─── Tool execution ────────────────────────────────────────────────────
 
 fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, String> {
+    if name.starts_with("hcd_") {
+        return hcd::execute(name, params);
+    }
     // convert tool does not use open_handler — it operates on legacy formats directly
     if name == "convert" {
         let file = params
@@ -581,14 +589,17 @@ fn mcp_parse_position(input: Option<&str>) -> InsertPosition {
 pub fn run_server() -> Result<(), anyhow::Error> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    run_stream(stdin.lock(), &mut stdout)
+}
 
-    for line in stdin.lock().lines() {
+fn run_stream(input: impl BufRead, stdout: &mut impl Write) -> Result<(), anyhow::Error> {
+    for line in input.lines() {
         let line = line?;
         if line.is_empty() {
             continue;
         }
 
-        let req: JsonRpcRequest = match serde_json::from_str(&line) {
+        let parsed: Value = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
                 let resp = JsonRpcResponse::error(None, -32700, format!("Parse error: {}", e));
@@ -599,8 +610,20 @@ pub fn run_server() -> Result<(), anyhow::Error> {
                 continue;
             }
         };
-
-        let resp = handle_request(req);
+        let req = serde_json::from_value::<JsonRpcRequest>(parsed.clone());
+        let resp = match req {
+            Ok(req) if req.jsonrpc == "2.0" => {
+                // Notifications never produce a response, including unknown
+                // notification methods. An explicit null id is a request.
+                if parsed.get("id").is_none() {
+                    continue;
+                }
+                handle_request(req)
+            }
+            _ => {
+                JsonRpcResponse::error(parsed.get("id").cloned(), -32600, "Invalid Request".into())
+            }
+        };
         let resp_str = serde_json::to_string(&resp)?;
         stdout.write_all(resp_str.as_bytes())?;
         stdout.write_all(b"\n")?;
@@ -612,6 +635,7 @@ pub fn run_server() -> Result<(), anyhow::Error> {
 
 fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
     match req.method.as_str() {
+        "ping" => JsonRpcResponse::success(req.id, serde_json::json!({})),
         "initialize" => JsonRpcResponse::success(
             req.id,
             serde_json::json!({
@@ -670,19 +694,43 @@ fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
             }
         }
 
-        "notifications/initialized" => {
-            // No response needed for notifications (no id)
-            if req.id.is_none() {
-                return JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: None,
-                    result: None,
-                    error: None,
-                };
-            }
-            JsonRpcResponse::success(req.id, serde_json::json!({}))
-        }
+        "notifications/initialized" => JsonRpcResponse::success(req.id, serde_json::json!({})),
 
         other => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdio_handles_notifications_errors_schema_and_eof() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"unknown-notification\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n",
+            "invalid-json\n",
+            "{\"jsonrpc\":\"1.0\",\"id\":4,\"method\":\"ping\"}\n",
+        );
+        let mut output = Vec::new();
+        run_stream(input.as_bytes(), &mut output).unwrap();
+        let lines: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0]["id"], 1);
+        for tool in lines[1]["result"]["tools"].as_array().unwrap() {
+            assert_eq!(tool["inputSchema"]["type"], "object");
+            assert!(tool.get("input_schema").is_none());
+        }
+        assert_eq!(lines[2]["result"], serde_json::json!({}));
+        assert_eq!(lines[3]["error"]["code"], -32700);
+        assert!(lines[3].get("id").unwrap().is_null());
+        assert_eq!(lines[4]["error"]["code"], -32600);
     }
 }

@@ -204,20 +204,19 @@ xlsx_suite_run_case() {
       | wc -l \
       | tr -d '[:space:]'
   )"
-  XLSX_SUITE_HCD_SHEET_COUNT="$(
-    grep -rhoE 'data-hcd-sheet="[^"]+"' "$XLSX_SUITE_CASE_DIR/hcd/bundle/chunks/sha256" 2>/dev/null \
-      | sort -u \
-      | wc -l \
-      | tr -d '[:space:]'
-  )"
-  XLSX_SUITE_HCD_SHEET_METADATA_COUNT="$(
-    grep -rhoE \
-      'data-hcd-sheet="[^"]+" data-hcd-sheet-index="[0-9]+" data-hcd-sheet-state="(visible|hidden|very-hidden)"' \
-      "$XLSX_SUITE_CASE_DIR/hcd/bundle/chunks/sha256" 2>/dev/null \
-      | sort -u \
-      | wc -l \
-      | tr -d '[:space:]'
-  )"
+  local XLSX_SUITE_PAGES="$XLSX_SUITE_REPORT_DIR/current-index-pages.ndjson"
+  : > "$XLSX_SUITE_PAGES"
+  local XLSX_SUITE_PAGE_COUNT XLSX_SUITE_PAGE
+  XLSX_SUITE_PAGE_COUNT="$(jq -r '.indexPageCount' "$XLSX_SUITE_CASE_DIR/hcd/bundle/manifest.json")"
+  for ((XLSX_SUITE_PAGE=0; XLSX_SUITE_PAGE<XLSX_SUITE_PAGE_COUNT; XLSX_SUITE_PAGE++)); do
+    if ! "$XLSX_SUITE_BIN" hdoc get-index-page "$XLSX_SUITE_CASE_DIR/hcd/bundle" "$XLSX_SUITE_PAGE" --json \
+      | jq -ec '.data.indexPage' >> "$XLSX_SUITE_PAGES"; then
+      printf '%s\n' "read_current_index" >> "$XLSX_SUITE_FAILURES_FILE"
+      XLSX_SUITE_FAILED=1
+    fi
+  done
+  XLSX_SUITE_HCD_SHEET_COUNT="$(jq -s '[.[].chunks[] | select(.region == "sheet") | .grid.sheetId] | unique | length' "$XLSX_SUITE_PAGES")"
+  XLSX_SUITE_HCD_SHEET_METADATA_COUNT="$(jq -s '[.[].chunks[] | select(.region == "sheet" and .grid.sheetIndex >= 0 and (.grid.sheetState == "visible" or .grid.sheetState == "hidden" or .grid.sheetState == "veryHidden")) | .grid.sheetId] | unique | length' "$XLSX_SUITE_PAGES")"
   printf 'source=%s\nhcd=%s\nhcdWithMetadata=%s\n' \
     "$XLSX_SUITE_SOURCE_SHEET_COUNT" "$XLSX_SUITE_HCD_SHEET_COUNT" \
     "$XLSX_SUITE_HCD_SHEET_METADATA_COUNT" \
@@ -233,8 +232,7 @@ xlsx_suite_run_case() {
   fi
 
   local XLSX_SUITE_GRID_INDEX_REPORT="$XLSX_SUITE_REPORT_DIR/grid-index.json"
-  if find "$XLSX_SUITE_CASE_DIR/hcd/bundle/indexes" -type f -name '*.json' -print0 \
-    | xargs -0 jq -s \
+  if jq -s \
       --argjson sourceSheetCount "$XLSX_SUITE_SOURCE_SHEET_COUNT" \
       '{
         descriptors: ([.[].chunks[]] | length),
@@ -252,7 +250,7 @@ xlsx_suite_run_case() {
              ((.grid.columnStart == null or .grid.columnEnd == null) or .grid.columnStart <= .grid.columnEnd))) and
           ([.[].chunks[].grid.sheetId] | unique | length) == $sourceSheetCount
         )
-      }' > "$XLSX_SUITE_GRID_INDEX_REPORT" && \
+      }' "$XLSX_SUITE_PAGES" > "$XLSX_SUITE_GRID_INDEX_REPORT" && \
     [[ "$(jq -r '.valid' "$XLSX_SUITE_GRID_INDEX_REPORT")" == "true" ]]; then
     :
   else

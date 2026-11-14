@@ -824,6 +824,10 @@ fn print_html_with_assets(
     } else {
         html.insert_str(0, print_styles);
     }
+    if let Some(styles) = fixed_slide_print_styles(source)? {
+        let position = html.rfind("</head>").unwrap_or(0);
+        html.insert_str(position, &styles);
+    }
 
     let mut root = None;
     for (href, asset) in assets {
@@ -832,6 +836,50 @@ fn print_html_with_assets(
         root = Some(common_resource_root(root.as_deref(), &canonical));
     }
     Ok((html, root.filter(|path| path.is_dir())))
+}
+
+/// Slide geometry is physical, not a flowing A4 document. Keep the original
+/// canvas and start each slide on its own page without browser-preview chrome.
+fn fixed_slide_print_styles(source: &str) -> Result<Option<String>, HandlerError> {
+    let mut dimensions = None;
+    for section in source.match_indices("<section") {
+        let Some(end) = find_tag_end(source.as_bytes(), section.0 + 1) else {
+            continue;
+        };
+        let Some(tag) = parse_tag(&source[section.0 + 1..end]) else {
+            continue;
+        };
+        if !tag
+            .attributes
+            .get("class")
+            .is_some_and(|class| class.split_whitespace().any(|c| c == "hcd-slide"))
+        {
+            continue;
+        }
+        let dimension = |name| {
+            tag.attributes
+                .get(name)
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0 && *v <= 100_000_000.0)
+        };
+        let current = dimension("data-hcd-width-emu")
+            .zip(dimension("data-hcd-height-emu"))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "slide dimensions are missing or out of bounds".into(),
+                )
+            })?;
+        if dimensions.is_some_and(|previous| previous != current) {
+            return Err(HandlerError::UnsupportedMode(
+                "mixed slide sizes require a per-page PDF layout".into(),
+            ));
+        }
+        dimensions = Some(current);
+    }
+    Ok(dimensions.map(|(width, height)| format!(
+        "<style id=\"officecli-slide-print\">@page{{size:{}pt {}pt;margin:0}}.hcd-chunk{{margin:0!important;padding:0!important;border:0!important;box-shadow:none!important}}.hcd-slide{{margin:0!important;break-inside:avoid;break-after:page;page-break-after:always;box-shadow:none!important}}.hcd-slide:last-child{{break-after:auto;page-break-after:auto}}</style>",
+        width / 12700.0, height / 12700.0
+    )))
 }
 
 fn normalize_markdown_print_controls(source: &str) -> String {
@@ -4875,6 +4923,33 @@ mod tests {
                 HtmlBlock::Paragraph("Hello world".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn fixed_slide_pdf_keeps_canvas_dimensions_and_page_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let html = temp.path().join("slides.html");
+        let slide = r#"<section class="hcd-slide" data-hcd-width-emu="12192000" data-hcd-height-emu="6858000" style="position:relative;width:1280px;height:720px"><p style="position:absolute;left:96px;top:96px">Wide slide</p></section>"#;
+        std::fs::write(
+            &html,
+            format!("<html><head></head><body>{slide}{slide}</body></html>"),
+        )
+        .unwrap();
+        let pdf = temp.path().join("slides.pdf");
+        convert_html_with_assets(&html, &pdf, "pdf", HashMap::new(), &[]).unwrap();
+        let doc = lopdf::Document::load(&pdf).unwrap();
+        assert_eq!(doc.get_pages().len(), 2);
+        for id in doc.get_pages().values() {
+            let bounds = doc
+                .get_dictionary(*id)
+                .unwrap()
+                .get(b"MediaBox")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert!((bounds[2].as_float().unwrap() - 960.0).abs() < 0.1);
+            assert!((bounds[3].as_float().unwrap() - 540.0).abs() < 0.1);
+        }
     }
 
     #[test]

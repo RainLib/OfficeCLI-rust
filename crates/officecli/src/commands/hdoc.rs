@@ -1250,6 +1250,56 @@ fn export(
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
     let head = bundle.manifest().map_err(handler_error)?;
     let target = semantic_target(&command.output, command.to.as_deref())?;
+    if target == "html"
+        && !(command.source.is_some() && normalize_format(&head.source.format) == "html")
+    {
+        let theme_stylesheet = command
+            .catalog
+            .as_deref()
+            .map(|path| {
+                let catalog = DiskCatalog::open(path).map_err(handler_error)?;
+                hcd_core::theme_presentation_css(&catalog, &bundle, command.revision)
+                    .map_err(handler_error)
+            })
+            .transpose()?
+            .flatten();
+        let path = Path::new(&command.output);
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        super::hdoc_html::render(
+            &bundle,
+            &HtmlPresentationOptions {
+                revision: command.revision,
+                theme_stylesheet,
+                ..Default::default()
+            },
+            temporary.as_file_mut(),
+        )
+        .map_err(handler_error)?;
+        temporary
+            .persist(path)
+            .map_err(|error| HandlerError::IoError(error.error))?;
+        let report = FidelityReport {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            level: FidelityLevel::High,
+            preserved: vec!["canonical HCD layout, text, styles and embedded assets".into()],
+            flattened: vec![],
+            dropped: vec![],
+            warnings: vec![],
+        };
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported standalone HTML to {}", command.output),
+        );
+    }
     let source_format = normalize_format(&head.source.format);
     let options = ExportOptions {
         revision: command.revision,

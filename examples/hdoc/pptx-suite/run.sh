@@ -86,19 +86,20 @@ pptx_suite_image_node_ids() {
   local PPTX_SUITE_BUNDLE="$1"
   local PPTX_SUITE_REVISION="$2"
   local PPTX_SUITE_OUTPUT="$3"
-  local PPTX_SUITE_INDEX_DIR
-  PPTX_SUITE_INDEX_DIR="$(printf '%s/indexes/rev-%020d' "$PPTX_SUITE_BUNDLE" "$PPTX_SUITE_REVISION")"
-  local PPTX_SUITE_INDEX PPTX_SUITE_HTML_HREF
-
+  local PPTX_SUITE_PAGE_COUNT PPTX_SUITE_PAGE PPTX_SUITE_SEQUENCE
+  local PPTX_SUITE_PAGE_JSON
+  PPTX_SUITE_PAGE_COUNT="$(jq -r '.indexPageCount' "$PPTX_SUITE_BUNDLE/manifest.json")"
   : > "$PPTX_SUITE_OUTPUT"
-  for PPTX_SUITE_INDEX in "$PPTX_SUITE_INDEX_DIR"/*.json; do
-    [[ -f "$PPTX_SUITE_INDEX" ]] || continue
-    while IFS= read -r PPTX_SUITE_HTML_HREF; do
-      (rg -o 'data-hcd-id="[^"]+" data-hcd-node-kind="image"' \
-        "$PPTX_SUITE_BUNDLE/$PPTX_SUITE_HTML_HREF" || true) \
-        | sed -E 's/^data-hcd-id="([^"]+)".*/\1/' >> "$PPTX_SUITE_OUTPUT"
-    done < <(jq -r '.chunks[].htmlHref' "$PPTX_SUITE_INDEX")
+  for ((PPTX_SUITE_PAGE=0; PPTX_SUITE_PAGE<PPTX_SUITE_PAGE_COUNT; PPTX_SUITE_PAGE++)); do
+    PPTX_SUITE_PAGE_JSON="$("$PPTX_SUITE_BIN" hdoc get-index-page "$PPTX_SUITE_BUNDLE" "$PPTX_SUITE_PAGE" --revision "$PPTX_SUITE_REVISION" --json)" || return 1
+    while IFS= read -r PPTX_SUITE_SEQUENCE; do
+      "$PPTX_SUITE_BIN" hdoc get-chunk "$PPTX_SUITE_BUNDLE" "$PPTX_SUITE_SEQUENCE" --revision "$PPTX_SUITE_REVISION" --json \
+        | jq -er '.data.map.entries[]? | select(.source.nodeKind == "image") | .nodeId' >> "$PPTX_SUITE_OUTPUT"
+      # An empty image list is valid; a failed chunk read is not.
+      [[ "${PIPESTATUS[0]}" -eq 0 ]] || return 1
+    done < <(printf '%s' "$PPTX_SUITE_PAGE_JSON" | jq -r '.data.indexPage.chunks[].sequence')
   done
+
 }
 
 pptx_suite_take_screenshot() {
