@@ -1145,12 +1145,14 @@ struct ExpectedRevision {
 async fn manifest(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    Ok(Json(
-        serde_json::to_value(open(&state, &id)?.manifest().map_err(internal)?).map_err(internal)?,
-    ))
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+    Ok(Json(serde_json::to_value(manifest).map_err(internal)?))
 }
 
 async fn editor(
@@ -1946,11 +1948,13 @@ async fn asset(
 async fn styles(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    let manifest = bundle.manifest().map_err(internal)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
     let path = bundle.resolve_href(&manifest.styles_href).map_err(bad)?;
     let bytes = tokio::fs::read(path).await.map_err(internal)?;
     if bytes.len() > 1024 * 1024 {
@@ -3297,6 +3301,90 @@ mod tests {
     use hcd_core::FontRef;
 
     const TTF: &[u8] = b"\x00\x01\x00\x00glyh font";
+
+    #[tokio::test]
+    async fn historical_manifest_and_styles_use_the_requested_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"snapshot-test-secret-012345678901234";
+        let state = test_state(secret, temp.path());
+        let id = "snapshot-document";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+        let theme = seed_theme(&state, secret, "snapshot-font").await;
+        let _ = pin_theme(
+            State(state.clone()),
+            Path(id.into()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        for requested in [None, Some(0), Some(1)] {
+            let expected = requested.unwrap_or(1);
+            let info = manifest(
+                State(state.clone()),
+                Path(id.into()),
+                Query(RevisionQuery {
+                    revision: requested,
+                }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(info["revision"], expected);
+            if expected == 0 {
+                assert!(info["themeRevisionId"].is_null());
+            } else {
+                assert_eq!(info["themeRevisionId"], theme);
+            }
+            let response = styles(
+                State(state.clone()),
+                Path(id.into()),
+                Query(RevisionQuery {
+                    revision: requested,
+                }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let css = std::str::from_utf8(&body).unwrap();
+            assert!(css.contains("article { color: #222222; }"));
+            assert_eq!(css.contains("--hcd-major-latin:"), expected == 1);
+        }
+        assert!(manifest(
+            State(state.clone()),
+            Path(id.into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .is_err());
+        assert!(styles(
+            State(state.clone()),
+            Path(id.into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            manifest(
+                State(state),
+                Path(id.into()),
+                Query(RevisionQuery { revision: Some(0) }),
+                bearer(secret, "another-document", "read"),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
 
     #[tokio::test]
     async fn agents_are_isolated_and_concurrent_edits_conflict_without_overwriting() {

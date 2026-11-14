@@ -166,7 +166,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [stageWidth, setStageWidth] = useState(0)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
-  const { preview, setPreview: setReadOnly, focused, setFocused, rightPanel, setRightPanel, activeTab, setActiveTab } = useDocumentViewState()
+  const { preview, setPreview: setReadOnly, focused, setFocused, rightPanel, setRightPanel, activeTab, setActiveTab, selectedRevision: viewRevision, setSelectedRevision: setViewRevision } = useDocumentViewState()
   const readOnly = session.scope === 'read' || preview
   const [refresh, setRefresh] = useState(0)
   const [previews, setPreviews] = useState<Record<number, PagePreview>>({})
@@ -184,7 +184,11 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(layoutScope))
   function showRightPanel(panel: 'settings' | 'revisions') { setFocused(false); setPanelOpen(false); setRightPanel(panel) }
   const [revisions, setRevisions] = useState<Revision[]>([])
-  const [viewRevision, setViewRevision] = useState<number | null>(null)
+  const [snapshot, setSnapshot] = useState<{ revision: number; manifest: Manifest; style: string } | null>(null)
+  const [snapshotError, setSnapshotError] = useState('')
+  const [snapshotReload, setSnapshotReload] = useState(0)
+  const [switchingRevision, setSwitchingRevision] = useState(false)
+  const revisionTransition = useRef(false)
   const [themeCss, setThemeCss] = useState('')
   const [themeFonts, setThemeFonts] = useState<ThemeFontOption[]>([])
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
@@ -217,6 +221,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       return
     }
     resetEditHistory(next)
+    setDescriptors([])
+    setLoadedPages(0)
     setManifest(previous => previous && ({ ...previous, revision: next }))
     setRefresh(previous => previous + 1)
   }
@@ -229,7 +235,13 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   useEffect(() => { saveLayout(layout, layoutScope) }, [layout, layoutScope])
   const displayedRevision = viewRevision ?? manifest?.revision ?? null
   useEffect(() => { setPreviews({}) }, [refresh, viewRevision])
-  const historical = viewRevision !== null && viewRevision !== manifest?.revision
+  const historical = viewRevision !== null
+  const visibleManifest = historical ? snapshot?.revision === viewRevision ? snapshot.manifest : null : manifest
+  const visibleStyle = historical ? snapshot?.revision === viewRevision ? snapshot.style : '' : style
+  const snapshotLoading = historical && !visibleManifest && !snapshotError
+  const selectedMetadata = revisions.find(item => item.revision === viewRevision)
+  const revisionMetadata = [selectedMetadata?.authorName || localizeSource(locale, viewRevision === 0 ? '初始导入' : '作者未记录'),
+    selectedMetadata?.createdAtEpochMs ? new Date(selectedMetadata.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''].filter(Boolean).join(' · ')
   const draftDirty = (selected && draft !== selected.node.text) || (newBox && !!newDraft.trim())
   const status = saving || historyBusy ? '保存中' : historical ? '历史只读' : remoteRevision ? '有新修订' : readOnly ? '只读' : draftDirty ? '编辑中' : '已保存'
   const canUndoDraft = !!activeEditor && undoDepth(activeEditor.state) > 0
@@ -330,14 +342,27 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       .then(([info, css]) => { if (live) { setManifest(info as Manifest); setEditHistory(previous => previous.head === (info as Manifest).revision ? previous : { head: (info as Manifest).revision, past: [], future: [] }); setStyle(css) } })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
-  }, [session])
+  }, [session, refresh])
+  useEffect(() => {
+    if (viewRevision === null) return
+    const request = new AbortController()
+    setSnapshot(null)
+    setSnapshotError('')
+    void Promise.all([
+      api(session, `?revision=${viewRevision}`, { signal: request.signal }).then(response => response.json() as Promise<Manifest>),
+      api(session, `/styles?revision=${viewRevision}`, { signal: request.signal }).then(response => response.text()),
+    ]).then(([info, css]) => {
+      if (!request.signal.aborted) setSnapshot({ revision: viewRevision, manifest: info, style: css })
+    }).catch(cause => { if (!request.signal.aborted) setSnapshotError(String(cause)) })
+    return () => request.abort()
+  }, [session, viewRevision, snapshotReload])
   // The pages render `${style}\n${themeCss}`, so the pair has to be decided
   // together: when the document's own stylesheet already carries the pinned
   // theme, the request asks for the font bytes alone instead of getting the
   // same variables and family rules a second time.
   useEffect(() => {
     let live = true
-    loadTheme(session, viewRevision, { facesOnly: hasThemeRegion(style) })
+    loadTheme(session, viewRevision, { facesOnly: hasThemeRegion(visibleStyle) })
       .then(theme => {
         if (!live) return
         setThemeCss(theme.css)
@@ -345,7 +370,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
-  }, [session, viewRevision, style])
+  }, [session, viewRevision, visibleStyle])
   useEffect(() => {
     let live = true
     api(session, '/revisions').then(response => response.json())
@@ -362,7 +387,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     setPlacingText(false)
   }, [viewRevision])
   useEffect(() => {
-    if (!manifest || loadedPages >= manifest.indexPageCount) return
+    if (!visibleManifest || loadedPages >= visibleManifest.indexPageCount) return
     const marker = tail.current
     if (!marker) return
     let live = true
@@ -379,7 +404,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     }, { rootMargin: '1600px' })
     observer.observe(marker)
     return () => { live = false; observer.disconnect() }
-  }, [session, manifest, loadedPages, descriptors, viewRevision])
+  }, [session, visibleManifest, loadedPages, descriptors, viewRevision])
   useEffect(() => {
     if (!searchTarget || !descriptors.some(item => item.sequence === searchTarget.chunkSequence)) return
     requestAnimationFrame(() => pagesRef.current?.querySelector(`[id="hcd-page-${searchTarget.chunkSequence}"]`)
@@ -615,9 +640,26 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     finally { setSaving(false) }
   }
   async function saveBeforeExport(): Promise<number | null> {
+    if (saving || historyBusy) return null
     if (selected && draft !== selected.node.text && !readOnly && !historical) return saveText(selected.node, draft)
     if (newBox && newDraft.trim() && !readOnly && !historical) return saveNewBox(newBox, newDraft)
     return displayedRevision
+  }
+  async function showRevision(number: number | null) {
+    if (revisionTransition.current || saving || historyBusy) return
+    revisionTransition.current = true
+    setSwitchingRevision(true)
+    try {
+      // Persist a fixed-layout text draft before unmounting its inline editor.
+      // A failed save leaves the current canvas and draft available for retry.
+      if (await saveBeforeExport() === null) return
+      setSnapshotError('')
+      setViewRevision(number)
+      if (number !== null && window.matchMedia('(max-width: 900px)').matches) {
+        setRightPanel(null)
+        setLayoutOption('showOutline', false)
+      }
+    } finally { revisionTransition.current = false; setSwitchingRevision(false) }
   }
   async function closeEditor() {
     if (((selected && draft !== selected.node.text) || (newBox && newDraft.trim())) && await saveBeforeExport() === null) return
@@ -837,11 +879,11 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   return <div data-format={session.format} data-hcd-history={historical ? 'true' : undefined} className={`workspace semantic-workspace fixed-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(rightPanel || panelOpen) && !focused ? '' : 'right-hidden'} ${focused ? 'focus-mode' : ''}`}>
     {layout.showHeader && <EditorHeader session={session} revision={displayedRevision} status={status} activeTab={activeTab}
       onTab={tab => { setActiveTab(tab); setPlacingText(false); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} onClose={() => void closeEditor()}
-      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings' && !panelOpen && !focused} focused={focused} onFocus={() => setFocused(value => !value)} readOnly={readOnly || historical} onReadOnly={value => { if (value && !readOnly) void saveBeforeExport().then(saved => { if (saved !== null) { setPlacingText(false); setReadOnly(true) } }); else if (!historical && session.scope === 'write') setReadOnly(value) }} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />}
+      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings' && !panelOpen && !focused} focused={focused} onFocus={() => setFocused(value => !value)} readOnly={readOnly || historical} onReadOnly={value => { if (value && !readOnly) void saveBeforeExport().then(saved => { if (saved !== null) { setPlacingText(false); setReadOnly(true) } }); else if (session.scope === 'write') { if (historical) void showRevision(null); setReadOnly(value) } }} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => showRightPanel('settings')}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={displayedRevision} />
     <div className="layout editor-layout">
-      {layout.showOutline && !focused && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div><nav>{descriptors.map(chunk => <div className="outline-entry" key={chunk.sequence}><button onClick={() => pagesRef.current?.querySelector(`[id="hcd-page-${chunk.sequence}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}><PageThumbnail preview={previews[chunk.sequence]} format={session.format} /><span className="page-thumbnail-label">{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</span></button>{session.format === 'pptx' && chunk.region === 'slide' && !chunk.continuation && !readOnly && !historical && <><button className="outline-move" title={localizeSource(locale, "把这一页上移一位")} disabled={saving || historyBusy || slidePages[0]?.chunkId === chunk.chunkId} onClick={() => void moveSlide(chunk.chunkId, 'up')}><LocalText source={"↑ 上移"} /></button><button className="outline-move" title={localizeSource(locale, "把这一页下移一位")} disabled={saving || historyBusy || (deckFullyLoaded && slidePages[slidePages.length - 1]?.chunkId === chunk.chunkId)} onClick={() => void moveSlide(chunk.chunkId, 'down')}><LocalText source={"↓ 下移"} /></button><button className="outline-copy" title={localizeSource(locale, "把这一页复制一份")} disabled={saving || historyBusy} onClick={() => void duplicateSlide(chunk.chunkId)}><LocalText source={"⧉ 复制"} /></button><button className="outline-remove" title={localizeSource(locale, "删除这一页幻灯片")} disabled={saving || historyBusy} onClick={() => void deleteSlide(chunk.chunkId)}><LocalText source={"✕ 删除"} /></button></>}</div>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
+      {layout.showOutline && !focused && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div><nav>{descriptors.map(chunk => <div className="outline-entry" key={chunk.sequence}><button onClick={() => pagesRef.current?.querySelector(`[id="hcd-page-${chunk.sequence}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}><PageThumbnail preview={previews[chunk.sequence]} format={session.format} /><span className="page-thumbnail-label">{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</span></button>{session.format === 'pptx' && chunk.region === 'slide' && !chunk.continuation && !readOnly && !historical && <><button className="outline-move" title={localizeSource(locale, "把这一页上移一位")} disabled={saving || historyBusy || slidePages[0]?.chunkId === chunk.chunkId} onClick={() => void moveSlide(chunk.chunkId, 'up')}><LocalText source={"↑ 上移"} /></button><button className="outline-move" title={localizeSource(locale, "把这一页下移一位")} disabled={saving || historyBusy || (deckFullyLoaded && slidePages[slidePages.length - 1]?.chunkId === chunk.chunkId)} onClick={() => void moveSlide(chunk.chunkId, 'down')}><LocalText source={"↓ 下移"} /></button><button className="outline-copy" title={localizeSource(locale, "把这一页复制一份")} disabled={saving || historyBusy} onClick={() => void duplicateSlide(chunk.chunkId)}><LocalText source={"⧉ 复制"} /></button><button className="outline-remove" title={localizeSource(locale, "删除这一页幻灯片")} disabled={saving || historyBusy} onClick={() => void deleteSlide(chunk.chunkId)}><LocalText source={"✕ 删除"} /></button></>}</div>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {visibleManifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
       {(!layout.showOutline || focused) && <PanelDock side="left" onOpen={() => { setFocused(false); setLayoutOption('showOutline', true) }} />}
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
         {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setPlacingText(false); setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={readOnly || !!historical} format={session.format} />}
@@ -861,17 +903,23 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {session.format === 'pptx' && selected?.node.createdInHcd && !readOnly && !historical && <button disabled={saving || draft !== selected.node.text} onClick={() => void deletePptxText(selected.node)}><LocalText source={"删除文字框"} /></button>}
       {newBox && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || !newDraft.trim()} onClick={() => void saveNewBox(newBox, newDraft)}><LocalText source={"保存新增文字"} /></button>}
     </nav>}
-      <CanvasViewport><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} onPreview={recordPreview} revision={viewRevision} stylesheet={`${style}\n${themeCss}`} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></CanvasViewport>
+      {historical && <section className="revision-preview-bar" aria-label={localizeSource(locale, '历史版本预览')}>
+        <div className="revision-preview-title"><div><strong><LocalText source="历史版本预览" /> · r{viewRevision}</strong><small>{revisionMetadata} · <LocalText source="只读" /></small></div></div>
+        <button className="return-current" disabled={switchingRevision} onClick={() => void showRevision(null)}><LocalText source="返回当前" /></button>
+      </section>}
+      {snapshotLoading && <div className="revision-empty" role="status"><LocalText source="正在加载历史版本…" /></div>}
+      {historical && snapshotError && <div className="revision-empty" role="alert"><p>{snapshotError}</p><button onClick={() => { setSnapshotError(''); setSnapshotReload(value => value + 1) }}><LocalText source="重试" /></button></div>}
+      <CanvasViewport hidden={!visibleManifest || !!snapshotError}><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{visibleManifest && descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} onPreview={recordPreview} revision={viewRevision} stylesheet={`${visibleStyle}\n${themeCss}`} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></CanvasViewport>
       </section>
       {panelOpen && !focused && <AgentPanel />}
       {!panelOpen && !focused && rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示页面目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div>
-          {historical && <button onClick={() => setViewRevision(null)}><LocalText source={"返回当前版本"} /></button>}
+          {historical && <button onClick={() => void showRevision(null)}><LocalText source={"返回当前版本"} /></button>}
           <h3><LocalText source={"本次编辑步骤"} /></h3><p><LocalText source={"保存后的撤销和重做会生成新的修订。协作者更新后，本地步骤会清空。"} /></p>
           {editHistory.past.length ? <ol className="fixed-edit-steps">{editHistory.past.map((step, index) => <li key={`${step.revision}-${index}`}><strong>{index + 1}. {localizeDynamic(locale, step.label)}</strong><small><LocalText source={"保存前 r"} />{step.revision}</small></li>).reverse()}</ol> : <p><LocalText source={"暂无可撤销步骤"} /></p>}
           {editHistory.future.length > 0 && <><h3><LocalText source={"可重做"} /></h3><ol className="fixed-edit-steps">{editHistory.future.slice().reverse().map((step, index) => <li key={`${step.revision}-${index}`}>{localizeDynamic(locale, step.label)}</li>)}</ol></>}
-          <h3><LocalText source={"全部修订"} /></h3><div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} onClick={() => setViewRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? localizeSource(locale, '导入').slice(0, 1) : '?')}</span><span className="revision-detail"><strong>r{item.revision}</strong><small>{item.authorName || (localizeSource(locale, item.revision === 0 ? '初始导入' : '作者未记录'))}</small><span><LocalText source={"查看版本"} /></span></span></button>)}</div></section>}
+          <h3><LocalText source={"全部修订"} /></h3><div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} data-revision={item.revision} aria-pressed={viewRevision === item.revision} disabled={saving || historyBusy || switchingRevision} onClick={() => void showRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? localizeSource(locale, '导入').slice(0, 1) : '?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs ? new Date(item.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</small></strong><small>{item.authorName || (localizeSource(locale, item.revision === 0 ? '初始导入' : '作者未记录'))}</small><span><LocalText source={"查看版本"} /></span></span></button>)}</div></section>}
       </aside>}
       {(focused || (!rightPanel && !panelOpen)) && <PanelDock side="right" onOpen={() => { setFocused(false); setPanelOpen(false); showRightPanel('settings') }} onHistory={() => { setFocused(false); setPanelOpen(false); showRightPanel('revisions') }} onAgents={() => { setFocused(false); setPanelOpen(true) }} />}
     </div>

@@ -65,6 +65,8 @@ test.beforeAll(async () => {
   const fixtures: Record<string,string> = {
     'tabs-a':'txt', 'tabs-b':'txt', 'human-draft':'txt', 'agents-text':'txt',
     'agents-slides':'examples/ppt/textboxes/textboxes-basic.pptx',
+    'fixed-history':'examples/ppt/textboxes/textboxes-basic.pptx',
+    'fixed-history-errors':'examples/ppt/textboxes/textboxes-basic.pptx',
     'complex-word':'assets/showcase/project-proposal.docx',
     'agents-grid':'assets/showcase/gradebook.xlsx',
     'view-state':'txt', 'history-outline':'md', 'revision-text':'txt', 'revision-errors':'txt', 'ui-text':'txt', 'ui-grid':'assets/showcase/gradebook.xlsx',
@@ -555,4 +557,93 @@ test('history uses the selected outline and closes the mobile drawer after selec
   await expect(active.locator('.revision-paper')).toContainText('Markdown workspace')
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
   await page.screenshot({path:info.outputPath('phone-history-selection.png')})
+})
+
+
+test('fixed history saves drafts, pins even the latest revision read-only and restores the live deck', async ({page},info) => {
+  const id='fixed-history'
+  await open(page,id)
+  const active=page.locator('.document-tab-panel:not([hidden])')
+  await active.locator('.fixed-page-hitbox').first().click()
+  const text=active.locator('.fixed-pages iframe').first().contentFrame().getByRole('textbox',{name:'编辑文字',exact:true})
+  await text.fill('PRESERVED_FIXED_DRAFT')
+  await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
+  const patchRoute=`**/v1/documents/${id}/node-patch`
+  await page.route(patchRoute, route=>route.fulfill({status:409,body:'Test conflict: draft must stay'}))
+  await active.locator('.history button[data-revision="0"]').click()
+  await expect(text).toHaveText('PRESERVED_FIXED_DRAFT')
+  await expect(active.locator('.revision-preview-bar')).toHaveCount(0)
+  await expect(active.locator('.toast.error')).toContainText('Test conflict')
+  await page.unroute(patchRoute)
+  await active.locator('.history button[data-revision="0"]').click()
+  await expect(active.locator('.workspace')).toHaveAttribute('data-hcd-history','true')
+  await expect(active.locator('.fixed-page-hitbox')).toHaveCount(0)
+  await expect(active.locator('.fixed-pages iframe').first().contentFrame().locator('body')).not.toContainText('PRESERVED_FIXED_DRAFT')
+  await active.locator('.revision-preview-bar').getByRole('button',{name:'返回当前',exact:true}).click()
+  await expect(active.locator('.fixed-pages iframe').first().contentFrame().locator('body')).toContainText('PRESERVED_FIXED_DRAFT')
+  await active.locator('.history button[data-revision="1"]').click()
+  await expect(active.locator('.history button[data-revision="1"]')).toHaveAttribute('aria-pressed','true')
+  await expect(active.locator('.fixed-page-hitbox')).toHaveCount(0)
+  await expect(active.locator('.ribbon')).toHaveCount(0)
+  await expect(active.locator('.revision-preview-title')).toContainText('browser-user')
+  await active.getByRole('button',{name:'编辑',exact:true}).click()
+  await expect(active.locator('.revision-preview-bar')).toHaveCount(0)
+  await active.getByRole('button',{name:'插入',exact:true}).click()
+  const before=await active.locator('.outline-entry').count()
+  await active.getByRole('button',{name:'新增幻灯片',exact:true}).click()
+  await expect(active.locator('.outline-entry')).toHaveCount(before+1)
+  await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
+  await active.locator('.history button[data-revision="0"]').click()
+  await expect(active.locator('.outline-entry')).toHaveCount(before)
+  await expect(active.locator('.outline-panel>small')).toContainText(`${before} / ${before}`)
+  await page.screenshot({path:info.outputPath('pptx-history-preview.png')})
+  await page.setViewportSize({width:390,height:844})
+  await active.locator('.history button[data-revision="1"]').click()
+  await expect(active.locator('.workspace-sidebar')).toHaveCount(0)
+  await expect(active.locator('.revision-preview-title')).toContainText('r1')
+  await active.locator('.revision-preview-bar').getByRole('button',{name:'返回当前',exact:true}).click()
+  await expect(active.locator('.outline-panel')).toHaveCount(0)
+  await active.getByRole('button',{name:'展开文档目录',exact:true}).click()
+  await expect(active.locator('.outline-entry')).toHaveCount(before+1)
+  await active.getByRole('button',{name:'隐藏页面目录',exact:true}).click()
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
+})
+
+test('fixed snapshot failures can retry and delayed requests cannot replace the selected revision', async ({page},info) => {
+  const id='fixed-history-errors'
+  await open(page,id)
+  const active=page.locator('.document-tab-panel:not([hidden])')
+  await expect(active.locator('.fixed-pages iframe').first()).toBeVisible()
+  await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
+  const snapshotRoute=`**/v1/documents/${id}?revision=0`
+  await page.route(snapshotRoute,route=>route.fulfill({status:503,body:'Snapshot temporarily unavailable'}))
+  await active.locator('.history button[data-revision="0"]').click()
+  await expect(active.locator('.content-shell [role="alert"]')).toContainText('Snapshot temporarily unavailable')
+  await expect(active.locator('.canvas-viewport')).toBeHidden()
+  await page.unroute(snapshotRoute)
+  await active.getByRole('button',{name:'重试',exact:true}).click()
+  await expect(active.locator('.fixed-pages iframe').first()).toBeVisible()
+  await active.locator('.revision-preview-bar').getByRole('button',{name:'返回当前',exact:true}).click()
+  let release!:()=>void, started!:()=>void
+  const requestStarted=new Promise<void>(resolve=>{started=resolve})
+  const gate=new Promise<void>(resolve=>{release=resolve})
+  await page.route(snapshotRoute,async route=>{started(); await gate; await route.continue().catch(()=>{})})
+  await active.locator('.history button[data-revision="0"]').click()
+  await requestStarted
+  await expect(active.getByText('正在加载历史版本…',{exact:true})).toBeVisible()
+  await active.locator('.revision-preview-bar').getByRole('button',{name:'返回当前',exact:true}).click()
+  release()
+  await expect(active.locator('.revision-preview-bar')).toHaveCount(0)
+  await expect(active.locator('.fixed-page-hitbox').first()).toBeVisible()
+  await page.screenshot({path:info.outputPath('fixed-history-return-current.png')})
+  await page.unroute(snapshotRoute)
+  await open(page,'ui-pdf','read')
+  const pdf=page.locator('.document-tab-panel:not([hidden])')
+  await pdf.getByRole('button',{name:'修订历史',exact:true}).first().click()
+  await pdf.locator('.history button[data-revision="0"]').click()
+  await expect(pdf.locator('.workspace')).toHaveAttribute('data-hcd-history','true')
+  await expect(pdf.locator('.fixed-pages iframe').first()).toBeVisible()
+  await expect(pdf.locator('.fixed-page-hitbox')).toHaveCount(0)
+  await expect(pdf.getByRole('button',{name:'编辑',exact:true})).toBeDisabled()
+  await page.screenshot({path:info.outputPath('pdf-history-preview.png')})
 })

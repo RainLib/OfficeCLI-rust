@@ -1,0 +1,92 @@
+Fixed-layout historical preview validation — 2026-11-14
+
+Changes: persist drafts before selecting revisions; keep all selected revisions read-only; resolve historical manifests, styles and themes together; expose a central return action; collapse mobile drawers; reject stale snapshot responses.
+
+Reproduction from the repository root:
+  cargo +1.90.0 build -p officecli
+  cargo +1.90.0 test -p officecli --bin officecli hdoc_server::tests
+  cargo +1.90.0 clippy -p officecli --all-targets -- -D warnings
+  cargo +1.90.0 fmt -- --check
+
+Reproduction from examples/hdoc/editor:
+  OFFICECLI_BIN=/absolute/path/to/officecli HCD_BROWSER_PATH=/absolute/path/to/chrome npm run test:workspace
+  npm run build
+
+All 20 browser/diff checks passed. Production standalone and embedded builds passed. Rust formatting and strict Clippy passed. Server test output follows.
+
+   Compiling officecli v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/officecli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.57s
+     Running unittests src/main.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/officecli-d5bcb9841ed0ef12)
+
+running 34 tests
+test hdoc_server::tests::admin_console_is_served_same_origin ... ok
+test hdoc_server::tests::catalog_retire_validates_id_and_requires_admin ... ok
+test hdoc_server::tests::catalog_theme_reachability_and_delete_require_admin ... ok
+test hdoc_server::tests::catalog_routes_require_an_admin_token ... ok
+test hdoc_server::tests::configured_default_theme_requires_a_theme_revision_digest ... ok
+test hdoc_server::tests::font_faces_only_keeps_face_lines_and_drops_the_rest ... ok
+test hdoc_server::tests::catalog_write_rejects_missing_blobs_and_unknown_fonts ... ok
+test hdoc_server::tests::audit_route_is_admin_only_and_answers_newest_first ... ok
+test hdoc_server::tests::admin_uploads_font_then_saves_and_lists_a_theme ... ok
+test hdoc_server::tests::audit_route_reads_a_utc_day_window_and_refuses_bounds_that_are_not_days ... ok
+test hdoc_server::tests::catalog_delete_refuses_referenced_fonts_and_removes_loose_ones ... ok
+test hdoc_server::tests::catalog_retire_lists_and_lifts_theme_retirement ... ok
+test hdoc_server::tests::catalog_delete_theme_refuses_then_removes_an_unpinned_theme ... ok
+test hdoc_server::tests::a_reimported_archive_keeps_its_own_theme_pin ... ok
+test hdoc_server::tests::catalog_documents_needs_admin_and_refuses_a_broken_bundle ... ok
+test hdoc_server::tests::theme_read_routes_accept_document_and_admin_tokens_only ... ok
+test hdoc_server::tests::a_pinned_document_gets_theme_bytes_not_a_second_copy_of_its_rules ... ok
+test hdoc_server::tests::default_theme_pins_a_freshly_imported_document ... ok
+test hdoc_server::tests::a_stale_or_retired_default_theme_warns_instead_of_failing_the_import ... ok
+test hdoc_server::tests::catalog_documents_lists_the_root_with_its_head_pins ... ok
+test hdoc_server::tests::catalog_theme_documents_name_the_pinning_documents ... ok
+test hdoc_server::tests::font_plan_route_says_when_the_stored_source_cannot_be_read ... ok
+test hdoc_server::tests::font_plan_route_names_a_license_that_is_about_to_expire ... ok
+test hdoc_server::tests::importing_a_document_that_already_exists_does_not_repin_it ... ok
+test hdoc_server::tests::every_finished_catalog_change_appends_a_line_and_a_refusal_none ... ok
+test hdoc_server::tests::agents_are_isolated_and_concurrent_edits_conflict_without_overwriting ... ok
+test hdoc_server::tests::historical_manifest_and_styles_use_the_requested_snapshot ... ok
+test hdoc_server::tests::theme_faces_only_query_serves_font_bytes_alone ... ok
+test hdoc_server::tests::an_import_auto_pin_is_recorded_against_the_uploader ... ok
+test hdoc_server::tests::font_plan_route_answers_what_each_export_would_carry ... ok
+test hdoc_server::tests::without_a_configured_default_theme_imports_stay_unpinned ... ok
+test hdoc_server::tests::font_plan_route_forecasts_nothing_to_move_when_no_face_will_embed ... ok
+test hdoc_server::tests::pin_theme_route_records_a_content_revision ... ok
+test hdoc_server::tests::font_plan_route_forecasts_the_pdf_text_a_pin_would_touch ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out; finished in 2.51s
+
+
+Browser test output:
+
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test
+
+
+Running 20 tests using 1 worker
+
+(node:13644) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/revision-diff.spec.ts:7:1 › revision diffs distinguish insertion, deletion, formatting, movement and complex content (3ms)
+  ✓   2 e2e/revision-diff.spec.ts:22:1 › inline diffs preserve Unicode offsets and bound long replacements (2ms)
+  ✓   3 e2e/workspace.spec.ts:100:1 › document tabs retain independent unsaved text and collaboration sessions (1.1s)
+  ✓   4 e2e/workspace.spec.ts:122:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits (4.0s)
+  ✓   5 e2e/workspace.spec.ts:165:1 › complex Word tables retain canonical read-only layout in the semantic editor (1.4s)
+  ✓   6 e2e/workspace.spec.ts:186:1 › a grid agent highlights its cell without changing the local selection (3.1s)
+  ✓   7 e2e/workspace.spec.ts:211:1 › an MCP agent cannot overwrite a collaborator with pending unsaved text (935ms)
+  ✓   8 e2e/workspace.spec.ts:230:1 › semantic MCP commits refresh the browser across collaboration epochs (11.0s)
+  ✓   9 e2e/workspace.spec.ts:250:1 › workspace drawers, focus mode and preview preserve document state (1.4s)
+  ✓  10 e2e/workspace.spec.ts:288:1 › workbook preview keeps its canvas and refuses to discard an unapplied formula (1.5s)
+  ✓  11 e2e/workspace.spec.ts:307:1 › all seven formats use the content shell and enforce read-only preview (3.1s)
+  ✓  12 e2e/workspace.spec.ts:328:1 › phone workspace provides reachable drawers without page overflow (1.3s)
+  ✓  13 e2e/workspace.spec.ts:351:1 › history previews and real diffs preserve drafts and enforce read permissions (2.4s)
+  ✓  14 e2e/workspace.spec.ts:423:1 › failed and superseded history requests cannot replace the current editor (1.5s)
+  ✓  15 e2e/workspace.spec.ts:445:1 › canvas zoom handles all formats and frames without scaling the page (3.8s)
+  ✓  16 e2e/workspace.spec.ts:471:1 › historical Word tables keep canonical layout and comparisons fit phones (1.3s)
+  ✓  17 e2e/workspace.spec.ts:488:1 › agent commits preserve preview, focus, zoom and the selected historical comparison (10.9s)
+  ✓  18 e2e/workspace.spec.ts:531:1 › history uses the selected outline and closes the mobile drawer after selection (1.2s)
+  ✓  19 e2e/workspace.spec.ts:563:1 › fixed history saves drafts, pins even the latest revision read-only and restores the live deck (2.1s)
+  ✓  20 e2e/workspace.spec.ts:612:1 › fixed snapshot failures can retry and delayed requests cannot replace the selected revision (1.8s)
+
+  20 passed (56.4s)
