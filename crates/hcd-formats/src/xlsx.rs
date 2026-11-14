@@ -2158,6 +2158,8 @@ where
         emit,
     )?;
     assets.extend(chart_assets);
+    assets.sort_by(|a, b| (&a.hash, &a.source_part).cmp(&(&b.hash, &b.source_part)));
+    assets.dedup_by(|a, b| a.hash == b.hash);
     std::fs::write(
         writer.root().join("assets/index.json"),
         serde_json::to_vec(&assets)?,

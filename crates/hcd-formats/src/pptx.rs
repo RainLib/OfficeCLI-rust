@@ -418,11 +418,9 @@ where
         .iter()
         .map(|asset| (asset.source_part.clone(), asset.clone()))
         .collect();
-    let mut indexed_hashes = HashSet::new();
-    let asset_index = assets
-        .iter()
-        .filter(|asset| indexed_hashes.insert(asset.hash.clone()))
-        .collect::<Vec<_>>();
+    let mut asset_index: Vec<_> = assets.iter().collect();
+    asset_index.sort_by(|a, b| (&a.hash, &a.source_part).cmp(&(&b.hash, &b.source_part)));
+    asset_index.dedup_by(|a, b| a.hash == b.hash);
     std::fs::write(
         writer.root().join("assets/index.json"),
         serde_json::to_vec(&asset_index)?,

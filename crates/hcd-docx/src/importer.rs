@@ -6468,10 +6468,15 @@ fn resolve_relationship_target(source_part: &str, target: &str) -> Result<String
 }
 
 fn write_asset_index(root: &Path, assets: &[AssetRecord]) -> Result<(), HcdError> {
+    // Keep the complete source-part list for relationship resolution. Only the
+    // content-addressed index is unique, with a deterministic representative.
+    let mut assets: Vec<_> = assets.iter().collect();
+    assets.sort_by(|a, b| (&a.hash, &a.source_part).cmp(&(&b.hash, &b.source_part)));
+    assets.dedup_by(|a, b| a.hash == b.hash);
     let directory = root.join("assets");
     std::fs::create_dir_all(&directory)?;
     let file = std::fs::File::create(directory.join("index.json"))?;
-    serde_json::to_writer(file, assets)?;
+    serde_json::to_writer(file, &assets)?;
     Ok(())
 }
 
@@ -6528,6 +6533,71 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn duplicate_media_import_produces_valid_unique_asset_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/reviews/hcd-runtime-audit-2026-11-14/duplicate-media.docx");
+        let output = temp.path().join("bundle");
+        import_docx(&source, &output, &ImportOptions::new("duplicates"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = hcd_core::Bundle::open(&output).unwrap();
+        let assets = bundle.read_asset_index().unwrap();
+        assert_eq!(assets.len(), 1);
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn duplicate_media_relationship_aliases_remain_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("aliases.docx");
+        let output = temp.path().join("bundle");
+        let drawing = |id| {
+            format!(
+                r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="{id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+            )
+        };
+        let document = format!(
+            r#"<w:document xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:pic="pic" xmlns:r="r"><w:body><w:p>{}{}</w:p></w:body></w:document>"#,
+            drawing("a"),
+            drawing("b")
+        );
+        let relationships = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="a" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a.png"/><Relationship Id="b" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/b.png"/></Relationships>"#;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+        for (name, bytes) in [
+            ("word/document.xml", document.as_bytes()),
+            ("word/_rels/document.xml.rels", relationships.as_bytes()),
+            ("word/media/a.png", b"same-image".as_slice()),
+            ("word/media/b.png", b"same-image".as_slice()),
+        ] {
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        let manifest =
+            import_docx(&source, &output, &ImportOptions::new("aliases"), |_| Ok(())).unwrap();
+        let bundle = hcd_core::Bundle::open(&output).unwrap();
+        assert_eq!(bundle.read_asset_index().unwrap().len(), 1);
+        let mut images = Vec::new();
+        for page in 0..manifest.index_page_count {
+            for chunk in bundle.read_index_page(&manifest, page).unwrap().chunks {
+                images.extend(
+                    hcd_core::extract_html_image_nodes(&bundle.read_chunk(&chunk).unwrap())
+                        .unwrap()
+                        .into_values(),
+                );
+            }
+        }
+        assert_eq!(
+            images.len(),
+            2,
+            "both relationships must render after index deduplication"
+        );
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+    }
 
     #[test]
     fn flattened_legacy_hyperlink_fields_render_results_and_block_scripts() {
