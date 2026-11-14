@@ -15,13 +15,14 @@ import { api, type Session } from './api.ts'
 import { loadTheme, type ThemeFace } from './themeCss.ts'
 import { BlockFontPicker } from './BlockFontPicker.tsx'
 import { FixedViewer } from './FixedViewer.tsx'
-import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon, type EditorTab } from './EditorChrome.tsx'
+import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { ErrorToast } from './ErrorToast.tsx'
 import { AgentActivityLayer, AgentPanel, useAgentWorkspace } from './AgentActivityLayer.tsx'
 import { opaquePreviewExtension } from './opaquePreview.ts'
 import { CanvasZoomProvider, CanvasViewport } from './CanvasZoom.tsx'
+import { DocumentViewProvider, useDocumentViewState } from './DocumentViewState.tsx'
 import { RevisionWorkspace } from './RevisionWorkspace.tsx'
 import './style.css'
 import './soft-canvas.css'
@@ -151,31 +152,39 @@ export function App() {
     </nav>
     <div className="document-tab-panel document-library" hidden={activeDocument !== null}>{library}</div>
     {sessions.map(item => <div className="document-tab-panel" key={item.documentId} hidden={activeDocument !== item.documentId} data-document-id={item.documentId}>
-      <Workspace key={`${item.documentId}:${item.collaborationEpoch ?? 0}`} session={item} onClose={() => setActiveDocument(null)} onEpochChange={epoch => setSessions(previous => previous.map(value => value.documentId === item.documentId ? { ...value, collaborationEpoch: epoch } : value))} />
+      <Workspace key={item.documentId} session={item} onClose={() => setActiveDocument(null)} onEpochChange={epoch => setSessions(previous => previous.map(value => value.documentId === item.documentId ? { ...value, collaborationEpoch: epoch } : value))} />
     </div>)}
   </div>
 }
 
-export function Workspace({ session, onClose, onEpochChange, embedded = false }: { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded?: boolean }) {
+type WorkspaceProps = { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded?: boolean }
+export function Workspace(props: WorkspaceProps) {
+  return <DocumentViewProvider key={`${props.session.apiUrl || ''}:${props.session.documentId}`} initialPreview={props.session.scope === 'read'}><CanvasZoomProvider>
+    <EpochWorkspace key={props.session.collaborationEpoch ?? 0} {...props} />
+  </CanvasZoomProvider></DocumentViewProvider>
+}
+
+function EpochWorkspace({ session, onClose, onEpochChange, embedded = false }: WorkspaceProps) {
   const semantic = ['docx', 'html', 'md', 'txt'].includes(session.format)
   const content = semantic ? <SemanticEditor session={session} onClose={onClose} onEpochChange={onEpochChange} embedded={embedded} />
     : session.format === 'xlsx' ? <Suspense fallback={<div className="embedded-loading"><LocalText source={"正在加载工作簿…"} /></div>}><UniverViewer session={session} onClose={onClose} embedded={embedded} /></Suspense>
       : <FixedViewer session={session} onClose={onClose} embedded={embedded} />
-  return <CanvasZoomProvider><AgentActivityLayer session={session}>{content}</AgentActivityLayer></CanvasZoomProvider>
+  return <AgentActivityLayer session={session}>{content}</AgentActivityLayer>
 }
 
 function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded: boolean }) {
   const { locale } = useI18n()
-  const [readOnly, setReadOnly] = useState(session.scope === 'read')
+  const { preview, setPreview: setReadOnly, focused, setFocused, wrapText, setWrapText, selectedRevision, setSelectedRevision, comparing, setComparing, rightPanel, setRightPanel, activeTab, setActiveTab } = useDocumentViewState()
+  const readOnly = session.scope === 'read' || preview
   const [status, setStatus] = useState('连接中')
   const [revision, setRevision] = useState<number | null>(null)
   const [history, setHistory] = useState<RevisionItem[]>([])
   const [nextBefore, setNextBefore] = useState<number | null | undefined>(undefined)
   const [historical, setHistorical] = useState<Projection | null>(null)
-  const [selectedRevision, setSelectedRevision] = useState<number | null>(null)
   const [comparisonHead, setComparisonHead] = useState<Projection | null>(null)
-  const [comparing, setComparing] = useState(false)
-  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(selectedRevision !== null)
+  const [historyReload, setHistoryReload] = useState(0)
+  const [editorSynced, setEditorSynced] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const [restoring, setRestoring] = useState(false)
   const historyRequest = useRef<AbortController | null>(null)
@@ -187,12 +196,8 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [linkHref, setLinkHref] = useState('')
   const [presence, setPresence] = useState<Array<{ id: string; name: string; color: string; connections: number }>>([])
   const { panelOpen, setPanelOpen } = useAgentWorkspace()
-  const [focused, setFocused] = useState(false)
-  const [wrapText, setWrapText] = useState(true)
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(session.documentId))
-  const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>(null)
   function showRightPanel(panel: 'settings' | 'revisions') { setFocused(false); setPanelOpen(false); setRightPanel(panel) }
-  const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [outline, setOutline] = useState<Array<{ pos: number; level: number; text: string }>>([])
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchVersion, setSearchVersion] = useState(0)
@@ -291,6 +296,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       setPresence(Array.from(unique.values()).sort((left, right) => Number(right.id === localUser.id) - Number(left.id === localUser.id)))
     }
     const synced = () => {
+      setEditorSynced(true)
       setStatus('已同步')
       // Creating the semantic projection can advance the imported revision while
       // the first collaboration room is loading. Wait for that baseline on save.
@@ -384,22 +390,27 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       return saved.revision
     } catch (cause) { setStatus('保存失败'); setError(String(cause)); return null }
   }
-  async function showRevision(number: number) {
+  function showRevision(number: number) {
+    setSelectedRevision(number)
+    setHistoryReload(value => value + 1)
+    if (window.matchMedia('(max-width: 900px)').matches) setRightPanel(null)
+  }
+  useEffect(() => {
     historyRequest.current?.abort()
+    if (selectedRevision === null) return
     const request = new AbortController()
     historyRequest.current = request
-    setSelectedRevision(number); setHistorical(null); setComparisonHead(null)
+    setHistorical(null); setComparisonHead(null)
     setHistoryLoading(true); setHistoryError(''); setMenu(null); setSearchOpen(false)
-    try {
-      const [old, head] = await Promise.all([
-        api(session, `/editor?revision=${number}`, { signal: request.signal }).then(response => response.json() as Promise<Projection>),
-        api(session, '/editor', { signal: request.signal }).then(response => response.json() as Promise<Projection>),
-      ])
-      if (request.signal.aborted) return
-      setHistorical(old); setComparisonHead(head)
-    } catch (cause) { if (!request.signal.aborted) setHistoryError(String(cause)) }
-    finally { if (!request.signal.aborted) setHistoryLoading(false) }
-  }
+    void Promise.all([
+      api(session, `/editor?revision=${selectedRevision}`, { signal: request.signal }).then(response => response.json() as Promise<Projection>),
+      api(session, '/editor', { signal: request.signal }).then(response => response.json() as Promise<Projection>),
+    ]).then(([old, head]) => {
+      if (!request.signal.aborted) { setHistorical(old); setComparisonHead(head) }
+    }).catch(cause => { if (!request.signal.aborted) setHistoryError(String(cause)) })
+      .finally(() => { if (!request.signal.aborted) setHistoryLoading(false) })
+    return () => request.abort()
+  }, [session, selectedRevision, historyReload])
   function returnToCurrent() {
     historyRequest.current?.abort()
     setSelectedRevision(null); setHistorical(null); setHistoryLoading(false); setHistoryError(''); setComparing(false)
@@ -413,6 +424,29 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       readOnly: canonical.get(block.blockId || '')?.readOnly || block.content.kind === 'opaque', content: block.content,
     })) }
   }, [comparisonHead, editor, searchVersion, historyActive])
+  const visibleOutline = useMemo(() => historyActive
+    ? (historical?.blocks || []).filter(block => block.region === 'body' && block.content.kind === 'heading').map(block => ({
+      key: block.blockId, blockId: block.blockId, pos: null, level: block.content.level || 1,
+      text: block.content.inlines.map(inline => inline.text).join('') || localizeSource(locale, '未命名标题'),
+    }))
+    : outline.map(item => ({ ...item, key: String(item.pos), blockId: null, pos: item.pos })), [historical, historyActive, outline, locale])
+  const selectedMetadata = history.find(item => item.revision === selectedRevision)
+  const revisionMetadata = [selectedMetadata?.authorName || localizeSource(locale, selectedRevision === 0 ? '初始导入' : '作者未记录'),
+    selectedMetadata?.createdAtEpochMs ? new Date(selectedMetadata.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''].filter(Boolean).join(' · ')
+  function locateHistoricalBlock(blockId: string) {
+    const column = editor?.view.dom.closest('.workspace')?.querySelector('.revision-column')
+    column?.querySelectorAll('.history-search-hit').forEach(node => node.classList.remove('history-search-hit'))
+    const target = column?.querySelector(`[data-hcd-block-id="${CSS.escape(blockId)}"]`)
+    target?.classList.add('history-search-hit')
+    target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
+  function navigateOutline(item: typeof visibleOutline[number]) {
+    if (item.blockId) { locateHistoricalBlock(item.blockId); return }
+    if (!editor || item.pos === null) return
+    editor.commands.focus()
+    editor.commands.setTextSelection(item.pos + 1)
+    editor.view.domAtPos(item.pos + 1).node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
   async function restoreHistorical() {
     if (!historical || session.scope !== 'write' || restoring) return
     setRestoring(true)
@@ -508,11 +542,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   }
   function navigateSearch(hit: SearchHit) {
     if (historyActive) {
-      const column = editor?.view.dom.closest('.workspace')?.querySelector('.revision-column')
-      column?.querySelectorAll('.history-search-hit').forEach(node => node.classList.remove('history-search-hit'))
-      const target = column?.querySelector(`[data-hcd-block-id="${CSS.escape(hit.nodeId)}"]`)
-      target?.classList.add('history-search-hit')
-      target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      locateHistoricalBlock(hit.nodeId)
       return
     }
     if (!editor || hit.position === undefined) return
@@ -537,14 +567,14 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     { label: '重做', disabled: readOnly || !editor?.can().redo(), action: () => editor?.chain().focus().redo().run() },
   ]
   return <div data-format={session.format} data-hcd-history={historyActive ? 'true' : undefined} className={`workspace semantic-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(rightPanel || panelOpen) && !focused ? '' : 'right-hidden'} ${focused ? 'focus-mode' : ''}`}>
-    {layout.showHeader && <EditorHeader session={session} revision={selectedRevision ?? revision} status={status} activeTab={activeTab}
+    {layout.showHeader && <EditorHeader session={session} revision={selectedRevision ?? revision} status={historyActive ? '历史只读' : status} activeTab={activeTab}
       onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} onClose={onClose}
       onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings' && !panelOpen && !focused} focused={focused} onFocus={() => setFocused(value => !value)} readOnly={readOnly || historyActive} onReadOnly={value => { if (historyActive) returnToCurrent(); if (session.scope === 'write') setReadOnly(value) }} beforeExport={historyActive ? async () => selectedRevision : save}
       presence={layout.showCollaborators && <details className="presence"><summary aria-label={`${localizeSource(locale, "在线协作者")} · ${presence.length}`}><span className="presence-avatars">{presence.slice(0, 3).map(user => <span key={user.id} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}</span><span>{presence.length} <LocalText source={" 人在线"} /></span></summary><div className="presence-menu"><strong><LocalText source={"在线协作者"} /></strong>{presence.map(user => <div key={user.id} className="presence-person"><span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><span>{user.name}{user.id === localUser.id ? localizeSource(locale, '（你）') : ''}</span>{user.connections > 1 && <small>{user.connections} <LocalText source={" 个窗口"} /></small>}</div>)}</div></details>} />}
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} aria-expanded={rightPanel === 'settings'} onClick={() => { setFocused(false); setPanelOpen(false); setRightPanel(previous => previous === 'settings' ? null : 'settings') }}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={`${searchVersion}:${selectedRevision ?? 'current'}:${historyLoading}`} />
     <div className="layout editor-layout">
-      {layout.showOutline && !focused && <aside className="outline-panel" aria-label={localizeSource(locale, "文档目录")}><div className="panel-head"><h2><LocalText source={"☷ 文档目录"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏文档目录")} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div>{outline.length ? <nav>{outline.map(item => <button key={item.pos} className={`outline-level-${item.level}`} onClick={() => { editor?.commands.focus(); editor?.commands.setTextSelection(item.pos + 1); editor?.view.domAtPos(item.pos + 1).node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' }) }}>{item.text}</button>)}</nav> : <p><LocalText source={"暂无标题。将段落设为标题后会显示在这里。"} /></p>}</aside>}
+      {layout.showOutline && !focused && <aside className="outline-panel" aria-label={localizeSource(locale, "文档目录")}><div className="panel-head"><h2><LocalText source={"☷ 文档目录"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏文档目录")} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div>{visibleOutline.length ? <nav>{visibleOutline.map(item => <button key={item.key} className={`outline-level-${item.level}`} onClick={() => navigateOutline(item)}>{item.text}</button>)}</nav> : <p><LocalText source={historyActive ? historyLoading ? "正在加载历史版本…" : "此版本暂无标题" : "暂无标题。将段落设为标题后会显示在这里。"} /></p>}</aside>}
       {(!layout.showOutline || focused) && <PanelDock side="left" onOpen={() => { setFocused(false); setLayoutOption('showOutline', true) }} />}
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
         {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={readOnly || historyActive} format={session.format} />}
@@ -569,7 +599,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         }
         setMenu({ x: event.clientX, y: event.clientY, selectedText })
       }}>{themeCss && <style>{themeCss}</style>}<EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => session.format !== 'txt' && !historyActive && !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main></CanvasViewport>
-      {historyActive && <RevisionWorkspace session={session} selected={selectedRevision} historical={historical} current={comparisonCurrent} comparing={comparing} loading={historyLoading} error={historyError} metadata={history.find(item => item.revision === selectedRevision)?.authorName} canRestore={session.scope === 'write' && selectedRevision < (revision ?? 0)} restoring={restoring} onCompare={setComparing} onReturn={returnToCurrent} onRetry={() => void showRevision(selectedRevision)} onRestore={() => void restoreHistorical()} />}
+      {historyActive && <RevisionWorkspace session={session} selected={selectedRevision} historical={historical} current={comparisonCurrent} comparing={comparing} loading={historyLoading || (comparing && !editorSynced)} error={historyError} metadata={revisionMetadata} canRestore={session.scope === 'write' && selectedRevision < (revision ?? 0)} restoring={restoring} onCompare={setComparing} onReturn={returnToCurrent} onRetry={() => void showRevision(selectedRevision)} onRestore={() => void restoreHistorical()} />}
       </section>
       {panelOpen && !focused && <AgentPanel />}
       {!panelOpen && !focused && rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>{rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示文档目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
@@ -581,7 +611,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         </section>}</aside>}
       {(focused || (!rightPanel && !panelOpen)) && <PanelDock side="right" onOpen={() => { setFocused(false); setPanelOpen(false); showRightPanel('settings') }} onHistory={() => { setFocused(false); setPanelOpen(false); showRightPanel('revisions') }} onAgents={() => { setFocused(false); setPanelOpen(true) }} />}
     </div>
-    <EditorStatusbar mode={localizeSource(locale, "连续视图")} format={session.format} revision={selectedRevision ?? revision} readOnly={readOnly || historyActive} status={status} />
+    <EditorStatusbar mode={localizeSource(locale, "连续视图")} format={session.format} revision={selectedRevision ?? revision} readOnly={readOnly || historyActive} status={historyActive ? '历史只读' : status} />
     {menu && <ContextMenu x={menu.x} y={menu.y} actions={actions} onClose={() => setMenu(null)} />}
     {linkOpen && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setLinkOpen(false) }}><div className="hcd-dialog" role="dialog" aria-modal="true" aria-label={localizeSource(locale, "设置链接")}><h2><LocalText source={"设置链接"} /></h2><label><LocalText source={"链接地址"} /><input autoFocus type="url" value={linkHref} onChange={event => setLinkHref(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyLink(); if (event.key === 'Escape') setLinkOpen(false) }} placeholder="https://example.com" /></label><div className="hcd-dialog-actions"><button onClick={() => setLinkOpen(false)}><LocalText source={"取消"} /></button><button className="primary" onClick={applyLink}><LocalText source={"应用链接"} /></button></div></div></div>}
     {error && <ErrorToast message={error} onClose={() => setError('')} />}

@@ -43,6 +43,6 @@ function EmbeddedContent({ documentId, token, apiUrl, collabUrl, onClose, onErro
     return () => { active = false }
   }, [documentId, token, apiUrl, collabUrl, onError])
   return <div className="hcd-surface hcd-embedded" lang={locale}>
-    {session ? <Workspace key={`${session.documentId}:${session.collaborationEpoch ?? 0}`} session={session} onClose={() => onClose?.()} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} embedded /> : <div className="embedded-loading">{error || t('openingDocument')}</div>}
+    {session ? <Workspace key={session.documentId} session={session} onClose={() => onClose?.()} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} embedded /> : <div className="embedded-loading">{error || t('openingDocument')}</div>}
   </div>
 }

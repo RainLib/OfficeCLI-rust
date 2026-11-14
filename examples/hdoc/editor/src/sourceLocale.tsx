@@ -3,6 +3,7 @@ import { traditionalChars } from './traditionalChars.ts'
 
 // These source strings belong to editor controls added after the first HCD UI dictionary.
 const sourceEn: Record<string, string> = {
+  '此版本暂无标题': 'This revision has no headings',
   "文档缩放": "Document zoom",
   "缩小文档": "Zoom out document",
   "重置文档缩放": "Reset document zoom",

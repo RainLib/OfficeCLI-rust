@@ -1,3 +1,4 @@
+import { useDocumentViewState } from './DocumentViewState.tsx'
 import { CanvasViewport, useCanvasZoom } from './CanvasZoom.tsx'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
@@ -8,7 +9,7 @@ import { UniverSheetsDrawingPreset } from '@univerjs/preset-sheets-drawing'
 import { HcdUniverAdapter, type HcdPatchEventDetail } from '../../xlsx-univer-viewer/src/adapter.ts'
 import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
-import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon, type EditorTab } from './EditorChrome.tsx'
+import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon } from './EditorChrome.tsx'
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
@@ -66,7 +67,7 @@ function selectionKind(sheet: ReturnType<HcdUniverAdapter['workbook']['getActive
 export function UniverViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
   const agents = useAgentActivities()
   const { panelOpen, setPanelOpen } = useAgentWorkspace()
-  const [focused, setFocused] = useState(false)
+  const { preview, setPreview, focused, setFocused, activeTab, setActiveTab } = useDocumentViewState()
   const { zoom, setZoom } = useCanvasZoom()
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -78,11 +79,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
   const [error, setError] = useState('')
   const [themeCss, setThemeCss] = useState('')
-  const [editing, setEditing] = useState(session.scope === 'write')
+  const editing = session.scope === 'write' && !preview
+  const setEditing = (value: boolean) => setPreview(!value)
   const editingRef = useRef(editing)
   editingRef.current = editing
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(session.documentId))
-  const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [settingsOpen, setSettingsOpen] = useState(false)
   function openSettings() { setFocused(false); setPanelOpen(false); setSettingsOpen(true) }
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)

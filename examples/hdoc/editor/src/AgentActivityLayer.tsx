@@ -1,3 +1,4 @@
+import { useDocumentViewState } from './DocumentViewState.tsx'
 import { createContext, useContext, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Crosshair, PanelRightClose, ShieldCheck, Sparkles } from 'lucide-react'
 import { LocalText, localizeSource } from './sourceLocale.tsx'
@@ -51,7 +52,7 @@ export function AgentActivityLayer({ session, children }: { session: Session; ch
   const [agents, setAgents] = useState<AgentActivity[]>([])
   const [cursors, setCursors] = useState<Cursor[]>([])
   const [connected, setConnected] = useState(true)
-  const [panelOpen, setPanelOpen] = useState(() => window.innerWidth > 900)
+  const { agentPanelOpen: panelOpen, setAgentPanelOpen: setPanelOpen } = useDocumentViewState()
   useEffect(() => {
     let alive = true
     let timer: ReturnType<typeof setTimeout>

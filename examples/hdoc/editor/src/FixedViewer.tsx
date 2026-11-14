@@ -1,3 +1,4 @@
+import { useDocumentViewState } from './DocumentViewState.tsx'
 import { CanvasViewport, useCanvasZoom } from './CanvasZoom.tsx'
 import { PageThumbnail, type PagePreview } from './PageThumbnail.tsx'
 import { AgentPanel, useAgentWorkspace } from './AgentActivityLayer.tsx'
@@ -10,7 +11,7 @@ import { redo, redoDepth, undo, undoDepth } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
 import { hasThemeRegion, loadTheme, themeFontOptions, themeFontPatch, type ThemeFontOption } from './themeCss.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
-import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon, type EditorTab } from './EditorChrome.tsx'
+import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
@@ -165,7 +166,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [stageWidth, setStageWidth] = useState(0)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
-  const [readOnly, setReadOnly] = useState(session.scope === 'read')
+  const { preview, setPreview: setReadOnly, focused, setFocused, rightPanel, setRightPanel, activeTab, setActiveTab } = useDocumentViewState()
+  const readOnly = session.scope === 'read' || preview
   const [refresh, setRefresh] = useState(0)
   const [previews, setPreviews] = useState<Record<number, PagePreview>>({})
   const recordPreview = useCallback((sequence: number, preview: PagePreview) => {
@@ -178,11 +180,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [placingText, setPlacingText] = useState(false)
   const [activeEditor, setActiveEditor] = useState<Editor | null>(null)
   const { panelOpen, setPanelOpen } = useAgentWorkspace()
-  const [focused, setFocused] = useState(false)
   const layoutScope = session.documentId
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(layoutScope))
-  const [activeTab, setActiveTab] = useState<EditorTab>('home')
-  const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>(null)
   function showRightPanel(panel: 'settings' | 'revisions') { setFocused(false); setPanelOpen(false); setRightPanel(panel) }
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [viewRevision, setViewRevision] = useState<number | null>(null)

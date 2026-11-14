@@ -67,7 +67,7 @@ test.beforeAll(async () => {
     'agents-slides':'examples/ppt/textboxes/textboxes-basic.pptx',
     'complex-word':'assets/showcase/project-proposal.docx',
     'agents-grid':'assets/showcase/gradebook.xlsx',
-    'revision-text':'txt', 'revision-errors':'txt', 'ui-text':'txt', 'ui-grid':'assets/showcase/gradebook.xlsx',
+    'view-state':'txt', 'history-outline':'md', 'revision-text':'txt', 'revision-errors':'txt', 'ui-text':'txt', 'ui-grid':'assets/showcase/gradebook.xlsx',
     'ui-markdown':'md', 'ui-html':'html', 'ui-pdf':'examples/test.pdf',
   }
   for (const [id,file] of Object.entries(fixtures)) {
@@ -481,4 +481,78 @@ test('historical Word tables keep canonical layout and comparisons fit phones', 
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
   expect(await workspace.locator('.revision-columns').evaluate(node=>getComputedStyle(node).gridTemplateColumns.split(' ').length)).toBe(1)
   await page.screenshot({path:info.outputPath('phone-revision-compare.png')})
+})
+
+test('agent commits preserve preview, focus, zoom and the selected historical comparison', async ({page},info) => {
+  const id='view-state'
+  await open(page,id)
+  const active=page.locator('.document-tab-panel:not([hidden])')
+  await expect(active.locator('.hcd-editor-body')).toContainText('First paragraph')
+  const client=await agent(id,'View State Agent')
+  try {
+    const initial=(await call(client,'hcd_read',{document_id:id,resource:'editor'})).data
+    await active.getByRole('button',{name:'预览',exact:true}).click()
+    await active.getByRole('button',{name:'放大文档',exact:true}).click({clickCount:3})
+    await expect(active.locator('.canvas-viewport')).toHaveAttribute('data-canvas-zoom','1.3')
+    await active.getByRole('button',{name:'专注模式',exact:true}).click()
+    const apply=async(label:string)=>{
+      const projection=(await call(client,'hcd_read',{document_id:id,resource:'editor'})).data
+      const auth=(await call(client,'hcd_read',{document_id:id,resource:'auth'})).data
+      const block=projection.blocks.find((block:{region:string;readOnly:boolean})=>block.region==='body'&&!block.readOnly)
+      const result=await call(client,'hcd_patch',{document_id:id,mode:'structure',expected_revision:projection.revision,collaboration_epoch:auth.collaborationEpoch,patch:{schemaVersion:'hcd-patch/4',documentId:id,patchId:label.replaceAll(' ','-'),baseRevision:projection.revision,operations:[{op:'block.replace',blockId:block.blockId,block:{...block.content,inlines:[{text:label}]},precondition:{blockHash:block.blockHash}}]}})
+      expect(result.error).toBe(false)
+    }
+    await apply('First remote view update')
+    await expect(active.locator('.hcd-editor-body')).toContainText('First remote view update')
+    await expect(active.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','false')
+    await expect(active.locator('.workspace')).toHaveClass(/focus-mode/)
+    await expect(active.locator('.canvas-viewport')).toHaveAttribute('data-canvas-zoom','1.3')
+    await expect(active.locator('.mode-switch').getByRole('button',{name:'预览',exact:true})).toHaveAttribute('aria-pressed','true')
+    await active.getByRole('button',{name:'退出专注模式',exact:true}).click()
+    await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
+    await active.locator(`.history button[data-revision="${initial.revision}"]`).click()
+    await active.locator('.revision-workspace').getByRole('button',{name:'对比当前',exact:true}).click()
+    await expect(active.locator('.revision-column').last()).toContainText('First remote view update')
+    await apply('Second remote view update')
+    await expect(active.locator('.revision-column').last()).toContainText('Second remote view update')
+    await expect(active.locator('.revision-column').first()).toContainText('First paragraph')
+    await expect(active.locator('.revision-scroll')).toHaveAttribute('data-canvas-zoom','1.3')
+    await expect(active.locator(`.history button[data-revision="${initial.revision}"]`)).toHaveAttribute('aria-pressed','true')
+    await page.screenshot({path:info.outputPath('comparison-after-agent-commit.png')})
+    await active.locator('.revision-workspace').getByRole('button',{name:'返回当前',exact:true}).click()
+    await expect(active.locator('main.document .hcd-editor-body')).toHaveAttribute('contenteditable','false')
+    await expect(active.locator('main.document .hcd-editor-body')).toContainText('Second remote view update')
+    await expect(active.locator('.canvas-viewport')).toHaveAttribute('data-canvas-zoom','1.3')
+  } finally {await client.close()}
+})
+
+test('history uses the selected outline and closes the mobile drawer after selection', async ({page},info) => {
+  const id='history-outline',headers={Authorization:`Bearer ${token(id,'outline-author')}`}
+  const get=async(path:string)=>(await fetch(`${apiUrl}/v1/documents/${id}${path}`,{headers})).json()
+  const imported=await get('/editor')
+  const projected=await fetch(`${apiUrl}/v1/documents/${id}/project`,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({expectedRevision:imported.revision})})
+  expect(projected.ok,await projected.text()).toBe(true)
+  const baseline=await get('/editor'),auth=await get('/auth')
+  const blocks=baseline.blocks.filter((block:{region:string})=>block.region==='body').map((block:{blockId:string;content:{kind:string}})=>({blockId:block.blockId,content:block.content.kind==='heading'?{...block.content,inlines:[{text:'Updated current heading'}]}:block.content}))
+  const saved=await fetch(`${apiUrl}/v1/documents/${id}/checkpoints`,{method:'POST',headers:{...headers,'Content-Type':'application/json','X-HCD-Collaboration-Epoch':String(auth.collaborationEpoch)},body:JSON.stringify({expectedRevision:baseline.revision,blocks})})
+  expect(saved.ok,await saved.text()).toBe(true)
+  await open(page,id,'read')
+  const active=page.locator('.document-tab-panel:not([hidden])')
+  await expect(active.locator('.outline-panel nav')).toContainText('Updated current heading')
+  await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
+  await active.locator(`.history button[data-revision="${baseline.revision}"]`).click()
+  await expect(active.locator('.outline-panel nav')).toContainText('Markdown workspace')
+  await expect(active.locator('.outline-panel nav')).not.toContainText('Updated current heading')
+  await active.locator('.outline-panel nav').getByRole('button',{name:'Markdown workspace',exact:true}).click()
+  await expect(active.locator('.revision-paper .history-search-hit')).toContainText('Markdown workspace')
+  await expect(active.locator('.revision-preview-title')).toContainText('outline-author')
+  await active.locator('.revision-workspace').getByRole('button',{name:'返回当前',exact:true}).click()
+  await expect(active.locator('.outline-panel nav')).toContainText('Updated current heading')
+  await active.getByRole('button',{name:'隐藏文档目录',exact:true}).click()
+  await page.setViewportSize({width:390,height:844})
+  await active.locator(`.history button[data-revision="${baseline.revision}"]`).click()
+  await expect(active.locator('.workspace-sidebar')).toHaveCount(0)
+  await expect(active.locator('.revision-paper')).toContainText('Markdown workspace')
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
+  await page.screenshot({path:info.outputPath('phone-history-selection.png')})
 })
