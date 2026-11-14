@@ -1,3 +1,5 @@
+import { Layers2, Plus, X } from 'lucide-react'
+import { WorkspaceLibrary, FormatIcon } from './WorkspaceLibrary.tsx'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
@@ -13,11 +15,17 @@ import { api, type Session } from './api.ts'
 import { loadTheme, type ThemeFace } from './themeCss.ts'
 import { BlockFontPicker } from './BlockFontPicker.tsx'
 import { FixedViewer } from './FixedViewer.tsx'
-import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon, type EditorTab } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { ErrorToast } from './ErrorToast.tsx'
+import { AgentActivityLayer, AgentPanel, useAgentWorkspace } from './AgentActivityLayer.tsx'
+import { opaquePreviewExtension } from './opaquePreview.ts'
+import { CanvasZoomProvider, CanvasViewport } from './CanvasZoom.tsx'
+import { RevisionWorkspace } from './RevisionWorkspace.tsx'
 import './style.css'
+import './soft-canvas.css'
+import './revision-workspace.css'
 
 const UniverViewer = lazy(() => import('./UniverViewer.tsx').then(module => ({ default: module.UniverViewer })))
 
@@ -43,7 +51,8 @@ export function App() {
   const { locale } = useI18n()
   const [documentId, setDocumentId] = useState(sessionStorage.getItem('hcd-document') || '')
   const [token, setToken] = useState(sessionStorage.getItem('hcd-token') || '')
-  const [session, setSession] = useState<Session | null>(null)
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [activeDocument, setActiveDocument] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [samples, setSamples] = useState<Array<{ id: string; title: string; format: string; mode: string }>>([])
   const [openingSample, setOpeningSample] = useState<string | null>(null)
@@ -69,9 +78,12 @@ export function App() {
         sessionStorage.setItem('hcd-document', draft.documentId)
         sessionStorage.setItem('hcd-token', draft.token)
       }
-      setSession({ ...draft, scope: access.scope, format: metadata.source.format,
+      const opened = { ...draft, title: samples.find(sample => sample.id === draft.documentId)?.title, scope: access.scope, format: metadata.source.format,
         userId: access.userId || undefined, displayName: access.displayName || undefined,
-        collaborationEpoch: access.collaborationEpoch })
+        collaborationEpoch: access.collaborationEpoch }
+      setSessions(previous => previous.some(item => item.documentId === opened.documentId)
+        ? previous.map(item => item.documentId === opened.documentId ? opened : item) : [...previous, opened])
+      setActiveDocument(opened.documentId)
     } catch (cause) { setError(String(cause)) }
   }
   async function openSample(id: string) {
@@ -117,26 +129,39 @@ export function App() {
       setError(`HCD 导入失败：${String(cause)}`)
     }
   }
-  if (session) return <div className="hcd-surface"><Workspace key={`${session.documentId}:${session.collaborationEpoch ?? 0}`} session={session} onClose={() => setSession(null)} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} /></div>
-  return <div className="hcd-surface"><main className="login"><div className={`login-card ${samples.length ? 'login-card-with-samples' : ''}`}>
-    <div className="eyebrow">OfficeCLI / HCD</div><h1><LocalText source={"文档编辑工作台"} /></h1><LocaleSelect />
-    {samples.length > 0 && <section className="acceptance-samples" aria-label={localizeSource(locale, "本地验收文档")}>
-      <p><LocalText source={"选择真实文件验收预览、编辑、修订与下载。"} /></p>
-      <div className="acceptance-grid">{samples.map(sample => <button key={sample.id} onClick={() => void openSample(sample.id)} disabled={openingSample !== null}>
-        <span className="sample-format">{sample.format}</span><strong>{sample.title}</strong><small>{sample.mode}</small><span className="sample-open">{localizeDynamic(locale, openingSample === sample.id ? '打开中…' : '打开文档 →')}</span>
-      </button>)}</div>
-    </section>}
+  function closeTab(id: string) {
+    if (!window.confirm('关闭此文档标签？请先保存未提交的修改。切换标签可以保留编辑状态。')) return
+    setSessions(previous => previous.filter(item => item.documentId !== id))
+    if (activeDocument === id) setActiveDocument(null)
+  }
+  const library = <WorkspaceLibrary samples={samples} sessions={sessions} opening={openingSample} onOpen={id => void openSample(id)} onResume={setActiveDocument}>
     <section className="manual-access"><p><LocalText source={"输入文档 ID 和短期访问令牌。只读令牌无法提交修改。"} /></p><label><LocalText source={"文档 ID"} /><input value={documentId} onChange={event => setDocumentId(event.target.value)} placeholder="doc-…" /></label><label><LocalText source={"访问令牌"} /><textarea rows={4} value={token} onChange={event => setToken(event.target.value)} placeholder={localizeSource(locale, "粘贴短期令牌")} /></label><button onClick={() => void open(documentId, token)} disabled={!documentId || !token}><LocalText source={"打开文档"} /></button></section>
     <section className="manual-access portable-import"><p><LocalText source={"重新打开单文件 HCD。上传令牌用于导入，文档访问令牌用于打开。"} /></p><label><LocalText source={"HCD 文件"} /><input type="file" accept=".hcd" onChange={event => setPortableFile(event.target.files?.[0] ?? null)} /></label><label><LocalText source={"上传令牌"} /><textarea rows={2} value={uploadToken} onChange={event => setUploadToken(event.target.value)} placeholder={localizeSource(locale, "粘贴短期上传令牌")} /></label><button onClick={() => void uploadPortable()} disabled={!portableFile || !uploadToken.trim() || uploadState === '上传中…'}><LocalText source={"导入 HCD"} /></button>{uploadState && <p role="status">{localizeDynamic(locale, uploadState)}</p>}</section>
     {error && <p className="error">{localizeDynamic(locale, error)}</p>}
-  </div></main></div>
+  </WorkspaceLibrary>
+  return <div className="hcd-surface multi-document-workspace">
+    <nav className="document-tabs" aria-label={localizeSource(locale, "已打开的文档")} hidden={!sessions.length}>
+      <button className="tabs-brand" aria-label={localizeSource(locale, '文档工作台')} onClick={() => setActiveDocument(null)}><Layers2 size={21} /><strong>office.</strong></button><button className={activeDocument === null ? 'active open-document-tab' : 'open-document-tab'} aria-label={localizeSource(locale, '打开其他文档')} onClick={() => setActiveDocument(null)}><Plus size={15} /><LocalText source="打开文档" /></button>
+      {sessions.map(item => <div className={`document-tab ${activeDocument === item.documentId ? 'active' : ''}`} key={item.documentId}>
+        <button aria-current={activeDocument === item.documentId ? 'page' : undefined} onClick={() => { setActiveDocument(item.documentId); requestAnimationFrame(() => window.dispatchEvent(new Event('resize'))) }} title={item.documentId}>
+          <FormatIcon format={item.format} size={14} /> <span>{item.title || item.documentId}</span><small>{item.format.toUpperCase()}</small>
+          {item.scope === 'read' && <span> · 只读</span>}
+        </button><button className="close-document-tab" aria-label={`关闭 ${item.documentId}`} onClick={() => closeTab(item.documentId)}><X size={13} /></button>
+      </div>)}
+    </nav>
+    <div className="document-tab-panel document-library" hidden={activeDocument !== null}>{library}</div>
+    {sessions.map(item => <div className="document-tab-panel" key={item.documentId} hidden={activeDocument !== item.documentId} data-document-id={item.documentId}>
+      <Workspace key={`${item.documentId}:${item.collaborationEpoch ?? 0}`} session={item} onClose={() => setActiveDocument(null)} onEpochChange={epoch => setSessions(previous => previous.map(value => value.documentId === item.documentId ? { ...value, collaborationEpoch: epoch } : value))} />
+    </div>)}
+  </div>
 }
 
 export function Workspace({ session, onClose, onEpochChange, embedded = false }: { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded?: boolean }) {
   const semantic = ['docx', 'html', 'md', 'txt'].includes(session.format)
-  if (semantic) return <SemanticEditor session={session} onClose={onClose} onEpochChange={onEpochChange} embedded={embedded} />
-  if (session.format === 'xlsx') return <Suspense fallback={<div className="embedded-loading"><LocalText source={"正在加载工作簿…"} /></div>}><UniverViewer session={session} onClose={onClose} embedded={embedded} /></Suspense>
-  return <FixedViewer session={session} onClose={onClose} embedded={embedded} />
+  const content = semantic ? <SemanticEditor session={session} onClose={onClose} onEpochChange={onEpochChange} embedded={embedded} />
+    : session.format === 'xlsx' ? <Suspense fallback={<div className="embedded-loading"><LocalText source={"正在加载工作簿…"} /></div>}><UniverViewer session={session} onClose={onClose} embedded={embedded} /></Suspense>
+      : <FixedViewer session={session} onClose={onClose} embedded={embedded} />
+  return <CanvasZoomProvider><AgentActivityLayer session={session}>{content}</AgentActivityLayer></CanvasZoomProvider>
 }
 
 function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded: boolean }) {
@@ -147,13 +172,26 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [history, setHistory] = useState<RevisionItem[]>([])
   const [nextBefore, setNextBefore] = useState<number | null | undefined>(undefined)
   const [historical, setHistorical] = useState<Projection | null>(null)
+  const [selectedRevision, setSelectedRevision] = useState<number | null>(null)
+  const [comparisonHead, setComparisonHead] = useState<Projection | null>(null)
+  const [comparing, setComparing] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [restoring, setRestoring] = useState(false)
+  const historyRequest = useRef<AbortController | null>(null)
+  const historyActive = selectedRevision !== null
+  useEffect(() => () => historyRequest.current?.abort(), [])
   const [error, setError] = useState('')
   const [menu, setMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null)
   const [linkOpen, setLinkOpen] = useState(false)
   const [linkHref, setLinkHref] = useState('')
   const [presence, setPresence] = useState<Array<{ id: string; name: string; color: string; connections: number }>>([])
-  const [layout, setLayout] = useState<LayoutPreferences>(readLayout)
-  const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>('settings')
+  const { panelOpen, setPanelOpen } = useAgentWorkspace()
+  const [focused, setFocused] = useState(false)
+  const [wrapText, setWrapText] = useState(true)
+  const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(session.documentId))
+  const [rightPanel, setRightPanel] = useState<'settings' | 'revisions' | null>(null)
+  function showRightPanel(panel: 'settings' | 'revisions') { setFocused(false); setPanelOpen(false); setRightPanel(panel) }
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [outline, setOutline] = useState<Array<{ pos: number; level: number; text: string }>>([])
   const [searchOpen, setSearchOpen] = useState(false)
@@ -162,14 +200,15 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const [themeFaces, setThemeFaces] = useState<ThemeFace[]>([])
   const lastOutline = useRef('')
   const lastSemantic = useRef<string | null>(null)
-  useEffect(() => { saveLayout(layout) }, [layout])
+  const canonicalHead = useRef<Promise<number> | null>(null)
+  useEffect(() => { saveLayout(layout, session.documentId) }, [layout, session.documentId])
   useEffect(() => {
     let live = true
-    loadTheme(session, historical?.revision ?? null, { editor: true })
+    loadTheme(session, null, { editor: true })
       .then(theme => { if (live) { setThemeCss(theme.css); setThemeFaces(theme.faces) } })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
-  }, [session, historical?.revision])
+  }, [session])
   function setLayoutOption(key: keyof LayoutPreferences, value: boolean) {
     setLayout(previous => ({ ...previous, [key]: value }))
   }
@@ -185,7 +224,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     token: session.token,
   }), [session.documentId, session.collaborationEpoch, session.token, ydoc])
   const editor = useEditor({
-    extensions: [...schemaExtensions, Collaboration.configure({ document: ydoc }),
+    extensions: [...schemaExtensions.map(extension => extension.name === 'hcdOpaque' ? opaquePreviewExtension(session) : extension), Collaboration.configure({ document: ydoc }),
       CollaborationCaret.configure({ provider, user: localUser, render: user => {
         const cursor = document.createElement('span')
         const samePerson = user.id === localUser.id
@@ -217,8 +256,8 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     },
   }, [ydoc])
   useEffect(() => {
-    editor?.setEditable(!readOnly)
-  }, [editor, readOnly])
+    editor?.setEditable(!readOnly && !historyActive)
+  }, [editor, readOnly, historyActive])
   useEffect(() => {
     const connection = ({ status: next }: { status: string }) => setStatus(next === 'connected' ? '已连接' : '连接中')
     const saveState = ({ payload }: { payload: string }) => {
@@ -251,12 +290,23 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       }
       setPresence(Array.from(unique.values()).sort((left, right) => Number(right.id === localUser.id) - Number(left.id === localUser.id)))
     }
+    const synced = () => {
+      setStatus('已同步')
+      // Creating the semantic projection can advance the imported revision while
+      // the first collaboration room is loading. Wait for that baseline on save.
+      const head = api(session, '/editor').then(response => response.json()).then((projection: Projection) => {
+        setRevision(previous => Math.max(previous ?? 0, projection.revision))
+        return projection.revision
+      })
+      canonicalHead.current = head
+      void head.catch(cause => setError(String(cause)))
+    }
     provider.on('status', connection)
-    provider.on('synced', () => setStatus('已同步'))
+    provider.on('synced', synced)
     provider.on('stateless', saveState)
     provider.awareness?.on('change', refreshPresence)
     refreshPresence()
-    return () => { provider.off('status', connection); provider.off('stateless', saveState); provider.awareness?.off('change', refreshPresence); provider.destroy(); ydoc.destroy() }
+    return () => { provider.off('status', connection); provider.off('synced', synced); provider.off('stateless', saveState); provider.awareness?.off('change', refreshPresence); provider.destroy(); ydoc.destroy() }
   }, [provider, ydoc, localUser])
   useEffect(() => {
     let alive = true
@@ -291,16 +341,33 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   }
   async function save(): Promise<number | null> {
     if (!editor || revision === null) return null
-    if (readOnly) return revision
+    if (session.scope === 'read') return revision
     setStatus('保存中')
     setError('')
     try {
+      const expectedRevision = Math.max(revision, await (canonicalHead.current ?? Promise.resolve(revision)))
       const blocks = jsonToSnapshot(editor.getJSON())
-      const saved = await (await api(session, '/checkpoints', {
-        method: 'POST', headers: { 'Content-Type': 'application/json',
-          'X-HCD-Collaboration-Epoch': String(session.collaborationEpoch ?? 0) },
-        body: JSON.stringify({ expectedRevision: revision, blocks }),
-      })).json() as { revision: number; projection: Projection }
+      let saved: { revision: number; projection: Projection }
+      try {
+        saved = await (await api(session, '/checkpoints', {
+          method: 'POST', headers: { 'Content-Type': 'application/json',
+            'X-HCD-Collaboration-Epoch': String(session.collaborationEpoch ?? 0) },
+          body: JSON.stringify({ expectedRevision, blocks }),
+        })).json() as typeof saved
+      } catch (cause) {
+        if (!String(cause).includes('409:')) throw cause
+        // The collaboration sidecar may have committed this exact snapshot first.
+        // Only acknowledge identical content; a divergent revision stays a conflict.
+        const projection = await (await api(session, '/editor')).json() as Projection
+        const contents = (items: typeof blocks) => JSON.stringify(items.map(({ content }) => ({
+          kind: content.kind, level: content.level ?? null, font: content.font ?? null,
+          inlines: content.inlines.filter(inline => inline.text).map(inline => ({
+            text: inline.text, bold: !!inline.bold, italic: !!inline.italic, link: inline.link ?? null,
+          })),
+        })))
+        if (contents(blocks) !== contents(projection.blocks.filter(block => block.region === 'body'))) throw cause
+        saved = { revision: projection.revision, projection }
+      }
       const nodes = ydoc.getXmlFragment('default').toArray().flatMap(item => {
         if (!(item instanceof Y.XmlElement)) return []
         if (item.nodeName === 'bulletList' || item.nodeName === 'orderedList') return item.toArray().filter((node): node is Y.XmlElement => node instanceof Y.XmlElement)
@@ -318,19 +385,46 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     } catch (cause) { setStatus('保存失败'); setError(String(cause)); return null }
   }
   async function showRevision(number: number) {
-    try { setHistorical(await (await api(session, `/editor?revision=${number}`)).json() as Projection) }
-    catch (cause) { setError(String(cause)) }
-  }
-  async function restoreHistorical() {
-    if (!historical || readOnly) return
-    const head = await save()
-    if (head === null || historical.revision >= head) return
+    historyRequest.current?.abort()
+    const request = new AbortController()
+    historyRequest.current = request
+    setSelectedRevision(number); setHistorical(null); setComparisonHead(null)
+    setHistoryLoading(true); setHistoryError(''); setMenu(null); setSearchOpen(false)
     try {
+      const [old, head] = await Promise.all([
+        api(session, `/editor?revision=${number}`, { signal: request.signal }).then(response => response.json() as Promise<Projection>),
+        api(session, '/editor', { signal: request.signal }).then(response => response.json() as Promise<Projection>),
+      ])
+      if (request.signal.aborted) return
+      setHistorical(old); setComparisonHead(head)
+    } catch (cause) { if (!request.signal.aborted) setHistoryError(String(cause)) }
+    finally { if (!request.signal.aborted) setHistoryLoading(false) }
+  }
+  function returnToCurrent() {
+    historyRequest.current?.abort()
+    setSelectedRevision(null); setHistorical(null); setHistoryLoading(false); setHistoryError(''); setComparing(false)
+  }
+  const comparisonCurrent = useMemo<Projection | null>(() => {
+    if (!comparisonHead || !editor || !historyActive) return null
+    const canonical = new Map(comparisonHead.blocks.map(block => [block.blockId, block]))
+    return { ...comparisonHead, blocks: jsonToSnapshot(editor.getJSON()).map((block, index) => ({
+      ...canonical.get(block.blockId || ''), blockId: block.blockId || `local-draft-${index}`,
+      blockHash: canonical.get(block.blockId || '')?.blockHash || '', region: 'body',
+      readOnly: canonical.get(block.blockId || '')?.readOnly || block.content.kind === 'opaque', content: block.content,
+    })) }
+  }, [comparisonHead, editor, searchVersion, historyActive])
+  async function restoreHistorical() {
+    if (!historical || session.scope !== 'write' || restoring) return
+    setRestoring(true)
+    try {
+      const head = await save()
+      if (head === null || historical.revision >= head) return
       await api(session, `/restore/${historical.revision}`, { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: head }) })
       const access = await (await api(session, '/auth')).json() as { collaborationEpoch: number }
       onEpochChange?.(access.collaborationEpoch)
     } catch (cause) { setError(String(cause)) }
+    finally { setRestoring(false) }
   }
   function moveBlock(direction: -1 | 1) {
     if (!editor || readOnly) return
@@ -375,6 +469,23 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     if (!editor) return { revision: revision ?? 0, hits, truncated: false }
     const needle = query.trim().toLocaleLowerCase()
     if (!needle) return { revision: revision ?? 0, hits, truncated: false }
+    if (historyActive) {
+      for (const block of historical?.blocks || []) {
+        if (block.region !== 'body') continue
+        const text = block.content.inlines.map(inline => inline.text).join('')
+        const lower = text.toLocaleLowerCase()
+        let start = 0
+        while (hits.length <= 200) {
+          const offset = lower.indexOf(needle, start)
+          if (offset < 0) break
+          hits.push({ chunkSequence: 0, region: 'body', nodeId: block.blockId, offset,
+            preview: text.slice(Math.max(0, offset - 32), offset + needle.length + 48), matchLength: query.trim().length })
+          start = offset + needle.length
+        }
+        if (hits.length > 200) break
+      }
+      return { revision: selectedRevision!, hits: hits.slice(0, 200), truncated: hits.length > 200 }
+    }
     editor.state.doc.descendants((node, pos) => {
       if (hits.length > 200) return false
       if (node.type.name !== 'paragraph' && node.type.name !== 'heading') return true
@@ -396,6 +507,14 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     return { revision: revision ?? 0, hits: hits.slice(0, 200), truncated: hits.length > 200 }
   }
   function navigateSearch(hit: SearchHit) {
+    if (historyActive) {
+      const column = editor?.view.dom.closest('.workspace')?.querySelector('.revision-column')
+      column?.querySelectorAll('.history-search-hit').forEach(node => node.classList.remove('history-search-hit'))
+      const target = column?.querySelector(`[data-hcd-block-id="${CSS.escape(hit.nodeId)}"]`)
+      target?.classList.add('history-search-hit')
+      target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      return
+    }
     if (!editor || hit.position === undefined) return
     const from = Math.min(hit.position, editor.state.doc.content.size)
     editor.commands.setTextSelection({ from, to: Math.min(from + (hit.matchLength || 1), editor.state.doc.content.size) })
@@ -417,24 +536,28 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     { label: '撤销', disabled: readOnly || !editor?.can().undo(), separated: true, action: () => editor?.chain().focus().undo().run() },
     { label: '重做', disabled: readOnly || !editor?.can().redo(), action: () => editor?.chain().focus().redo().run() },
   ]
-  return <div className={`workspace semantic-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline ? '' : 'outline-hidden'} ${rightPanel ? '' : 'right-hidden'}`}>
-    {layout.showHeader && <EditorHeader session={session} revision={revision} status={status} activeTab={activeTab}
-      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} onClose={onClose}
-      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings'} beforeExport={save}
+  return <div data-format={session.format} data-hcd-history={historyActive ? 'true' : undefined} className={`workspace semantic-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(rightPanel || panelOpen) && !focused ? '' : 'right-hidden'} ${focused ? 'focus-mode' : ''}`}>
+    {layout.showHeader && <EditorHeader session={session} revision={selectedRevision ?? revision} status={status} activeTab={activeTab}
+      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} onClose={onClose}
+      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings' && !panelOpen && !focused} focused={focused} onFocus={() => setFocused(value => !value)} readOnly={readOnly || historyActive} onReadOnly={value => { if (historyActive) returnToCurrent(); if (session.scope === 'write') setReadOnly(value) }} beforeExport={historyActive ? async () => selectedRevision : save}
       presence={layout.showCollaborators && <details className="presence"><summary aria-label={`${localizeSource(locale, "在线协作者")} · ${presence.length}`}><span className="presence-avatars">{presence.slice(0, 3).map(user => <span key={user.id} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}</span><span>{presence.length} <LocalText source={" 人在线"} /></span></summary><div className="presence-menu"><strong><LocalText source={"在线协作者"} /></strong>{presence.map(user => <div key={user.id} className="presence-person"><span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><span>{user.name}{user.id === localUser.id ? localizeSource(locale, '（你）') : ''}</span>{user.connections > 1 && <small>{user.connections} <LocalText source={" 个窗口"} /></small>}</div>)}</div></details>} />}
-    {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} aria-expanded={rightPanel === 'settings'} onClick={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')}><LocalText source={"⚙ 界面设置"} /></button>}
-    <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={searchVersion} />
-    {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().undo().run()} disabled={readOnly || !editor?.can().undo()}><LocalText source={"↶ 撤销"} /></button><button onClick={() => editor?.chain().focus().redo().run()} disabled={readOnly || !editor?.can().redo()}><LocalText source={"↷ 重做"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().setParagraph().run()} disabled={readOnly}><LocalText source={"正文"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}><LocalText source={"标题"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly}><LocalText source={"𝐁 加粗"} /></button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly}><LocalText source={"𝑰 斜体"} /></button><button onClick={openLink} disabled={readOnly}><LocalText source={"链接"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}><LocalText source={"项目符号"} /></button><button onClick={() => editor?.chain().focus().toggleOrderedList().run()} disabled={readOnly}><LocalText source={"编号"} /></button></div><div className="tool-group"><button onClick={() => moveBlock(-1)} disabled={readOnly}><LocalText source={"段落上移"} /></button><button onClick={() => moveBlock(1)} disabled={readOnly}><LocalText source={"段落下移"} /></button></div></>}
-      {activeTab === 'home' && <BlockFontPicker editor={editor} faces={themeFaces} disabled={readOnly || historical !== null} />}
-      {activeTab === 'insert' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().insertContent({ type: 'paragraph', content: [{ type: 'text', text: '新段落' }] }).run()} disabled={readOnly}><LocalText source={"＋ 新增段落"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}><LocalText source={"插入标题"} /></button><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}><LocalText source={"插入列表"} /></button></div><div className="tool-group"><button onClick={openLink} disabled={readOnly}><LocalText source={"插入链接"} /></button><button onClick={deleteCurrentBlock} disabled={readOnly}><LocalText source={"删除段落"} /></button></div></>}
-      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示大纲"} /></label><label className="mode"><input type="checkbox" checked={readOnly} disabled={session.scope === 'read'} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
-      {activeTab === 'revisions' && <><button onClick={() => void save()} disabled={readOnly}><LocalText source={"创建保存点"} /></button><button onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{revision ?? '…'}</span></>}
+    {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} aria-expanded={rightPanel === 'settings'} onClick={() => { setFocused(false); setPanelOpen(false); setRightPanel(previous => previous === 'settings' ? null : 'settings') }}><LocalText source={"⚙ 界面设置"} /></button>}
+    <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={`${searchVersion}:${selectedRevision ?? 'current'}:${historyLoading}`} />
+    <div className="layout editor-layout">
+      {layout.showOutline && !focused && <aside className="outline-panel" aria-label={localizeSource(locale, "文档目录")}><div className="panel-head"><h2><LocalText source={"☷ 文档目录"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏文档目录")} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div>{outline.length ? <nav>{outline.map(item => <button key={item.pos} className={`outline-level-${item.level}`} onClick={() => { editor?.commands.focus(); editor?.commands.setTextSelection(item.pos + 1); editor?.view.domAtPos(item.pos + 1).node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' }) }}>{item.text}</button>)}</nav> : <p><LocalText source={"暂无标题。将段落设为标题后会显示在这里。"} /></p>}</aside>}
+      {(!layout.showOutline || focused) && <PanelDock side="left" onOpen={() => { setFocused(false); setLayoutOption('showOutline', true) }} />}
+      <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
+        {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={readOnly || historyActive} format={session.format} />}
+    {layout.showToolbar && !focused && !readOnly && !historyActive && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
+      {session.format !== 'txt' && activeTab === 'home' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().undo().run()} disabled={readOnly || !editor?.can().undo()}><LocalText source={"↶ 撤销"} /></button><button onClick={() => editor?.chain().focus().redo().run()} disabled={readOnly || !editor?.can().redo()}><LocalText source={"↷ 重做"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().setParagraph().run()} disabled={readOnly}><LocalText source={"正文"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}><LocalText source={"标题"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly}><LocalText source={"𝐁 加粗"} /></button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly}><LocalText source={"𝑰 斜体"} /></button><button onClick={openLink} disabled={readOnly}><LocalText source={"链接"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}><LocalText source={"项目符号"} /></button><button onClick={() => editor?.chain().focus().toggleOrderedList().run()} disabled={readOnly}><LocalText source={"编号"} /></button></div><div className="tool-group"><button onClick={() => moveBlock(-1)} disabled={readOnly}><LocalText source={"段落上移"} /></button><button onClick={() => moveBlock(1)} disabled={readOnly}><LocalText source={"段落下移"} /></button></div></>}
+      {!['txt', 'md'].includes(session.format) && activeTab === 'home' && <BlockFontPicker editor={editor} faces={themeFaces} disabled={readOnly || historical !== null} />}
+      {session.format !== 'txt' && activeTab === 'insert' && <><div className="tool-group"><button onClick={() => editor?.chain().focus().insertContent({ type: 'paragraph', content: [{ type: 'text', text: '新段落' }] }).run()} disabled={readOnly}><LocalText source={"＋ 新增段落"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly}><LocalText source={"插入标题"} /></button><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly}><LocalText source={"插入列表"} /></button></div><div className="tool-group"><button onClick={openLink} disabled={readOnly}><LocalText source={"插入链接"} /></button><button onClick={deleteCurrentBlock} disabled={readOnly}><LocalText source={"删除段落"} /></button></div></>}
+      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示大纲"} /></label><label className="mode"><input type="checkbox" checked={readOnly} disabled={session.scope === 'read'} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => showRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
+      {activeTab === 'revisions' && <><button onClick={() => void save()} disabled={readOnly}><LocalText source={"创建保存点"} /></button><button onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{revision ?? '…'}</span></>}
+      {session.format === 'txt' && <div className="tool-group"><button disabled={readOnly || !editor?.can().undo()} onClick={() => editor?.chain().focus().undo().run()}><LocalText source="↶ 撤销" /></button><button disabled={readOnly || !editor?.can().redo()} onClick={() => editor?.chain().focus().redo().run()}><LocalText source="↷ 重做" /></button><button aria-pressed={wrapText} onClick={() => setWrapText(value => !value)}><LocalText source="自动换行" /></button><span className="ribbon-note"><LocalText source="纯文本 · 等宽显示" /></span></div>}
       {activeTab !== 'revisions' && <button className="primary save-trigger" onClick={() => void save()} disabled={readOnly}><LocalText source={"保存点"} /></button>}
     </nav>}
-    <div className="layout editor-layout">
-      {layout.showOutline && <aside className="outline-panel" aria-label={localizeSource(locale, "文档目录")}><div className="panel-head"><h2><LocalText source={"☷ 文档目录"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏文档目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div>{outline.length ? <nav>{outline.map(item => <button key={item.pos} className={`outline-level-${item.level}`} onClick={() => { editor?.commands.focus(); editor?.commands.setTextSelection(item.pos + 1); editor?.view.domAtPos(item.pos + 1).node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' }) }}>{item.text}</button>)}</nav> : <p><LocalText source={"暂无标题。将段落设为标题后会显示在这里。"} /></p>}</aside>}
-      <div className="document-scroll"><main className="document" onContextMenu={event => {
+      <CanvasViewport hidden={historyActive}><main className={`document ${session.format === 'txt' && !wrapText ? 'text-no-wrap' : ''}`} onContextMenu={event => {
         event.preventDefault()
         const selection = window.getSelection()
         const selectedAtPoint = selection && selection.rangeCount > 0 && Array.from(selection.getRangeAt(0).getClientRects()).some(rect =>
@@ -445,16 +568,20 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
           if (point && !selectedText) editor.commands.setTextSelection(point.pos)
         }
         setMenu({ x: event.clientX, y: event.clientY, selectedText })
-      }}>{themeCss && <style>{themeCss}</style>}<EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main></div>
-      {rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>{rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示文档目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
-        {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><p><LocalText source={"结构编辑后导出 DOCX 将重建语义版式。"} /></p>
-        <div className="history">{history.slice().reverse().map(item => <button key={item.revision} onClick={() => void showRevision(item.revision)} title={item.patchId}><span className="revision-avatar" title={item.authorName || (localizeSource(locale, item.revision === 0 ? '导入' : '作者未记录'))} style={item.authorId ? { background: presenceColor(item.authorId) } : undefined}>{item.authorName?.slice(0, 1) || (item.revision === 0 ? localizeSource(locale, '导入').slice(0, 1) : '?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs ? new Date(item.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</small></strong><small>{item.authorName || (localizeSource(locale, item.revision === 0 ? '初始导入' : '作者未记录'))} · {localizeSource(locale, item.revision === 0 ? '导入' : item.patchId?.startsWith('restore-') ? '恢复版本' : item.patchId === 'editor-projection' ? '编辑投影' : '内容更新')}</small><span><LocalText source={"查看版本"} /></span></span></button>)}
+      }}>{themeCss && <style>{themeCss}</style>}<EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => session.format !== 'txt' && !historyActive && !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main></CanvasViewport>
+      {historyActive && <RevisionWorkspace session={session} selected={selectedRevision} historical={historical} current={comparisonCurrent} comparing={comparing} loading={historyLoading} error={historyError} metadata={history.find(item => item.revision === selectedRevision)?.authorName} canRestore={session.scope === 'write' && selectedRevision < (revision ?? 0)} restoring={restoring} onCompare={setComparing} onReturn={returnToCurrent} onRetry={() => void showRevision(selectedRevision)} onRestore={() => void restoreHistorical()} />}
+      </section>
+      {panelOpen && !focused && <AgentPanel />}
+      {!panelOpen && !focused && rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>{rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示文档目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
+        {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><p><LocalText source="点击版本，在中央预览或与当前内容对比。" /></p>
+        <div className="history">{history.slice().reverse().map(item => <button key={item.revision} data-revision={item.revision} aria-pressed={selectedRevision === item.revision} onClick={() => void showRevision(item.revision)} title={item.patchId}><span className="revision-avatar" title={item.authorName || (localizeSource(locale, item.revision === 0 ? '导入' : '作者未记录'))} style={item.authorId ? { background: presenceColor(item.authorId) } : undefined}>{item.authorName?.slice(0, 1) || (item.revision === 0 ? localizeSource(locale, '导入').slice(0, 1) : '?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs ? new Date(item.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</small></strong><small>{item.authorName || (localizeSource(locale, item.revision === 0 ? '初始导入' : '作者未记录'))} · {localizeSource(locale, item.revision === 0 ? '导入' : item.patchId?.startsWith('restore-') ? '恢复版本' : item.patchId === 'editor-projection' ? '编辑投影' : '内容更新')}</small><span><LocalText source={"查看版本"} /></span></span></button>)}
           {nextBefore !== null && nextBefore !== undefined && <button onClick={() => void loadOlderRevisions()}><LocalText source={"加载更早的修订"} /></button>}
         </div>
-        {historical && <section className="revision-view"><div className="panel-head"><strong>r{historical.revision} <LocalText source={" 内容"} /></strong><button onClick={() => setHistorical(null)}><LocalText source={"关闭"} /></button></div><div>{historical.blocks.filter(block => block.region === 'body').map(block => <p key={block.blockId}>{block.content.inlines.map(item => item.text).join('')}</p>)}</div><button disabled={readOnly || historical.revision >= (revision ?? 0)} onClick={() => void restoreHistorical()}><LocalText source={"恢复为此版本"} /></button></section>}
+        {historyActive && <button className="return-current" onClick={returnToCurrent}><LocalText source="返回当前" /></button>}
         </section>}</aside>}
+      {(focused || (!rightPanel && !panelOpen)) && <PanelDock side="right" onOpen={() => { setFocused(false); setPanelOpen(false); showRightPanel('settings') }} onHistory={() => { setFocused(false); setPanelOpen(false); showRightPanel('revisions') }} onAgents={() => { setFocused(false); setPanelOpen(true) }} />}
     </div>
-    <EditorStatusbar mode={localizeSource(locale, "连续视图")} format={session.format} revision={revision} readOnly={readOnly} status={status} />
+    <EditorStatusbar mode={localizeSource(locale, "连续视图")} format={session.format} revision={selectedRevision ?? revision} readOnly={readOnly || historyActive} status={status} />
     {menu && <ContextMenu x={menu.x} y={menu.y} actions={actions} onClose={() => setMenu(null)} />}
     {linkOpen && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setLinkOpen(false) }}><div className="hcd-dialog" role="dialog" aria-modal="true" aria-label={localizeSource(locale, "设置链接")}><h2><LocalText source={"设置链接"} /></h2><label><LocalText source={"链接地址"} /><input autoFocus type="url" value={linkHref} onChange={event => setLinkHref(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyLink(); if (event.key === 'Escape') setLinkOpen(false) }} placeholder="https://example.com" /></label><div className="hcd-dialog-actions"><button onClick={() => setLinkOpen(false)}><LocalText source={"取消"} /></button><button className="primary" onClick={applyLink}><LocalText source={"应用链接"} /></button></div></div></div>}
     {error && <ErrorToast message={error} onClose={() => setError('')} />}

@@ -1,5 +1,6 @@
 export type Session = {
   documentId: string
+  title?: string
   token: string
   scope: 'read' | 'write'
   format: string

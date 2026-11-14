@@ -61,6 +61,7 @@ export const HcdOpaque = Node.create({
       hcdBlockId: { default: null },
       hcdContent: { default: null },
       preview: { default: '' },
+      previewRevision: { default: null },
     }
   },
   parseHTML() { return [{ tag: 'div[data-hcd-opaque]' }] },
@@ -93,9 +94,9 @@ function inlineJson(inline: Inline): JSONContent {
   return { type: 'text', text: inline.text, ...(marks.length ? { marks } : {}) }
 }
 
-function blockJson(block: Block): JSONContent {
+function blockJson(block: Block, revision: number): JSONContent {
   if (block.readOnly || block.content.kind === 'opaque') {
-    return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '▣' } }
+    return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, previewRevision: revision, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '▣' } }
   }
   const content = block.content.inlines.filter(part => part.text.length > 0).map(inlineJson)
   const attrs = { hcdBlockId: block.blockId, ...(block.content.font ? { hcdFont: block.content.font } : {}) }
@@ -115,10 +116,10 @@ export function projectionToJson(projection: Projection): JSONContent {
         pending = { type, content: [] }
         content.push(pending)
       }
-      pending.content!.push(blockJson(block))
+      pending.content!.push(blockJson(block, projection.revision))
     } else {
       pending = null
-      content.push(blockJson(block))
+      content.push(blockJson(block, projection.revision))
     }
   }
   return { type: 'doc', content }

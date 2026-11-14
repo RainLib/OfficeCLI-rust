@@ -66,6 +66,7 @@ function localAcceptanceSamples(): Plugin {
 }
 
 export default defineConfig({
+  cacheDir: process.env.HCD_VITE_CACHE_DIR,
   plugins: [localAcceptanceSamples()],
   server: {
     port: 8767,

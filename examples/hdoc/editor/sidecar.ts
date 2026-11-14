@@ -63,8 +63,17 @@ async function documentFormat(documentId: string): Promise<string> {
 
 function isFixed(format: string) { return format === 'pdf' || format === 'pptx' || format === 'xlsx' }
 
-type Pending = { document: Y.Doc; first: number; last: number; timer: ReturnType<typeof setTimeout> | null; saving: boolean }
+type Pending = { document: Y.Doc; first: number; last: number; version: number; timer: ReturnType<typeof setTimeout> | null; saving: boolean }
 const pending = new Map<string, Pending>()
+let pendingSequence = Date.now() * 1000
+async function markPending(documentName: string, dirty: boolean) {
+  const selected = room(documentName)
+  const response = await request(selected.documentId, '/collaboration/pending', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dirty, sequence: ++pendingSequence }),
+  }, selected.epoch)
+  if (!response.ok) throw new Error(`HCD pending state failed: ${response.status}`)
+}
 
 function announceSave(documentId: string, status: 'editing' | 'saving' | 'saved' | 'failed', revision?: number) {
   server.hocuspocus.documents.get(documentId)?.broadcastStateless(JSON.stringify({
@@ -74,7 +83,8 @@ function announceSave(documentId: string, status: 'editing' | 'saving' | 'saved'
 
 function schedule(documentId: string, document: Y.Doc) {
   const now = Date.now()
-  const item = pending.get(documentId) || { document, first: now, last: now, timer: null, saving: false }
+  const item = pending.get(documentId) || { document, first: now, last: now, version: 0, timer: null, saving: false }
+  item.version++
   item.document = document
   item.last = now
   if (item.timer) clearTimeout(item.timer)
@@ -102,6 +112,7 @@ async function checkpoint(documentId: string) {
   if (item.timer) clearTimeout(item.timer)
   item.timer = null
   announceSave(documentId, 'saving')
+  const version = item.version
   try {
     const selected = room(documentId)
     const projection = await currentProjection(selected.documentId)
@@ -129,6 +140,7 @@ async function checkpoint(documentId: string) {
       }, 'hcd-canonical-ids')
     }
     item.first = Date.now()
+    if (item.version === version) await markPending(documentId, false)
     announceSave(documentId, 'saved', saved.revision)
     console.log(`HCD checkpoint ${documentId} revision ${saved.revision}`)
   } catch (error) {
@@ -189,6 +201,7 @@ const server = new Server({
     if (isFixed(await documentFormat(room(documentName).documentId))) return
     if (transactionOrigin === 'hcd-canonical-ids') return
     schedule(documentName, document)
+    await markPending(documentName, true)
   },
   async onStateless({ documentName, document, connection, payload }) {
     if (connection.readOnly) return

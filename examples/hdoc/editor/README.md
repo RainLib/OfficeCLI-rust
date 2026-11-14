@@ -1,5 +1,7 @@
 # HCD reference editor and core service
 
+The app supports multiple open document tabs with retained workspace state. External MCP agents can read, locate, patch and export served revisions; their authenticated activity appears as cursors and operation highlights. See the [multi-agent workflow and acceptance report](../../../docs/acceptance/hcd-agent-workspace-2026-11-14.zh.md) for setup, conflict handling, screenshots and current limits. Run `npm run test:workspace` after building `officecli` to exercise the browser and standard MCP SDK together.
+
 This example runs a self-hosted Tiptap/Yjs editor against the `hcd/2` core API. DOCX, HTML, Markdown, and TXT use the semantic editor. PDF and PPTX use the fixed-layout, window-loaded viewer; both can place and edit positioned text boxes. XLSX uses the Univer adapter for mapped cell values, formulas, and bounded cell merging. The formula bar can turn an existing editable value into a native formula; see [the SUM acceptance steps](../../../docs/acceptance/hcd-xlsx-formula-from-value.md). HCD revisions are immutable; semantic editing creates `hcd-patch/4` checkpoints and does not write browser HTML into a bundle.
 
 ## Local run

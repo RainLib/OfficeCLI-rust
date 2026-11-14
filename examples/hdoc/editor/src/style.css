@@ -1,5 +1,29 @@
 .hcd-surface{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#233128;background:#f3f5f2;min-height:100vh}
 .hcd-surface,.hcd-surface *{box-sizing:border-box}
+.hcd-surface [hidden]{display:none!important}
+.hcd-surface.multi-document-workspace{height:100vh;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.hcd-surface .document-tabs{display:flex;align-items:stretch;gap:6px;padding:6px 10px;background:#e8eef8;border-bottom:1px solid #cbd7e9;overflow-x:auto;flex:none;min-height:45px}
+.hcd-surface .document-tabs button{white-space:nowrap;font-size:12px;padding:6px 10px;border:0;background:transparent}
+.hcd-surface .document-tabs>.active,.hcd-surface .document-tab.active{background:white;border-radius:7px;box-shadow:0 1px 4px #1e3a5f18}
+.hcd-surface .document-tab{display:flex;flex:none;max-width:300px;align-items:center}
+.hcd-surface .document-tab>button:first-child{overflow:hidden;text-overflow:ellipsis}
+.hcd-surface .document-tab small{font-size:10px;color:#1769e8}
+.hcd-surface .document-tab-panel{flex:1;min-height:0;position:relative;overflow:hidden}
+.hcd-surface .document-library{overflow:auto}
+.hcd-surface .document-library .login{min-height:100%}
+.hcd-surface .agent-workspace{height:100%;min-height:0;position:relative}
+.hcd-surface .document-tab-panel .workspace.semantic-workspace{height:100%;min-height:0}
+.hcd-surface .agent-activity-panel{position:absolute;right:18px;bottom:44px;z-index:35;display:flex;flex-direction:column;gap:6px;max-height:35%;overflow:auto;width:230px;pointer-events:none}
+.hcd-surface .agent-activity{display:flex;flex-direction:column;gap:4px;border-left:3px solid;padding:9px 12px;border-radius:6px;background:#ffffffed;box-shadow:0 3px 16px #17325822;font-size:12px}
+.hcd-surface .agent-activity small{color:#65748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hcd-surface .agent-cursor{position:fixed;z-index:34;pointer-events:none;border:2px solid;border-radius:3px;transition:left .35s ease,top .35s ease,width .25s ease,height .25s ease;background:transparent}
+.hcd-surface .agent-cursor>span{position:absolute;left:-2px;top:-25px;white-space:nowrap;background:currentColor;border-radius:5px 5px 0 0;padding:3px 7px;font-size:11px;line-height:18px;box-shadow:0 2px 5px #17325822}
+.hcd-surface .agent-cursor>span{background:#fff;border:1px solid currentColor}
+.hcd-surface .agent-cursor.agent-editing{animation:hcd-agent-edit 1s ease-in-out infinite alternate}
+.hcd-surface .agent-cursor.agent-applied{background:#16a34a18}
+.hcd-surface .agent-cursor.agent-conflict{border-style:dashed;background:#dc262610}
+@keyframes hcd-agent-edit{from{box-shadow:0 0 0 1px currentColor}to{box-shadow:0 0 0 4px transparent}}
+@media(prefers-reduced-motion:reduce){.hcd-surface .agent-cursor{transition:none;animation:none!important}}
 .hcd-surface button,.hcd-surface input,.hcd-surface textarea,.hcd-surface select{font:inherit}
 .hcd-surface button{cursor:pointer;border:1px solid #d7ded8;border-radius:8px;padding:8px 12px;background:#fff;color:#314539;transition:background .15s,border-color .15s}
 .hcd-surface button:hover{border-color:#668a73;background:#f5f9f6}
@@ -71,6 +95,8 @@
 .hcd-surface .hcd-editor-body h1,.hcd-surface .hcd-editor-body h2{line-height:1.35;margin:1.1em 0 .5em}
 .hcd-surface .hcd-editor-body:focus-visible{outline:none}
 .hcd-surface .hcd-editor-body .hcd-opaque{background:#f1f4f1;border-left:3px solid #b7c9bb;padding:12px;color:#637065;margin:12px 0}
+.hcd-surface .hcd-editor-body .hcd-opaque-preview{padding:8px;border-color:#8baad2;background:#f3f7fc;overflow:auto}
+.hcd-surface .hcd-opaque-preview>small{display:block;font-size:11px;margin:0 0 5px;color:#60789a}
 .hcd-surface .layout aside{background:#fff;border:1px solid #e4eae5;border-radius:9px;padding:18px;align-self:start;max-height:calc(100vh - 220px);overflow:auto}
 .hcd-surface .layout aside h2{font-size:15px;margin:0 0 6px}
 .hcd-surface .layout aside p{font-size:12px;line-height:1.5;color:#79857b}
@@ -211,6 +237,11 @@
 .hcd-surface .floating-settings{position:fixed;z-index:100;right:16px;top:14px;box-shadow:0 8px 24px #20375a30;color:#164b9a!important;font-weight:700}
 .hcd-surface .semantic-workspace .ribbon{min-height:70px;align-items:stretch;padding:9px 20px;gap:12px;box-shadow:0 2px 9px #2139650d}
 .hcd-surface .semantic-workspace .ribbon .tool-group{align-items:center;gap:6px;padding-right:12px;border-right-color:#d7e0ed}
+.hcd-surface .univer-workspace .ribbon,.hcd-surface .fixed-workspace .ribbon{overflow-x:auto;flex-wrap:nowrap;min-width:0}
+.hcd-surface .univer-workspace .ribbon>*:not(style),.hcd-surface .fixed-workspace .ribbon>*:not(style){flex-shrink:0;white-space:nowrap}
+.hcd-surface .univer-workspace .ribbon .tool-group,.hcd-surface .fixed-workspace .ribbon .tool-group{flex:none}
+.hcd-surface .fixed-workspace .outline-entry{flex-wrap:wrap}
+.hcd-surface .fixed-workspace .outline-entry>button:first-child{flex-basis:100%!important}
 .hcd-surface .univer-workspace .xlsx-insert-count{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:13px;color:#304b7a}
 .hcd-surface .univer-workspace .xlsx-insert-count input{width:62px;height:32px;padding:4px 6px;border:1px solid #cbd8e6;border-radius:5px;color:#20365e}
 .hcd-surface .semantic-workspace .ribbon button{border-color:transparent;background:transparent;color:#20365e;min-height:37px}

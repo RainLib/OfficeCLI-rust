@@ -1,3 +1,4 @@
+import { CanvasViewport, useCanvasZoom } from './CanvasZoom.tsx'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
@@ -7,7 +8,7 @@ import { UniverSheetsDrawingPreset } from '@univerjs/preset-sheets-drawing'
 import { HcdUniverAdapter, type HcdPatchEventDetail } from '../../xlsx-univer-viewer/src/adapter.ts'
 import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
-import { EditorHeader, EditorStatusbar, type EditorTab } from './EditorChrome.tsx'
+import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon, type EditorTab } from './EditorChrome.tsx'
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
@@ -15,6 +16,7 @@ import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { api, type Session } from './api.ts'
 import { loadThemeCss } from './themeCss.ts'
 import { ErrorToast } from './ErrorToast.tsx'
+import { agentColor, agentStatus, useAgentActivities, useAgentWorkspace, AgentPanel } from './AgentActivityLayer.tsx'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
 
@@ -62,6 +64,12 @@ function selectionKind(sheet: ReturnType<HcdUniverAdapter['workbook']['getActive
 }
 
 export function UniverViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
+  const agents = useAgentActivities()
+  const { panelOpen, setPanelOpen } = useAgentWorkspace()
+  const [focused, setFocused] = useState(false)
+  const { zoom, setZoom } = useCanvasZoom()
+  const zoomRef = useRef(zoom)
+  zoomRef.current = zoom
   const { locale } = useI18n()
   const [status, setStatus] = useState('正在加载工作簿')
   const [revision, setRevision] = useState<number | null>(null)
@@ -71,9 +79,12 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [error, setError] = useState('')
   const [themeCss, setThemeCss] = useState('')
   const [editing, setEditing] = useState(session.scope === 'write')
-  const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout('xlsx'))
+  const editingRef = useRef(editing)
+  editingRef.current = editing
+  const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(session.documentId))
   const [activeTab, setActiveTab] = useState<EditorTab>('home')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  function openSettings() { setFocused(false); setPanelOpen(false); setSettingsOpen(true) }
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
@@ -107,7 +118,46 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const host = useRef<HTMLDivElement>(null)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
   const localeApi = useRef<Pick<ReturnType<typeof createUniver>['univerAPI'], 'loadLocales' | 'setLocale'> | null>(null)
+  useEffect(() => {
+    const sheet = runtime.current?.adapter.workbook.getActiveSheet()
+    if (sheet && Math.abs(sheet.getZoom() - zoom) > 0.005) sheet.zoom(zoom)
+  }, [zoom])
   const syncing = useRef(false)
+  useEffect(() => {
+    let decorations: Array<{ dispose: () => void }> = []
+    let signature = ''
+    const refresh = () => {
+      const current = runtime.current
+      const visible = !!host.current?.getClientRects().length
+      const sheet = current?.adapter.workbook.getActiveSheet()
+      const targets = agents.map(agent => ({ agent, address: agent.nodeId ? current?.adapter.nodeAddress(agent.nodeId) : undefined }))
+      const next = JSON.stringify([visible, sheet?.getSheetId(), targets, revision])
+      if (next === signature) return
+      signature = next
+      decorations.forEach(item => item.dispose()); decorations = []
+      if (!current || !visible || !sheet) return
+      const occupants = new Map<string, number>()
+      for (const { agent, address } of targets) {
+        if (!address || sheet.getSheetId() !== address.sheetId) continue
+        try {
+          const range = sheet.getRange(address.row, address.column)
+          const color = agentColor(agent.agentId)
+          const key = `${address.row}:${address.column}`
+          const offset = occupants.get(key) || 0
+          occupants.set(key, offset + 1)
+          decorations.push(range.highlight({ stroke: color, fill: `${color}18`, strokeWidth: 2 }))
+          const popup = range.attachPopup({
+            componentKey: () => <span className="agent-grid-cursor" data-agent-id={agent.agentId} style={{pointerEvents:'none',color,background:'#fff',border:`1px solid ${color}`,borderRadius:4,padding:'3px 7px',fontSize:11,whiteSpace:'nowrap'}}>➤ {agent.name} · {agentStatus[agent.status]}</span>,
+            direction: 'top-left', offset: [0, -24 * offset], hideOnInvisible: true, zIndex: 34,
+          })
+          if (popup) decorations.push(popup)
+        } catch { /* Virtualized or inactive cells keep their activity card. */ }
+      }
+    }
+    refresh()
+    const timer = setInterval(refresh, 300)
+    return () => { clearInterval(timer); decorations.forEach(item => item.dispose()) }
+  }, [agents, revision])
   const gridBusy = useRef(false)
   const collaborationSession = useMemo(() => ({ ...session, collaborationEpoch }), [session, collaborationEpoch])
   const collaboration = useFixedCollaboration(collaborationSession, revision, next => setRemoteRevision(previous => Math.max(previous ?? 0, next)))
@@ -169,6 +219,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   }
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!host.current?.getClientRects().length) return
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return
       const target = event.target
       if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return
@@ -183,7 +234,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     return () => window.removeEventListener('keydown', onKeyDown)
   })
   useEffect(() => () => { deletionResolver.current?.(false); deletionResolver.current = null }, [])
-  useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
+  useEffect(() => { saveLayout(layout, session.documentId) }, [layout, session.documentId])
   useEffect(() => {
     let live = true
     loadThemeCss(session, null)
@@ -302,6 +353,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       localeApi.current = univerAPI
       disposeUniver = () => univer.dispose()
       const workbook = univerAPI.createWorkbook(workbookData)
+      workbook.getActiveSheet().zoom(zoomRef.current)
+      univerAPI.addEvent(univerAPI.Event.SheetZoomChanged, () => setZoom(workbook.getActiveSheet().getZoom()))
+      univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, () => setZoom(workbook.getActiveSheet().getZoom()))
       const updateFormulaBar = () => {
         const sheet = workbook.getActiveSheet()
         const selection = sheet.getActiveRange()
@@ -315,7 +369,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       updateFormulaBarRef.current = updateFormulaBar
       univerAPI.addEvent(univerAPI.Event.SelectionChanged, updateFormulaBar)
       univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, updateFormulaBar)
-      const adapter = new HcdUniverAdapter(client, univerAPI, workbook, editing ? 'editable' : 'readonly', message => {
+      const adapter = new HcdUniverAdapter(client, univerAPI, workbook, editingRef.current ? 'editable' : 'readonly', message => {
         if (alive) setStatus(message)
       }, styleCatalog)
       let saveQueue = Promise.resolve()
@@ -373,7 +427,18 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     }
     void boot().catch(cause => { if (alive) setError(String(cause)) })
     return () => { alive = false; runtime.current = null; localeApi.current = null; updateFormulaBarRef.current = () => {}; removePatchListener?.(); disposeUniver?.(); client.dispose() }
-  }, [session, editing])
+  }, [session])
+
+  function changeMode(readOnly: boolean) {
+    if (!readOnly && session.scope !== 'write') return
+    if (runtime.current?.adapter.workbook.isCellEditing()) { setError('请先确认单元格编辑，再切换模式。'); return }
+    if (formulaDirty || runtime.current?.adapter.hasPendingPatch() || historyLocked || gridBusy.current) {
+      setError('请先应用当前公式并等待保存完成，再切换模式。')
+      return
+    }
+    runtime.current?.adapter.setMode(readOnly ? 'readonly' : 'editable')
+    setEditing(!readOnly)
+  }
 
   async function mergeSelection() {
     const current = runtime.current
@@ -1222,7 +1287,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   ]
 
   const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
-  return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''}`}>
+  return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(!panelOpen && !settingsOpen && activeTab !== 'revisions') || focused ? 'right-hidden' : ''} ${focused ? 'focus-mode' : ''}`}>
     {themeCss && <style>{themeCss}</style>}
     {deletionPrompt && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) answerDeletion(false) }}>
       <div className="hcd-dialog" role="dialog" aria-modal="true" aria-label={localizeSource(locale, "确认删除")} onKeyDown={event => { if (event.key === 'Escape') answerDeletion(false) }}>
@@ -1231,11 +1296,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       </div>
     </div>}
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
-      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
-    {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => setSettingsOpen(true)}><LocalText source={"⚙ 界面设置"} /></button>}
+      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); setSettingsOpen(false) } }} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen && !panelOpen} readOnly={!editing} onReadOnly={changeMode} focused={focused} onFocus={() => setFocused(value => !value)} presence={layout.showCollaborators ? collaboration.avatars : null} />}
+    {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => openSettings()}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
-    {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button className={selectedCellLink()?.bold ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.bold} onClick={() => void saveCellFormat({ bold: !selectedCellLink()?.bold })}><LocalText source={"加粗"} /></button><button className={selectedCellLink()?.italic ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.italic} onClick={() => void saveCellFormat({ italic: !selectedCellLink()?.italic })}><LocalText source={"斜体"} /></button><button className={selectedCellLink()?.underline ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.underline} onClick={() => void saveCellFormat({ underline: !selectedCellLink()?.underline })}><LocalText source={"下划线"} /></button><label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="409" step="0.5" value={cellFontSize} disabled={!editing || formatBusy} onChange={event => setCellFontSize(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || formatBusy || !Number.isFinite(Number(cellFontSize)) || Number(cellFontSize) < 1 || Number(cellFontSize) > 409} onClick={() => void saveCellFormat({ fontSizePt: Number(cellFontSize) })}><LocalText source={"应用字号"} /></button><label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={cellFontColor} disabled={!editing || formatBusy} onChange={event => setCellFontColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ color: cellFontColor })}><LocalText source={"应用颜色"} /></button><label><LocalText source={"填充"} /><input aria-label={localizeSource(locale, "填充")} type="color" value={cellFillColor} disabled={!editing || formatBusy} onChange={event => setCellFillColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ fill: cellFillColor })}><LocalText source={"应用填充"} /></button><button className={selectedCellLink()?.horizontal === 'left' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'left'} onClick={() => void saveCellLayout({ horizontal: 'left' })}><LocalText source={"左对齐"} /></button><button className={selectedCellLink()?.horizontal === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'center'} onClick={() => void saveCellLayout({ horizontal: 'center' })}><LocalText source={"居中"} /></button><button className={selectedCellLink()?.horizontal === 'right' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'right'} onClick={() => void saveCellLayout({ horizontal: 'right' })}><LocalText source={"右对齐"} /></button><button className={selectedCellLink()?.vertical === 'top' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'top'} onClick={() => void saveCellLayout({ vertical: 'top' })}><LocalText source={"顶端对齐"} /></button><button className={selectedCellLink()?.vertical === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'center'} onClick={() => void saveCellLayout({ vertical: 'center' })}><LocalText source={"垂直居中"} /></button><button className={selectedCellLink()?.vertical === 'bottom' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'bottom'} onClick={() => void saveCellLayout({ vertical: 'bottom' })}><LocalText source={"底端对齐"} /></button><button className={selectedCellLink()?.wrap ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.wrap} onClick={() => void saveCellLayout({ wrap: !selectedCellLink()?.wrap })}><LocalText source={"自动换行"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'thin' })}><LocalText source={"所有框线"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'none' })}><LocalText source={"无框线"} /></button><label><LocalText source={"数字格式 "} /><select aria-label={localizeSource(locale, "数字格式")} value={cellNumberFormat} disabled={!editing || formatBusy} onChange={event => setCellNumberFormat(event.target.value)}><option value="General">{localizeSource(locale, "常规")}</option><option value="0.00">{localizeSource(locale, "数值")}</option><option value="#,##0.00">{localizeSource(locale, "会计数值")}</option><option value="0%">{localizeSource(locale, "百分比")}</option><option value="0.00E+00">{localizeSource(locale, "科学计数")}</option><option value="yyyy-mm-dd">{localizeSource(locale, "日期")}</option><option value="@">{localizeSource(locale, "文本")}</option></select></label><label><LocalText source={"格式代码 "} /><input aria-label={localizeSource(locale, "格式代码")} value={cellNumberFormat} disabled={!editing || formatBusy} maxLength={1024} onChange={event => setCellNumberFormat(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellNumberFormat(cellNumberFormat)}><LocalText source={"应用数字格式"} /></button><label><LocalText source={"工作表名 "} /><input aria-label={localizeSource(locale, "工作表名")} value={sheetNameDraft} disabled={!editing || renameBusy} maxLength={31} onFocus={() => setSheetNameDraft(previous => previous || activeSheetName())} onChange={event => setSheetNameDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "重命名当前工作表，公式与内部链接会跟随新名称")} disabled={!editing || renameBusy || addBusy || formatBusy || !sheetNameDraft.trim()} onClick={() => void renameActiveSheet(sheetNameDraft)}><LocalText source={"重命名工作表"} /></button><label><LocalText source={"新增工作表名 "} /><input aria-label={localizeSource(locale, "新增工作表名")} value={sheetAddDraft} disabled={!editing || addBusy} maxLength={31} onChange={event => setSheetAddDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "在工作簿末尾新增一个空白工作表")} disabled={!editing || addBusy || renameBusy || formatBusy || !sheetAddDraft.trim()} onClick={() => void addWorksheet(sheetAddDraft)}><LocalText source={"新增工作表"} /></button><button title={localizeSource(locale, "删除当前工作表，它的单元格一并删除，引用它的公式变为 #REF!")} disabled={!editing || deleteBusy || addBusy || renameBusy || formatBusy} onClick={() => void deleteActiveSheet()}><LocalText source={"删除工作表"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一行，已经冻结的列保持不变")} className={currentFreeze().rows > 0 ? 'primary' : ''} aria-pressed={currentFreeze().rows > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(1, currentFreeze().columns)}><LocalText source={"冻结首行"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一列，已经冻结的行保持不变")} className={currentFreeze().columns > 0 ? 'primary' : ''} aria-pressed={currentFreeze().columns > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(currentFreeze().rows, 1)}><LocalText source={"冻结首列"} /></button><button title={localizeSource(locale, "在选中单元格的上方和左侧冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={freezeAtSelection}><LocalText source={"冻结窗格"} /></button><button title={localizeSource(locale, "取消当前工作表的冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy || !currentFreeze().rows && !currentFreeze().columns} onClick={() => void freezeActiveSheet(0, 0)}><LocalText source={"取消冻结"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
+    <div className="layout editor-layout">
+      {layout.showOutline && !focused ? <aside className="outline-panel" aria-label={localizeSource(locale, '工作表')}><div className="panel-head"><h2><LocalText source="工作表" /></h2><button className="icon-button panel-close" aria-label={localizeSource(locale, '隐藏文档目录')} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div><nav>{runtime.current?.client.sheets().filter(sheet => sheet.sheetState === 'visible').map(sheet => <button key={sheet.sheetId} onClick={() => { const workbook = runtime.current?.adapter.workbook; const target = workbook?.getSheetBySheetId(sheet.sheetId); if (target) workbook?.setActiveSheet(target) }}>{sheet.sheetName}</button>)}</nav></aside> : <PanelDock side="left" onOpen={() => { setFocused(false); setLayoutOption('showOutline', true) }} />}
+      <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
+        {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); setSettingsOpen(false) } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={!editing} format="xlsx" />}
+    {layout.showToolbar && editing && !focused && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
+      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button className={selectedCellLink()?.bold ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.bold} onClick={() => void saveCellFormat({ bold: !selectedCellLink()?.bold })}><LocalText source={"加粗"} /></button><button className={selectedCellLink()?.italic ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.italic} onClick={() => void saveCellFormat({ italic: !selectedCellLink()?.italic })}><LocalText source={"斜体"} /></button><button className={selectedCellLink()?.underline ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.underline} onClick={() => void saveCellFormat({ underline: !selectedCellLink()?.underline })}><LocalText source={"下划线"} /></button><label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="409" step="0.5" value={cellFontSize} disabled={!editing || formatBusy} onChange={event => setCellFontSize(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || formatBusy || !Number.isFinite(Number(cellFontSize)) || Number(cellFontSize) < 1 || Number(cellFontSize) > 409} onClick={() => void saveCellFormat({ fontSizePt: Number(cellFontSize) })}><LocalText source={"应用字号"} /></button><label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={cellFontColor} disabled={!editing || formatBusy} onChange={event => setCellFontColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ color: cellFontColor })}><LocalText source={"应用颜色"} /></button></div></>}
+      {activeTab === 'format' && <><div className="tool-group"><label><LocalText source={"填充"} /><input aria-label={localizeSource(locale, "填充")} type="color" value={cellFillColor} disabled={!editing || formatBusy} onChange={event => setCellFillColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ fill: cellFillColor })}><LocalText source={"应用填充"} /></button><button className={selectedCellLink()?.horizontal === 'left' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'left'} onClick={() => void saveCellLayout({ horizontal: 'left' })}><LocalText source={"左对齐"} /></button><button className={selectedCellLink()?.horizontal === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'center'} onClick={() => void saveCellLayout({ horizontal: 'center' })}><LocalText source={"居中"} /></button><button className={selectedCellLink()?.horizontal === 'right' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'right'} onClick={() => void saveCellLayout({ horizontal: 'right' })}><LocalText source={"右对齐"} /></button><button className={selectedCellLink()?.vertical === 'top' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'top'} onClick={() => void saveCellLayout({ vertical: 'top' })}><LocalText source={"顶端对齐"} /></button><button className={selectedCellLink()?.vertical === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'center'} onClick={() => void saveCellLayout({ vertical: 'center' })}><LocalText source={"垂直居中"} /></button><button className={selectedCellLink()?.vertical === 'bottom' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'bottom'} onClick={() => void saveCellLayout({ vertical: 'bottom' })}><LocalText source={"底端对齐"} /></button><button className={selectedCellLink()?.wrap ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.wrap} onClick={() => void saveCellLayout({ wrap: !selectedCellLink()?.wrap })}><LocalText source={"自动换行"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'thin' })}><LocalText source={"所有框线"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'none' })}><LocalText source={"无框线"} /></button><label><LocalText source={"数字格式 "} /><select aria-label={localizeSource(locale, "数字格式")} value={cellNumberFormat} disabled={!editing || formatBusy} onChange={event => setCellNumberFormat(event.target.value)}><option value="General">{localizeSource(locale, "常规")}</option><option value="0.00">{localizeSource(locale, "数值")}</option><option value="#,##0.00">{localizeSource(locale, "会计数值")}</option><option value="0%">{localizeSource(locale, "百分比")}</option><option value="0.00E+00">{localizeSource(locale, "科学计数")}</option><option value="yyyy-mm-dd">{localizeSource(locale, "日期")}</option><option value="@">{localizeSource(locale, "文本")}</option></select></label><label><LocalText source={"格式代码 "} /><input aria-label={localizeSource(locale, "格式代码")} value={cellNumberFormat} disabled={!editing || formatBusy} maxLength={1024} onChange={event => setCellNumberFormat(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellNumberFormat(cellNumberFormat)}><LocalText source={"应用数字格式"} /></button></div></>}
+      {activeTab === 'sheet' && <><div className="tool-group"><label><LocalText source={"工作表名 "} /><input aria-label={localizeSource(locale, "工作表名")} value={sheetNameDraft} disabled={!editing || renameBusy} maxLength={31} onFocus={() => setSheetNameDraft(previous => previous || activeSheetName())} onChange={event => setSheetNameDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "重命名当前工作表，公式与内部链接会跟随新名称")} disabled={!editing || renameBusy || addBusy || formatBusy || !sheetNameDraft.trim()} onClick={() => void renameActiveSheet(sheetNameDraft)}><LocalText source={"重命名工作表"} /></button><label><LocalText source={"新增工作表名 "} /><input aria-label={localizeSource(locale, "新增工作表名")} value={sheetAddDraft} disabled={!editing || addBusy} maxLength={31} onChange={event => setSheetAddDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "在工作簿末尾新增一个空白工作表")} disabled={!editing || addBusy || renameBusy || formatBusy || !sheetAddDraft.trim()} onClick={() => void addWorksheet(sheetAddDraft)}><LocalText source={"新增工作表"} /></button><button title={localizeSource(locale, "删除当前工作表，它的单元格一并删除，引用它的公式变为 #REF!")} disabled={!editing || deleteBusy || addBusy || renameBusy || formatBusy} onClick={() => void deleteActiveSheet()}><LocalText source={"删除工作表"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一行，已经冻结的列保持不变")} className={currentFreeze().rows > 0 ? 'primary' : ''} aria-pressed={currentFreeze().rows > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(1, currentFreeze().columns)}><LocalText source={"冻结首行"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一列，已经冻结的行保持不变")} className={currentFreeze().columns > 0 ? 'primary' : ''} aria-pressed={currentFreeze().columns > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(currentFreeze().rows, 1)}><LocalText source={"冻结首列"} /></button><button title={localizeSource(locale, "在选中单元格的上方和左侧冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={freezeAtSelection}><LocalText source={"冻结窗格"} /></button><button title={localizeSource(locale, "取消当前工作表的冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy || !currentFreeze().rows && !currentFreeze().columns} onClick={() => void freezeActiveSheet(0, 0)}><LocalText source={"取消冻结"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
       {activeTab === 'insert' && <><div className="tool-group">
         {gridSelectionKind !== 'column' && gridSelectionKind !== 'all' && <>
           <label className="xlsx-insert-count"><LocalText source={"插入行数 "} /><input aria-label={localizeSource(locale, "插入行数")} type="number" min="1" max="100" step="1" value={rowInsertCount} disabled={!editing || rowBusy} onChange={event => { setRowInsertCount(event.target.value); if (error.includes('插入行数必须')) setError('') }} /></label>
@@ -1252,13 +1323,13 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         </>}
         {gridSelectionKind === 'cell' && <button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并选中单元格"} /></button>}
       </div><span className="ribbon-note"><LocalText source={"整行只显示行操作，整列只显示列操作；普通单元格可选择两种操作 · "} />{localizeDynamic(locale, status)}</span></>}
-      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setSettingsOpen(true)}><LocalText source={"界面设置"} /></button></>}
+      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => changeMode(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => openSettings()}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><div className="tool-group"><button disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"撤销 "} />{history.past.length} <LocalText source={" 步"} /></button><button disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"重做 "} />{history.future.length} <LocalText source={" 步"} /></button></div><span className="ribbon-note"><LocalText source={"当前修订 r"} />{revision ?? '…'} · {localizeDynamic(locale, history.past.length ? `下一步可撤销：${history.past.at(-1)?.label}` : '当前会话无可撤销步骤')} <LocalText source={" · 协作者更新后将清空本地步骤"} /></span></>}
     </nav>}
-    <form className="xlsx-formula-bar" aria-label={localizeSource(locale, "公式栏")} onSubmit={event => { event.preventDefault(); applyFormulaBarInput() }}>
+    {!focused && <form className="xlsx-formula-bar" aria-label={localizeSource(locale, "公式栏")} onSubmit={event => { event.preventDefault(); applyFormulaBarInput() }}>
       <span className="xlsx-formula-address" aria-label={localizeSource(locale, "选中单元格")}>{formulaAddress}</span>
-      <label htmlFor="xlsx-formula-expression">ƒx</label>
-      <input id="xlsx-formula-expression" ref={formulaInput} aria-label={localizeSource(locale, "单元格内容或公式")} value={formulaText}
+      <label htmlFor={`xlsx-formula-expression-${session.documentId}`}>ƒx</label>
+      <input id={`xlsx-formula-expression-${session.documentId}`} ref={formulaInput} aria-label={localizeSource(locale, "单元格内容或公式")} value={formulaText}
         disabled={!editing} placeholder={localizeSource(locale, "输入文字、数字或 =SUM(A1:A10)")}
         onChange={event => { setFormulaText(event.target.value); setFormulaDirty(true) }} />
       <select aria-label={localizeSource(locale, "插入常用函数")} disabled={!editing} value="" onChange={event => {
@@ -1271,13 +1342,23 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         {['SUM', 'AVERAGE', 'COUNT', 'MIN', 'MAX', 'IF'].map(name => <option key={name} value={name}>{name}</option>)}
       </select>
       <button type="submit" disabled={!editing}><LocalText source={"应用内容"} /></button>
-    </form>
-    <div className="univer-editor-area" onContextMenu={openGridContextMenu} onMouseDownCapture={() => setContextMenu(null)} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" />
-      {settingsOpen && <aside className="workspace-sidebar" aria-label={localizeSource(locale, "界面设置")}><section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setSettingsOpen(false)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset></section></aside>}
-      {activeTab === 'revisions' && !settingsOpen && <aside className="workspace-sidebar xlsx-history-sidebar" aria-label={localizeSource(locale, "编辑步骤")}><div className="panel-head"><h2><LocalText source={"编辑步骤"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "关闭编辑步骤")} onClick={() => setActiveTab('home')}>×</button></div><p><LocalText source={"本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。"} /></p>
+    </form>}
+    <CanvasViewport native className="univer-editor-area" onContextMenu={openGridContextMenu} onMouseDownCapture={() => setContextMenu(null)} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" /></CanvasViewport>
+      </section>
+      {panelOpen && !focused && <AgentPanel onLocate={async agent => {
+        const current = runtime.current
+        if (!current || !agent.nodeId) return false
+        const descriptor = current.client.descriptors.find(item => item.sequence === agent.chunkSequence)
+        if (descriptor?.grid?.sheetId && descriptor.grid.rowStart !== undefined && descriptor.grid.rowEnd !== undefined) await current.adapter.loadRange(descriptor.grid.sheetId, descriptor.grid.rowStart - 1, descriptor.grid.rowEnd - 1)
+        return current.adapter.focusNode(agent.nodeId)
+      }} />}
+
+      {settingsOpen && !panelOpen && !focused && <aside className="workspace-sidebar" aria-label={localizeSource(locale, "界面设置")}><section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setSettingsOpen(false)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset></section></aside>}
+      {activeTab === 'revisions' && !settingsOpen && !panelOpen && !focused && <aside className="workspace-sidebar xlsx-history-sidebar" aria-label={localizeSource(locale, "编辑步骤")}><div className="panel-head"><h2><LocalText source={"编辑步骤"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "关闭编辑步骤")} onClick={() => setActiveTab('home')}>×</button></div><p><LocalText source={"本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。"} /></p>
         {history.past.length ? <ol className="xlsx-edit-steps">{history.past.map((step, index) => <li key={`${index}-${step.revision}`}><span>{index + 1}</span><strong>{localizeDynamic(locale, step.label)}</strong><small><LocalText source={"保存前 r"} />{step.revision}</small></li>).reverse()}</ol> : <p><LocalText source={"暂无可撤销步骤"} /></p>}
         {history.future.length > 0 && <><h3><LocalText source={"可重做"} /></h3><ol className="xlsx-edit-steps">{history.future.slice().reverse().map((step, index) => <li key={`${index}-${step.revision}`}><span>↷</span><strong>{localizeDynamic(locale, step.label)}</strong></li>)}</ol></>}
       </aside>}
+      {(focused || (!settingsOpen && !panelOpen && activeTab !== 'revisions')) && <PanelDock side="right" onOpen={() => { setFocused(false); setPanelOpen(false); openSettings() }} onAgents={() => { setFocused(false); setPanelOpen(true) }} onHistory={() => { setFocused(false); setPanelOpen(false); setSettingsOpen(false); setActiveTab('revisions') }} />}
     </div>
     {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions}
       count={showRowContext ? { label: '插入行数', value: rowInsertCount, onChange: value => { setRowInsertCount(value); if (error.includes('插入行数必须')) setError('') } } : undefined}

@@ -1,6 +1,7 @@
 import { useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import { useState } from 'react'
+import { ArrowUpRight, Download } from 'lucide-react'
 import { api, type Session } from './api.ts'
 
 const formats = ['docx', 'xlsx', 'pptx', 'pdf', 'html', 'md', 'txt', 'hcd'] as const
@@ -15,7 +16,8 @@ export function ExportControl({ session, revision, beforeExport }: {
   const [pdfMode, setPdfMode] = useState<'visual' | 'source'>('visual')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [ready, setReady] = useState<{ url: string; filename: string; previewUrl?: string } | null>(null)
+  const [ready, setReady] = useState<{ url: string; filename: string; revision: number; previewUrl?: string } | null>(null)
+  const visibleReady = ready?.revision === revision ? ready : null
 
   async function prepare() {
     setBusy(true)
@@ -33,23 +35,27 @@ export function ExportControl({ session, revision, beforeExport }: {
       const url = new URL(ticket.url, base.origin).href
       const previewUrl = new URL(window.location.href)
       previewUrl.searchParams.set('pdfPreview', `${new URL(url).pathname}/preview`)
-      setReady({ url, filename: ticket.filename, previewUrl: format === 'pdf' ? previewUrl.href : undefined })
+      setReady({ url, filename: ticket.filename, revision: savedRevision, previewUrl: format === 'pdf' ? previewUrl.href : undefined })
     } catch (cause) { setError(String(cause)) }
     finally { setBusy(false) }
   }
 
-  return <div className="export-control">
-    <label><LocalText source={"导出格式 "} /><select aria-label={localizeSource(locale, "导出格式")} value={format} onChange={event => { setFormat(event.target.value); setReady(null) }}>
+  return <details className="export-control">
+    <summary><ArrowUpRight size={16} /><LocalText source="导出" /></summary>
+    <div className="export-popover">
+    <strong><Download size={16} /><LocalText source="导出文档" /></strong>
+    <label><LocalText source={"导出格式 "} /><select disabled={busy} aria-label={localizeSource(locale, "导出格式")} value={format} onChange={event => { setFormat(event.target.value); setReady(null) }}>
       {formats.map(item => <option key={item} value={item}>{item.toUpperCase()}</option>)}
     </select></label>
-    {session.format === 'pdf' && format === 'pdf' && <label><LocalText source={"PDF 内容\n      "} /><select aria-label={localizeSource(locale, "PDF 内容")} value={pdfMode} onChange={event => { setPdfMode(event.target.value as 'visual' | 'source'); setReady(null) }}>
+    {session.format === 'pdf' && format === 'pdf' && <label><LocalText source={"PDF 内容\n      "} /><select disabled={busy} aria-label={localizeSource(locale, "PDF 内容")} value={pdfMode} onChange={event => { setPdfMode(event.target.value as 'visual' | 'source'); setReady(null) }}>
         <option value="visual"><LocalText source={"当前修订的页面视觉"} /></option>
         <option value="source"><LocalText source={"保留源 PDF（修订位置近似）"} /></option>
       </select>
     </label>}
-    <button onClick={() => void prepare()} disabled={busy}>{localizeDynamic(locale, busy ? '准备中…' : ready ? '重新准备' : '准备下载')}</button>
-    {ready?.previewUrl && <a className="export-preview" href={ready.previewUrl}><LocalText source={"预览导出 PDF"} /></a>}
-    {ready && <a className="download-ready" href={ready.url} download={ready.filename} rel="noreferrer" aria-label={localizeDynamic(locale, `下载 ${ready.filename}`)}><LocalText source={"下载文件"} /></a>}
+    <button onClick={() => void prepare()} disabled={busy}>{localizeDynamic(locale, busy ? '准备中…' : visibleReady ? '重新准备' : '准备下载')}</button>
+    {visibleReady?.previewUrl && <a className="export-preview" href={visibleReady.previewUrl}><LocalText source={"预览导出 PDF"} /></a>}
+    {visibleReady && <a className="download-ready" href={visibleReady.url} download={visibleReady.filename} rel="noreferrer" aria-label={localizeDynamic(locale, `下载 ${visibleReady.filename}`)}><LocalText source={"下载文件"} /></a>}
     {error && <span className="export-error" title={localizeDynamic(locale, error)}>{localizeDynamic(locale, error)}</span>}
-  </div>
+    </div>
+  </details>
 }

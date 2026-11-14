@@ -171,7 +171,7 @@ export class HcdUniverAdapter {
     readonly client: HcdBundleClient,
     readonly univerAPI: FUniver,
     readonly workbook: FWorkbook,
-    readonly mode: HcdViewerMode,
+    private currentMode: HcdViewerMode,
     private readonly onStatus: (message: string) => void,
     private readonly styleCatalog: Record<string, IStyleData> = {},
   ) {
@@ -184,6 +184,13 @@ export class HcdUniverAdapter {
         rows: new Map(),
       });
     }
+  }
+
+  get mode(): HcdViewerMode { return this.currentMode; }
+
+  setMode(mode: HcdViewerMode): void {
+    if (this.hasPendingPatch()) throw new Error('请等待当前单元格保存完成');
+    this.currentMode = mode;
   }
 
   async start(): Promise<void> {
@@ -286,6 +293,12 @@ export class HcdUniverAdapter {
     sheet.scrollToCell(link.row, link.column);
     sheet.setActiveRange(sheet.getRange(link.row, link.column));
     return true;
+  }
+
+  /** A remote cursor must not change the local user's active cell. */
+  nodeAddress(nodeId: string): { sheetId: string; row: number; column: number } | undefined {
+    const link = this.linksByNode.get(nodeId);
+    return link ? { sheetId: link.sheetId, row: link.row, column: link.column } : undefined;
   }
 
   async loadRange(sheetId: string, startRow: number, endRow: number): Promise<void> {
@@ -934,6 +947,11 @@ export class HcdUniverAdapter {
           const formula = String(formulas?.[rowOffset]?.[columnOffset] ?? '');
           const entered = editInput ?? next;
           const enteredFormula = formula || (entered.startsWith('=') ? entered : '');
+          // Formula recalculation emits value events after withApplying has
+          // returned. An unchanged expression is not a user edit, including
+          // in readonly mode: restoring it would trigger another calculation
+          // and an endless restore/value-event loop.
+          if (enteredFormula && enteredFormula === link?.formula) continue;
           if (link && (link.formulaEditable || link.editable) && this.mode === 'editable' && enteredFormula) {
             if ([...this.pending.values()].some(({ links }) => links.includes(link))) continue;
             if (enteredFormula === link.formula) continue;

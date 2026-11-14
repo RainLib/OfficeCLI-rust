@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HocuspocusProvider } from '@hocuspocus/provider'
 import * as Y from 'yjs'
 import { api, type Session } from './api.ts'
+import { useAgentActivities } from './AgentActivityLayer.tsx'
 
 type Person = { id: string; name: string; color: string; connections: number }
 const palette = ['#d84a54', '#3478c0', '#9a5abb', '#13866a', '#d17d20', '#7b65d8']
@@ -27,6 +28,7 @@ function browserUserId(): string {
 
 /** Fixed-layout clients share presence and committed revisions, not uncommitted keystrokes. */
 export function useFixedCollaboration(session: Session, revision: number | null, onRemoteRevision: (revision: number) => void) {
+  const agents = useAgentActivities()
   const { locale } = useI18n()
   const [presence, setPresence] = useState<Person[]>([])
   const [connection, setConnection] = useState('连接中')
@@ -34,6 +36,10 @@ export function useFixedCollaboration(session: Session, revision: number | null,
   const onRemoteRef = useRef(onRemoteRevision)
   revisionRef.current = revision
   onRemoteRef.current = onRemoteRevision
+  useEffect(() => {
+    const latest = Math.max(-1, ...agents.filter(agent => agent.status === 'applied').map(agent => agent.revision))
+    if (latest > (revisionRef.current ?? -1)) onRemoteRef.current(latest)
+  }, [agents])
   const ydoc = useMemo(() => new Y.Doc(), [session.documentId, session.collaborationEpoch])
   const provider = useMemo(() => new HocuspocusProvider({
     url: session.collabUrl || import.meta.env.VITE_HCD_COLLAB_URL || 'ws://127.0.0.1:8768',

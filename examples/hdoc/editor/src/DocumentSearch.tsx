@@ -31,11 +31,13 @@ export function DocumentSearch({ open, onOpen, onClose, search, onSelect, refres
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const input = useRef<HTMLInputElement>(null)
+  const anchor = useRef<HTMLSpanElement>(null)
   const searchRef = useRef(search)
   searchRef.current = search
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
+      if (!anchor.current?.parentElement?.getClientRects().length) return
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault()
         onOpen()
@@ -75,8 +77,8 @@ export function DocumentSearch({ open, onOpen, onClose, search, onSelect, refres
     try { await onSelect(hit); setActive(index); setError('') }
     catch (cause) { setError(String(cause)) }
   }
-  if (!open) return null
-  return <section className="document-search" aria-label={localizeSource(locale, "文档内容搜索")}>
+  if (!open) return <span hidden ref={anchor} />
+  return <><span hidden ref={anchor} /><section className="document-search" aria-label={localizeSource(locale, "文档内容搜索")}>
     <div className="document-search-controls">
       <label><LocalText source={"查找全文 "} /><input ref={input} type="search" value={query} maxLength={128} placeholder={localizeSource(locale, "输入文字，搜索所有页面或工作表")}
         onChange={event => setQuery(event.target.value)} onKeyDown={event => {
@@ -94,5 +96,5 @@ export function DocumentSearch({ open, onOpen, onClose, search, onSelect, refres
       </button>) : <p><LocalText source={"没有找到匹配内容"} /></p>}
       {result.truncated && <p><LocalText source={"最多显示前 200 处结果，请缩小关键词范围。"} /></p>}
     </div>}
-  </section>
+  </section></>
 }

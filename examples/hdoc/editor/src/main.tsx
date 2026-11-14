@@ -1,3 +1,4 @@
+import './standalone.css'
 import { createRoot } from 'react-dom/client'
 import { useEffect } from 'react'
 import { App } from './App.tsx'
