@@ -347,3 +347,9 @@
 .hcd-surface .content-toolbar-actions { display:flex; gap:4px; align-items:center; flex:none; }
 .hcd-surface .content-toolbar-actions .toolbar-search { border:0; background:transparent; color:var(--muted); font-size:11px; padding:7px; }
 @media (max-width:760px) { .hcd-surface .toolbar-search>span { display:none; } }
+
+.hcd-surface .export-popover { max-height:min(76dvh,680px); overflow-y:auto; overscroll-behavior:contain; }
+.hcd-surface .export-guidance { font-size:11px; line-height:1.65; color:var(--muted); overflow-wrap:anywhere; }
+.hcd-surface .export-guidance p { margin:0 0 8px; }
+.hcd-surface .export-guidance [role=alert] { color:#a44040; }
+.hcd-surface .export-guidance details>summary { cursor:pointer; color:var(--accent); }

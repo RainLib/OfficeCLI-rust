@@ -2,6 +2,7 @@
 //! The HTTP surface only returns decoded, verified objects requested by the client.
 use crate::commands::hdoc::{HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope};
 use crate::hdoc_remote::RemoteStore;
+mod exports;
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -9,6 +10,9 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use exports::{
+    download_ticket, export_document, prepare_download, preview_download_ticket, DownloadTicket,
+};
 use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, audit_action, detect_font_format, editor_projection,
@@ -42,6 +46,7 @@ struct ServerState {
     default_theme: Option<String>,
     collaboration_lock: Arc<Mutex<()>>,
     downloads: Arc<Mutex<HashMap<String, DownloadTicket>>>,
+    export_jobs: Arc<tokio::sync::Semaphore>,
     agents: Arc<Mutex<HashMap<(String, String), AgentActivity>>>,
 }
 
@@ -69,14 +74,6 @@ struct AgentFocus {
     chunk_sequence: Option<usize>,
     message: Option<String>,
     expected_revision: u64,
-}
-
-#[derive(Clone)]
-struct DownloadTicket {
-    document_id: String,
-    format: String,
-    query: ExportQuery,
-    expires_at: Instant,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -171,6 +168,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         default_theme,
         collaboration_lock: Arc::new(Mutex::new(())),
         downloads: Arc::new(Mutex::new(HashMap::new())),
+        export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
         agents: Arc::new(Mutex::new(HashMap::new())),
     };
     let router = Router::new()
@@ -250,6 +248,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route(
             "/v1/catalog/themes/{theme_revision_id}",
             delete(catalog_delete_theme),
+        )
+        .route(
+            "/v1/documents/{id}/export-capabilities",
+            get(exports::capabilities),
         )
         .route("/v1/documents/{id}/export/{format}", get(export_document))
         .route(
@@ -3053,254 +3055,224 @@ async fn catalog_audit(
     })))
 }
 
-#[derive(Clone, Copy, Deserialize)]
-struct ExportQuery {
-    revision: Option<u64>,
-    source: Option<bool>,
-}
-
-async fn prepare_download(
-    State(state): State<ServerState>,
-    Path((id, format)): Path<(String, String)>,
-    Query(query): Query<ExportQuery>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
-    authorize(&state, &headers, &id, false)?;
-    let bundle = open(&state, &id)?;
-    let head = bundle.manifest().map_err(internal)?;
-    let revision = query.revision.unwrap_or(head.revision);
-    if revision > head.revision {
-        return Err(bad("revision ahead of head"));
-    }
-    if format == "hcd" && revision != head.revision {
-        return Err(bad(
-            "portable HCD includes history through the current revision",
-        ));
-    }
-    if !matches!(
-        format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
-    ) {
-        return Err(bad("unsupported export format"));
-    }
-    let ticket = uuid::Uuid::new_v4().to_string();
-    let mut downloads = state.downloads.lock().await;
-    downloads.retain(|_, item| item.expires_at > Instant::now());
-    if downloads.len() >= 256 {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many pending downloads".to_string(),
-        ));
-    }
-    downloads.insert(
-        ticket.clone(),
-        DownloadTicket {
-            document_id: id.clone(),
-            format: format.clone(),
-            query: ExportQuery {
-                revision: Some(revision),
-                source: query.source,
-            },
-            expires_at: Instant::now() + Duration::from_secs(300),
-        },
-    );
-    Ok(Json(json!({
-        "url": format!("/v1/downloads/{ticket}"),
-        "filename": format!("{id}-r{revision}.{format}"),
-    })))
-}
-
-async fn download_ticket(
-    State(state): State<ServerState>,
-    Path(ticket): Path<String>,
-) -> Result<Response, ApiError> {
-    let download = resolve_download_ticket(&state, &ticket).await?;
-    export_document_inner(state, download.document_id, download.format, download.query).await
-}
-
-async fn preview_download_ticket(
-    State(state): State<ServerState>,
-    Path(ticket): Path<String>,
-) -> Result<Response, ApiError> {
-    let download = resolve_download_ticket(&state, &ticket).await?;
-    if download.format != "pdf" {
-        return Err(bad("inline preview supports only PDF downloads"));
-    }
-    let mut response =
-        export_document_inner(state, download.document_id, download.format, download.query).await?;
-    let disposition = response
-        .headers()
-        .get(header::CONTENT_DISPOSITION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| bad("PDF export has no content disposition"))?
-        .replacen("attachment;", "inline;", 1);
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        disposition.parse().map_err(internal)?,
-    );
-    Ok(response)
-}
-
-async fn resolve_download_ticket(
-    state: &ServerState,
-    ticket: &str,
-) -> Result<DownloadTicket, ApiError> {
-    let download = state
-        .downloads
-        .lock()
-        .await
-        .get(ticket)
-        .cloned()
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "download link not found".to_string()))?;
-    if download.expires_at <= Instant::now() {
-        state.downloads.lock().await.remove(ticket);
-        return Err(ApiError(
-            StatusCode::GONE,
-            "download link expired".to_string(),
-        ));
-    }
-    Ok(download)
-}
-
-async fn export_document(
-    State(state): State<ServerState>,
-    Path((id, format)): Path<(String, String)>,
-    Query(query): Query<ExportQuery>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    authorize(&state, &headers, &id, false)?;
-    export_document_inner(state, id, format, query).await
-}
-
-async fn export_document_inner(
-    state: ServerState,
-    id: String,
-    format: String,
-    query: ExportQuery,
-) -> Result<Response, ApiError> {
-    let bundle = open(&state, &id)?;
-    let head = bundle.manifest().map_err(internal)?;
-    let requested = query.revision.unwrap_or(head.revision);
-    if requested > head.revision {
-        return Err(bad("revision ahead of head"));
-    }
-    if format == "hcd" && requested != head.revision {
-        return Err(bad(
-            "portable HCD includes history through the current revision",
-        ));
-    }
-    if !matches!(
-        format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
-    ) {
-        return Err(bad("unsupported export format"));
-    }
-    let mime = match format.as_str() {
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "pdf" => "application/pdf",
-        "hcd" => "application/zip",
-        "html" => "text/html; charset=utf-8",
-        "md" => "text/markdown; charset=utf-8",
-        _ => "text/plain; charset=utf-8",
-    };
-    let bytes = if format == "hcd" {
-        let temp = tempfile::tempdir().map_err(internal)?;
-        let output = temp.path().join("document.hcd");
-        let bundle_path = bundle.root().to_path_buf();
-        let archive_path = output.clone();
-        tokio::task::spawn_blocking(move || {
-            let snapshot = Bundle::open(bundle_path)?;
-            hcd_core::pack_archive(&snapshot, archive_path)
-        })
-        .await
-        .map_err(internal)?
-        .map_err(bad)?;
-        if tokio::fs::metadata(&output).await.map_err(internal)?.len() > 256 * 1024 * 1024 {
-            return Err(bad("HCD archive exceeds 256 MiB HTTP limit"));
-        }
-        tokio::fs::read(output).await.map_err(internal)?
-    } else if format == "html" {
-        let mut output = Vec::new();
-        let theme_stylesheet =
-            hcd_core::theme_presentation_css(&state.catalog, &bundle, Some(requested))
-                .map_err(hcd_error)?;
-        crate::commands::hdoc_html::render(
-            &bundle,
-            &hcd_core::HtmlPresentationOptions {
-                revision: Some(requested),
-                max_output_bytes: 256 * 1024 * 1024,
-                theme_stylesheet,
-                ..Default::default()
-            },
-            &mut output,
-        )
-        .map_err(bad)?;
-        output
-    } else {
-        let temp = tempfile::tempdir().map_err(internal)?;
-        let output = temp.path().join(format!("export.{format}"));
-        let mut command = tokio::process::Command::new(std::env::current_exe().map_err(internal)?);
-        command
-            .arg("hdoc")
-            .arg("export")
-            .arg(bundle.root())
-            .arg("--output")
-            .arg(&output)
-            .arg("--revision")
-            .arg(requested.to_string())
-            .arg("--catalog")
-            .arg(state.catalog.root());
-        if query.source.unwrap_or(false) {
-            let source = state
-                .root
-                .join("sources")
-                .join(format!("{id}.{}", head.source.format));
-            if !source.is_file() {
-                return Err(bad("immutable source is unavailable"));
-            }
-            command.arg("--source").arg(source);
-        }
-        let result = command.output().await.map_err(internal)?;
-        if !result.status.success() {
-            return Err(bad(format!(
-                "export failed: {}",
-                String::from_utf8_lossy(&result.stderr)
-            )));
-        }
-        let metadata = tokio::fs::metadata(&output).await.map_err(internal)?;
-        if metadata.len() > 256 * 1024 * 1024 {
-            return Err(bad("export exceeds 256 MiB HTTP limit"));
-        }
-        tokio::fs::read(output).await.map_err(internal)?
-    };
-    let mut response = Response::new(Body::from(bytes));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, mime.parse().map_err(internal)?);
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{id}-r{requested}.{format}\"")
-            .parse()
-            .map_err(internal)?,
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, "no-store".parse().map_err(internal)?);
-    response.headers_mut().insert(
-        header::REFERRER_POLICY,
-        "no-referrer".parse().map_err(internal)?,
-    );
-    Ok(response)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hcd_core::FontRef;
 
     const TTF: &[u8] = b"\x00\x01\x00\x00glyh font";
+
+    async fn export_plan(
+        state: &ServerState,
+        secret: &[u8],
+        id: &str,
+        revision: Option<u64>,
+    ) -> Value {
+        serde_json::to_value(
+            exports::capabilities(
+                State(state.clone()),
+                Path(id.into()),
+                Query(RevisionQuery { revision }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap()
+            .0,
+        )
+        .unwrap()
+    }
+
+    fn export_fixture(state: &ServerState, id: &str, fixture: &str) -> (Bundle, PathBuf) {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(fixture);
+        let extension = source.extension().unwrap().to_str().unwrap();
+        std::fs::create_dir_all(state.root.join("sources")).unwrap();
+        let stored = state.root.join("sources").join(format!("{id}.{extension}"));
+        std::fs::copy(source, &stored).unwrap();
+        hcd_formats::import_document(
+            &stored,
+            state.root.join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        (open(state, id).unwrap(), stored)
+    }
+
+    #[tokio::test]
+    async fn export_capabilities_detect_missing_and_mismatched_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"export-test-secret-01234567890123456";
+        let state = test_state(secret, temp.path());
+        let id = "export-workbook";
+        let (_, source) = export_fixture(&state, id, "assets/showcase/gradebook.xlsx");
+        let plan = export_plan(&state, secret, id, None).await;
+        assert_eq!(plan["sourceFormat"], "xlsx");
+        let workbook = |plan: &Value| {
+            plan["formats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["format"] == "xlsx")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(workbook(&plan)["recommendedMode"], "source");
+        assert_eq!(workbook(&plan)["modes"][0]["available"], true);
+        std::fs::write(&source, b"different workbook").unwrap();
+        let changed = export_plan(&state, secret, id, None).await;
+        assert_eq!(
+            workbook(&changed)["modes"][0]["reasonCode"],
+            "source_mismatch"
+        );
+        assert_eq!(workbook(&changed)["recommendedMode"], "semantic");
+        std::fs::remove_file(source).unwrap();
+        let missing = export_plan(&state, secret, id, None).await;
+        assert_eq!(workbook(&missing)["available"], true);
+        assert_eq!(
+            workbook(&missing)["modes"][0]["reasonCode"],
+            "source_missing"
+        );
+        assert!(exports::capabilities(
+            State(state.clone()),
+            Path(id.into()),
+            Query(RevisionQuery { revision: Some(1) }),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            exports::capabilities(
+                State(state),
+                Path(id.into()),
+                Query(RevisionQuery { revision: None }),
+                bearer(secret, "other-document", "read")
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn export_capabilities_apply_pdf_revision_restrictions_before_ticket_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"export-test-secret-01234567890123456";
+        let state = test_state(secret, temp.path());
+        let id = "export-pdf";
+        let (bundle, _) = export_fixture(&state, id, "examples/test.pdf");
+        let manifest = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let map = bundle.read_map(descriptor).unwrap();
+        let node = map
+            .entries
+            .iter()
+            .find(|node| node.source.editable)
+            .unwrap();
+        let patch = serde_json::from_value(json!({"schemaVersion":"hcd-patch/37","documentId":id,"patchId":"font-selection","baseRevision":0,
+            "operations":[{"op":"text.font","nodeId":node.node_id,"font":{"latin":"Arial"},"precondition":{"nodeHash":node.node_hash}}]})).unwrap();
+        apply_patch(&bundle, &patch, 0).unwrap();
+        let current = export_plan(&state, secret, id, Some(1)).await;
+        let pdf = |plan: &Value| {
+            plan["formats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["format"] == "pdf")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(pdf(&current)["recommendedMode"], "visual");
+        assert_eq!(
+            pdf(&current)["modes"][0]["reasonCode"],
+            "source_revision_unsupported"
+        );
+        assert_eq!(pdf(&current)["modes"][1]["available"], true);
+        let historical = export_plan(&state, secret, id, Some(0)).await;
+        assert_eq!(pdf(&historical)["modes"][0]["available"], true);
+        assert_eq!(
+            historical["formats"][7]["modes"][0]["reasonCode"],
+            "history_archive_unavailable"
+        );
+        let query = serde_json::from_value(json!({"revision":1,"source":true})).unwrap();
+        assert!(exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "pdf".into())),
+            Query(query),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert!(state.downloads.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepared_exports_are_immutable_and_failed_generation_never_issues_a_ticket() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"export-test-secret-01234567890123456";
+        let state = test_state(secret, temp.path());
+        let id = "export-text";
+        std::fs::write(temp.path().join("source.txt"), "Original export text").unwrap();
+        hcd_formats::import_document(
+            temp.path().join("source.txt"),
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let query = || serde_json::from_value(json!({"revision":0})).unwrap();
+        let ready = exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "html".into())),
+            Query(query()),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(ready["bytes"].as_u64().unwrap() > 0);
+        let ticket = ready["url"].as_str().unwrap().rsplit('/').next().unwrap();
+        let bundle = open(&state, id).unwrap();
+        project_editor(&bundle, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        std::fs::remove_file(bundle.resolve_href(&head.styles_href).unwrap()).unwrap();
+        let download = exports::download_ticket(State(state.clone()), Path(ticket.into()))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(download.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Original export text"));
+        assert!(exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "html".into())),
+            Query(query()),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(state.downloads.lock().await.len(), 1);
+        assert!(exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "csv".into())),
+            Query(query()),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            exports::preview_download_ticket(State(state), Path(ticket.into()))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
 
     #[tokio::test]
     async fn historical_manifest_and_styles_use_the_requested_snapshot() {
@@ -3583,6 +3555,7 @@ mod tests {
             default_theme: None,
             collaboration_lock: Arc::new(Mutex::new(())),
             downloads: Arc::new(Mutex::new(HashMap::new())),
+            export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
             agents: Arc::new(Mutex::new(HashMap::new())),
         }
     }

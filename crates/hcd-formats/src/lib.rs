@@ -83,6 +83,40 @@ pub fn export_document(
     }
 }
 
+/// Check source identity and known revision restrictions without writing output.
+/// Format writers can still report additional constraints during materialization.
+pub fn validate_source_export(
+    bundle: &hcd_core::Bundle,
+    source: &Path,
+    revision: Option<u64>,
+) -> Result<(), HcdError> {
+    use common::{checked_export_state, checked_export_state_with_restores, RunFontSupport};
+    let options = ExportOptions {
+        revision,
+        ..Default::default()
+    };
+    match bundle.manifest()?.source.format.as_str() {
+        "pdf" | "xlsx" => {
+            checked_export_state_with_restores(bundle, source, &options, RunFontSupport::Rejects)?;
+        }
+        "pptx" => {
+            checked_export_state_with_restores(bundle, source, &options, RunFontSupport::Rewrites)?;
+        }
+        "docx" => {
+            checked_export_state(bundle, source, &options, RunFontSupport::Rewrites)?;
+        }
+        "html" | "md" | "txt" => {
+            checked_export_state(bundle, source, &options, RunFontSupport::Rejects)?;
+        }
+        format => {
+            return Err(HcdError::Unsupported(format!(
+                "source-backed export does not support {format}"
+            )))
+        }
+    }
+    Ok(())
+}
+
 fn extension(path: &Path) -> Result<String, HcdError> {
     path.extension()
         .and_then(|extension| extension.to_str())

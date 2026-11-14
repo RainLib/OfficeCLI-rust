@@ -1,0 +1,305 @@
+Revision-aware export capabilities — 2026-11-14
+
+GET /v1/documents/{id}/export-capabilities?revision=N returns source format, selected/head revisions, default format, and available output methods with disabled reasons and conversion/font warnings.
+
+The editor uses this list, rechecks the saved revision, and does not silently change an explicitly selected method. Historical HCD packing, missing/mismatched originals and known source-rewrite restrictions are handled before download preparation.
+
+POST /v1/documents/{id}/downloads/{format}?revision=N[&source=true] generates the file before issuing a ready link. Prepared files are immutable, expire after five minutes and are cached on disk with a 512 MiB aggregate limit. Conversion concurrency is bounded and CLI subprocesses have a timeout. Failed generation does not issue a ticket.
+
+Reproduction from repository root:
+  cargo +1.90.0 build -p officecli
+  cargo +1.90.0 test -p officecli --bin officecli hdoc_server::tests
+  cargo +1.90.0 test -p hcd-formats --lib
+  cargo +1.90.0 clippy -p officecli --all-targets -- -D warnings
+  cargo +1.90.0 fmt -- --check
+
+Reproduction from examples/hdoc/editor:
+  OFFICECLI_BIN=/absolute/path/to/officecli HCD_BROWSER_PATH=/absolute/path/to/chrome npm run test:workspace
+  npm run build
+
+Validation: 24 browser/diff checks, 37 server tests and 184 format-handler tests passed. Standalone and embedded production builds, strict Clippy and formatting passed. The authenticated capability endpoint was also verified against the updated local development API.
+
+Server tests:
+
+   Compiling officecli v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/officecli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.72s
+     Running unittests src/main.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/officecli-d5bcb9841ed0ef12)
+
+running 37 tests
+test hdoc_server::tests::admin_console_is_served_same_origin ... ok
+test hdoc_server::tests::catalog_retire_validates_id_and_requires_admin ... ok
+test hdoc_server::tests::catalog_routes_require_an_admin_token ... ok
+test hdoc_server::tests::catalog_theme_reachability_and_delete_require_admin ... ok
+test hdoc_server::tests::configured_default_theme_requires_a_theme_revision_digest ... ok
+test hdoc_server::tests::catalog_write_rejects_missing_blobs_and_unknown_fonts ... ok
+test hdoc_server::tests::audit_route_reads_a_utc_day_window_and_refuses_bounds_that_are_not_days ... ok
+test hdoc_server::tests::font_faces_only_keeps_face_lines_and_drops_the_rest ... ok
+test hdoc_server::tests::admin_uploads_font_then_saves_and_lists_a_theme ... ok
+test hdoc_server::tests::audit_route_is_admin_only_and_answers_newest_first ... ok
+test hdoc_server::tests::catalog_retire_lists_and_lifts_theme_retirement ... ok
+test hdoc_server::tests::catalog_delete_refuses_referenced_fonts_and_removes_loose_ones ... ok
+test hdoc_server::tests::catalog_documents_needs_admin_and_refuses_a_broken_bundle ... ok
+test hdoc_server::tests::a_reimported_archive_keeps_its_own_theme_pin ... ok
+test hdoc_server::tests::catalog_delete_theme_refuses_then_removes_an_unpinned_theme ... ok
+test hdoc_server::tests::a_pinned_document_gets_theme_bytes_not_a_second_copy_of_its_rules ... ok
+test hdoc_server::tests::default_theme_pins_a_freshly_imported_document ... ok
+test hdoc_server::tests::catalog_theme_documents_name_the_pinning_documents ... ok
+test hdoc_server::tests::catalog_documents_lists_the_root_with_its_head_pins ... ok
+test hdoc_server::tests::a_stale_or_retired_default_theme_warns_instead_of_failing_the_import ... ok
+test hdoc_server::tests::theme_read_routes_accept_document_and_admin_tokens_only ... ok
+test hdoc_server::tests::font_plan_route_names_a_license_that_is_about_to_expire ... ok
+test hdoc_server::tests::an_import_auto_pin_is_recorded_against_the_uploader ... ok
+test hdoc_server::tests::agents_are_isolated_and_concurrent_edits_conflict_without_overwriting ... ok
+test hdoc_server::tests::every_finished_catalog_change_appends_a_line_and_a_refusal_none ... ok
+test hdoc_server::tests::font_plan_route_says_when_the_stored_source_cannot_be_read ... ok
+test hdoc_server::tests::export_capabilities_apply_pdf_revision_restrictions_before_ticket_creation ... ok
+test hdoc_server::tests::font_plan_route_answers_what_each_export_would_carry ... ok
+test hdoc_server::tests::importing_a_document_that_already_exists_does_not_repin_it ... ok
+test hdoc_server::tests::historical_manifest_and_styles_use_the_requested_snapshot ... ok
+test hdoc_server::tests::theme_faces_only_query_serves_font_bytes_alone ... ok
+test hdoc_server::tests::export_capabilities_detect_missing_and_mismatched_sources ... ok
+test hdoc_server::tests::prepared_exports_are_immutable_and_failed_generation_never_issues_a_ticket ... ok
+test hdoc_server::tests::without_a_configured_default_theme_imports_stay_unpinned ... ok
+test hdoc_server::tests::pin_theme_route_records_a_content_revision ... ok
+test hdoc_server::tests::font_plan_route_forecasts_nothing_to_move_when_no_face_will_embed ... ok
+test hdoc_server::tests::font_plan_route_forecasts_the_pdf_text_a_pin_would_touch ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out; finished in 2.60s
+
+
+Format-handler tests:
+
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling hcd-docx v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-docx)
+   Compiling hcd-formats v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-formats)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.11s
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/hcd_formats-f999fdb554bd5fec)
+
+running 184 tests
+test common::tests::a_reorder_refuses_a_name_it_asks_for_twice ... ok
+test common::tests::xml_budget_rejects_excessive_depth ... ok
+test common::tests::a_reorder_refuses_a_list_that_opens_one_of_its_entries ... ok
+test common::tests::a_reorder_refuses_a_page_the_list_does_not_hold ... ok
+test mermaid::tests::unsupported_diagram_never_executes_source_as_markup ... ok
+test pdf::tests::pdf_text_controls_are_sanitized_before_hcd_publication ... ok
+test common::tests::a_prefixed_name_finds_the_relationship_whatever_prefix_the_package_used ... ok
+test common::tests::an_entry_the_order_leaves_alone_stays_behind_the_named_ones ... ok
+test common::tests::a_reordered_list_trades_its_entries_and_keeps_every_other_byte ... ok
+test common::tests::a_list_that_already_holds_the_wanted_order_reports_no_move ... ok
+test common::tests::a_bare_attribute_name_matches_only_an_unprefixed_attribute ... ok
+test common::tests::an_appended_child_repeats_only_the_namespace_its_siblings_need ... ok
+test mermaid::tests::sequence_diagram_is_bounded_and_escaped ... ok
+test mermaid::tests::flowchart_is_derived_from_the_current_canonical_node ... ok
+test pptx::tests::a_pinned_face_reaches_a_field_run_and_its_self_closed_properties ... ok
+test pptx::tests::a_pinned_face_with_no_writable_run_stops_the_slide_export ... ok
+test pptx::tests::a_run_left_open_at_the_end_of_a_part_is_broken ... ok
+test common::tests::export_collection_materializes_only_dirty_nodes_not_the_whole_part ... ok
+test pdf::tests::hcd_pdf_import_publishes_a_valid_lazy_page_raster ... ok
+test pdf::tests::hcd_import_rejects_an_object_stream_bomb_before_lopdf_without_publishing ... ok
+test pptx::tests::an_alignment_the_part_has_no_shape_or_no_paragraph_for_is_refused ... ok
+test pdf::tests::hcd_import_rejects_an_xref_stream_bomb_before_lopdf_without_publishing ... ok
+test pptx::tests::an_inserted_box_writes_its_pinned_face_into_the_shape_it_creates ... ok
+test pdf::tests::hcd_import_rejects_a_compressed_page_stream_bomb_without_publishing ... ok
+test pptx::tests::a_page_whose_relationship_list_names_a_notes_page_is_not_copied ... ok
+test pptx::tests::a_page_that_points_at_nothing_copies_with_an_empty_relationship_list ... ok
+test pptx::tests::a_page_moved_and_moved_back_writes_the_package_unchanged ... ok
+test pdf::tests::restored_pdf_text_exports_the_selected_revision ... ok
+test pptx::tests::a_page_copied_and_deleted_again_writes_the_package_unchanged ... ok
+test pptx::tests::a_page_created_and_deleted_inside_the_history_writes_no_slide_part ... ok
+test pptx::tests::a_text_box_hcd_created_keeps_the_alignment_it_was_drawn_with ... ok
+test pptx::tests::inserts_slide_shape_before_extension_list ... ok
+test pptx::tests::a_second_paragraph_alignment_only_moves_the_axis_it_names ... ok
+test pptx::tests::integrated_inserted_text_box_combines_font_format_and_alignment ... ok
+test pptx::tests::a_page_hcd_created_moves_through_the_deck_it_joined ... ok
+test pptx::tests::an_added_slide_refuses_a_package_that_has_no_layout_to_draw ... ok
+test pptx::tests::a_deck_that_grew_moved_and_lost_a_page_exports_all_three ... ok
+test pptx::tests::aligning_a_slide_shape_writes_every_paragraph_and_the_body_anchor ... ok
+test pptx::tests::rejects_oversized_drawingml_table_span_before_chunk_publication ... ok
+test pptx::tests::a_copied_page_is_written_as_a_slide_part_the_package_did_not_carry ... ok
+test pptx::tests::oversized_pptx_merged_row_group_fails_before_fragment_publication ... ok
+test pptx::tests::a_copy_outlives_the_page_it_was_made_from ... ok
+test textual::tests::bounded_line_rejects_a_node_larger_than_the_hard_limit ... ok
+test pptx::tests::imports_text_shape_geometry_and_direct_run_formatting ... ok
+test pptx::tests::renders_direct_slide_background_and_shape_paint_geometry ... ok
+test pptx::tests::deleting_a_slide_whose_notes_point_back_at_it_is_refused ... ok
+test pptx::tests::imports_drawingml_table_geometry_merges_styles_and_roundtrips_text ... ok
+test pptx::tests::deleting_a_page_that_spans_chunks_takes_every_chunk_that_carries_it ... ok
+test pptx::tests::formats_native_slide_runs_and_preserves_history ... ok
+test theme_fonts::tests::a_face_that_cannot_draw_the_text_says_so_instead_of_failing_silently ... ok
+test pptx::tests::moves_native_slide_text_shape_and_preserves_history_and_formatting ... ok
+test pptx::tests::source_export_pins_a_patched_face_onto_one_slide_run ... ok
+test pptx::tests::an_edit_on_a_copied_page_is_rebuilt_onto_the_page_it_was_made_from ... ok
+test textual::tests::html_hcd_patch_preserves_markup_and_escapes_replacement ... ok
+test theme_fonts::tests::a_forecast_with_nothing_to_embed_says_so_instead_of_a_bare_zero ... ok
+test theme_fonts::tests::a_plan_with_no_drawable_face_has_nothing_to_report ... ok
+test pptx::tests::large_drawingml_table_streams_fragments_before_part_eof ... ok
+test pptx::tests::deleting_a_slide_writes_a_package_that_no_longer_addresses_it ... ok
+test textual::tests::txt_hcd_patch_preserves_bom_and_crlf ... ok
+test theme_fonts::tests::characters_no_face_is_asked_to_draw_are_not_the_invisible_ones ... ok
+test theme_fonts::tests::guid_obfuscation_reverses_the_spec_key ... ok
+test theme_fonts::tests::an_expiring_license_is_warned_about_once_per_file ... ok
+test theme_fonts::tests::refusal_lines_read_right_at_one_run_and_at_several ... ok
+test theme_fonts::tests::the_body_face_is_the_one_that_can_draw_every_character ... ok
+test pptx::tests::appends_a_blank_slide_and_exports_it_as_a_new_slide_part ... ok
+test theme_fonts::tests::the_minor_latin_slot_is_preferred_when_it_covers_the_text ... ok
+test textual::tests::large_markdown_table_is_stably_split_into_row_groups ... ok
+test pptx::tests::moving_a_page_writes_the_slide_list_in_the_decks_new_order ... ok
+test theme_fonts::tests::powerpoint_stores_raw_font_bytes ... ok
+test textual::tests::markdown_hcd_covers_commonmark_gfm_and_safe_extensions ... ok
+test xlsx::tests::a_defined_name_address_moves_with_the_grid_its_tab_shifts ... ok
+test textual::tests::large_html_table_is_stably_split_into_contiguous_fragments ... ok
+test xlsx::tests::a_filter_range_and_the_column_it_filters_on_move_with_the_grid ... ok
+test pptx::tests::restored_slide_text_exports_the_selected_revision ... ok
+test textual::tests::markdown_hcd_renders_semantics_and_source_backed_patch_preserves_other_bytes ... ok
+test theme_fonts::tests::workbook_registers_the_name_without_font_bytes ... ok
+test theme_fonts::tests::word_embed_obfuscates_the_face_and_registers_a_denied_family ... ok
+test pdf::tests::pdf_raster_modes_keep_small_text_quality_gate ... ok
+test pptx::tests::inserted_slide_text_box_is_valid_and_exports_as_native_shape ... ok
+test xlsx::tests::a_band_that_cannot_grow_past_its_sheet_stops_the_shift ... ok
+test xlsx::tests::a_defined_name_the_shift_cannot_count_still_stops_the_export ... ok
+test theme_fonts::tests::a_pinned_face_that_cannot_draw_the_page_says_which_runs_stayed ... ok
+test pptx::tests::integrated_copy_fonts_format_and_alignment_survive_export_delete_and_restore ... ok
+test xlsx::tests::a_pane_no_window_counted_stops_the_export_that_would_move_it_off_the_sheet ... ok
+test xlsx::tests::a_hidden_worksheet_can_be_deleted_but_an_unknown_one_cannot ... ok
+test xlsx::tests::a_history_freeze_replaces_a_source_pane_a_shift_cannot_count ... ok
+test theme_fonts::tests::a_forecast_counts_the_runs_its_face_cannot_draw ... ok
+test theme_fonts::tests::a_face_the_print_engine_drew_with_is_not_written_twice ... ok
+test xlsx::tests::a_grid_shift_moves_a_filter_and_the_ranges_it_validates ... ok
+test xlsx::tests::a_grid_shift_moves_the_defined_names_that_ranged_over_the_sheet ... ok
+test xlsx::tests::a_pane_the_shift_cannot_count_stops_the_export ... ok
+test xlsx::tests::a_frozen_band_the_history_records_follows_the_rows_and_columns_a_shift_moves ... ok
+test xlsx::tests::a_window_the_importer_filled_in_names_the_band_the_shift_widened ... ok
+test xlsx::tests::a_tab_created_and_deleted_in_one_history_writes_no_worksheet_part ... ok
+test theme_fonts::tests::a_semantic_pdf_export_leaves_the_text_its_own_writer_drew_alone ... ok
+test xlsx::tests::chart_formula_references_resolve_quoted_sheets_and_enforce_bounds ... ok
+test xlsx::tests::a_pane_the_source_workbook_froze_follows_the_rows_a_shift_moves ... ok
+test xlsx::tests::control_lists_lose_exactly_the_entry_that_named_the_deleted_tab ... ok
+test xlsx::tests::blank_merge_rejects_nonempty_and_overlapping_cells_without_advancing_head ... ok
+test xlsx::tests::aligns_and_borders_native_cell_without_dropping_font_format ... ok
+test xlsx::tests::a_shift_moves_a_protected_sheet_and_leaves_the_protection_alone ... ok
+test xlsx::tests::appends_a_created_tab_in_the_workbooks_own_namespace ... ok
+test xlsx::tests::appended_xlsx_row_is_editable_and_survives_source_backed_export ... ok
+test xlsx::tests::column_insertion_after_last_materialized_column_keeps_exportable_blank_column ... ok
+test xlsx::tests::a_row_the_source_never_wrote_still_takes_its_place_in_the_grid ... ok
+test theme_fonts::tests::a_source_pdf_export_points_the_text_it_carries_at_the_pinned_face ... ok
+test xlsx::tests::a_filter_the_shift_cannot_count_still_stops_the_export ... ok
+test xlsx::tests::a_protection_that_names_cells_still_stops_the_shift ... ok
+test xlsx::tests::budget_workbook_column_insertion_preserves_formulas_merges_and_chart ... ok
+test xlsx::tests::budget_workbook_grid_deletion_preserves_formulas_merges_and_chart ... ok
+test xlsx::tests::drawing_anchor_attributes_preserve_cell_offsets_and_extents ... ok
+test xlsx::tests::budget_workbook_row_insertion_preserves_formulas_merges_and_chart ... ok
+test xlsx::tests::creates_formula_in_first_row_after_grid_and_keeps_history ... ok
+test xlsx::tests::deleting_implicit_blank_column_moves_source_cells_left ... ok
+test xlsx::tests::empty_sheet_chunk_repeats_view_and_default_grid_metadata ... ok
+test xlsx::tests::formats_common_excel_numbers_and_both_date_systems ... ok
+test xlsx::tests::deleting_only_worksheet_row_keeps_empty_grid_window ... ok
+test xlsx::tests::creates_a_worksheet_tab_and_exports_it_as_a_new_part ... ok
+test xlsx::tests::deleting_filled_inserted_column_clears_dirty_node ... ok
+test xlsx::tests::deleting_a_worksheet_takes_the_relationship_part_it_owned ... ok
+test xlsx::tests::converts_real_shared_formulas_to_literal_values_and_keeps_history ... ok
+test xlsx::tests::deleting_all_columns_keeps_empty_rows_and_valid_bundle ... ok
+test xlsx::tests::grid_view_refs_shift_absolute_and_rectangular_selections ... ok
+test xlsx::tests::creates_formula_in_blank_row_tail_and_exports_native_formula ... ok
+test xlsx::tests::incomplete_shared_formula_group_remains_read_only ... ok
+test xlsx::tests::merged_range_parser_rejects_invalid_and_overlapping_ranges ... ok
+test xlsx::tests::deleting_previously_inserted_and_filled_row_clears_dirty_node ... ok
+test xlsx::tests::freezing_a_worksheet_writes_a_window_list_for_a_part_that_names_none ... ok
+test xlsx::tests::existing_numeric_cell_becomes_native_sum_formula_and_keeps_history ... ok
+test xlsx::tests::formats_native_cell_font_and_fill_without_rewriting_shared_text ... ok
+test xlsx::tests::deletes_a_worksheet_and_every_entry_that_named_it ... ok
+test xlsx::tests::first_edit_of_sparse_cell_creates_stable_node_and_source_cell ... ok
+test xlsx::tests::freezing_a_worksheet_replaces_the_panes_of_every_window_it_names ... ok
+test theme_fonts::tests::a_forecast_line_is_the_sentence_the_export_would_write ... ok
+test xlsx::tests::grid_deletion_ignores_formulas_on_an_unrelated_sheet ... ok
+test xlsx::tests::imports_shared_strings_without_a_workbook_wide_string_table ... ok
+test xlsx::tests::only_a_feature_that_survives_its_tab_refuses_the_deletion ... ok
+test xlsx::tests::grid_deletion_rewrites_native_formulas_on_target_sheet ... ok
+test xlsx::tests::merges_empty_xlsx_cells_in_hcd_and_source_backed_export ... ok
+test xlsx::tests::converts_real_formula_to_native_number_then_text_without_stale_numeric_metadata ... ok
+test xlsx::tests::rejects_oversized_custom_number_formats ... ok
+test xlsx::tests::edits_one_shared_formula_member_and_expands_its_source_group ... ok
+test xlsx::tests::merges_blank_anchor_and_unmerges_with_source_backed_export ... ok
+test xlsx::tests::merges_sparse_blank_cells_beyond_the_rendered_row_tail ... ok
+test xlsx::tests::middle_column_insertion_preserves_explicit_source_widths ... ok
+test theme_fonts::tests::the_forecast_offers_the_slots_in_the_order_the_export_does ... ok
+test theme_fonts::tests::the_slot_that_comes_first_is_the_one_the_text_moves_to ... ok
+test xlsx::tests::middle_column_deletion_shifts_all_windows_and_preserves_history ... ok
+test xlsx::tests::middle_column_insertion_shifts_all_row_windows ... ok
+test xlsx::tests::middle_row_insertion_shifts_across_chunk_windows ... ok
+test xlsx::tests::shared_formula_projection_shifts_only_relative_a1_references ... ok
+test xlsx::tests::ordinary_formula_edit_preserves_native_formula_and_recalculates ... ok
+test xlsx::tests::middle_row_deletion_shifts_windows_and_preserves_history ... ok
+test xlsx::tests::shared_string_store_supports_disk_backed_random_reads ... ok
+test xlsx::tests::sparse_rows_keep_cells_in_their_excel_columns ... ok
+test xlsx::tests::selected_grid_range_rejection_preserves_head ... ok
+test xlsx::tests::range_paste_creates_cells_across_windows_and_edits_existing_cell_atomically ... ok
+test xlsx::tests::the_workbook_keeps_the_names_a_grid_shift_never_moves ... ok
+test xlsx::tests::pastes_mixed_formula_range_atomically_and_preserves_history ... ok
+test xlsx::tests::vertical_merge_columns_do_not_gain_duplicate_empty_cells ... ok
+test xlsx::tests::worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows ... ok
+test xlsx::tests::worksheet_view_scan_preserves_split_positions_and_bounds_metadata ... ok
+test xlsx::tests::selected_grid_range_can_delete_every_materialized_row ... ok
+test xlsx::tests::middle_row_insertion_preserves_node_ids_history_and_exported_addresses ... ok
+test xlsx::tests::selected_row_count_can_insert_multiple_rows_after_sheet_tail ... ok
+test xlsx::tests::middle_column_insertion_preserves_ids_history_and_exported_addresses ... ok
+test xlsx::tests::selected_row_delete_removes_annotations_for_deleted_cells ... ok
+test xlsx::tests::removes_only_empty_appended_xlsx_tail_row ... ok
+test xlsx::tests::grid_shifts_keep_untouched_merges_in_hcd_and_source_export ... ok
+test xlsx::tests::restored_grid_revisions_export_source_backed_undo_and_redo ... ok
+test xlsx::tests::the_last_visible_worksheet_cannot_be_deleted ... ok
+test xlsx::tests::renames_worksheet_tab_and_follows_references_on_export ... ok
+test xlsx::tests::source_export_still_refuses_a_pinned_cell_font ... ok
+test xlsx::tests::splits_source_merge_and_exports_preserving_other_merges_and_history ... ok
+test xlsx::tests::unmerges_hcd_created_cells_and_exports_without_merge ... ok
+test xlsx::tests::writes_the_first_cell_of_an_empty_worksheet_and_exports_it ... ok
+test xlsx::tests::writes_custom_number_format_on_the_same_cloned_style_as_font_color ... ok
+test xlsx::tests::writes_a_cell_onto_a_worksheet_created_in_hcd ... ok
+test xlsx::tests::xlsx_column_width_splits_source_span_and_preserves_history ... ok
+test xlsx::tests::xlsx_row_height_exports_existing_and_inserted_rows_with_history ... ok
+test xlsx::tests::styled_budget_cell_becomes_formula_without_corrupting_html_attributes ... ok
+test xlsx::tests::adds_a_worksheet_window_to_a_new_index_page ... ok
+test xlsx::tests::selected_row_range_crosses_chunk_boundary ... ok
+test xlsx::tests::selected_grid_ranges_commit_once_and_export_all_four_shifts ... ok
+
+test result: ok. 184 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.21s
+
+
+Browser tests:
+
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test
+
+
+Running 24 tests using 1 worker
+
+(node:18090) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/revision-diff.spec.ts:7:1 › revision diffs distinguish insertion, deletion, formatting, movement and complex content (3ms)
+  ✓   2 e2e/revision-diff.spec.ts:22:1 › inline diffs preserve Unicode offsets and bound long replacements (2ms)
+  ✓   3 e2e/workspace.spec.ts:102:1 › document tabs retain independent unsaved text and collaboration sessions (1.1s)
+  ✓   4 e2e/workspace.spec.ts:124:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits (4.9s)
+  ✓   5 e2e/workspace.spec.ts:167:1 › complex Word tables retain canonical read-only layout in the semantic editor (2.5s)
+  ✓   6 e2e/workspace.spec.ts:188:1 › a grid agent highlights its cell without changing the local selection (4.1s)
+  ✓   7 e2e/workspace.spec.ts:213:1 › an MCP agent cannot overwrite a collaborator with pending unsaved text (1.2s)
+  ✓   8 e2e/workspace.spec.ts:232:1 › semantic MCP commits refresh the browser across collaboration epochs (10.6s)
+  ✓   9 e2e/workspace.spec.ts:252:1 › workspace drawers, focus mode and preview preserve document state (1.4s)
+  ✓  10 e2e/workspace.spec.ts:290:1 › workbook preview keeps its canvas and refuses to discard an unapplied formula (1.5s)
+  ✓  11 e2e/workspace.spec.ts:309:1 › all seven formats use the content shell and enforce read-only preview (3.1s)
+  ✓  12 e2e/workspace.spec.ts:330:1 › phone workspace provides reachable drawers without page overflow (1.3s)
+  ✓  13 e2e/workspace.spec.ts:353:1 › history previews and real diffs preserve drafts and enforce read permissions (2.4s)
+  ✓  14 e2e/workspace.spec.ts:425:1 › failed and superseded history requests cannot replace the current editor (1.5s)
+  ✓  15 e2e/workspace.spec.ts:447:1 › canvas zoom handles all formats and frames without scaling the page (3.7s)
+  ✓  16 e2e/workspace.spec.ts:473:1 › historical Word tables keep canonical layout and comparisons fit phones (1.3s)
+  ✓  17 e2e/workspace.spec.ts:490:1 › agent commits preserve preview, focus, zoom and the selected historical comparison (10.9s)
+  ✓  18 e2e/workspace.spec.ts:533:1 › history uses the selected outline and closes the mobile drawer after selection (1.1s)
+  ✓  19 e2e/workspace.spec.ts:565:1 › fixed history saves drafts, pins even the latest revision read-only and restores the live deck (2.2s)
+  ✓  20 e2e/workspace.spec.ts:614:1 › fixed snapshot failures can retry and delayed requests cannot replace the selected revision (2.3s)
+  ✓  21 e2e/workspace.spec.ts:654:1 › export menus use source-aware methods and prepare real TXT, XLSX and PDF artifacts (2.4s)
+  ✓  22 e2e/workspace.spec.ts:684:1 › missing workbook sources fall back explicitly to content conversion (1.2s)
+  ✓  23 e2e/workspace.spec.ts:705:1 › export capabilities follow the selected PDF revision and block historical HCD archives (1.5s)
+  ✓  24 e2e/workspace.spec.ts:747:1 › export option failures retry and conversion failures never expose a download link (865ms)
+
+  24 passed (1.2m)

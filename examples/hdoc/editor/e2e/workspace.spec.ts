@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { createHmac, randomBytes } from 'node:crypto'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createServer } from 'node:net'
@@ -63,6 +63,8 @@ test.beforeAll(async () => {
   root = mkdtempSync(resolve(tmpdir(),'hcd-workspace-e2e-'))
   const service = resolve(root,'service'); mkdirSync(resolve(service,'sources'),{recursive:true})
   const fixtures: Record<string,string> = {
+    'export-text':'txt', 'export-errors':'txt', 'export-grid':'assets/showcase/gradebook.xlsx',
+    'export-missing-grid':'assets/showcase/gradebook.xlsx', 'export-pdf':'examples/test.pdf', 'export-font-pdf':'examples/test.pdf',
     'tabs-a':'txt', 'tabs-b':'txt', 'human-draft':'txt', 'agents-text':'txt',
     'agents-slides':'examples/ppt/textboxes/textboxes-basic.pptx',
     'fixed-history':'examples/ppt/textboxes/textboxes-basic.pptx',
@@ -646,4 +648,129 @@ test('fixed snapshot failures can retry and delayed requests cannot replace the 
   await expect(pdf.locator('.fixed-page-hitbox')).toHaveCount(0)
   await expect(pdf.getByRole('button',{name:'编辑',exact:true})).toBeDisabled()
   await page.screenshot({path:info.outputPath('pdf-history-preview.png')})
+})
+
+
+test('export menus use source-aware methods and prepare real TXT, XLSX and PDF artifacts', async ({page},info) => {
+  for (const [id,format,mode] of [['export-text','txt','semantic'],['export-grid','xlsx','source'],['export-pdf','pdf','visual']]) {
+    await open(page,id,'read')
+    const active=page.locator('.document-tab-panel:not([hidden])')
+    await active.locator('.export-control summary').first().click()
+    const select=active.getByRole('combobox',{name:'导出格式',exact:true})
+    await expect(select).toBeEnabled()
+    await expect(select).toHaveValue(format)
+    await expect(active.getByRole('combobox',{name:'导出方式',exact:true})).toHaveValue(mode)
+    await expect(select.locator('option[value="csv"]')).toHaveCount(0)
+    await active.getByRole('button',{name:'准备下载',exact:true}).click()
+    const download=active.locator('.download-ready')
+    await expect(download).toBeVisible()
+    const response=await page.request.get((await download.getAttribute('href'))!)
+    expect(response.ok(),await response.text().then(text=>text.slice(0,160))).toBe(true)
+    const body=await response.body()
+    if (format==='txt') expect(body.toString()).toContain('First paragraph export-text')
+    else if (format==='xlsx') expect(body.subarray(0,2).toString()).toBe('PK')
+    else {
+      expect(body.subarray(0,4).toString()).toBe('%PDF')
+      const href=(await download.getAttribute('href'))!
+      const preview=await page.request.get(`${href}/preview`)
+      expect(preview.headers()['content-disposition']).toMatch(/^inline;/)
+      expect((await preview.body()).equals(body)).toBe(true)
+      await expect(active.locator('.export-guidance')).toContainText('页面图像')
+      await page.screenshot({path:info.outputPath('pdf-export-capabilities.png')})
+    }
+  }
+})
+
+test('missing workbook sources fall back explicitly to content conversion', async ({page},info) => {
+  const id='export-missing-grid'
+  rmSync(resolve(root,'service','sources',`${id}.xlsx`))
+  await open(page,id,'read')
+  const active=page.locator('.document-tab-panel:not([hidden])')
+  await active.locator('.export-control summary').first().click()
+  const method=active.getByRole('combobox',{name:'导出方式',exact:true})
+  await expect(method).toHaveValue('semantic')
+  await expect(method.locator('option[value="source"]')).toBeDisabled()
+  await expect(active.locator('.export-guidance')).toContainText('复杂排版可能变化')
+  await active.getByRole('button',{name:'准备下载',exact:true}).click()
+  await expect(active.locator('.download-ready')).toBeVisible()
+  const response=await page.request.get((await active.locator('.download-ready').getAttribute('href'))!)
+  expect(response.status()).toBe(200)
+  expect((await response.body()).subarray(0,2).toString()).toBe('PK')
+  await active.getByRole('combobox',{name:'导出格式',exact:true}).selectOption('docx')
+  await expect(active.locator('.export-guidance')).toContainText('公式、图表和工作簿结构')
+  await expect(active.locator('.download-ready')).toHaveCount(0)
+  await page.screenshot({path:info.outputPath('workbook-export-fallback.png')})
+})
+
+test('export capabilities follow the selected PDF revision and block historical HCD archives', async ({page},info) => {
+  const id='export-font-pdf',headers={Authorization:`Bearer ${token(id,'font-author')}`}
+  const resource=async(path:string)=>(await fetch(`${apiUrl}/v1/documents/${id}${path}`,{headers})).json()
+  const chunk=await resource('/chunks/0'),node=chunk.map.entries.find((node:{source:{editable:boolean}})=>node.source.editable)
+  const edited=await fetch(`${apiUrl}/v1/documents/${id}/node-patch`,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({schemaVersion:'hcd-patch/37',documentId:id,patchId:'export-font-constraint',baseRevision:0,operations:[{op:'text.font',nodeId:node.nodeId,font:{latin:'Arial'},precondition:{nodeHash:node.nodeHash}}]})})
+  expect(edited.ok,await edited.text()).toBe(true)
+  await open(page,id,'read')
+  const active=page.locator('.document-tab-panel:not([hidden])')
+  await active.locator('.export-control summary').first().click()
+  const method=active.getByRole('combobox',{name:'导出方式',exact:true})
+  await expect(method).toHaveValue('visual')
+  await expect(method.locator('option[value="source"]')).toBeDisabled()
+  await active.locator('.export-control summary').first().click()
+  await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
+  await active.locator('.history button[data-revision="0"]').click()
+  await active.locator('.export-control summary').first().click()
+  await expect(method).toBeEnabled()
+  await expect(method.locator('option[value="source"]')).toBeEnabled()
+  await expect(active.getByRole('combobox',{name:'导出格式',exact:true}).locator('option[value="hcd"]')).toBeDisabled()
+  await method.selectOption('source')
+  await expect(active.locator('div.export-guidance')).toContainText('优先保留源文档结构')
+  await page.screenshot({path:info.outputPath('historical-export-options.png')})
+  await active.getByRole('button',{name:'准备下载',exact:true}).click()
+  await expect(active.locator('.download-ready')).toBeVisible()
+  const historicalUrl=(await active.locator('.download-ready').getAttribute('href'))!
+  const original=await page.request.get(historicalUrl)
+  expect(original.ok()).toBe(true)
+  const oldBytes=await original.body()
+  await active.locator('.export-control summary').first().click()
+  await active.locator('.revision-preview-bar').getByRole('button',{name:'返回当前',exact:true}).click()
+  await active.locator('.export-control summary').first().click()
+  await expect(method).toBeEnabled()
+  await expect(active.locator('.download-ready')).toHaveCount(0)
+  await expect(method).toHaveValue('source')
+  await expect(active.getByRole('button',{name:'准备下载',exact:true})).toBeDisabled()
+  await expect(active.locator('div.export-guidance [role="alert"]')).toContainText('当前版本的修改无法')
+  await method.selectOption('visual')
+  await active.getByRole('button',{name:'准备下载',exact:true}).click()
+  await expect(active.locator('.download-ready')).toBeVisible()
+  expect((await (await page.request.get(historicalUrl)).body()).equals(oldBytes)).toBe(true)
+})
+
+test('export option failures retry and conversion failures never expose a download link', async ({page},info) => {
+  const id='export-errors',capRoute=`**/v1/documents/${id}/export-capabilities?revision=*`
+  await open(page,id,'read')
+  const active=page.locator('.document-tab-panel:not([hidden])')
+  await page.route(capRoute,route=>route.fulfill({status:503,body:'Capabilities temporarily unavailable'}))
+  await active.locator('.export-control summary').first().click()
+  await expect(active.locator('.export-popover [role="alert"]')).toContainText('无法获取导出选项')
+  await expect(active.getByRole('button',{name:'准备下载',exact:true})).toBeDisabled()
+  await page.unroute(capRoute)
+  await page.route(capRoute,async route=>{
+    const response=await route.fetch(),plan=await response.json()
+    plan.formats=plan.formats.filter((item:{format:string})=>item.format==='txt')
+    await route.fulfill({response,json:plan})
+  })
+  await active.getByRole('button',{name:'重试',exact:true}).click()
+  const format=active.getByRole('combobox',{name:'导出格式',exact:true})
+  await expect(format).toBeEnabled()
+  await expect(format.locator('option')).toHaveCount(1)
+  const headers={Authorization:`Bearer ${token(id,'export-validator')}`}
+  const manifest=await (await fetch(`${apiUrl}/v1/documents/${id}`,{headers})).json()
+  const stylePath=resolve(root,'service',`${id}.hcd`,manifest.stylesHref),styles=readFileSync(stylePath)
+  rmSync(stylePath)
+  await active.getByRole('button',{name:'准备下载',exact:true}).click()
+  await expect(active.locator('.export-popover>.export-error')).toBeVisible()
+  await expect(active.locator('.download-ready')).toHaveCount(0)
+  writeFileSync(stylePath,styles)
+  await active.getByRole('button',{name:'准备下载',exact:true}).click()
+  await expect(active.locator('.download-ready')).toBeVisible()
+  await page.screenshot({path:info.outputPath('txt-export-ready.png')})
 })
