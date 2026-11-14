@@ -1,0 +1,30 @@
+[
+  {
+    "format": "docx",
+    "source": "assets/showcase/project-proposal.docx"
+  },
+  {
+    "format": "xlsx",
+    "source": "assets/showcase/gradebook.xlsx"
+  },
+  {
+    "format": "pptx",
+    "source": "examples/ppt/textboxes/textboxes-basic.pptx"
+  },
+  {
+    "format": "pdf",
+    "source": "examples/hdoc/pdf-raster-quality.pdf"
+  },
+  {
+    "format": "html",
+    "source": "examples/hdoc/source.html"
+  },
+  {
+    "format": "md",
+    "source": "examples/hdoc/text-suite/source.md"
+  },
+  {
+    "format": "txt",
+    "source": "examples/hdoc/text-suite/source.txt"
+  }
+]

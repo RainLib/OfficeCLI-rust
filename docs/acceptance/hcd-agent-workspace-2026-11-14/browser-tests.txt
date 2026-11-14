@@ -1,0 +1,17 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test
+
+
+Running 6 tests using 1 worker
+
+(node:66795) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/workspace.spec.ts:94:1 › document tabs retain independent unsaved text and collaboration sessions (857ms)
+  ✓  2 e2e/workspace.spec.ts:116:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits (4.0s)
+  ✓  3 e2e/workspace.spec.ts:159:1 › complex Word tables retain canonical read-only layout in the semantic editor (1.3s)
+  ✓  4 e2e/workspace.spec.ts:180:1 › a grid agent highlights its cell without changing the local selection (2.9s)
+  ✓  5 e2e/workspace.spec.ts:205:1 › an MCP agent cannot overwrite a collaborator with pending unsaved text (701ms)
+  ✓  6 e2e/workspace.spec.ts:224:1 › semantic MCP commits refresh the browser across collaboration epochs (10.8s)
+
+  6 passed (21.8s)

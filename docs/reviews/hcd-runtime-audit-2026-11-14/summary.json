@@ -1,0 +1,1070 @@
+{
+  "commit": "60207d879ab182eee6cf9d664a90f2894e9f781f",
+  "branch": "feature/hcd-font-format-integration",
+  "date": "2026-11-14",
+  "runtime": "macOS arm64; Rust 1.90.0; Google Chrome headless",
+  "rawArtifacts": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-capability-ad6oakbr",
+  "importCases": [
+    {
+      "format": "docx",
+      "source": "assets/showcase/project-proposal.docx",
+      "importExit": 0,
+      "validationExit": 0,
+      "profile": "semantic-flow",
+      "capabilities": {
+        "textPatch": true,
+        "annotations": true,
+        "structurePatch": false,
+        "stylePatch": false,
+        "exactPagination": false
+      }
+    },
+    {
+      "format": "xlsx",
+      "source": "assets/showcase/gradebook.xlsx",
+      "importExit": 0,
+      "validationExit": 0,
+      "profile": "grid",
+      "capabilities": {
+        "textPatch": true,
+        "annotations": true,
+        "structurePatch": false,
+        "stylePatch": false,
+        "exactPagination": false
+      }
+    },
+    {
+      "format": "pptx",
+      "source": "examples/ppt/textboxes/textboxes-basic.pptx",
+      "importExit": 0,
+      "validationExit": 0,
+      "profile": "slide-canvas",
+      "capabilities": {
+        "textPatch": true,
+        "annotations": true,
+        "structurePatch": false,
+        "stylePatch": false,
+        "exactPagination": false
+      }
+    },
+    {
+      "format": "pdf",
+      "source": "examples/hdoc/pdf-raster-quality.pdf",
+      "importExit": 0,
+      "validationExit": 0,
+      "profile": "fixed-layout",
+      "capabilities": {
+        "textPatch": true,
+        "annotations": true,
+        "structurePatch": false,
+        "stylePatch": false,
+        "exactPagination": false
+      }
+    },
+    {
+      "format": "html",
+      "source": "examples/hdoc/source.html",
+      "importExit": 0,
+      "validationExit": 0,
+      "profile": "semantic-flow",
+      "capabilities": {
+        "textPatch": true,
+        "annotations": true,
+        "structurePatch": false,
+        "stylePatch": false,
+        "exactPagination": false
+      }
+    },
+    {
+      "format": "md",
+      "source": "examples/hdoc/text-suite/source.md",
+      "importExit": 0,
+      "validationExit": 0,
+      "profile": "semantic-flow",
+      "capabilities": {
+        "textPatch": true,
+        "annotations": true,
+        "structurePatch": false,
+        "stylePatch": false,
+        "exactPagination": false
+      }
+    },
+    {
+      "format": "txt",
+      "source": "examples/hdoc/text-suite/source.txt",
+      "importExit": 0,
+      "validationExit": 0,
+      "profile": "semantic-flow",
+      "capabilities": {
+        "textPatch": true,
+        "annotations": true,
+        "structurePatch": false,
+        "stylePatch": false,
+        "exactPagination": false
+      }
+    }
+  ],
+  "semanticConversionCases": [
+    {
+      "from": "docx",
+      "to": "docx",
+      "exportExit": 0,
+      "bytes": 5839,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "docx",
+      "to": "xlsx",
+      "exportExit": 0,
+      "bytes": 5545,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "docx",
+      "to": "pptx",
+      "exportExit": 0,
+      "bytes": 10892,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "docx",
+      "to": "pdf",
+      "exportExit": 0,
+      "bytes": 135167,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "HIGH"
+    },
+    {
+      "from": "docx",
+      "to": "html",
+      "exportExit": 1
+    },
+    {
+      "from": "docx",
+      "to": "md",
+      "exportExit": 0,
+      "bytes": 4204,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "docx",
+      "to": "txt",
+      "exportExit": 0,
+      "bytes": 3988,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "xlsx",
+      "to": "docx",
+      "exportExit": 0,
+      "bytes": 5988,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "xlsx",
+      "to": "xlsx",
+      "exportExit": 0,
+      "bytes": 4658,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "xlsx",
+      "to": "pptx",
+      "exportExit": 0,
+      "bytes": 6177,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "xlsx",
+      "to": "pdf",
+      "exportExit": 0,
+      "bytes": 57911,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "HIGH"
+    },
+    {
+      "from": "xlsx",
+      "to": "html",
+      "exportExit": 1
+    },
+    {
+      "from": "xlsx",
+      "to": "md",
+      "exportExit": 0,
+      "bytes": 2074,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "xlsx",
+      "to": "txt",
+      "exportExit": 0,
+      "bytes": 1709,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pptx",
+      "to": "docx",
+      "exportExit": 0,
+      "bytes": 3297,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pptx",
+      "to": "xlsx",
+      "exportExit": 0,
+      "bytes": 3654,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pptx",
+      "to": "pptx",
+      "exportExit": 0,
+      "bytes": 4783,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pptx",
+      "to": "pdf",
+      "exportExit": 0,
+      "bytes": 88050,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "HIGH"
+    },
+    {
+      "from": "pptx",
+      "to": "html",
+      "exportExit": 1
+    },
+    {
+      "from": "pptx",
+      "to": "md",
+      "exportExit": 0,
+      "bytes": 1126,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pptx",
+      "to": "txt",
+      "exportExit": 0,
+      "bytes": 1120,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pdf",
+      "to": "docx",
+      "exportExit": 0,
+      "bytes": 70336,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pdf",
+      "to": "xlsx",
+      "exportExit": 0,
+      "bytes": 71666,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pdf",
+      "to": "pptx",
+      "exportExit": 0,
+      "bytes": 70234,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pdf",
+      "to": "pdf",
+      "exportExit": 0,
+      "bytes": 136788,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "VISUAL"
+    },
+    {
+      "from": "pdf",
+      "to": "html",
+      "exportExit": 1
+    },
+    {
+      "from": "pdf",
+      "to": "md",
+      "exportExit": 0,
+      "bytes": 1010,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "pdf",
+      "to": "txt",
+      "exportExit": 0,
+      "bytes": 1010,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "html",
+      "to": "docx",
+      "exportExit": 0,
+      "bytes": 3144,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "html",
+      "to": "xlsx",
+      "exportExit": 0,
+      "bytes": 3425,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "html",
+      "to": "pptx",
+      "exportExit": 0,
+      "bytes": 4319,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "html",
+      "to": "pdf",
+      "exportExit": 0,
+      "bytes": 121806,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "HIGH"
+    },
+    {
+      "from": "html",
+      "to": "html",
+      "exportExit": 1
+    },
+    {
+      "from": "html",
+      "to": "md",
+      "exportExit": 0,
+      "bytes": 478,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "html",
+      "to": "txt",
+      "exportExit": 0,
+      "bytes": 438,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "md",
+      "to": "docx",
+      "exportExit": 0,
+      "bytes": 3145,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "md",
+      "to": "xlsx",
+      "exportExit": 0,
+      "bytes": 3389,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "md",
+      "to": "pptx",
+      "exportExit": 0,
+      "bytes": 3685,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "md",
+      "to": "pdf",
+      "exportExit": 0,
+      "bytes": 118587,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "HIGH"
+    },
+    {
+      "from": "md",
+      "to": "html",
+      "exportExit": 1
+    },
+    {
+      "from": "md",
+      "to": "md",
+      "exportExit": 0,
+      "bytes": 481,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "md",
+      "to": "txt",
+      "exportExit": 0,
+      "bytes": 420,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "txt",
+      "to": "docx",
+      "exportExit": 0,
+      "bytes": 2748,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "txt",
+      "to": "xlsx",
+      "exportExit": 0,
+      "bytes": 3148,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "txt",
+      "to": "pptx",
+      "exportExit": 0,
+      "bytes": 2743,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "txt",
+      "to": "pdf",
+      "exportExit": 0,
+      "bytes": 16147,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "previewExit": 0,
+      "fidelityLevel": "HIGH"
+    },
+    {
+      "from": "txt",
+      "to": "html",
+      "exportExit": 1
+    },
+    {
+      "from": "txt",
+      "to": "md",
+      "exportExit": 0,
+      "bytes": 182,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    },
+    {
+      "from": "txt",
+      "to": "txt",
+      "exportExit": 0,
+      "bytes": 182,
+      "reimportExit": 0,
+      "validateExit": 0,
+      "fidelityLevel": "SEMANTIC"
+    }
+  ],
+  "sourceBackedCases": [
+    {
+      "from": "docx",
+      "to": "docx",
+      "sourceBacked": true,
+      "exportExit": 0,
+      "byteIdentical": false
+    },
+    {
+      "from": "xlsx",
+      "to": "xlsx",
+      "sourceBacked": true,
+      "exportExit": 0,
+      "byteIdentical": false
+    },
+    {
+      "from": "pptx",
+      "to": "pptx",
+      "sourceBacked": true,
+      "exportExit": 0,
+      "byteIdentical": false
+    },
+    {
+      "from": "pdf",
+      "to": "pdf",
+      "sourceBacked": true,
+      "exportExit": 0,
+      "byteIdentical": true
+    },
+    {
+      "from": "html",
+      "to": "html",
+      "sourceBacked": true,
+      "exportExit": 0,
+      "byteIdentical": true
+    },
+    {
+      "from": "md",
+      "to": "md",
+      "sourceBacked": true,
+      "exportExit": 0,
+      "byteIdentical": true
+    },
+    {
+      "from": "txt",
+      "to": "txt",
+      "sourceBacked": true,
+      "exportExit": 0,
+      "byteIdentical": true
+    }
+  ],
+  "sourceBackedOfficeEntryIdentity": [
+    {
+      "format": "docx",
+      "zipEntryContentsIdentical": true,
+      "differences": []
+    },
+    {
+      "format": "xlsx",
+      "zipEntryContentsIdentical": true,
+      "differences": []
+    },
+    {
+      "format": "pptx",
+      "zipEntryContentsIdentical": true,
+      "differences": []
+    }
+  ],
+  "fileSuites": {
+    "docx": {
+      "expected": 8,
+      "reportedTotal": 7,
+      "reportedPass": 7,
+      "omittedFailedCase": "examples/word/inlinedparts-hosts.docx",
+      "actualObserved": {
+        "pass": 7,
+        "fail": 1
+      },
+      "failure": "DUPLICATE_ASSET; script failed to emit case when patched-fidelity.json was missing"
+    },
+    "xlsx": {
+      "total": 20,
+      "reportedPass": 0,
+      "reportedFail": 20,
+      "failures": [
+        "sheet_count",
+        "grid_random_access_index"
+      ],
+      "diagnosis": "script reads gzip content as plaintext and only scans index *.json",
+      "gzipAwareCheckPass": 20,
+      "gzipAwareCheckTotal": 20
+    },
+    "pptx": {
+      "total": 54,
+      "pass": 39,
+      "fail": 15,
+      "failure": "patched_reimport_root_hash",
+      "diagnosis": [
+        {
+          "source": "examples/ppt/charts/charts-3d.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-advanced.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-area.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-bar.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-bubble.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-column.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-combo.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-doughnut.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-line.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-pie.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-radar.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-scatter.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-stock.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/charts/charts-waterfall.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        },
+        {
+          "source": "examples/ppt/pictures/pictures-basic.pptx",
+          "descriptorsEqual": true,
+          "stylesEqual": true,
+          "assetOrderEqual": false,
+          "assetRecordsEqualAfterSort": true,
+          "rawAssetIndexEqual": false
+        }
+      ]
+    }
+  },
+  "browserPreviews": [
+    {
+      "format": "docx",
+      "opened": true,
+      "javascriptExceptions": []
+    },
+    {
+      "format": "xlsx",
+      "opened": true,
+      "javascriptExceptions": []
+    },
+    {
+      "format": "pptx",
+      "opened": true,
+      "javascriptExceptions": []
+    },
+    {
+      "format": "pdf",
+      "opened": true,
+      "javascriptExceptions": []
+    },
+    {
+      "format": "html",
+      "opened": true,
+      "javascriptExceptions": []
+    },
+    {
+      "format": "md",
+      "opened": true,
+      "javascriptExceptions": []
+    },
+    {
+      "format": "txt",
+      "opened": true,
+      "javascriptExceptions": []
+    }
+  ],
+  "semanticCollaboration": {
+    "kind": "semantic",
+    "document": "accept-txt",
+    "aToB": true,
+    "bToA": true,
+    "readReceives": true,
+    "readEditable": "false",
+    "presence": "b\nb\nb\n3 人在线",
+    "revision": 2,
+    "saved": true
+  },
+  "semanticPersistence": {
+    "revision": 2,
+    "aSaved": true,
+    "bSaved": true
+  },
+  "fixedCollaboration": [
+    {
+      "format": "pptx",
+      "readOnlyPatch": 403,
+      "saveStatus": 200,
+      "revision": 2,
+      "idempotentReplayStatus": 200,
+      "staleDistinctPatchStatus": 409,
+      "twoBrowsersUpdated": true,
+      "elapsedMs": 293,
+      "errors": []
+    },
+    {
+      "format": "pdf",
+      "readOnlyPatch": 403,
+      "saveStatus": 200,
+      "revision": 1,
+      "idempotentReplayStatus": 200,
+      "staleDistinctPatchStatus": 409,
+      "twoBrowsersUpdated": true,
+      "elapsedMs": 275,
+      "errors": []
+    },
+    {
+      "format": "xlsx",
+      "readOnlyPatch": 403,
+      "saveStatus": 200,
+      "revision": 1,
+      "idempotentReplayStatus": 200,
+      "staleDistinctPatchStatus": 409,
+      "twoBrowsersUpdated": true,
+      "elapsedMs": 273,
+      "errors": []
+    }
+  ],
+  "restore": {
+    "status": 200,
+    "oldEpoch": 0,
+    "newEpoch": 1,
+    "staleRoomWriteStatus": 409
+  },
+  "pdfExportPreview": {
+    "rendered": true,
+    "pixels": {
+      "width": 893,
+      "height": 1263,
+      "nonwhiteSamples": 1110
+    },
+    "body": "OFFICECLI / HCD\n导出 PDF 预览\n显示实际导出的打印版式\n返回工作台\n上一页\n1 / 4\n下一页\n下载此 PDF\n语言\nEnglish (US)\nEnglish (UK)\n简体中文\n繁體中文（台灣）\n繁體中文（香港）",
+    "errors": []
+  },
+  "httpDownloads": [
+    {
+      "from": "docx",
+      "to": "html",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 104084,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "xlsx",
+      "to": "html",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 107709,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "pptx",
+      "to": "html",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 21582,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "pdf",
+      "to": "html",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 219065,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "html",
+      "to": "html",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 5427,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "md",
+      "to": "html",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 9119,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "html",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/html; charset=utf-8",
+      "bytes": 2574,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "docx",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "bytes": 2777,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "xlsx",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "bytes": 3185,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "pptx",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "bytes": 2771,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "pdf",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "application/pdf",
+      "bytes": 17320,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "md",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/markdown; charset=utf-8",
+      "bytes": 224,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "txt",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "text/plain; charset=utf-8",
+      "bytes": 224,
+      "reimportExit": 0,
+      "validateExit": 0
+    },
+    {
+      "from": "txt",
+      "to": "hcd",
+      "prepareStatus": 200,
+      "downloadStatus": 200,
+      "contentType": "application/zip",
+      "bytes": 8810,
+      "reimportExit": 0,
+      "validateExit": 0
+    }
+  ],
+  "fidelityAudit": {
+    "overall": {
+      "pipelineCertified": false,
+      "sourceBackedNoOpCertified": true,
+      "sourceBackedPatchedCertified": true,
+      "editableHtmlOneToOneCertified": false,
+      "verdict": "PARTIAL_HIGH_FIDELITY"
+    },
+    "exit": 1,
+    "caveat": "Original suite bookkeeping defects described above affect counts; independent visual certification remains absent."
+  },
+  "mcp": {
+    "rpcInitialize": true,
+    "toolCount": 14,
+    "extractTextFormatsPassed": [
+      "docx",
+      "xlsx",
+      "pptx",
+      "pdf"
+    ],
+    "toolFields": [
+      "description",
+      "input_schema",
+      "name"
+    ],
+    "requiredMcpFieldMissing": "inputSchema",
+    "hcdTools": false,
+    "notificationProducedResponse": true,
+    "stdoutAtEof": "MCP server stopped",
+    "standardSdkCompatibilityTested": false
+  },
+  "pdfGeometry": {
+    "pptxSourceEmu": [
+      12192000,
+      6858000
+    ],
+    "exportedPdfMediaBoxPt": [
+      0,
+      0,
+      595.28,
+      841.89
+    ],
+    "pdfSourceMappedTextNodes": 52,
+    "visualPdfReimportMappedTextNodes": 0
+  },
+  "duplicateAssetMinimalRepro": {
+    "sourceValidationExit": 0,
+    "importExit": 0,
+    "hcdValidationExit": 1,
+    "renderExit": 1,
+    "code": "DUPLICATE_ASSET",
+    "description": "Blank DOCX with two identical PNG media parts and a PNG content type; local OfficeCLI source validator passes."
+  }
+}

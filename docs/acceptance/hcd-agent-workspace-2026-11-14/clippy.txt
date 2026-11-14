@@ -1,0 +1,2 @@
+    Checking officecli v0.1.31 (<repo>/crates/officecli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.81s
