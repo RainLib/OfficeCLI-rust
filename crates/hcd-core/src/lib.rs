@@ -12,6 +12,7 @@ mod structure;
 mod types;
 mod validate;
 mod xlsx_formula;
+mod xlsx_grid;
 
 pub use archive::{inspect_archive, pack_archive, unpack_archive, ArchiveReport};
 pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
@@ -41,8 +42,10 @@ pub use structure::{
 pub use types::*;
 pub use validate::validate_bundle;
 pub use xlsx_formula::{
-    delete_formula_references, insert_formula_references, FormulaDeletion, FormulaInsertion,
+    delete_formula_references, drop_formula_sheet_references, insert_formula_references,
+    rename_formula_sheet_references, FormulaDeletion, FormulaInsertion,
 };
+pub use xlsx_grid::{sheet_grid_id, sheet_window_chunk_id, XlsxSheetSection};
 
 pub const HCD_SCHEMA_VERSION: &str = "hcd/2";
 pub const HCD_SCHEMA_VERSION_1: &str = "hcd/1";
@@ -75,6 +78,24 @@ pub const HCD_PATCH_SCHEMA_VERSION_26: &str = "hcd-patch/26";
 pub const HCD_PATCH_SCHEMA_VERSION_27: &str = "hcd-patch/27";
 pub const HCD_PATCH_SCHEMA_VERSION_28: &str = "hcd-patch/28";
 pub const HCD_PATCH_SCHEMA_VERSION_29: &str = "hcd-patch/29";
+pub const HCD_PATCH_SCHEMA_VERSION_30: &str = "hcd-patch/30";
+pub const HCD_PATCH_SCHEMA_VERSION_31: &str = "hcd-patch/31";
+pub const HCD_PATCH_SCHEMA_VERSION_32: &str = "hcd-patch/32";
+pub const HCD_PATCH_SCHEMA_VERSION_33: &str = "hcd-patch/33";
+pub const HCD_PATCH_SCHEMA_VERSION_34: &str = "hcd-patch/34";
+pub const HCD_PATCH_SCHEMA_VERSION_35: &str = "hcd-patch/35";
+pub const HCD_PATCH_SCHEMA_VERSION_36: &str = "hcd-patch/36";
+/// Approved band for the PPTX slide-structure line: 41 adds a slide, 42 deletes
+/// one, 43 reorder, 44 copy. Numbers 37 to 40 belong to other lines and to the
+/// pending remap, so this line does not take them.
+pub const HCD_PATCH_SCHEMA_VERSION_41: &str = "hcd-patch/41";
+pub const HCD_PATCH_SCHEMA_VERSION_42: &str = "hcd-patch/42";
+pub const HCD_PATCH_SCHEMA_VERSION_43: &str = "hcd-patch/43";
+pub const HCD_PATCH_SCHEMA_VERSION_44: &str = "hcd-patch/44";
+/// 45 is this line's first XLSX window op: freeze panes on a worksheet.
+/// 46 is this line's first PPTX paragraph op: align a slide text shape.
+pub const HCD_PATCH_SCHEMA_VERSION_45: &str = "hcd-patch/45";
+pub const HCD_PATCH_SCHEMA_VERSION_46: &str = "hcd-patch/46";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
 pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
@@ -106,6 +127,19 @@ pub const HCD_PATCH_SCHEMA_V26_JSON: &str = include_str!("../schemas/hcd-patch-2
 pub const HCD_PATCH_SCHEMA_V27_JSON: &str = include_str!("../schemas/hcd-patch-27.schema.json");
 pub const HCD_PATCH_SCHEMA_V28_JSON: &str = include_str!("../schemas/hcd-patch-28.schema.json");
 pub const HCD_PATCH_SCHEMA_V29_JSON: &str = include_str!("../schemas/hcd-patch-29.schema.json");
+pub const HCD_PATCH_SCHEMA_V30_JSON: &str = include_str!("../schemas/hcd-patch-30.schema.json");
+pub const HCD_PATCH_SCHEMA_V31_JSON: &str = include_str!("../schemas/hcd-patch-31.schema.json");
+pub const HCD_PATCH_SCHEMA_V32_JSON: &str = include_str!("../schemas/hcd-patch-32.schema.json");
+pub const HCD_PATCH_SCHEMA_V33_JSON: &str = include_str!("../schemas/hcd-patch-33.schema.json");
+pub const HCD_PATCH_SCHEMA_V34_JSON: &str = include_str!("../schemas/hcd-patch-34.schema.json");
+pub const HCD_PATCH_SCHEMA_V35_JSON: &str = include_str!("../schemas/hcd-patch-35.schema.json");
+pub const HCD_PATCH_SCHEMA_V36_JSON: &str = include_str!("../schemas/hcd-patch-36.schema.json");
+pub const HCD_PATCH_SCHEMA_V41_JSON: &str = include_str!("../schemas/hcd-patch-41.schema.json");
+pub const HCD_PATCH_SCHEMA_V42_JSON: &str = include_str!("../schemas/hcd-patch-42.schema.json");
+pub const HCD_PATCH_SCHEMA_V43_JSON: &str = include_str!("../schemas/hcd-patch-43.schema.json");
+pub const HCD_PATCH_SCHEMA_V44_JSON: &str = include_str!("../schemas/hcd-patch-44.schema.json");
+pub const HCD_PATCH_SCHEMA_V45_JSON: &str = include_str!("../schemas/hcd-patch-45.schema.json");
+pub const HCD_PATCH_SCHEMA_V46_JSON: &str = include_str!("../schemas/hcd-patch-46.schema.json");
 pub const DEFAULT_CHUNK_SOFT_BYTES: usize = 512 * 1024;
 pub const DEFAULT_CHUNK_BLOCKS: usize = 256;
 pub const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -176,6 +210,32 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V28_JSON).unwrap();
         let patch_v29: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V29_JSON).unwrap();
+        let patch_v30: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V30_JSON).unwrap();
+        let patch_v31: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V31_JSON).unwrap();
+        let patch_v32: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V32_JSON).unwrap();
+        let patch_v33: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V33_JSON).unwrap();
+        let patch_v34: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V34_JSON).unwrap();
+        let patch_v35: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V35_JSON).unwrap();
+        let patch_v36: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V36_JSON).unwrap();
+        let patch_v41: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V41_JSON).unwrap();
+        let patch_v42: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V42_JSON).unwrap();
+        let patch_v43: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V43_JSON).unwrap();
+        let patch_v44: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V44_JSON).unwrap();
+        let patch_v45: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V45_JSON).unwrap();
+        let patch_v46: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V46_JSON).unwrap();
         assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
@@ -206,6 +266,19 @@ mod schema_tests {
         assert_eq!(patch_v27["$id"], "urn:officecli:hcd-patch:27");
         assert_eq!(patch_v28["$id"], "urn:officecli:hcd-patch:28");
         assert_eq!(patch_v29["$id"], "urn:officecli:hcd-patch:29");
+        assert_eq!(patch_v30["$id"], "urn:officecli:hcd-patch:30");
+        assert_eq!(patch_v31["$id"], "urn:officecli:hcd-patch:31");
+        assert_eq!(patch_v32["$id"], "urn:officecli:hcd-patch:32");
+        assert_eq!(patch_v33["$id"], "urn:officecli:hcd-patch:33");
+        assert_eq!(patch_v34["$id"], "urn:officecli:hcd-patch:34");
+        assert_eq!(patch_v35["$id"], "urn:officecli:hcd-patch:35");
+        assert_eq!(patch_v36["$id"], "urn:officecli:hcd-patch:36");
+        assert_eq!(patch_v41["$id"], "urn:officecli:hcd-patch:41");
+        assert_eq!(patch_v42["$id"], "urn:officecli:hcd-patch:42");
+        assert_eq!(patch_v43["$id"], "urn:officecli:hcd-patch:43");
+        assert_eq!(patch_v44["$id"], "urn:officecli:hcd-patch:44");
+        assert_eq!(patch_v45["$id"], "urn:officecli:hcd-patch:45");
+        assert_eq!(patch_v46["$id"], "urn:officecli:hcd-patch:46");
     }
 
     #[test]

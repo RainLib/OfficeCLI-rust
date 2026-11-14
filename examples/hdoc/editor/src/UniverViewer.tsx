@@ -85,6 +85,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [columnWidthChars, setColumnWidthChars] = useState('28')
   const [rowHeightBusy, setRowHeightBusy] = useState(false)
   const [rowHeightPoints, setRowHeightPoints] = useState('30')
+  const [formatBusy, setFormatBusy] = useState(false)
+  const [cellFontSize, setCellFontSize] = useState('11')
+  const [cellFontColor, setCellFontColor] = useState('#112233')
+  const [cellFillColor, setCellFillColor] = useState('#fff2cc')
+  const [cellNumberFormat, setCellNumberFormat] = useState('0.00')
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [sheetNameDraft, setSheetNameDraft] = useState('')
+  const [addBusy, setAddBusy] = useState(false)
+  const [sheetAddDraft, setSheetAddDraft] = useState('')
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [freezeBusy, setFreezeBusy] = useState(false)
   const [formulaAddress, setFormulaAddress] = useState('A1')
   const [formulaText, setFormulaText] = useState('')
   const [formulaDirty, setFormulaDirty] = useState(false)
@@ -108,8 +119,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   function resetHistory(nextRevision: number) {
     setHistory({ head: nextRevision, past: [], future: [] })
   }
-  const historyLocked = historyBusy || mergeBusy || rowBusy || columnBusy || columnWidthBusy || rowHeightBusy
-    || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
+  const historyLocked = historyBusy || mergeBusy || rowBusy || columnBusy || columnWidthBusy || rowHeightBusy || renameBusy
+    || addBusy || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
   async function travelHistory(direction: 'undo' | 'redo') {
     const current = runtime.current
     const steps = direction === 'undo' ? history.past : history.future
@@ -450,6 +461,318 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     } catch (cause) {
       setError(`拆分失败：${String(cause)}`)
     } finally { setMergeBusy(false) }
+  }
+
+  function selectedCellLink() {
+    const current = runtime.current
+    const sheet = current?.adapter.workbook.getActiveSheet()
+    const range = sheet?.getActiveRange()
+    if (!current || !sheet || !range) return undefined
+    return current.adapter.getNodeAt(sheet.getSheetId(), range.getRow(), range.getColumn())
+  }
+
+  async function saveCellFormat(format: { bold?: boolean; italic?: boolean; underline?: boolean; fontSizePt?: number; color?: string; fill?: string }) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || formatBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const link = selectedCellLink()
+      if (!link) throw new Error('请先选中已有内容的单元格')
+      setFormatBusy(true)
+      setStatus('正在设置单元格格式…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/31', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.cell.format', nodeId: link.nodeId, format,
+            precondition: { nodeHash: link.nodeHash } }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了格式修改')
+      recordEdit(saved.revision, '设置单元格格式')
+      collaboration.announceRevision(saved.revision)
+      await current.adapter.refreshFromServer()
+      setRevision(saved.revision)
+      setError('')
+      setStatus(`revision ${saved.revision} · 已设置单元格格式`)
+    } catch (cause) {
+      setError(`设置格式失败：${String(cause)}`)
+    } finally {
+      setFormatBusy(false)
+    }
+  }
+
+  async function saveCellLayout(layout: { horizontal?: 'left' | 'center' | 'right'; vertical?: 'top' | 'center' | 'bottom'; wrap?: boolean; border?: 'none' | 'thin' }) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || formatBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const link = selectedCellLink()
+      if (!link) throw new Error('请先选中已有内容的单元格')
+      setFormatBusy(true)
+      setStatus('正在设置单元格对齐…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/32', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.cell.layout', nodeId: link.nodeId, layout,
+            precondition: { nodeHash: link.nodeHash } }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了对齐修改')
+      recordEdit(saved.revision, '设置单元格对齐')
+      collaboration.announceRevision(saved.revision)
+      await current.adapter.refreshFromServer()
+      setRevision(saved.revision)
+      setError('')
+      setStatus(`revision ${saved.revision} · 已设置单元格对齐`)
+    } catch (cause) {
+      setError(`设置对齐失败：${String(cause)}`)
+    } finally {
+      setFormatBusy(false)
+    }
+  }
+
+  async function saveCellNumberFormat(formatCode: string) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || formatBusy) return
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const link = selectedCellLink()
+      if (!link) throw new Error('请先选中已有内容的单元格')
+      const code = formatCode.trim()
+      if (!code || code.length > 1024) throw new Error('数字格式必须是 1 到 1024 个字符')
+      setFormatBusy(true)
+      setStatus('正在设置数字格式…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/33', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.cell.numberFormat', nodeId: link.nodeId,
+            numberFormat: { formatCode: code },
+            precondition: { nodeHash: link.nodeHash } }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了数字格式')
+      recordEdit(saved.revision, '设置数字格式')
+      collaboration.announceRevision(saved.revision)
+      await current.adapter.refreshFromServer()
+      setRevision(saved.revision)
+      setError('')
+      setStatus(`revision ${saved.revision} · 已设置数字格式`)
+    } catch (cause) {
+      setError(`设置数字格式失败：${String(cause)}`)
+    } finally {
+      setFormatBusy(false)
+    }
+  }
+
+  function activeSheetName(): string {
+    const current = runtime.current
+    return current ? current.adapter.workbook.getActiveSheet().getSheetName() : ''
+  }
+
+  /** Excel's tab-name rule: 1 to 31 characters, none of the path and glob set. */
+  function sheetNameProblem(name: string): string {
+    const trimmed = name.trim()
+    if (!trimmed || [...trimmed].length > 31) return '工作表名必须是 1 到 31 个字符'
+    if (/[/\\?*[\]:]/.test(trimmed) || trimmed.startsWith("'") || trimmed.endsWith("'")) {
+      return '工作表名不能包含 / \\ ? * [ ] : 或以单引号开头结尾'
+    }
+    return ''
+  }
+
+  async function renameActiveSheet(name: string) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || renameBusy) return
+    const sheetId = current.adapter.workbook.getActiveSheet().getSheetId()
+    const trimmed = name.trim()
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const problem = sheetNameProblem(trimmed)
+      if (problem) throw new Error(problem)
+      if (trimmed === activeSheetName()) throw new Error('新名称必须与当前工作表名不同')
+      setRenameBusy(true)
+      setStatus('正在重命名工作表…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/34', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.sheet.rename', sheetId, name: trimmed }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了工作表重命名')
+      await current.adapter.refreshFromServer()
+      current.adapter.renameSheet(sheetId, trimmed)
+      recordEdit(saved.revision, '重命名工作表')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setSheetNameDraft('')
+      setError('')
+      setStatus(`revision ${saved.revision} · 已重命名工作表 ${trimmed}`)
+    } catch (cause) {
+      setError(`重命名工作表失败：${String(cause)}`)
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
+  async function addWorksheet(name: string) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || addBusy || renameBusy) return
+    const trimmed = name.trim()
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      const problem = sheetNameProblem(trimmed)
+      if (problem) throw new Error(problem)
+      // HCD compares tab names without regard to case, so the button checks the
+      // same way instead of letting the server reject the patch.
+      if (current.client.sheets().some(({ sheetName }) =>
+        sheetName.toLowerCase() === trimmed.toLowerCase())) {
+        throw new Error('已存在同名工作表')
+      }
+      setAddBusy(true)
+      setStatus('正在新增工作表…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/35', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.sheet.add', name: trimmed }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了工作表新增')
+      await current.adapter.refreshFromServer()
+      // HCD mints the tab's grid id, so the tab is found by name in the index
+      // the reload just fetched, and only where Univer has no tab for it yet.
+      const created = current.client.sheets().find(({ sheetId, sheetName }) =>
+        sheetName === trimmed && !current.adapter.workbook.getSheetBySheetId(sheetId))
+      if (!created) throw new Error('服务器已记录新增工作表，但索引里没有它')
+      await current.adapter.addSheet(trimmed, created.sheetId)
+      recordEdit(saved.revision, '新增工作表')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setSheetAddDraft('')
+      setError('')
+      setStatus(`revision ${saved.revision} · 已新增工作表 ${trimmed}`)
+    } catch (cause) {
+      setError(`新增工作表失败：${String(cause)}`)
+    } finally {
+      setAddBusy(false)
+    }
+  }
+
+  async function deleteActiveSheet() {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || deleteBusy) return
+    const sheet = current.adapter.workbook.getActiveSheet()
+    const sheetId = sheet.getSheetId()
+    const name = sheet.getSheetName()
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      // What the bundle holds decides whether a tab may go, not the tabs on
+      // screen: a hidden worksheet is still a tab, and a workbook left with no
+      // visible tab is not a file Excel opens.
+      const sheets = current.client.sheets()
+      const visible = sheets.filter(({ sheetState }) => sheetState === 'visible')
+      if (visible.length <= 1 && visible.some(({ sheetId: id }) => id === sheetId)) {
+        throw new Error('工作簿必须保留一个可见工作表')
+      }
+      if (!sheets.some(({ sheetId: id }) => id === sheetId)) {
+        throw new Error(`HCD 索引里没有工作表 ${name}`)
+      }
+      setDeleteBusy(true)
+      setStatus('正在删除工作表…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/36', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.sheet.delete', sheetId }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了工作表删除')
+      // The tab leaves the local workbook before the index reloads: the reload
+      // fetches the windows of whichever sheet is active, and after a deletion
+      // that has to be a sheet the document still has.
+      current.adapter.removeSheet(sheetId)
+      await current.adapter.refreshFromServer()
+      recordEdit(saved.revision, '删除工作表')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setError('')
+      setStatus(`revision ${saved.revision} · 已删除工作表 ${name}`)
+    } catch (cause) {
+      setError(`删除工作表失败：${String(cause)}`)
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  /** The band the worksheet on screen holds still, as Univer sees it right now. */
+  function currentFreeze(): { rows: number; columns: number } {
+    const current = runtime.current
+    if (!current) return { rows: 0, columns: 0 }
+    const freeze = current.adapter.workbook.getActiveSheet().getFreeze()
+    return { rows: freeze?.ySplit ?? 0, columns: freeze?.xSplit ?? 0 }
+  }
+
+  /**
+   * Hold the first `rows` rows and the first `columns` columns of the worksheet
+   * on screen still. Excel sets the split at the cell the cursor stands on, so
+   * the pane button reads it from there, and `0`/`0` lets the band go again.
+   */
+  async function freezeActiveSheet(rows: number, columns: number) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || freezeBusy) return
+    const sheet = current.adapter.workbook.getActiveSheet()
+    const name = sheet.getSheetName()
+    try {
+      if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (!Number.isInteger(rows) || rows < 0 || rows > 1_048_575) throw new Error('冻结行数须在 0 到 1048575 之间')
+      if (!Number.isInteger(columns) || columns < 0 || columns > 16_383) throw new Error('冻结列数须在 0 到 16383 之间')
+      setFreezeBusy(true)
+      setStatus('正在设置冻结窗格…')
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/45', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.sheet.freeze', sheetId: sheet.getSheetId(), rows, columns }] }),
+      })
+      const saved = await response.json() as { revision?: number; message?: string }
+      if (!response.ok || saved.revision === undefined) throw new Error(saved.message || '服务器拒绝了冻结窗格')
+      // The band moves on screen before the chunks reload, so the sheet already
+      // scrolls the way the saved file will once the reload lands. The reload
+      // carries the same split: HCD writes it into every window of the sheet.
+      if (rows > 0 || columns > 0) {
+        sheet.setFreeze({ startRow: rows, startColumn: columns, xSplit: columns, ySplit: rows })
+      } else {
+        sheet.cancelFreeze()
+      }
+      await current.adapter.refreshFromServer()
+      recordEdit(saved.revision, rows > 0 || columns > 0 ? '设置冻结窗格' : '取消冻结')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      setError('')
+      setStatus(rows > 0 || columns > 0
+        ? `revision ${saved.revision} · ${name} 已冻结前 ${rows} 行 ${columns} 列`
+        : `revision ${saved.revision} · ${name} 已取消冻结`)
+    } catch (cause) {
+      setError(`设置冻结窗格失败：${String(cause)}`)
+    } finally {
+      setFreezeBusy(false)
+    }
+  }
+
+  /** Freeze above and to the left of the cell the cursor stands on. */
+  function freezeAtSelection() {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || freezeBusy) return
+    const range = current.adapter.workbook.getActiveSheet().getActiveRange()
+    if (!range) { setError('请先选中要冻结区域右下方的单元格'); return }
+    if (range.getRow() === 0 && range.getColumn() === 0) {
+      setError('A1 的上方和左侧没有可冻结的行或列，请选中其他单元格')
+      return
+    }
+    void freezeActiveSheet(range.getRow(), range.getColumn())
   }
 
   async function appendRow() {
@@ -902,7 +1225,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => setSettingsOpen(true)}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button className={selectedCellLink()?.bold ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.bold} onClick={() => void saveCellFormat({ bold: !selectedCellLink()?.bold })}><LocalText source={"加粗"} /></button><button className={selectedCellLink()?.italic ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.italic} onClick={() => void saveCellFormat({ italic: !selectedCellLink()?.italic })}><LocalText source={"斜体"} /></button><button className={selectedCellLink()?.underline ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.underline} onClick={() => void saveCellFormat({ underline: !selectedCellLink()?.underline })}><LocalText source={"下划线"} /></button><label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="409" step="0.5" value={cellFontSize} disabled={!editing || formatBusy} onChange={event => setCellFontSize(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || formatBusy || !Number.isFinite(Number(cellFontSize)) || Number(cellFontSize) < 1 || Number(cellFontSize) > 409} onClick={() => void saveCellFormat({ fontSizePt: Number(cellFontSize) })}><LocalText source={"应用字号"} /></button><label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={cellFontColor} disabled={!editing || formatBusy} onChange={event => setCellFontColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ color: cellFontColor })}><LocalText source={"应用颜色"} /></button><label><LocalText source={"填充"} /><input aria-label={localizeSource(locale, "填充")} type="color" value={cellFillColor} disabled={!editing || formatBusy} onChange={event => setCellFillColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ fill: cellFillColor })}><LocalText source={"应用填充"} /></button><button className={selectedCellLink()?.horizontal === 'left' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'left'} onClick={() => void saveCellLayout({ horizontal: 'left' })}><LocalText source={"左对齐"} /></button><button className={selectedCellLink()?.horizontal === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'center'} onClick={() => void saveCellLayout({ horizontal: 'center' })}><LocalText source={"居中"} /></button><button className={selectedCellLink()?.horizontal === 'right' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'right'} onClick={() => void saveCellLayout({ horizontal: 'right' })}><LocalText source={"右对齐"} /></button><button className={selectedCellLink()?.vertical === 'top' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'top'} onClick={() => void saveCellLayout({ vertical: 'top' })}><LocalText source={"顶端对齐"} /></button><button className={selectedCellLink()?.vertical === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'center'} onClick={() => void saveCellLayout({ vertical: 'center' })}><LocalText source={"垂直居中"} /></button><button className={selectedCellLink()?.vertical === 'bottom' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'bottom'} onClick={() => void saveCellLayout({ vertical: 'bottom' })}><LocalText source={"底端对齐"} /></button><button className={selectedCellLink()?.wrap ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.wrap} onClick={() => void saveCellLayout({ wrap: !selectedCellLink()?.wrap })}><LocalText source={"自动换行"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'thin' })}><LocalText source={"所有框线"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'none' })}><LocalText source={"无框线"} /></button><label><LocalText source={"数字格式 "} /><select aria-label={localizeSource(locale, "数字格式")} value={cellNumberFormat} disabled={!editing || formatBusy} onChange={event => setCellNumberFormat(event.target.value)}><option value="General">{localizeSource(locale, "常规")}</option><option value="0.00">{localizeSource(locale, "数值")}</option><option value="#,##0.00">{localizeSource(locale, "会计数值")}</option><option value="0%">{localizeSource(locale, "百分比")}</option><option value="0.00E+00">{localizeSource(locale, "科学计数")}</option><option value="yyyy-mm-dd">{localizeSource(locale, "日期")}</option><option value="@">{localizeSource(locale, "文本")}</option></select></label><label><LocalText source={"格式代码 "} /><input aria-label={localizeSource(locale, "格式代码")} value={cellNumberFormat} disabled={!editing || formatBusy} maxLength={1024} onChange={event => setCellNumberFormat(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellNumberFormat(cellNumberFormat)}><LocalText source={"应用数字格式"} /></button><label><LocalText source={"工作表名 "} /><input aria-label={localizeSource(locale, "工作表名")} value={sheetNameDraft} disabled={!editing || renameBusy} maxLength={31} onFocus={() => setSheetNameDraft(previous => previous || activeSheetName())} onChange={event => setSheetNameDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "重命名当前工作表，公式与内部链接会跟随新名称")} disabled={!editing || renameBusy || addBusy || formatBusy || !sheetNameDraft.trim()} onClick={() => void renameActiveSheet(sheetNameDraft)}><LocalText source={"重命名工作表"} /></button><label><LocalText source={"新增工作表名 "} /><input aria-label={localizeSource(locale, "新增工作表名")} value={sheetAddDraft} disabled={!editing || addBusy} maxLength={31} onChange={event => setSheetAddDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "在工作簿末尾新增一个空白工作表")} disabled={!editing || addBusy || renameBusy || formatBusy || !sheetAddDraft.trim()} onClick={() => void addWorksheet(sheetAddDraft)}><LocalText source={"新增工作表"} /></button><button title={localizeSource(locale, "删除当前工作表，它的单元格一并删除，引用它的公式变为 #REF!")} disabled={!editing || deleteBusy || addBusy || renameBusy || formatBusy} onClick={() => void deleteActiveSheet()}><LocalText source={"删除工作表"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一行，已经冻结的列保持不变")} className={currentFreeze().rows > 0 ? 'primary' : ''} aria-pressed={currentFreeze().rows > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(1, currentFreeze().columns)}><LocalText source={"冻结首行"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一列，已经冻结的行保持不变")} className={currentFreeze().columns > 0 ? 'primary' : ''} aria-pressed={currentFreeze().columns > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(currentFreeze().rows, 1)}><LocalText source={"冻结首列"} /></button><button title={localizeSource(locale, "在选中单元格的上方和左侧冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={freezeAtSelection}><LocalText source={"冻结窗格"} /></button><button title={localizeSource(locale, "取消当前工作表的冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy || !currentFreeze().rows && !currentFreeze().columns} onClick={() => void freezeActiveSheet(0, 0)}><LocalText source={"取消冻结"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
       {activeTab === 'insert' && <><div className="tool-group">
         {gridSelectionKind !== 'column' && gridSelectionKind !== 'all' && <>
           <label className="xlsx-insert-count"><LocalText source={"插入行数 "} /><input aria-label={localizeSource(locale, "插入行数")} type="number" min="1" max="100" step="1" value={rowInsertCount} disabled={!editing || rowBusy} onChange={event => { setRowInsertCount(event.target.value); if (error.includes('插入行数必须')) setError('') }} /></label>

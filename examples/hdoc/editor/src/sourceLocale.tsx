@@ -23,6 +23,30 @@ const sourceEn: Record<string, string> = {
   '保留源 PDF（修订位置近似）': 'Preserve source PDF (edit positions approximate)',
   '预览导出 PDF': 'Preview exported PDF', '下载文件': 'Download file',
   '撤销（⌘/Ctrl+Z）': 'Undo (⌘/Ctrl+Z)',
+  '文字格式': 'Text formatting', '加粗': 'Bold', '斜体': 'Italic', '下划线': 'Underline',
+  '字号': 'Font size', '应用字号': 'Apply size', '颜色': 'Color', '文字颜色': 'Text color',
+  '应用颜色': 'Apply color', '填充': 'Fill', '应用填充': 'Apply fill',
+  '左对齐': 'Align left', '居中': 'Center', '右对齐': 'Align right',
+  '顶端对齐': 'Align top', '垂直居中': 'Middle align', '底端对齐': 'Align bottom',
+  '两端对齐': 'Justify', '分散对齐': 'Distribute', '形状对齐': 'Shape alignment',
+  '自动换行': 'Wrap text', '所有框线': 'All borders', '无框线': 'No border',
+  '数字格式': 'Number format', '数字格式 ': 'Number format ', '常规': 'General', '数值': 'Number',
+  '会计数值': 'Accounting', '百分比': 'Percent', '科学计数': 'Scientific', '日期': 'Date',
+  '文本': 'Text', '格式代码': 'Format code', '格式代码 ': 'Format code ',
+  '应用数字格式': 'Apply number format',
+  '工作表名': 'Sheet name', '工作表名 ': 'Sheet name ',
+  '重命名工作表': 'Rename sheet',
+  '重命名当前工作表，公式与内部链接会跟随新名称': 'Rename the active sheet. Formulas and internal links follow the new name',
+  '新增工作表名': 'New sheet name', '新增工作表名 ': 'New sheet name ',
+  '新增工作表': 'Insert sheet',
+  '在工作簿末尾新增一个空白工作表': 'Add a blank worksheet at the end of the workbook',
+  '删除工作表': 'Delete sheet',
+  '✕ 删除': '✕ Remove', '删除这一页幻灯片': 'Delete this slide',
+  '↑ 上移': '↑ Up', '↓ 下移': '↓ Down',
+  '把这一页上移一位': 'Move this slide up one place', '把这一页下移一位': 'Move this slide down one place',
+  '⧉ 复制': '⧉ Duplicate', '把这一页复制一份': 'Duplicate this slide',
+  '删除当前工作表，它的单元格一并删除，引用它的公式变为 #REF!': 'Delete the active sheet. Its cells go with it, and formulas that named it read #REF!',
+  '点击文字原位编辑 · 选中后可设置加粗、斜体、下划线、字号、颜色和整个文字框的对齐，并拖动调整位置': 'Click text to edit it in place. Select it to set bold, italic, underline, size, color, and how the whole box aligns, then drag to move it',
   '重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）': 'Redo (⌘/Ctrl+Shift+Z or Ctrl+Y)',
   '显示页面目录': 'Show page outline', '步': ' steps',
   '保存修改': 'Save changes', '删除文字框': 'Delete text box', '保存新增文字': 'Save new text',
@@ -43,6 +67,17 @@ const sourceEn: Record<string, string> = {
   '合并单元格': 'Merge cells', '拆分单元格': 'Unmerge cells', '列宽': 'Column width',
   '选中列宽度': 'Selected column width', '设置列宽': 'Set column width', '行高': 'Row height',
   '选中行高度': 'Selected row height', '设置行高': 'Set row height',
+  '冻结首行': 'Freeze top row', '冻结首列': 'Freeze first column',
+  '冻结窗格': 'Freeze panes', '取消冻结': 'Unfreeze panes', '设置冻结窗格': 'Freeze panes',
+  '冻结当前工作表的第一行，已经冻结的列保持不变': 'Freeze the top row of the active sheet. Frozen columns stay as they are',
+  '冻结当前工作表的第一列，已经冻结的行保持不变': 'Freeze the first column of the active sheet. Frozen rows stay as they are',
+  '在选中单元格的上方和左侧冻结窗格': 'Freeze the rows above and the columns to the left of the selected cell',
+  '取消当前工作表的冻结窗格': 'Release the frozen band of the active sheet',
+  '正在设置冻结窗格…': 'Freezing panes…', '服务器拒绝了冻结窗格': 'The server rejected the frozen pane',
+  '冻结行数须在 0 到 1048575 之间': 'Frozen rows must be between 0 and 1048575',
+  '冻结列数须在 0 到 16383 之间': 'Frozen columns must be between 0 and 16383',
+  '请先选中要冻结区域右下方的单元格': 'Select the cell below and to the right of the band to freeze',
+  'A1 的上方和左侧没有可冻结的行或列，请选中其他单元格': 'Nothing to freeze above or left of A1. Select another cell',
   '双击单元格或按 F2 编辑 · 右键显示操作菜单 ·': 'Double-click a cell or press F2 to edit · Right-click for actions ·',
   '插入行数': 'Rows to insert', '在选中行前插入': 'Insert before selected row',
   '行': ' rows', '在选中行后插入': 'Insert after selected row',
@@ -235,7 +270,11 @@ const dynamicEn: Record<string, string> = {
   '上移段落': 'Move paragraph up', '下移段落': 'Move paragraph down',
   '编辑文字': 'Edit text', '编辑文字：': 'Edit text: ',
   '调整文字框位置': 'Move text box', '调整 PDF 文字框位置': 'Move PDF text box',
-  '新增文字框': 'Add text box', '幻灯片目录': 'Slide outline', '页面目录': 'Page outline',
+  '设置文字格式': 'Set text format', '设置形状对齐': 'Align shape',
+  '新增文字框': 'Add text box', '新增幻灯片': 'Add slide',
+  '删除幻灯片': 'Delete slide', '上移幻灯片': 'Move slide up', '下移幻灯片': 'Move slide down',
+  '复制幻灯片': 'Duplicate slide',
+  '幻灯片目录': 'Slide outline', '页面目录': 'Page outline',
   '编辑单元格': 'Edit cell', '新增行': 'Add rows', '列': 'column',
   '插入或删除多行列': 'Insert or delete rows and columns',
   '插入行': 'Insert rows', '插入列': 'Insert columns',
@@ -266,6 +305,7 @@ const dynamicEn: Record<string, string> = {
   '在上方插入 ': 'Insert above: ', '在下方插入 ': 'Insert below: ',
   ' · 已合并 ': ' · Merged ', ' · 已拆分 ': ' · Unmerged ',
   ' · 已新增第 ': ' · Added row ',
+  '设置冻结窗格失败：': 'Freezing panes failed: ',
 }
 
 const orderedEn = Object.entries(dynamicEn).sort((a, b) => b[0].length - a[0].length)
@@ -281,6 +321,16 @@ export function localizeDynamic(locale: EditorLocale, source: string): string {
   if (match) return `Page ${match[1]}`
   match = /^revision (\d+) · 已(删除|新增|撤销)第 (\d+) (行|列)$/.exec(source)
   if (match) return `Revision ${match[1]} · ${match[2] === '删除' ? 'Deleted' : match[2] === '新增' ? 'Added' : 'Removed'} ${match[4] === '行' ? 'row' : 'column'} ${match[3]}`
+  match = /^revision (\d+) · (.+) 已冻结前 (\d+) 行 (\d+) 列$/.exec(source)
+  if (match) {
+    const band = [[match[3], 'row'], [match[4], 'column']]
+      .filter(([count]) => Number(count) > 0)
+      .map(([count, unit]) => `${count} ${unit}${count === '1' ? '' : 's'}`)
+      .join(' and ')
+    return `Revision ${match[1]} · ${match[2]}: froze ${band}`
+  }
+  match = /^revision (\d+) · (.+) 已取消冻结$/.exec(source)
+  if (match) return `Revision ${match[1]} · ${match[2]}: unfrozen`
   let result = source
   for (const [original, translated] of orderedEn) result = result.replaceAll(original, translated)
   return result

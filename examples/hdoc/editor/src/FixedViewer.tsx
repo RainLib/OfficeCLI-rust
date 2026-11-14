@@ -16,9 +16,66 @@ type Manifest = { chunkCount: number; indexPageCount: number; revision: number; 
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
 type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
 type PdfGeometry = { xPt: number; yPt: number; widthPt: number; heightPt: number }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
+type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; runBold?: boolean; runItalic?: boolean; runUnderline?: boolean; runFontSizePt?: number; runColor?: string; shapeHorizontal?: PptxHorizontalAlign; shapeVertical?: PptxVerticalAlign }
+type PptxRunFormat = { bold?: boolean; italic?: boolean; underline?: boolean; fontSizePt?: number; color?: string }
+type PptxHorizontalAlign = 'left' | 'center' | 'right' | 'justify' | 'distributed'
+type PptxVerticalAlign = 'top' | 'center' | 'bottom'
+type PptxShapeAlign = { horizontal?: PptxHorizontalAlign; vertical?: PptxVerticalAlign }
 type ShapeDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PptxGeometry; current: PptxGeometry; shape: HTMLElement }
 type PdfDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PdfGeometry; current: PdfGeometry; shape: HTMLElement; pointsPerPixel: number }
+function cssDeclaration(style: string, property: string): string | undefined {
+  for (const part of style.split(';')) {
+    const splitAt = part.indexOf(':')
+    if (splitAt < 0) continue
+    if (part.slice(0, splitAt).trim().toLowerCase() === property) return part.slice(splitAt + 1).trim()
+  }
+  return undefined
+}
+function pptxRunStyle(element: Element | undefined): Pick<TextNode, 'runBold' | 'runItalic' | 'runUnderline' | 'runFontSizePt' | 'runColor'> {
+  const run = element?.closest('.hcd-ppt-run, .hcd-slide-text')
+  const style = run?.getAttribute('style') || ''
+  const flag = (name: string, fallback: boolean) => {
+    const value = element?.getAttribute(name)
+    return value === '1' ? true : value === '0' ? false : fallback
+  }
+  const sizeText = element?.getAttribute('data-hcd-font-size-pt') || cssDeclaration(style, 'font-size')?.replace(/pt$/, '')
+  const size = Number(sizeText)
+  const storedColor = element?.getAttribute('data-hcd-color')
+  const cssColor = cssDeclaration(style, 'color')
+  const color = storedColor ? `#${storedColor}` : cssColor?.startsWith('#') ? cssColor : undefined
+  return {
+    runBold: flag('data-hcd-bold', ['700', 'bold'].includes(cssDeclaration(style, 'font-weight') || '')),
+    runItalic: flag('data-hcd-italic', cssDeclaration(style, 'font-style') === 'italic'),
+    runUnderline: flag('data-hcd-underline', (cssDeclaration(style, 'text-decoration') || '').includes('underline')),
+    runFontSizePt: Number.isFinite(size) && size >= 1 && size <= 256 ? size : undefined,
+    runColor: color,
+  }
+}
+const pptxHorizontalTokens: PptxHorizontalAlign[] = ['left', 'center', 'right', 'justify', 'distributed']
+const pptxVerticalTokens: PptxVerticalAlign[] = ['top', 'center', 'bottom']
+const cssToPptxHorizontal: Record<string, PptxHorizontalAlign> = { left: 'left', center: 'center', right: 'right', justify: 'justify' }
+const cssToPptxVertical: Record<string, PptxVerticalAlign> = { 'flex-start': 'top', center: 'center', 'flex-end': 'bottom' }
+function pptxShapeAlign(element: Element | undefined): Pick<TextNode, 'shapeHorizontal' | 'shapeVertical'> {
+  const shape = element?.closest('.hcd-slide-shape')
+  if (!shape) return {}
+  // Alignment lives on the frame, not on the run under the cursor, so the box names
+  // its own axes once this editor touched it.
+  const token = <T extends string>(name: string, allowed: T[]): T | undefined =>
+    allowed.find(value => value === shape.getAttribute(name))
+  if (shape.getAttribute('data-hcd-align-edited') === 'true') {
+    return { shapeHorizontal: token('data-hcd-horizontal', pptxHorizontalTokens), shapeVertical: token('data-hcd-vertical', pptxVerticalTokens) }
+  }
+  // Before that the only record is the CSS the importer drew from the source shape,
+  // which folds distributed into justify and shows nothing when one box holds
+  // paragraphs that disagree.
+  const paragraphs = new Set(Array.from(shape.querySelectorAll('.hcd-slide-text'),
+    paragraph => cssDeclaration(paragraph.getAttribute('style') || '', 'text-align')))
+  const horizontal = paragraphs.size === 1 ? Array.from(paragraphs)[0] : undefined
+  return {
+    shapeHorizontal: horizontal ? cssToPptxHorizontal[horizontal] : undefined,
+    shapeVertical: cssToPptxVertical[cssDeclaration(shape.getAttribute('style') || '', 'justify-content') || ''],
+  }
+}
 function pptxGeometry(element: Element | null): PptxGeometry | undefined {
   if (!element?.classList.contains('hcd-slide-shape')) return undefined
   const values = ['data-hcd-x-emu', 'data-hcd-y-emu', 'data-hcd-width-emu', 'data-hcd-height-emu'].map(name => Number(element.getAttribute(name)))
@@ -43,6 +100,52 @@ type EditHistory = { head: number | null; past: EditStep[]; future: EditStep[] }
 function mergeDescriptors(previous: Descriptor[], incoming: Descriptor[]): Descriptor[] {
   return Array.from(new Map([...previous, ...incoming].map(item => [item.sequence, item])).values())
     .sort((left, right) => left.sequence - right.sequence)
+}
+
+function PptxRunFormatBar({ node, disabled, onApply }: { node: TextNode; disabled: boolean; onApply: (format: PptxRunFormat) => void }) {
+  const { locale } = useI18n()
+  const [size, setSize] = useState(node.runFontSizePt ? String(node.runFontSizePt) : '18')
+  const [color, setColor] = useState(node.runColor || '#112233')
+  useEffect(() => {
+    setSize(node.runFontSizePt ? String(node.runFontSizePt) : '18')
+    setColor(node.runColor || '#112233')
+  }, [node.nodeId, node.nodeHash, node.runFontSizePt, node.runColor])
+  const parsedSize = Number(size)
+  const sizeValid = Number.isFinite(parsedSize) && parsedSize >= 1 && parsedSize <= 256
+  return <div className="tool-group" aria-label={localizeSource(locale, "文字格式")}>
+    <button className={node.runBold ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runBold} onClick={() => onApply({ bold: !node.runBold })}><LocalText source={"加粗"} /></button>
+    <button className={node.runItalic ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runItalic} onClick={() => onApply({ italic: !node.runItalic })}><LocalText source={"斜体"} /></button>
+    <button className={node.runUnderline ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runUnderline} onClick={() => onApply({ underline: !node.runUnderline })}><LocalText source={"下划线"} /></button>
+    <label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="256" step="0.5" value={size} disabled={disabled || !node.editable} onChange={event => setSize(event.target.value)} style={{ width: 68 }} /></label>
+    <button disabled={disabled || !node.editable || !sizeValid || parsedSize === node.runFontSizePt} onClick={() => onApply({ fontSizePt: parsedSize })}><LocalText source={"应用字号"} /></button>
+    <label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={color} disabled={disabled || !node.editable} onChange={event => setColor(event.target.value)} /></label>
+    <button disabled={disabled || !node.editable || color.toLowerCase() === (node.runColor || '').toLowerCase()} onClick={() => onApply({ color })}><LocalText source={"应用颜色"} /></button>
+  </div>
+}
+
+function PptxShapeAlignBar({ node, disabled, onApply }: { node: TextNode; disabled: boolean; onApply: (align: PptxShapeAlign) => void }) {
+  const { locale } = useI18n()
+  // The whole box moves, so the button that already reads this value is greyed out
+  // rather than left to be refused by the patch.
+  const keys: Array<{ axis: 'horizontal' | 'vertical'; value: string; label: string }> = [
+    { axis: 'horizontal', value: 'left', label: '左对齐' },
+    { axis: 'horizontal', value: 'center', label: '居中' },
+    { axis: 'horizontal', value: 'right', label: '右对齐' },
+    { axis: 'horizontal', value: 'justify', label: '两端对齐' },
+    { axis: 'horizontal', value: 'distributed', label: '分散对齐' },
+    { axis: 'vertical', value: 'top', label: '顶端对齐' },
+    { axis: 'vertical', value: 'center', label: '垂直居中' },
+    { axis: 'vertical', value: 'bottom', label: '底端对齐' },
+  ]
+  const active = (key: { axis: 'horizontal' | 'vertical'; value: string }) =>
+    (key.axis === 'horizontal' ? node.shapeHorizontal : node.shapeVertical) === key.value
+  return <div className="tool-group" aria-label={localizeSource(locale, '形状对齐')}>
+    {keys.map(key => <button key={`${key.axis}-${key.value}`} className={active(key) ? 'primary' : ''}
+      disabled={disabled || !node.editable || active(key)} aria-pressed={active(key)}
+      onClick={() => onApply(key.axis === 'horizontal'
+        ? { horizontal: key.value as PptxHorizontalAlign }
+        : { vertical: key.value as PptxVerticalAlign })}><LocalText source={key.label} /></button>)}
+  </div>
 }
 
 export function FixedViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
@@ -317,6 +420,52 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(`${String(cause)}。请重新选择文字框后重试。`); return null }
     finally { setSaving(false) }
   }
+  async function saveRunFormat(node: TextNode, format: PptxRunFormat): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || !node.editable || draft !== node.text) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/30', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.run.format', nodeId: node.nodeId, format,
+            precondition: { nodeHash: node.nodeHash } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '设置文字格式')
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setSelected(null)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字后重试。`); return null }
+    finally { setSaving(false) }
+  }
+  async function saveShapeAlign(node: TextNode, align: PptxShapeAlign): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || !node.editable || draft !== node.text) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/46', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest?.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.shape.align', nodeId: node.nodeId, align,
+            precondition: { nodeHash: node.nodeHash } }] }),
+      })
+      const result = await response.json() as { revision: number }
+      recordEdit(result.revision, '设置形状对齐')
+      setManifest(previous => previous && ({ ...previous, revision: result.revision }))
+      collaboration.announceRevision(result.revision)
+      setSelected(null)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`${String(cause)}。请重新选择文字框后重试。`); return null }
+    finally { setSaving(false) }
+  }
   async function savePdfGeometry(node: TextNode, geometry: PdfGeometry): Promise<number | null> {
     if (session.format !== 'pdf' || readOnly || historical || saving || historyBusy || !node.pdfGeometry || draft !== node.text) return null
     setSaving(true)
@@ -422,6 +571,168 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     } catch (cause) { setError(String(cause)); return null }
     finally { setSaving(false) }
   }
+  async function addSlide(): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    // A new page reshuffles what the editor has loaded, so text that is still
+    // being typed is committed first and its revision becomes the patch base.
+    const base = await saveBeforeExport()
+    if (base === null) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/41', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: base,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.slide.add' }] }),
+      })
+      const result = await response.json() as { revision: number }
+      // A new slide is a page the editor never fetched, so the manifest and the
+      // last index page are read again instead of only bumping the revision.
+      const info = await api(session, '').then(current => current.json() as Promise<Manifest>)
+      // The new page always sits on the last index page, whether it joins the one
+      // that was already there or starts a page of its own.
+      const last = Math.max(0, info.indexPageCount - 1)
+      const index = await api(session, `/index/${last}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
+        .then(current => current.json() as Promise<{ chunks: Descriptor[] }>)
+      recordEdit(result.revision, '新增幻灯片')
+      setManifest(info)
+      collaboration.announceRevision(result.revision)
+      setDescriptors(previous => mergeDescriptors(previous, index.chunks))
+      // Pages load in order, so the count only moves when the page just read is
+      // the next one in line; a deck still being scrolled keeps its own frontier.
+      setLoadedPages(previous => (last === previous ? previous + 1 : previous))
+      setSelected(null)
+      setNewBox(null)
+      setNewDraft('')
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(String(cause)); return null }
+    finally { setSaving(false) }
+  }
+  async function deleteSlide(chunkId: string): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    // The page a deletion takes out is whichever one the row names, so text still
+    // being typed has to reach a revision before the patch asks for its base.
+    const base = await saveBeforeExport()
+    if (base === null) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/42', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: base,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.slide.delete', chunkId }] }),
+      })
+      const result = await response.json() as { revision: number }
+      // Every page after the one that left moves up by a chunk, so the index the
+      // editor holds is wrong as a whole rather than at one row: the pages it had
+      // loaded are read again and replace the list. The deck can also lose an
+      // index page, so the frontier is capped by what the manifest still has.
+      const info = await api(session, '').then(current => current.json() as Promise<Manifest>)
+      const pages = Math.min(loadedPages, info.indexPageCount)
+      const indexes = await Promise.all(Array.from({ length: pages }, (_, page) =>
+        api(session, `/index/${page}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
+          .then(current => current.json() as Promise<{ chunks: Descriptor[] }>)))
+      recordEdit(result.revision, '删除幻灯片')
+      setManifest(info)
+      collaboration.announceRevision(result.revision)
+      setDescriptors(indexes.flatMap(index => index.chunks))
+      setLoadedPages(pages)
+      setSelected(null)
+      setNewBox(null)
+      setNewDraft('')
+      setPlacingText(false)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`删除幻灯片失败：${String(cause)}`); return null }
+    finally { setSaving(false) }
+  }
+  async function moveSlide(chunkId: string, direction: 'up' | 'down'): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    // The page that moves is whichever one the row names, so text still being
+    // typed has to reach a revision before the patch asks for its base.
+    const base = await saveBeforeExport()
+    if (base === null) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/43', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: base,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.slide.reorder', chunkId, direction }] }),
+      })
+      const result = await response.json() as { revision: number }
+      // Two pages trade their places, so every row between them is numbered wrong
+      // rather than only the one that moved: the pages the editor had loaded are
+      // read again and replace the list. Nothing left the deck, so it keeps its
+      // chunk count and its index pages, and the frontier stays where it was.
+      const info = await api(session, '').then(current => current.json() as Promise<Manifest>)
+      const pages = Math.min(loadedPages, info.indexPageCount)
+      const indexes = await Promise.all(Array.from({ length: pages }, (_, page) =>
+        api(session, `/index/${page}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
+          .then(current => current.json() as Promise<{ chunks: Descriptor[] }>)))
+      recordEdit(result.revision, direction === 'up' ? '上移幻灯片' : '下移幻灯片')
+      setManifest(info)
+      collaboration.announceRevision(result.revision)
+      setDescriptors(indexes.flatMap(index => index.chunks))
+      setLoadedPages(pages)
+      setSelected(null)
+      setNewBox(null)
+      setNewDraft('')
+      setPlacingText(false)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`${direction === 'up' ? '上移' : '下移'}幻灯片失败：${String(cause)}`); return null }
+    finally { setSaving(false) }
+  }
+  async function duplicateSlide(chunkId: string): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    // The page that is duplicated is whichever one the row names, so text still
+    // being typed has to reach a revision before the patch asks for its base.
+    const base = await saveBeforeExport()
+    if (base === null) return null
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/44', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: base,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pptx.slide.copy', chunkId }] }),
+      })
+      const result = await response.json() as { revision: number }
+      // The copy is inserted right behind the page it came from, so every row
+      // after it is numbered wrong rather than only the one that was copied: the
+      // pages the editor had loaded are read again and replace the list. A copied
+      // page can also start an index page of its own, so a deck whose every chunk
+      // had arrived reads the whole of the new list, and one still being scrolled
+      // keeps its own frontier.
+      const info = await api(session, '').then(current => current.json() as Promise<Manifest>)
+      const pages = deckFullyLoaded ? info.indexPageCount : Math.min(loadedPages, info.indexPageCount)
+      const indexes = await Promise.all(Array.from({ length: pages }, (_, page) =>
+        api(session, `/index/${page}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
+          .then(current => current.json() as Promise<{ chunks: Descriptor[] }>)))
+      recordEdit(result.revision, '复制幻灯片')
+      setManifest(info)
+      collaboration.announceRevision(result.revision)
+      setDescriptors(indexes.flatMap(index => index.chunks))
+      setLoadedPages(pages)
+      setSelected(null)
+      setNewBox(null)
+      setNewDraft('')
+      setPlacingText(false)
+      setRefresh(previous => previous + 1)
+      return result.revision
+    } catch (cause) { setError(`复制幻灯片失败：${String(cause)}`); return null }
+    finally { setSaving(false) }
+  }
   function placeText(box: NewTextBox) {
     setSelected(null)
     setNewBox(box)
@@ -436,6 +747,14 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     setNewBox(null)
     setNewDraft('')
   }
+  // The rows a page can move from are its head: a slide whose table split repeats
+  // its section in a continuation, and a continuation is the same page, not a
+  // second one the deck could put somewhere else.
+  const slidePages = descriptors.filter(chunk => chunk.region === 'slide' && !chunk.continuation)
+  // Loading walks index pages in order, so the first row is the deck's first page
+  // however far the reader got; the last row is its last page only once every
+  // chunk has arrived, which is what puts a downward move out of reach.
+  const deckFullyLoaded = descriptors.length >= (manifest?.chunkCount ?? descriptors.length)
   return <div className={`workspace semantic-workspace fixed-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline ? '' : 'outline-hidden'} ${rightPanel ? '' : 'right-hidden'}`}>
     {layout.showHeader && <EditorHeader session={session} revision={displayedRevision} status={status} activeTab={activeTab}
       onTab={tab => { setActiveTab(tab); setPlacingText(false); if (tab === 'revisions') setRightPanel('revisions') }} onClose={() => void closeEditor()}
@@ -443,8 +762,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => setRightPanel('settings')}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={displayedRevision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div><span className="ribbon-note">{localizeDynamic(locale, session.format === 'pptx' ? '点击文字原位编辑 · 选中后拖动顶部把手移动、右下角调整尺寸' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消')}</span></>}
-      {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
+      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div>{session.format === 'pptx' && selected && <PptxRunFormatBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={format => void saveRunFormat(selected.node, format)} />}{session.format === 'pptx' && selected && <PptxShapeAlignBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={align => void saveShapeAlign(selected.node, align)} />}<span className="ribbon-note">{localizeDynamic(locale, session.format === 'pptx' ? '点击文字原位编辑 · 选中后可设置加粗、斜体、下划线、字号、颜色和整个文字框的对齐，并拖动调整位置' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消')}</span></>}
+      {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button>{session.format === 'pptx' && <button disabled={readOnly || historical || saving || historyBusy} onClick={() => void addSlide()}><LocalText source={"新增幻灯片"} /></button>}<span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : session.format === 'pptx' ? '新增幻灯片排在最后，放好后可以直接在上面新增文字框' : '新增文字框保留页面布局'}</span></>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示页面目录"} /></label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><button disabled={historyLocked || !canUndoSaved} onClick={() => travel('undo')}><LocalText source={"撤销 "} />{editHistory.past.length} <LocalText source={" 步"} /></button><button disabled={historyLocked || !canRedoSaved} onClick={() => travel('redo')}><LocalText source={"重做 "} />{editHistory.future.length} <LocalText source={" 步"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{manifest?.revision ?? '…'} · {editHistory.past.length ? `下一步可撤销：${editHistory.past.at(-1)?.label}` : '当前会话无已保存的可撤销步骤'}</span></>}
       {selected && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}><LocalText source={"保存修改"} /></button>}
@@ -453,7 +772,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {newBox && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || !newDraft.trim()} onClick={() => void saveNewBox(newBox, newDraft)}><LocalText source={"保存新增文字"} /></button>}
     </nav>}
     <div className="layout editor-layout">
-      {layout.showOutline && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</button>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
+      {layout.showOutline && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <div className="outline-entry" key={chunk.sequence}><button onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</button>{session.format === 'pptx' && chunk.region === 'slide' && !chunk.continuation && !readOnly && !historical && <><button className="outline-move" title={localizeSource(locale, "把这一页上移一位")} disabled={saving || historyBusy || slidePages[0]?.chunkId === chunk.chunkId} onClick={() => void moveSlide(chunk.chunkId, 'up')}><LocalText source={"↑ 上移"} /></button><button className="outline-move" title={localizeSource(locale, "把这一页下移一位")} disabled={saving || historyBusy || (deckFullyLoaded && slidePages[slidePages.length - 1]?.chunkId === chunk.chunkId)} onClick={() => void moveSlide(chunk.chunkId, 'down')}><LocalText source={"↓ 下移"} /></button><button className="outline-copy" title={localizeSource(locale, "把这一页复制一份")} disabled={saving || historyBusy} onClick={() => void duplicateSlide(chunk.chunkId)}><LocalText source={"⧉ 复制"} /></button><button className="outline-remove" title={localizeSource(locale, "删除这一页幻灯片")} disabled={saving || historyBusy} onClick={() => void deleteSlide(chunk.chunkId)}><LocalText source={"✕ 删除"} /></button></>}</div>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
       <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示页面目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
@@ -599,6 +918,7 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
           pdfGeometry: session.format === 'pdf' ? pdfGeometry(anchor) : undefined,
           fontSize: position?.fontSize, fontFamily: position?.fontFamily, fontWeight: position?.fontWeight,
           fontStyle: position?.fontStyle, color: position?.color, lineHeight: position?.lineHeight,
+          ...(session.format === 'pptx' ? { ...pptxRunStyle(element), ...pptxShapeAlign(element) } : {}),
         }
       })
       const hashes = Array.from(new Set(Array.from(chunk.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1])))

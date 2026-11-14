@@ -914,7 +914,26 @@ fn validate_patch_revision(
         .patch_id
         .as_deref()
         .is_some_and(|id| id.starts_with("restore-"));
-    let content_changed = !record.dirty_node_ids.is_empty() || !record.dirty_grid_parts.is_empty();
+    // A worksheet rename rewrites index chunks and the workbook sheet list, not a
+    // cell and not the worksheet part itself, so it is content without dirty sets.
+    // Creating a worksheet is the same shape: one new window chunk, no cell.
+    // Deleting one is the same shape turned around: chunks leave the index and
+    // their cells go with them, so the revision is content without a source part
+    // rewritten in place. A slide addition is the same shape as a worksheet
+    // addition: one new page chunk, no node yet. A slide deletion is a worksheet
+    // deletion turned around: the page leaves the index and its text nodes leave
+    // with it, and an empty slide leaves neither behind. A slide move is the one
+    // shape of its own: the index it rewrote says the same chunks in a different
+    // order, so there are no nodes and no source part, only chunks that moved.
+    let content_changed = !record.dirty_node_ids.is_empty()
+        || !record.dirty_grid_parts.is_empty()
+        || !record.sheet_renames.is_empty()
+        || !record.sheet_additions.is_empty()
+        || !record.sheet_removals.is_empty()
+        || !record.slide_additions.is_empty()
+        || !record.slide_removals.is_empty()
+        || !record.slide_reorders.is_empty()
+        || !record.slide_copies.is_empty();
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
             || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())

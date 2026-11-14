@@ -279,6 +279,13 @@ fn revision_record(
         grid_row_deletions: Vec::new(),
         grid_column_insertions: Vec::new(),
         grid_column_deletions: Vec::new(),
+        sheet_renames: Vec::new(),
+        sheet_additions: Vec::new(),
+        sheet_removals: Vec::new(),
+        slide_additions: Vec::new(),
+        slide_removals: Vec::new(),
+        slide_reorders: Vec::new(),
+        slide_copies: Vec::new(),
         structural_change,
     })
 }

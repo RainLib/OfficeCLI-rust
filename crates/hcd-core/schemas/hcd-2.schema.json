@@ -317,6 +317,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100000000
+        },
+        "sheetPart": {
+          "type": "string",
+          "pattern": "^xl/(worksheets|chartsheets)/[^/]+\\.xml$"
         }
       }
     },

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:32",
+  "title": "HTML Canonical Document XLSX cell alignment and borders",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/32" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["op", "nodeId", "layout", "precondition"],
+        "properties": {
+          "op": { "const": "xlsx.cell.layout" },
+          "nodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
+          "layout": {
+            "type": "object", "additionalProperties": false, "minProperties": 1,
+            "properties": {
+              "horizontal": { "enum": ["left", "center", "right"] },
+              "vertical": { "enum": ["top", "center", "bottom"] },
+              "wrap": { "type": "boolean" },
+              "border": { "enum": ["none", "thin"] }
+            }
+          },
+          "precondition": {
+            "type": "object", "additionalProperties": false,
+            "required": ["nodeHash"],
+            "properties": { "nodeHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+          }
+        }
+      }
+    }
+  }
+}
