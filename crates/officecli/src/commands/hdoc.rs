@@ -1,11 +1,12 @@
 use clap::{Args, Subcommand, ValueEnum};
 use handler_common::{HandlerError, OutputFormat};
 use hcd_core::{
-    hash_file, manifest_at_revision, render_standalone_html_with_transform, Bundle, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions, PatchBatch,
-    StorageCodec, HCD_SCHEMA_VERSION,
+    hash_file, manifest_at_revision, render_standalone_html_with_transform, theme_font_plan,
+    Bundle, DiskCatalog, FidelityLevel, FidelityReport, FidelityWarning, HcdError, HcdManifest,
+    HtmlPresentationOptions, PatchBatch, StorageCodec, ThemeEmbedKind, ThemeFontDecision,
+    HCD_SCHEMA_VERSION,
 };
-use hcd_formats::{ExportOptions, ImportOptions, PdfRasterMode};
+use hcd_formats::{apply_theme_fonts, ExportOptions, ImportOptions, PdfFaceOptions, PdfRasterMode};
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -327,6 +328,12 @@ pub struct HdocServeCommand {
     /// Optional S3-compatible endpoint environment variable
     #[arg(long, default_value = "HCD_S3_ENDPOINT")]
     pub s3_endpoint_env: String,
+    /// Font catalog directory. Defaults to <root>/catalog on the same machine.
+    #[arg(long)]
+    pub catalog: Option<PathBuf>,
+    /// Theme revision id pinned onto newly imported documents. Unset leaves imports unpinned.
+    #[arg(long, value_name = "themeRevisionId")]
+    pub default_theme: Option<String>,
 }
 
 #[derive(Args)]
@@ -361,6 +368,9 @@ pub enum HdocTokenScope {
     Read,
     Write,
     Upload,
+    /// Font catalog administrator. Pairs with `--document-id '*'` and unlocks
+    /// the `/v1/catalog` write API used by the management console.
+    Admin,
 }
 
 #[derive(Args)]
@@ -378,6 +388,9 @@ pub struct HdocExportCommand {
     pub revision: Option<u64>,
     #[arg(long)]
     pub fidelity_report: Option<PathBuf>,
+    /// Font catalog used to embed or register the document's pinned theme.
+    #[arg(long)]
+    pub catalog: Option<PathBuf>,
 }
 
 pub fn handle_hdoc(
@@ -1242,8 +1255,22 @@ fn export(
         revision: command.revision,
         fidelity_report: command.fidelity_report.clone(),
     };
-    let report = match command.source.as_deref() {
+    let theme_plan = theme_faces(
+        &bundle,
+        command.revision,
+        command.catalog.as_deref(),
+        &target,
+    )?;
+    let mut theme = ThemeExport {
+        plan: &theme_plan,
+        pdf: PdfFaceOptions::default(),
+    };
+    let mut report = match command.source.as_deref() {
         Some(source) if target == source_format => {
+            // The file is the document's own PDF, so the text on its pages is
+            // real text the pinned faces can take over where that is provably
+            // safe. A semantic export writes that text itself and says so.
+            theme.pdf.retarget_existing_text = target == "pdf";
             hcd_formats::export_document(&command.bundle, source, &command.output, &options)
                 .map_err(handler_error)?
         }
@@ -1254,8 +1281,13 @@ fn export(
             &target,
             command.revision,
             command.fidelity_report.as_deref(),
+            &mut theme,
         )?,
     };
+    attach_theme_fonts(&theme, Path::new(&command.output), &target, &mut report)?;
+    if let Some(path) = command.fidelity_report.as_deref() {
+        write_semantic_fidelity_report(path, &report)?;
+    }
     render(
         &report,
         format,
@@ -1264,6 +1296,72 @@ fn export(
             command.output, report.level
         ),
     )
+}
+
+/// The faces a pinned theme contributes to an export of this target, or an
+/// empty plan when there is nothing to pin.
+///
+/// Resolved *before* the export runs, because the semantic PDF path needs the
+/// bytes to lay its own body text out with, and the same plan is what
+/// [`attach_theme_fonts`] writes into the file afterwards. One resolution is
+/// what keeps the downloaded file and the fidelity report agreeing about which
+/// face is this document's.
+fn theme_faces(
+    bundle: &Bundle,
+    revision: Option<u64>,
+    catalog: Option<&Path>,
+    target: &str,
+) -> Result<Vec<ThemeFontDecision>, HandlerError> {
+    let Some(kind) = (match target {
+        "docx" | "pptx" => Some(ThemeEmbedKind::Ooxml),
+        "pdf" => Some(ThemeEmbedKind::Pdf),
+        "xlsx" => Some(ThemeEmbedKind::Spreadsheet),
+        _ => None,
+    }) else {
+        return Ok(Vec::new());
+    };
+    let Some(catalog) = catalog else {
+        return Ok(Vec::new());
+    };
+    let catalog = DiskCatalog::open(catalog).map_err(handler_error)?;
+    theme_font_plan(&catalog, bundle, revision, kind).map_err(handler_error)
+}
+
+/// A pinned theme's faces for one export, and what the writer did with them.
+///
+/// The plan is resolved once, before the file is written: the semantic PDF path
+/// lays its body text out in one of these faces, and the same plan is what
+/// [`apply_theme_fonts`] writes into the file's font tables afterwards.
+/// What the writer already did with the faces, and what it may do next, rides
+/// along as [`PdfFaceOptions`].
+#[derive(Default)]
+struct ThemeExport<'a> {
+    plan: &'a [ThemeFontDecision],
+    pdf: PdfFaceOptions,
+}
+
+/// Write the pinned theme's faces into the file that was just exported.
+fn attach_theme_fonts(
+    theme: &ThemeExport,
+    output: &Path,
+    target: &str,
+    report: &mut FidelityReport,
+) -> Result<(), HandlerError> {
+    if theme.plan.is_empty() {
+        return Ok(());
+    }
+    let applied =
+        apply_theme_fonts(output, target, theme.plan, theme.pdf).map_err(handler_error)?;
+    report.preserved.extend(applied.preserved);
+    report
+        .warnings
+        .extend(applied.warnings.into_iter().map(|message| FidelityWarning {
+            code: "HCD_THEME_FONT".to_string(),
+            message,
+            node_id: None,
+            source_part: None,
+        }));
+    Ok(())
 }
 
 fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, HandlerError> {
@@ -1305,6 +1403,11 @@ fn normalize_format(value: &str) -> String {
     }
 }
 
+/// Rebuild a revision as an Office or PDF file from its canonical HCD HTML.
+///
+/// `theme` carries the plan resolved by [`theme_faces`] for this target; the
+/// PDF path draws its body text in the face the theme pins and reports back
+/// which one it used, so the caller can carry those bytes once.
 fn semantic_export(
     bundle: &Bundle,
     head: &HcdManifest,
@@ -1312,6 +1415,7 @@ fn semantic_export(
     target: &str,
     requested_revision: Option<u64>,
     fidelity_report: Option<&Path>,
+    theme: &mut ThemeExport,
 ) -> Result<FidelityReport, HandlerError> {
     if !matches!(target, "docx" | "xlsx" | "pptx" | "pdf" | "md" | "txt") {
         return Err(HandlerError::UnsupportedMode(format!(
@@ -1389,10 +1493,12 @@ fn semantic_export(
         output_path,
         target,
         assets,
+        theme.plan,
     )?;
     let image_count = summary.image_count;
     let embedded_image_count = summary.embedded_image_count;
     let conversion_engine = summary.engine;
+    theme.pdf.drawn_by_writer = summary.pdf_body_face;
 
     let mut warnings = vec![FidelityWarning {
         code: "HCD_CROSS_FORMAT_SEMANTIC_EXPORT".to_string(),
@@ -1409,6 +1515,17 @@ fn semantic_export(
         node_id: None,
         source_part: None,
     }));
+    // A theme face the file carries but the body was not drawn in is the case
+    // an operator is most likely to ask about, so it says why in the same
+    // `HCD_THEME_FONT` stream the exporter's own font sentences use.
+    if let Some(note) = summary.pdf_body_face_note {
+        warnings.push(FidelityWarning {
+            code: "HCD_THEME_FONT".to_string(),
+            message: note,
+            node_id: None,
+            source_part: None,
+        });
+    }
     let mut preserved = vec![
         format!("canonical HCD revision {revision} text in chunk sequence order"),
         format!(
@@ -1425,6 +1542,16 @@ fn semantic_export(
     if embedded_image_count > 0 {
         preserved.push(format!(
             "{embedded_image_count} of {image_count} content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
+        ));
+    }
+    if summary.pinned_font_paragraphs > 0 {
+        let split = match summary.pinned_font_split_paragraphs {
+            0 => String::new(),
+            splits => format!("; {splits} slide paragraph(s) were split by line to carry them"),
+        };
+        preserved.push(format!(
+            "block fonts pinned by text.font on {} generated paragraph(s){split}",
+            summary.pinned_font_paragraphs
         ));
     }
     let report = FidelityReport {
@@ -1579,7 +1706,7 @@ fn handler_error(error: HcdError) -> HandlerError {
         HcdError::InvalidBundle(message) | HcdError::SourceMismatch(message) => {
             HandlerError::ValidationError(message)
         }
-        HcdError::NodeNotFound(node) => HandlerError::PathNotFound(node),
+        HcdError::NodeNotFound(node) | HcdError::NotFound(node) => HandlerError::PathNotFound(node),
         HcdError::Unsupported(message) => HandlerError::UnsupportedMode(message),
         HcdError::Io(error) => HandlerError::IoError(error),
         other => HandlerError::OperationFailed(other.to_string()),

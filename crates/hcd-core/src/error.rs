@@ -12,6 +12,8 @@ pub enum HcdError {
     RevisionConflict(String),
     #[error("node not found: {0}")]
     NodeNotFound(String),
+    #[error("not found: {0}")]
+    NotFound(String),
     #[error("node precondition failed: {0}")]
     PreconditionFailed(String),
     #[error("resource limit exceeded: {0}")]

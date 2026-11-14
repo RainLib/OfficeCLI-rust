@@ -60,6 +60,10 @@ pub struct HcdManifest {
     pub index_page_count: usize,
     pub chunk_count: usize,
     pub styles_href: String,
+    /// Immutable font-catalog theme pinned to this head.
+    /// Historical revisions keep the id stored on their own revision record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision_id: Option<String>,
     pub capabilities: HcdCapabilities,
     /// Import-time fidelity contract for the canonical HTML representation.
     /// A source-backed export can still preserve opaque package parts exactly.
@@ -345,6 +349,33 @@ pub enum PatchOperation {
         start: usize,
         delete_count: usize,
         insert_text: String,
+        precondition: NodePrecondition,
+    },
+    /// Assign a font family to the whole editable text node (paragraph/run block),
+    /// by script slot. This writes the canonical `data-hcd-font*` attributes and an
+    /// inline `font-family` style onto the node so HCD preview and pure-Rust semantic
+    /// export use the chosen face; it does not change the node's extracted text, so
+    /// the precondition node hash is the unchanged text hash. Source-backed
+    /// (`--source`) DOCX export writes the slots onto the mapped run's `w:rFonts`,
+    /// and PPTX export onto its `a:latin` / `a:ea` / `a:cs`. XLSX and PDF source
+    /// export still reject a revision that carries this change rather than silently
+    /// dropping the font, mirroring the `node.style` contract.
+    #[serde(rename = "text.font", rename_all = "camelCase")]
+    TextFont {
+        node_id: String,
+        font: FontPatch,
+        precondition: NodePrecondition,
+    },
+    /// Remove a `text.font` pin from one canonical text node. Omitting a slot in
+    /// `text.font` cannot do this, because that operation always pins at least one
+    /// face; this one drops the whole pin, so the node falls back to the face it
+    /// had before: its source run font on a `--source` export, the theme slots
+    /// otherwise. Only a node carrying `data-hcd-font-patched` can be cleared, so
+    /// a face that came from the source document is never rewritten. The node's
+    /// text is unchanged, so the precondition stays the unchanged text hash.
+    #[serde(rename = "text.font.clear", rename_all = "camelCase")]
+    TextFontClear {
+        node_id: String,
         precondition: NodePrecondition,
     },
     /// Add a positioned editable text box to a raster-backed PDF page.
@@ -641,6 +672,8 @@ impl PatchOperation {
     pub fn node_id(&self) -> Option<&str> {
         match self {
             Self::TextSplice { node_id, .. }
+            | Self::TextFont { node_id, .. }
+            | Self::TextFontClear { node_id, .. }
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
@@ -690,6 +723,8 @@ impl PatchOperation {
         matches!(
             self,
             Self::TextSplice { .. }
+                | Self::TextFont { .. }
+                | Self::TextFontClear { .. }
                 | Self::PdfTextInsert { .. }
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
@@ -769,6 +804,24 @@ pub struct ImageGeometry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VisualPrecondition {
     pub visual_hash: String,
+}
+
+/// Font family slots requested by a `text.font` operation. At least one slot
+/// must be present. Values are validated to a plain, safe CSS font-family token
+/// (no quotes, semicolons, `<`, `>`, or control characters) before they reach the
+/// node's inline style. `latin` is the primary face written to `font-family`.
+///
+/// The same three slots describe the face an editor block carries, so a block
+/// font and a pinned run font travel through the code as one type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FontPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asia: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bidi: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -853,6 +906,9 @@ pub struct RevisionRecord {
     pub author_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_name: Option<String>,
+    /// Catalog theme pinned when this revision was written. Older records omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision_id: Option<String>,
     pub root_hash: String,
     pub annotation_root_hash: String,
     pub index_prefix: String,
@@ -866,6 +922,11 @@ pub struct RevisionRecord {
     /// field and resolve to the original `assets/index.json`.
     #[serde(default = "default_asset_index_href")]
     pub asset_index_href: String,
+    /// Stylesheet committed into this revision's body root. Documents written
+    /// before theme pinning and content-only revisions keep `styles.css`; a
+    /// theme pin records a pinned stylesheet here so history stays verifiable.
+    #[serde(default = "default_styles_href")]
+    pub styles_href: String,
     pub created_at_epoch_ms: u128,
     #[serde(default)]
     pub dirty_node_ids: Vec<String>,
@@ -1030,6 +1091,10 @@ fn is_false(value: &bool) -> bool {
 
 fn default_asset_index_href() -> String {
     "assets/index.json".to_string()
+}
+
+fn default_styles_href() -> String {
+    "styles.css".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

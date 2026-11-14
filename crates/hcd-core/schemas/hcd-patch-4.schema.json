@@ -38,8 +38,25 @@
       "properties": {
         "kind": { "enum": ["paragraph", "heading", "list_item"] },
         "level": { "type": "integer", "minimum": 0, "maximum": 6 },
+        "font": { "$ref": "#/$defs/blockFont" },
         "inlines": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/inline" } }
       }
+    },
+    "blockFont": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Script faces pinned on the whole block. The same three slots a text.font operation takes, with the same limits the server enforces.",
+      "properties": {
+        "latin": { "$ref": "#/$defs/fontFamily" },
+        "eastAsia": { "$ref": "#/$defs/fontFamily" },
+        "bidi": { "$ref": "#/$defs/fontFamily" }
+      }
+    },
+    "fontFamily": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "description": "One font family. maxLength counts characters; the server caps the value at 128 bytes.",
+      "pattern": "^[^<>\"';:&\\x00-\\x1F\\x7F]+$"
     },
     "insert": {
       "type": "object", "additionalProperties": false, "required": ["op", "block", "afterBlockId"],

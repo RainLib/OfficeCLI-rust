@@ -1,7 +1,7 @@
 use crate::common::{
     base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
     escape_attribute, escape_text, finish_import, source_identity, source_identity_with_extensions,
-    write_fidelity_report, ExportOptions, ImportOptions,
+    write_fidelity_report, ExportOptions, ImportOptions, RunFontSupport,
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
@@ -2292,7 +2292,8 @@ fn export_textual(
         )));
     }
     validate_target_extension(target, format)?;
-    let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
+    let (manifest, _, dirty_parts, dirty_node_ids) =
+        checked_export_state(bundle, source, options, RunFontSupport::Rejects)?;
     if manifest.source.format != format {
         return Err(HcdError::InvalidBundle(format!(
             "bundle source format is {}, expected {format}",

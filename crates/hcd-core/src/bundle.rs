@@ -530,6 +530,26 @@ impl Bundle {
         atomic_write_json(&self.root.join("manifest.json"), manifest)
     }
 
+    /// Write a managed stylesheet part (for example a pinned theme) under the
+    /// given href and return that href. The CSS is validated first so an
+    /// invalid stylesheet can never be committed into a revision's body root.
+    pub fn write_styles_part(&self, href: &str, styles: &str) -> Result<String, HcdError> {
+        crate::html::validate_css_text(styles)?;
+        let path = self.resolve_href(href)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        atomic_write(&path, styles.as_bytes())?;
+        Ok(href.to_string())
+    }
+
+    /// Read the stylesheet committed at `href` (the global `styles.css` or a
+    /// managed theme part).
+    pub fn read_styles_part(&self, href: &str) -> Result<String, HcdError> {
+        let path = self.resolve_href(href)?;
+        crate::bundle::read_text_bounded(&path, MAX_CONTROL_PART_BYTES, "HCD stylesheet")
+    }
+
     pub(crate) fn acquire_write_lock(&self) -> Result<BundleWriteGuard, HcdError> {
         let path = self.root.join(".hcd-write-lock");
         let mut lock = fs::OpenOptions::new()
@@ -799,8 +819,12 @@ impl BundleWriter {
         let bundle = Bundle {
             root: self.root.clone(),
         };
-        manifest.root_hash =
-            finalize_root_hash(&bundle, self.root_hasher.clone(), "assets/index.json")?;
+        manifest.root_hash = finalize_root_hash(
+            &bundle,
+            self.root_hasher.clone(),
+            "assets/index.json",
+            "styles.css",
+        )?;
         manifest.annotation_root_hash = hash_bytes(b"[]");
         manifest.annotation_href = None;
         manifest.index_prefix = "indexes/rev-00000000000000000000".to_string();
@@ -821,6 +845,7 @@ impl BundleWriter {
             patch_base_revision: None,
             author_id: None,
             author_name: None,
+            theme_revision_id: manifest.theme_revision_id.clone(),
             root_hash: manifest.root_hash.clone(),
             annotation_root_hash: manifest.annotation_root_hash.clone(),
             index_prefix: manifest.index_prefix.clone(),
@@ -828,6 +853,7 @@ impl BundleWriter {
             index_page_count: Some(manifest.index_page_count),
             chunk_count: Some(manifest.chunk_count),
             asset_index_href: "assets/index.json".to_string(),
+            styles_href: manifest.styles_href.clone(),
             created_at_epoch_ms: now_epoch_ms(),
             dirty_node_ids: Vec::new(),
             removed_node_ids: Vec::new(),
@@ -1097,15 +1123,17 @@ pub(crate) fn hash_descriptor(hasher: &mut Sha256, descriptor: &ChunkDescriptor)
 }
 
 /// Finish the revision body root from canonical HTML/map descriptors plus the
-/// immutable rendering inputs shared by every revision. Annotations are
-/// intentionally excluded and use `annotationRootHash` instead.
+/// rendering inputs committed to that revision (its stylesheet and asset
+/// index). Annotations are intentionally excluded and use
+/// `annotationRootHash` instead.
 pub(crate) fn finalize_root_hash(
     bundle: &Bundle,
     descriptor_hasher: Sha256,
     asset_index_href: &str,
+    styles_href: &str,
 ) -> Result<String, HcdError> {
     let descriptor_digest = descriptor_hasher.finalize();
-    let styles = crate::hash::hash_file(&bundle.resolve_href("styles.css")?)?;
+    let styles = crate::hash::hash_file(&bundle.resolve_href(styles_href)?)?;
     let assets = crate::hash::hash_file(&bundle.resolve_href(asset_index_href)?)?;
     let mut root = Sha256::new();
     root.update(b"officecli-hcd-body-root/1\0");
@@ -1239,6 +1267,7 @@ mod tests {
             index_page_count: 0,
             chunk_count: 0,
             styles_href: String::new(),
+            theme_revision_id: None,
             capabilities: HcdCapabilities::default(),
             fidelity: None,
             state: String::new(),
@@ -1306,6 +1335,7 @@ mod tests {
             index_page_count: 0,
             chunk_count: 0,
             styles_href: String::new(),
+            theme_revision_id: None,
             capabilities: HcdCapabilities::default(),
             fidelity: None,
             state: String::new(),

@@ -3056,6 +3056,7 @@ where
         index_page_count: 0,
         chunk_count: 0,
         styles_href: "styles.css".to_string(),
+        theme_revision_id: None,
         capabilities: HcdCapabilities::default(),
         fidelity: Some(FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),

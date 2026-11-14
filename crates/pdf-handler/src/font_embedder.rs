@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use handler_common::HandlerError;
@@ -51,7 +51,7 @@ pub fn font_file_missing_chars(
             path.display()
         ))
     })?;
-    font_bytes_missing_chars(&font_bytes, chars_needed).map_err(|error| {
+    first_face_missing_chars(&font_bytes, chars_needed).map_err(|error| {
         HandlerError::OperationFailed(format!(
             "failed to parse font file '{}': {error}",
             path.display()
@@ -63,11 +63,27 @@ pub fn font_file_missing_chars(
 pub fn bundled_font_missing_chars(
     chars_needed: &HashSet<char>,
 ) -> Result<HashSet<char>, HandlerError> {
-    font_bytes_missing_chars(BUNDLED_NOTO, chars_needed)
+    first_face_missing_chars(BUNDLED_NOTO, chars_needed)
         .map_err(|error| HandlerError::OperationFailed(format!("bundled font: {error}")))
 }
 
-fn font_bytes_missing_chars(
+/// Return the requested characters that the first face in these font bytes cannot draw.
+///
+/// A renderer that lays a whole document out in one family has to ask this
+/// before it commits: a character the face cannot draw comes out as a blank
+/// box, and the pure-Rust print backend has no per-glyph fallback to another
+/// registered family. Glyph 0 — the notdef outline — counts as *not* drawable,
+/// because a mapped-but-empty glyph is exactly the hole this question is asked
+/// to avoid.
+pub fn font_bytes_missing_chars(
+    font_bytes: &[u8],
+    chars_needed: &HashSet<char>,
+) -> Result<HashSet<char>, HandlerError> {
+    first_face_missing_chars(font_bytes, chars_needed)
+        .map_err(|error| HandlerError::OperationFailed(format!("font bytes: {error}")))
+}
+
+fn first_face_missing_chars(
     font_bytes: &[u8],
     chars_needed: &HashSet<char>,
 ) -> Result<HashSet<char>, String> {
@@ -75,7 +91,10 @@ fn font_bytes_missing_chars(
     Ok(chars_needed
         .iter()
         .copied()
-        .filter(|character| face.glyph_index(*character).is_none())
+        .filter(|character| {
+            face.glyph_index(*character)
+                .is_none_or(|glyph| glyph.0 == 0)
+        })
         .collect())
 }
 
@@ -593,6 +612,254 @@ fn ensure_font_in_resources(
     Ok(())
 }
 
+/// Embed a complete TrueType or OpenType face and register it on every page.
+///
+/// The face arrives ready to draw with: its real glyph advances go into `/W`
+/// and a ToUnicode CMap built from its own character map goes on the Type0
+/// font, so [crate::content_stream::pick_fonts_for_text] can encode text into
+/// it by character instead of treating it as an unusable resource. The bytes
+/// stay in the PDF and existing text operators keep their original fonts —
+/// nothing here rewrites content that is already on the page. A face that is
+/// not a parseable font returns an error and leaves the file untouched.
+pub fn embed_font_file(path: &Path, resource_name: &str, bytes: &[u8]) -> Result<(), HandlerError> {
+    let face = Face::parse(bytes, 0).map_err(|error| {
+        HandlerError::OperationFailed(format!(
+            "theme font is not a TrueType or OpenType font: {error:?}"
+        ))
+    })?;
+    if resource_name.is_empty()
+        || !resource_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(HandlerError::OperationFailed(
+            "PDF font resource name must be ASCII alphanumeric".to_string(),
+        ));
+    }
+    let mut document = LopdfDocument::load(path).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to open PDF for font embedding: {error}"))
+    })?;
+    let font_id = add_complete_font(&mut document, resource_name, bytes, &face)?;
+    for page_id in document.get_pages().values().copied() {
+        register_font_on_page(&mut document, page_id, resource_name, font_id)?;
+    }
+    document.save(path).map_err(|error| {
+        HandlerError::OperationFailed(format!("failed to save PDF after font embedding: {error}"))
+    })?;
+    Ok(())
+}
+
+fn add_complete_font(
+    doc: &mut LopdfDocument,
+    resource_name: &str,
+    bytes: &[u8],
+    face: &Face<'_>,
+) -> Result<ObjectId, HandlerError> {
+    let length1 = bytes.len() as i64;
+    let glyf = face
+        .raw_face()
+        .table(ttf_parser::Tag::from_bytes(b"glyf"))
+        .is_some();
+    let mut fontfile_stream = if glyf {
+        Stream::new(
+            dictionary! { "Length1" => Object::Integer(length1) },
+            bytes.to_vec(),
+        )
+    } else {
+        Stream::new(
+            dictionary! {
+                "Subtype" => Object::Name(b"OpenType".to_vec()),
+                "Length1" => Object::Integer(length1)
+            },
+            bytes.to_vec(),
+        )
+    };
+    let _ = fontfile_stream.compress();
+    let fontfile_id = doc.add_object(Object::Stream(fontfile_stream));
+    let units_per_em = face.units_per_em() as f32;
+    let scale = if units_per_em > 0.0 {
+        1000.0 / units_per_em
+    } else {
+        1.0
+    };
+    let bbox = face.global_bounding_box();
+    let file_key = if glyf { "FontFile2" } else { "FontFile3" };
+    let mut descriptor = dictionary! {
+        "Type" => Object::Name(b"FontDescriptor".to_vec()),
+        "FontName" => Object::Name(resource_name.as_bytes().to_vec()),
+        "Flags" => Object::Integer(32),
+        "FontBBox" => Object::Array(vec![
+            Object::Integer((bbox.x_min as f32 * scale) as i64),
+            Object::Integer((bbox.y_min as f32 * scale) as i64),
+            Object::Integer((bbox.x_max as f32 * scale) as i64),
+            Object::Integer((bbox.y_max as f32 * scale) as i64),
+        ]),
+        "ItalicAngle" => Object::Real(face.italic_angle().unwrap_or(0.0)),
+        "Ascent" => Object::Integer((face.ascender() as f32 * scale).round() as i64),
+        "Descent" => Object::Integer((face.descender() as f32 * scale).round() as i64),
+        "CapHeight" => Object::Integer((face.ascender() as f32 * scale).round() as i64),
+        "StemV" => Object::Integer(80),
+    };
+    descriptor.set(file_key, Object::Reference(fontfile_id));
+    let descriptor_id = doc.add_object(descriptor);
+    // Everything this face can draw, and the widths those glyphs advance by.
+    // Without them the font is luggage: the PDF carries the bytes, but no text
+    // can be pointed at it, and a viewer that tried would space every glyph
+    // 1 em apart.
+    let mapped = mapped_chars(face);
+    let to_unicode_id = doc.add_object(Stream::new(
+        dictionary! {},
+        to_unicode_cmap(&mapped).into_bytes(),
+    ));
+    let cidfont_id = doc.add_object(dictionary! {
+        "Type" => Object::Name(b"Font".to_vec()),
+        "Subtype" => Object::Name(if glyf { b"CIDFontType2".to_vec() } else { b"CIDFontType0".to_vec() }),
+        "BaseFont" => Object::Name(resource_name.as_bytes().to_vec()),
+        "CIDSystemInfo" => Object::Dictionary(dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => Object::Integer(0),
+        }),
+        "FontDescriptor" => Object::Reference(descriptor_id),
+        "CIDToGIDMap" => Object::Name(b"Identity".to_vec()),
+        "W" => Object::Array(width_array(face, scale, &mapped)),
+    });
+    Ok(doc.add_object(dictionary! {
+        "Type" => Object::Name(b"Font".to_vec()),
+        "Subtype" => Object::Name(b"Type0".to_vec()),
+        "BaseFont" => Object::Name(resource_name.as_bytes().to_vec()),
+        "Encoding" => Object::Name(b"Identity-H".to_vec()),
+        "DescendantFonts" => Object::Array(vec![Object::Reference(cidfont_id)]),
+        "ToUnicode" => Object::Reference(to_unicode_id),
+    }))
+}
+
+/// Every character this face draws, as `(character, glyph id)`, in character order.
+///
+/// Identity-H writes two-byte codes, so only the BMP is addressable: a
+/// supplementary-plane character has no code to write here and is left out,
+/// which makes it report as missing instead of being drawn as a blank box.
+/// The glyph id doubles as the CID because the descendant font maps CIDs to
+/// glyphs by identity.
+/// The same mapping [face] would answer for "can this character be drawn, and
+/// with which code", as a map a PDF writer can consult directly.
+///
+/// A font that has been subset loses this question's answer in general, so
+/// callers use it only for faces they embedded whole.
+pub(crate) fn face_bmp_char_to_cid(face: &Face<'_>) -> HashMap<char, u32> {
+    mapped_chars(face)
+        .into_iter()
+        .map(|(character, gid)| (character, u32::from(gid)))
+        .collect()
+}
+
+fn mapped_chars(face: &Face<'_>) -> Vec<(char, u16)> {
+    (0..0x1_0000u32)
+        .filter_map(char::from_u32)
+        .filter_map(|character| {
+            face.glyph_index(character)
+                .filter(|gid| gid.0 != 0)
+                .map(|gid| (character, gid.0))
+        })
+        .collect()
+}
+
+/// A ToUnicode CMap for [`mapped_chars`], so text drawn with this face can be
+/// read back as characters.
+///
+/// One entry per glyph, not per character: a CMap answers a glyph with a single
+/// string, and a face like Noto Sans SC maps both U+0020 and U+00A0 onto one
+/// glyph. Naming the first character of each glyph keeps the map honest — a
+/// non-breaking space extracts as a space, which is what it looks like — where
+/// writing both would let the later entry silently replace the earlier one and
+/// lose the first character for every reader.
+///
+/// Writing text into this face does not use this map; it uses the face's own
+/// character map, which has room for every character. See
+/// [crate::content_stream::face_char_to_cid].
+///
+/// Entries are chunked at 100 because that is the most a conforming reader has
+/// to accept inside one `beginbfchar` block.
+fn to_unicode_cmap(mapped: &[(char, u16)]) -> String {
+    let mut per_glyph: Vec<(u16, char)> = Vec::with_capacity(mapped.len());
+    let mut seen = HashSet::with_capacity(mapped.len());
+    for (character, cid) in mapped {
+        if seen.insert(*cid) {
+            per_glyph.push((*cid, *character));
+        }
+    }
+    per_glyph.sort_unstable();
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    for chunk in per_glyph.chunks(100) {
+        cmap.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (cid, character) in chunk {
+            cmap.push_str(&format!(
+                "<{:04X}> <{:04X}>\n",
+                *cid as u32, *character as u16
+            ));
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    cmap
+}
+
+/// The `/W` array of the descendant CID font: the advance, in 1/1000 units, of
+/// every glyph this face can draw.
+///
+/// Consecutive glyphs that advance by the same amount — most of a CJK face,
+/// where ideographs share one width — collapse into a `first last width`
+/// triple, and a consecutive run of different widths becomes one
+/// `first [w1 w2 …]` group, so a 20 000-glyph face does not pay for 20 000
+/// array entries. Glyphs nobody can name are not listed; the spec's default of
+/// 1 em covers them.
+fn width_array(face: &Face<'_>, scale: f32, mapped: &[(char, u16)]) -> Vec<Object> {
+    // One advance per drawable glyph, in glyph-id order: `mapped` is in
+    // character order, and several characters can share one glyph.
+    let mut glyphs: BTreeMap<u16, i64> = BTreeMap::new();
+    for (_, cid) in mapped {
+        glyphs.entry(*cid).or_insert_with(|| {
+            face.glyph_hor_advance(GlyphId(*cid))
+                .map_or(1000.0, |advance| advance as f32 * scale)
+                .round() as i64
+        });
+    }
+    let advances: Vec<(u16, i64)> = glyphs.into_iter().collect();
+
+    let mut widths = Vec::new();
+    let mut index = 0usize;
+    while index < advances.len() {
+        let first = index;
+        let mut end = index + 1;
+        while end < advances.len()
+            && u32::from(advances[end].0) == u32::from(advances[end - 1].0) + 1
+            && advances[end].1 == advances[end - 1].1
+        {
+            end += 1;
+        }
+        if end - first > 1 {
+            widths.push(Object::Integer(advances[first].0 as i64));
+            widths.push(Object::Integer(advances[end - 1].0 as i64));
+            widths.push(Object::Integer(advances[first].1));
+        } else {
+            widths.push(Object::Integer(advances[first].0 as i64));
+            widths.push(Object::Array(
+                advances[first..end]
+                    .iter()
+                    .map(|(_, width)| Object::Integer(*width))
+                    .collect(),
+            ));
+        }
+        index = end;
+    }
+    widths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +908,163 @@ mod tests {
         assert!(!face.is_variable());
         assert_eq!(face.weight().to_number(), 400);
         assert!(face.glyph_index('😀').is_some());
+    }
+
+    /// One blank page, so an embedding test exercises the real file round trip.
+    fn one_page_pdf(document: &mut LopdfDocument) {
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(lopdf::dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => Dictionary::new(),
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(lopdf::dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        let catalog = document.add_object(lopdf::dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog);
+    }
+
+    #[test]
+    fn complete_font_bytes_are_registered_on_the_page() {
+        let mut document = LopdfDocument::with_version("1.5");
+        one_page_pdf(&mut document);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.pdf");
+        document.save(&path).unwrap();
+        embed_font_file(&path, "HcdEmoji", BUNDLED_NOTO_EMOJI).unwrap();
+        let saved = LopdfDocument::load(&path).unwrap();
+        let page = saved.get_pages()[&1];
+        let (resources, _) = saved.get_page_resources(page).unwrap();
+        let fonts = resources.unwrap().get(b"Font").unwrap().as_dict().unwrap();
+        assert!(fonts.get(b"HcdEmoji").is_ok());
+    }
+
+    #[test]
+    fn an_embedded_face_can_draw_the_text_it_claims() {
+        use crate::content_stream::pick_fonts_for_text;
+
+        let mut document = LopdfDocument::with_version("1.5");
+        one_page_pdf(&mut document);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drawable.pdf");
+        document.save(&path).unwrap();
+        embed_font_file(&path, "HcdSans", BUNDLED_NOTO).unwrap();
+
+        let saved = LopdfDocument::load(&path).unwrap();
+        let page = saved.get_pages()[&1];
+
+        // The character map is what makes the face addressable: without it the
+        // text writer cannot name a single glyph and skips the font entirely.
+        // U+00A0 shares its glyph with the space in this face, so only the
+        // face's own character map can say it is drawable.
+        let sample = "中文 \u{a0}Alpha";
+        let mut missing = Vec::new();
+        let segments =
+            pick_fonts_for_text(&saved, page, Some("HcdSans"), sample, &mut missing).unwrap();
+        assert!(
+            missing.is_empty(),
+            "face should cover its own text: {missing:?}"
+        );
+        assert_eq!(segments.len(), 1, "one face draws the whole run");
+        assert_eq!(segments[0].font_name, "HcdSans");
+        assert_eq!(
+            segments[0].encoded_operand.len(),
+            sample.chars().count() * 4 + 2,
+            "Identity-H writes two bytes per character: {}",
+            segments[0].encoded_operand
+        );
+
+        // The widths are the face's own, so text is not spaced one em per glyph.
+        let type0 = saved
+            .get_page_fonts(page)
+            .unwrap()
+            .into_iter()
+            .find(|(name, _)| name == b"HcdSans")
+            .expect("the face should be registered on the page")
+            .1;
+        let descendant = type0.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
+            .as_reference()
+            .unwrap();
+        let cidfont = saved.get_object(descendant).unwrap().as_dict().unwrap();
+        let widths = widths_from_w_array(cidfont.get(b"W").unwrap().as_array().unwrap());
+        let face = Face::parse(BUNDLED_NOTO, 0).unwrap();
+        let scale = 1000.0 / face.units_per_em() as f32;
+        for character in ['A', 'i', '中'] {
+            let gid = face.glyph_index(character).unwrap().0;
+            let expected =
+                (face.glyph_hor_advance(GlyphId(gid)).unwrap() as f32 * scale).round() as i64;
+            assert_eq!(
+                widths.get(&i64::from(gid)).copied(),
+                Some(expected),
+                "advance for {character:?} should come from the face"
+            );
+        }
+        assert_ne!(widths[&i64::from(face.glyph_index('A').unwrap().0)], 1000);
+    }
+
+    #[test]
+    fn the_cmap_gives_one_character_per_glyph() {
+        // This face answers both U+0020 and U+00A0 with the same glyph, and a
+        // CMap can reply to a glyph with only one string. Naming each glyph once
+        // is what keeps the earlier entry from being overwritten: the space stays
+        // extractable, and the non-breaking space extracts as the space it looks
+        // like. Writing text is unaffected — the face itself still knows both.
+        let face = Face::parse(BUNDLED_NOTO, 0).unwrap();
+        let space = face.glyph_index(' ').unwrap().0;
+        assert_eq!(space, face.glyph_index('\u{a0}').unwrap().0);
+
+        let mapped = mapped_chars(&face);
+        assert!(mapped.iter().any(|(ch, _)| *ch == '\u{a0}'));
+        let cmap = to_unicode_cmap(&mapped);
+        let parsed = crate::content_stream::parse_to_unicode_cmap(&cmap);
+        assert_eq!(
+            parsed.get(&u32::from(space)).map(String::as_str),
+            Some(" "),
+            "the first character of a shared glyph is the one a reader gets"
+        );
+
+        let distinct_glyphs = mapped
+            .iter()
+            .map(|(_, cid)| cid)
+            .collect::<HashSet<_>>()
+            .len();
+        assert_eq!(parsed.len(), distinct_glyphs);
+        assert!(cmap
+            .lines()
+            .filter_map(|line| line.strip_suffix(" beginbfchar"))
+            .all(|count| count.parse::<usize>().unwrap() <= 100));
+    }
+
+    /// Both shapes of a `/W` array, flattened to glyph id -> width.
+    fn widths_from_w_array(array: &[Object]) -> HashMap<i64, i64> {
+        let mut widths = HashMap::new();
+        let mut index = 0;
+        while index < array.len() {
+            let first = array[index].as_i64().unwrap();
+            if let Ok(group) = array[index + 1].as_array() {
+                for (offset, width) in group.iter().enumerate() {
+                    widths.insert(first + offset as i64, width.as_i64().unwrap());
+                }
+                index += 2;
+            } else {
+                let last = array[index + 1].as_i64().unwrap();
+                let width = array[index + 2].as_i64().unwrap();
+                for cid in first..=last {
+                    widths.insert(cid, width);
+                }
+                index += 3;
+            }
+        }
+        widths
     }
 }

@@ -60,6 +60,9 @@
 .hcd-surface .tool-group{display:flex;gap:4px;padding-right:10px;margin-right:2px;border-right:1px solid #e3e9e4}
 .hcd-surface .toolbar button{font-size:13px;padding:7px 10px}
 .hcd-surface .mode{margin-left:auto;font-size:13px;color:#506b58;display:flex;align-items:center;gap:6px}
+.hcd-surface .font-group{align-items:center;gap:6px;font-size:13px;color:#506b58}
+.hcd-surface .font-group select{border:1px solid #d7ded8;border-radius:8px;background:#fff;color:#314539;padding:6px 8px;font-size:13px;max-width:190px}
+.hcd-surface .font-group select:disabled{opacity:.55;cursor:not-allowed}
 .hcd-surface .layout{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:24px;max-width:1380px;margin:0 auto;padding:28px}
 .hcd-surface .document{background:#fff;border:1px solid #e4eae5;min-height:calc(100vh - 220px);box-shadow:0 12px 45px #234b360c;border-radius:5px;padding:52px clamp(32px,6vw,90px)}
 .hcd-surface .hcd-editor-body{outline:none;line-height:1.75;font-size:15px;max-width:820px;margin:auto;min-height:450px}

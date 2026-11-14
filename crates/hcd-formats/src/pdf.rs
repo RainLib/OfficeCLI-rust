@@ -1,7 +1,7 @@
 use crate::common::{
     base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
     emit_started, escape_attribute, escape_text, finish_import, source_identity,
-    write_fidelity_report, ExportOptions, ImportOptions, PdfRasterMode,
+    write_fidelity_report, ExportOptions, ImportOptions, PdfRasterMode, RunFontSupport,
 };
 use handler_common::{DocumentHandler, InsertPosition};
 use hayro::hayro_interpret::InterpreterSettings;
@@ -1071,7 +1071,7 @@ pub(crate) fn export_pdf(
         )));
     }
     let (manifest, dirty_parts, dirty_node_ids, _) =
-        checked_export_state_with_restores(bundle, source, options)?;
+        checked_export_state_with_restores(bundle, source, options, RunFontSupport::Rejects)?;
     let mut nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
     nodes.sort_by(|left, right| {
         let left_page = page_number(&left.source.part);

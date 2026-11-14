@@ -3,9 +3,38 @@ import StarterKit from '@tiptap/starter-kit'
 import { Fragment, Slice, type Node as PmNode } from '@tiptap/pm/model'
 
 export type Inline = { text: string; bold?: boolean; italic?: boolean; link?: string | null; nodeId?: string | null }
-export type BlockContent = { kind: 'paragraph' | 'heading' | 'list_item' | 'opaque'; level?: number | null; inlines: Inline[] }
+/** The faces a block carries, in the three script slots `text.font` uses. Only the
+ * slots the theme covers are present, which is what the server's `font` object looks
+ * like, so a projection can be sent back unchanged. */
+export type BlockFont = { latin?: string; eastAsia?: string; bidi?: string }
+export type BlockContent = { kind: 'paragraph' | 'heading' | 'list_item' | 'opaque'; level?: number | null; font?: BlockFont | null; inlines: Inline[] }
 export type Block = { blockId: string; blockHash: string; region: string; readOnly: boolean; content: BlockContent; readOnlyHtml?: string }
 export type Projection = { documentId: string; revision: number; blocks: Block[] }
+
+/** The DOM form of a block face: the same `data-hcd-font*` attributes the server
+ * writes on the text nodes it renders, so a copy inside or outside the editor keeps
+ * the face. */
+export function renderBlockFont(font: BlockFont | null | undefined): Record<string, string> {
+  if (!font) return {}
+  const attributes: Record<string, string> = {}
+  if (font.latin) attributes['data-hcd-font-latin'] = font.latin
+  if (font.eastAsia) attributes['data-hcd-font-east-asia'] = font.eastAsia
+  if (font.bidi) attributes['data-hcd-font-bidi'] = font.bidi
+  const primary = font.latin || font.eastAsia || font.bidi
+  if (primary) attributes.style = `font-family:'${primary}'`
+  return Object.keys(attributes).length ? attributes : {}
+}
+
+export function parseBlockFont(element: HTMLElement): BlockFont | null {
+  const font: BlockFont = {}
+  const latin = element.getAttribute('data-hcd-font-latin')
+  const eastAsia = element.getAttribute('data-hcd-font-east-asia')
+  const bidi = element.getAttribute('data-hcd-font-bidi')
+  if (latin) font.latin = latin
+  if (eastAsia) font.eastAsia = eastAsia
+  if (bidi) font.bidi = bidi
+  return Object.keys(font).length ? font : null
+}
 
 export const HcdIdentity = Extension.create({
   name: 'hcdIdentity',
@@ -14,6 +43,9 @@ export const HcdIdentity = Extension.create({
       types: ['paragraph', 'heading', 'listItem'],
       attributes: {
         hcdBlockId: { default: null, parseHTML: el => el.getAttribute('data-hcd-block-id'), renderHTML: attrs => attrs.hcdBlockId ? { 'data-hcd-block-id': attrs.hcdBlockId } : {} },
+        // The face pinned on this block. A block-level property, so it rides on the
+        // node, not on a mark: every text in the block takes the same three slots.
+        hcdFont: { default: null, parseHTML: el => parseBlockFont(el), renderHTML: attrs => renderBlockFont(attrs.hcdFont) },
       },
     }]
   },
@@ -66,7 +98,7 @@ function blockJson(block: Block): JSONContent {
     return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '▣' } }
   }
   const content = block.content.inlines.filter(part => part.text.length > 0).map(inlineJson)
-  const attrs = { hcdBlockId: block.blockId }
+  const attrs = { hcdBlockId: block.blockId, ...(block.content.font ? { hcdFont: block.content.font } : {}) }
   if (block.content.kind === 'heading') return { type: 'heading', attrs: { ...attrs, level: block.content.level || 1 }, content }
   if (block.content.kind === 'list_item') return { type: 'listItem', attrs, content: [{ type: 'paragraph', content }] }
   return { type: 'paragraph', attrs, content }
@@ -109,15 +141,27 @@ function inlinesFromNode(node: JSONContent): Inline[] {
   return result
 }
 
+/** The snapshot form of a node's `hcdFont` attribute: only the slots that name a
+ * family, so a block with no face sends no `font` at all and the server reads the
+ * object exactly as its own projection wrote it. */
+export function blockFontAttribute(attrs: Record<string, unknown> | undefined): { font?: BlockFont } {
+  const font = attrs?.hcdFont as BlockFont | null | undefined
+  const slots: BlockFont = {}
+  if (font?.latin) slots.latin = font.latin
+  if (font?.eastAsia) slots.eastAsia = font.eastAsia
+  if (font?.bidi) slots.bidi = font.bidi
+  return Object.keys(slots).length ? { font: slots } : {}
+}
+
 export function jsonToSnapshot(json: JSONContent): Array<{ blockId: string | null; content: BlockContent }> {
   const result: Array<{ blockId: string | null; content: BlockContent }> = []
   const push = (node: JSONContent) => {
     if (node.type === 'hcdOpaque') {
       result.push({ blockId: node.attrs?.hcdBlockId || null, content: node.attrs?.hcdContent || { kind: 'opaque', inlines: [] } })
     } else if (node.type === 'paragraph' || node.type === 'heading') {
-      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: node.type, ...(node.type === 'heading' ? { level: node.attrs?.level || 1 } : {}), inlines: inlinesFromNode(node) } })
+      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: node.type, ...(node.type === 'heading' ? { level: node.attrs?.level || 1 } : {}), ...blockFontAttribute(node.attrs), inlines: inlinesFromNode(node) } })
     } else if (node.type === 'listItem') {
-      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: 'list_item', level: 0, inlines: inlinesFromNode(node) } })
+      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: 'list_item', level: 0, ...blockFontAttribute(node.attrs), inlines: inlinesFromNode(node) } })
     }
   }
   for (const node of json.content || []) {

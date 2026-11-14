@@ -1,5 +1,6 @@
 pub mod content_stream;
 pub mod font_embedder;
+pub mod font_retarget;
 pub mod handler;
 pub mod html_preview;
 pub mod modifier;

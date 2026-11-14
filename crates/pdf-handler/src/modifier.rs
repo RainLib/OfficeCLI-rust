@@ -354,7 +354,7 @@ pub fn replace_text_with_style(
     Ok(())
 }
 
-fn write_content_to_page(
+pub(crate) fn write_content_to_page(
     doc: &mut LopdfDocument,
     page_id: ObjectId,
     content: &[u8],

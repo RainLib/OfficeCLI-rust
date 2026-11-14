@@ -3,7 +3,7 @@ use crate::common::{
     checked_export_state_with_restores, collect_dirty_nodes, current_control_part,
     drop_control_elements, emit_failed, emit_started, escape_attribute, escape_text, finish_import,
     highest_control_id, local_name, package_error, source_identity, write_fidelity_report,
-    AddedElement, ExportOptions, ImportOptions, XmlBudget, MAX_CONTROL_BYTES,
+    AddedElement, ExportOptions, ImportOptions, RunFontSupport, XmlBudget, MAX_CONTROL_BYTES,
 };
 use hcd_core::{
     drop_formula_sheet_references, hash_bytes, node_bloom_might_contain,
@@ -4745,7 +4745,7 @@ pub(crate) fn export_xlsx(
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
     let (manifest, dirty_parts, dirty_node_ids, revisions) =
-        checked_export_state_with_restores(bundle, source, options)?;
+        checked_export_state_with_restores(bundle, source, options, RunFontSupport::Rejects)?;
     let mut dirty_node_ids = dirty_node_ids;
     let mut deleted_nodes = std::collections::HashSet::new();
     for &revision in &revisions {
@@ -11125,11 +11125,11 @@ fn safe_temp_name(part: &str) -> String {
 mod tests {
     use super::*;
     use hcd_core::{
-        extract_text_page, validate_bundle, NodePrecondition, PatchBatch, PatchOperation,
-        XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch,
+        extract_text_page, validate_bundle, FontPatch, NodePrecondition, PatchBatch,
+        PatchOperation, XlsxCellFormatPatch, XlsxCellLayoutPatch, XlsxCellNumberFormatPatch,
         HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_31, HCD_PATCH_SCHEMA_VERSION_32,
         HCD_PATCH_SCHEMA_VERSION_33, HCD_PATCH_SCHEMA_VERSION_34, HCD_PATCH_SCHEMA_VERSION_35,
-        HCD_PATCH_SCHEMA_VERSION_36, HCD_PATCH_SCHEMA_VERSION_6,
+        HCD_PATCH_SCHEMA_VERSION_36, HCD_PATCH_SCHEMA_VERSION_37, HCD_PATCH_SCHEMA_VERSION_6,
     };
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -20234,5 +20234,83 @@ mod tests {
         let mut output = String::new();
         entry.read_to_string(&mut output).unwrap();
         output
+    }
+    #[test]
+    fn source_export_still_refuses_a_pinned_cell_font() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("rows.xlsx");
+        let bundle_path = temp.path().join("document.hcd");
+        let exported = temp.path().join("exported.xlsx");
+        create_plain_rows_fixture(&source, 4);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("xlsx-font"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let cell = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .remove(0);
+        let node_id = cell.node_id.clone();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "pin-cell-font".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextFont {
+                node_id: node_id.clone(),
+                font: FontPatch {
+                    latin: Some("Brand Serif".to_string()),
+                    east_asia: None,
+                    bidi: None,
+                },
+                precondition: NodePrecondition {
+                    node_hash: cell.node_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        let error =
+            export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("source-backed xlsx export does not rewrite run fonts"),
+            "{error}"
+        );
+        assert!(!exported.exists());
+
+        // Clearing the pin drops the patch marker, so no face is collected for the
+        // cell and the refusal lifts: the workbook exports with the font it already had.
+        let cleared = hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "clear-cell-font".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextFontClear {
+                    node_id,
+                    precondition: NodePrecondition {
+                        node_hash: cell.node_hash,
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(cleared.revision, 2);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(exported.exists());
     }
 }

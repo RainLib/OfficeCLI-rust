@@ -95,6 +95,15 @@ const sourceEn: Record<string, string> = {
   '应用内容': 'Apply content', '编辑步骤': 'Editing steps', '关闭编辑步骤': 'Close editing steps',
   '本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。': 'Changes saved in this session. Each undo or redo creates a new HCD revision.',
   '工作簿视图': 'Workbook view', '在线协作者 ·': 'Online collaborators ·',
+  '字体': 'Font', '选择主题字体': 'Choose a theme font', '无钉住字体': 'No pinned font',
+  '把选中文字改成钉住主题的字体': 'Set the selected text to a font from the pinned theme',
+  '把整段的字体改成钉住主题的字体': 'Set the whole paragraph to a font from the pinned theme',
+  '把光标移到段落里再选字体': 'Place the caret in a paragraph to choose its font',
+  '清除段落字体': 'Clear the paragraph font',
+  '清除字体': 'Clear the font',
+  '去掉钉在选中文字上的主题字体，回到文档原来的字体': 'Removes the theme font pinned on the selected text and gives the text back the font the document had before',
+  '文档没有钉住主题字体，先在管理后台钉住主题': 'This document pins no theme font. Pin a theme in the admin console first.',
+  '字体改动会进入预览、HTML 和语义导出；保留源 PDF 的导出仍拒绝带字体的修订': 'Font changes reach the preview, HTML, and semantic exports; exports that preserve the source PDF still reject revisions carrying a font.',
 }
 
 const sourceTw: Record<string, string> = {
@@ -197,6 +206,17 @@ const sourceTw: Record<string, string> = {
   "本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。": "本次開啟期間儲存的操作。每次撤銷和重做都會生成新的 HCD 修訂。",
   "工作簿视图": "工作簿檢視",
   "在线协作者 ·": "線上協作者 ·",
+  "字体": "字體",
+  "选择主题字体": "選擇主題字體",
+  "无钉住字体": "無釘住字體",
+  "把选中文字改成钉住主题的字体": "把選中文字改成釘住主題的字體",
+  "把整段的字体改成钉住主题的字体": "把整段的字體改成釘住主題的字體",
+  "把光标移到段落里再选字体": "把光標移到段落裡再選字體",
+  "清除段落字体": "清除段落字體",
+  "清除字体": "清除字體",
+  "去掉钉在选中文字上的主题字体，回到文档原来的字体": "去掉釘在選中文字上的主題字體，回到文件原來的字體",
+  "文档没有钉住主题字体，先在管理后台钉住主题": "文件沒有釘住主題字體，請先在管理後臺釘住主題",
+  "字体改动会进入预览、HTML 和语义导出；保留源 PDF 的导出仍拒绝带字体的修订": "字體改動會進入預覽、HTML 和語義匯出；保留源 PDF 的匯出仍拒絕帶字體的修訂",
 }
 
 const dynamicEn: Record<string, string> = {
@@ -306,6 +326,7 @@ const dynamicEn: Record<string, string> = {
   ' · 已合并 ': ' · Merged ', ' · 已拆分 ': ' · Unmerged ',
   ' · 已新增第 ': ' · Added row ',
   '设置冻结窗格失败：': 'Freezing panes failed: ',
+  '设置字体 ': 'Set font ',
 }
 
 const orderedEn = Object.entries(dynamicEn).sort((a, b) => b[0].length - a[0].length)
