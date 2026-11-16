@@ -362,6 +362,20 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     Default::default()
                 }
             };
+            if let Err(error) = crate::extract_docx_inline_runs(&html) {
+                issues.push(issue(
+                    "WORD_INLINE_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                ));
+            }
+            if let Err(error) = crate::extract_xlsx_inline_runs(&html) {
+                issues.push(issue(
+                    "XLSX_INLINE_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                ));
+            }
             let actual_text_chars: usize = canonical_nodes
                 .values()
                 .map(|text| text.chars().count())
@@ -606,7 +620,7 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
     }
     if !matches!(
         manifest.source.format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "png" | "jpg" | "jpeg" | "webp"
     ) {
         issues.push(issue(
             "SOURCE_FORMAT_INVALID",
@@ -1280,7 +1294,13 @@ fn validate_map_entry(
         ));
     }
     if entry.source.created_in_hcd
-        && !((source.format == "xlsx" && entry.source.node_kind == "cell")
+        && !((entry.source.node_kind == "image"
+            && entry
+                .source
+                .text_id
+                .as_deref()
+                .is_some_and(|v| v.starts_with("hcd:image:")))
+            || (source.format == "xlsx" && entry.source.node_kind == "cell")
             || (source.format == "pptx"
                 && entry.source.node_kind == "slide-text"
                 && entry
@@ -1298,7 +1318,9 @@ fn validate_map_entry(
             path,
         ));
     }
-    if matches!(source.format.as_str(), "html" | "md" | "txt") {
+    if matches!(source.format.as_str(), "html" | "md" | "txt")
+        && !(entry.source.created_in_hcd && entry.source.node_kind == "image")
+    {
         validate_textual_source_range(
             entry,
             source,
@@ -1443,7 +1465,8 @@ fn valid_source_part(value: &str) -> bool {
         || value.starts_with("pdf/")
         || value.starts_with("html/")
         || value.starts_with("markdown/")
-        || value.starts_with("text/");
+        || value.starts_with("text/")
+        || value.starts_with("image/");
     allowed_prefix
         && !value.is_empty()
         && value.len() <= 1024
@@ -2000,6 +2023,7 @@ fn validate_html_element<B: std::io::BufRead>(
             | "s"
             | "small"
             | "img"
+            | "figure"
     ) {
         return Err(HcdError::InvalidBundle(format!(
             "HTML element {name} is not allowed by hcd/1"
@@ -2098,17 +2122,11 @@ fn validate_html_element<B: std::io::BufRead>(
                 .map_err(|error| {
                     HcdError::InvalidBundle(format!("invalid URL attribute: {error}"))
                 })?;
-            let lower = value.to_ascii_lowercase();
             let asset_hash = value.strip_prefix("asset://sha256/");
             let valid_asset =
                 asset_hash.is_some_and(|hash| valid_sha256(hash) && asset_hashes.contains(hash));
-            let allowed = valid_asset
-                || (normalized_key == "href" && value.starts_with('#'))
-                || (normalized_key == "href"
-                    && (lower.starts_with("https://")
-                        || lower.starts_with("http://")
-                        || lower.starts_with("mailto:")
-                        || lower.starts_with("tel:")));
+            let allowed =
+                valid_asset || (normalized_key == "href" && crate::is_safe_hyperlink(&value));
             if !allowed {
                 return Err(HcdError::InvalidBundle(format!(
                     "external URL is forbidden: {value}"
@@ -2307,6 +2325,8 @@ mod tests {
             "<section><img decoding=\"parallel\"/></section>",
             "<section loading=\"lazy\">bad placement</section>",
             "<section><img SRC=\"https://example.test/tracker\"/></section>",
+            "<section><a href=\"https://example.test/&#10;bad\">bad</a></section>",
+            "<section><a href=\"https://example.test/\\bad\">bad</a></section>",
             "<table><tbody><tr><td colspan=\"16385\">x</td></tr></tbody></table>",
             "<table><tbody><tr><td rowspan=\"1048577\">x</td></tr></tbody></table>",
             "<table><colgroup><col span=\"0\"/></colgroup><tbody></tbody></table>",

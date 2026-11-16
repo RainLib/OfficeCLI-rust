@@ -20,8 +20,10 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "sidecar": "tsx sidecar.ts",
+    "dev:agent": "tsx scripts/start-agent-demo.ts",
     "build": "tsc --noEmit && vite build && vite build --config vite.embed.config.ts",
-    "test:workspace": "playwright test"
+    "test:workspace": "playwright test",
+    "test:provider": "node scripts/verify-provider.mjs"
   },
   "dependencies": {
     "@hocuspocus/provider": "4.7.0",
@@ -38,6 +40,8 @@
     "@univerjs/presets": "^0.25.1",
     "lucide-react": "^1.73.0",
     "pdfjs-dist": "^6.3.289",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "yjs": "13.6.27"
   },
   "peerDependencies": {
@@ -50,6 +54,7 @@
     "@types/node": "22.18.6",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
+    "ajv": "^8.20.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "tsx": "4.20.6",

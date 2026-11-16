@@ -20,6 +20,8 @@ const MAX_BLOCKS: usize = 1_000_000;
 const MAX_INLINE_BYTES: usize = 1024 * 1024;
 const MAX_OPS: usize = 10_000;
 const CHUNK_SOFT_BYTES: usize = 512 * 1024;
+mod table;
+pub use table::TableEditAction;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -68,9 +70,17 @@ pub struct EditorBlockView {
     pub block_hash: String,
     pub region: String,
     pub read_only: bool,
+    /// Source-backed text edits are allowed inside these table runs. The block
+    /// itself remains protected against replacement, removal and movement.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub editable_text_node_ids: Vec<String>,
     pub content: EditorBlockContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only_html: Option<String>,
+    /// Server-owned presentation, separate from editable semantic content.
+    /// Clients must not send it back as a structure patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_html: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +109,32 @@ pub struct StructurePatchBatch {
     deny_unknown_fields
 )]
 pub enum StructureOperation {
+    #[serde(rename = "table.insert")]
+    TableInsert {
+        after_block_id: Option<String>,
+        rows: usize,
+        columns: usize,
+    },
+    #[serde(rename = "table.edit")]
+    TableEdit {
+        block_id: String,
+        table_index: usize,
+        action: TableEditAction,
+        index: usize,
+        precondition: BlockPrecondition,
+    },
+    #[serde(rename = "table.delete")]
+    TableDelete {
+        block_id: String,
+        precondition: BlockPrecondition,
+    },
+    #[serde(rename = "table.restore")]
+    TableRestore {
+        block_id: String,
+        source_revision: u64,
+        after_block_id: Option<String>,
+        precondition: TableRestorePrecondition,
+    },
     #[serde(rename = "block.insert")]
     Insert {
         after_block_id: Option<String>,
@@ -129,6 +165,12 @@ pub struct BlockPrecondition {
     pub block_hash: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableRestorePrecondition {
+    pub block_hash: Option<String>,
+}
+
 #[derive(Clone)]
 struct Block {
     id: String,
@@ -150,10 +192,59 @@ impl Block {
             block_hash: self.hash(),
             region: self.region.clone(),
             read_only: self.read_only,
+            editable_text_node_ids: table_text_node_ids(self),
             content: self.content.clone(),
             read_only_html: self.read_only.then(|| self.html.clone()),
+            presentation_html: (!self.read_only).then(|| self.html.clone()),
         }
     }
+}
+
+fn table_text_node_ids(block: &Block) -> Vec<String> {
+    if block.region != "body" || !block.html.contains("<table") {
+        return Vec::new();
+    }
+    let mut reader = Reader::from_str(&block.html);
+    let mut depth = 0usize;
+    let mut ids = HashSet::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                if start.name().as_ref() == b"table" {
+                    depth += 1;
+                }
+                if depth > 0 {
+                    if let Ok(Some(id)) = attribute(&start, &reader, "data-hcd-id") {
+                        ids.insert(id);
+                    }
+                }
+            }
+            Ok(Event::End(end)) if end.name().as_ref() == b"table" => {
+                depth = depth.saturating_sub(1);
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return Vec::new(),
+            _ => {}
+        }
+    }
+    let editable: HashSet<&str> = block
+        .entries
+        .iter()
+        .filter(|entry| entry.source.editable)
+        .map(|entry| entry.node_id.as_str())
+        .collect();
+    block
+        .content
+        .inlines
+        .iter()
+        .filter_map(|inline| {
+            inline
+                .node_id
+                .as_ref()
+                .filter(|id| ids.contains(*id) && editable.contains(id.as_str()))
+                .cloned()
+        })
+        .collect()
 }
 
 pub fn editor_projection(
@@ -486,6 +577,7 @@ fn block_from_raw(
 ) -> Result<Block, HcdError> {
     let nodes = extract_html_text_nodes(raw)?;
     let marks = extract_marks(raw)?;
+    let rich_runs = crate::extract_docx_inline_runs(raw)?;
     let entries: Vec<NodeMapEntry> = map
         .entries
         .iter()
@@ -494,17 +586,34 @@ fn block_from_raw(
         .collect();
     let inlines: Vec<EditorInline> = entries
         .iter()
-        .filter_map(|entry| {
-            nodes.get(&entry.node_id).map(|text| {
-                let mark = marks.get(&entry.node_id);
-                EditorInline {
-                    text: text.clone(),
-                    node_id: Some(entry.node_id.clone()),
-                    bold: mark.is_some_and(|value| value.0),
-                    italic: mark.is_some_and(|value| value.1),
-                    link: mark.and_then(|value| value.2.clone()),
-                }
-            })
+        .flat_map(|entry| {
+            if let Some(runs) = rich_runs.get(&entry.node_id) {
+                let link = marks.get(&entry.node_id).and_then(|marks| marks.2.clone());
+                return runs
+                    .iter()
+                    .map(|run| EditorInline {
+                        text: run.text.clone(),
+                        node_id: Some(entry.node_id.clone()),
+                        bold: run.bold,
+                        italic: run.italic,
+                        link: link.clone(),
+                    })
+                    .collect::<Vec<_>>();
+            }
+            nodes
+                .get(&entry.node_id)
+                .map(|text| {
+                    let mark = marks.get(&entry.node_id);
+                    EditorInline {
+                        text: text.clone(),
+                        node_id: Some(entry.node_id.clone()),
+                        bold: mark.is_some_and(|value| value.0),
+                        italic: mark.is_some_and(|value| value.1),
+                        link: mark.and_then(|value| value.2.clone()),
+                    }
+                })
+                .into_iter()
+                .collect()
         })
         .collect();
     let kind = match open.name.as_str() {
@@ -789,8 +898,21 @@ pub fn apply_structure_patch(
         .collect();
     let mut dirty_nodes = HashSet::new();
     let mut dirty_parts = HashSet::new();
+    let mut structural_change = false;
     for (operation_index, operation) in patch.operations.iter().enumerate() {
-        apply_operation(
+        if matches!(operation, StructureOperation::TableRestore { .. }) {
+            table::restore(
+                bundle,
+                &mut blocks,
+                &manifest,
+                operation,
+                &mut dirty_nodes,
+                &mut dirty_parts,
+            )?;
+            structural_change = true;
+            continue;
+        }
+        structural_change |= apply_operation(
             &mut blocks,
             operation,
             operation_index,
@@ -846,14 +968,16 @@ pub fn apply_structure_patch(
     manifest.index_page_count = descriptors.len().div_ceil(INDEX_PAGE_SIZE);
     manifest.chunk_count = descriptors.len();
     manifest.capabilities.structure_patch = true;
-    manifest.warnings.push(FidelityWarning {
-        code: "HCD_STRUCTURE_SEMANTIC_REBUILD".to_string(),
-        message: "structural edits are canonical in HCD; DOCX export rebuilds semantics and may change physical pagination".to_string(),
-        node_id: None,
-        source_part: None,
-    });
-    if let Some(report) = &mut manifest.fidelity {
-        report.level = crate::FidelityLevel::Semantic;
+    if structural_change {
+        manifest.warnings.push(FidelityWarning {
+            code: "HCD_STRUCTURE_SEMANTIC_REBUILD".to_string(),
+            message: "structural edits are canonical in HCD; DOCX export rebuilds semantics and may change physical pagination".to_string(),
+            node_id: None,
+            source_part: None,
+        });
+        if let Some(report) = &mut manifest.fidelity {
+            report.level = crate::FidelityLevel::Semantic;
+        }
     }
     let mut record = revision_record(
         bundle,
@@ -861,7 +985,7 @@ pub fn apply_structure_patch(
         revision,
         &patch.patch_id,
         Some(patch_hash),
-        true,
+        structural_change,
     )?;
     record.root_hash = root_hash.clone();
     record.annotation_root_hash = annotation_root_hash.clone();
@@ -903,8 +1027,86 @@ fn apply_operation(
     patch_id: &str,
     dirty_nodes: &mut HashSet<String>,
     dirty_parts: &mut HashSet<String>,
-) -> Result<(), HcdError> {
+) -> Result<bool, HcdError> {
     match operation {
+        StructureOperation::TableInsert {
+            after_block_id,
+            rows,
+            columns,
+        } => {
+            let insertion = insertion_index(blocks, after_block_id.as_deref())?;
+            if !insertion_touches_region(blocks, insertion, "body")
+                || manifest.source.format == "txt"
+            {
+                return Err(HcdError::Unsupported(
+                    "tables require a rich document body".into(),
+                ));
+            }
+            let generated = table::insert(manifest, patch_id, operation_index, *rows, *columns)?;
+            dirty_nodes.extend(generated.entries.iter().map(|entry| entry.node_id.clone()));
+            dirty_parts.extend(
+                generated
+                    .entries
+                    .iter()
+                    .map(|entry| entry.source.part.clone()),
+            );
+            blocks.insert(insertion, generated);
+        }
+        StructureOperation::TableEdit {
+            block_id,
+            table_index,
+            action,
+            index,
+            precondition,
+        } => {
+            let position = block_index(blocks, block_id, precondition)?;
+            if blocks[position].region != "body" || manifest.source.format == "txt" {
+                return Err(HcdError::Unsupported(
+                    "cannot edit a table outside a rich document body".into(),
+                ));
+            }
+            let updated = table::edit(
+                &blocks[position],
+                manifest,
+                patch_id,
+                operation_index,
+                *table_index,
+                *action,
+                *index,
+            )?;
+            dirty_nodes.extend(
+                blocks[position]
+                    .entries
+                    .iter()
+                    .chain(&updated.entries)
+                    .map(|entry| entry.node_id.clone()),
+            );
+            dirty_parts.extend(
+                updated
+                    .entries
+                    .iter()
+                    .map(|entry| entry.source.part.clone()),
+            );
+            blocks[position] = updated;
+        }
+        StructureOperation::TableDelete {
+            block_id,
+            precondition,
+        } => {
+            let position = block_index(blocks, block_id, precondition)?;
+            table::ensure_table(&blocks[position])?;
+            let removed = blocks.remove(position);
+            dirty_nodes.extend(removed.entries.iter().map(|entry| entry.node_id.clone()));
+            dirty_parts.extend(
+                removed
+                    .entries
+                    .iter()
+                    .map(|entry| entry.source.part.clone()),
+            );
+        }
+        StructureOperation::TableRestore { .. } => {
+            unreachable!("historical table operations are resolved before apply_operation")
+        }
         StructureOperation::Insert {
             after_block_id,
             block,
@@ -984,14 +1186,30 @@ fn apply_operation(
             block,
             precondition,
         } => {
-            validate_content(block)?;
             let index = block_index(blocks, block_id, precondition)?;
             if blocks[index].read_only {
-                return Err(HcdError::Unsupported(format!(
-                    "block {block_id} is read-only"
-                )));
+                let preserved = replace_table_text(&blocks[index], block)?;
+                for (before, after) in blocks[index].entries.iter().zip(&preserved.entries) {
+                    if before.node_hash != after.node_hash {
+                        dirty_nodes.insert(after.node_id.clone());
+                        dirty_parts.insert(after.source.part.clone());
+                    }
+                }
+                blocks[index] = preserved;
+                return Ok(false);
             }
+            validate_content(block)?;
             let old = &blocks[index];
+            if let Some(preserved) = replace_text_preserving_presentation(old, block)? {
+                for entry in &preserved.entries {
+                    if old.html != preserved.html {
+                        dirty_nodes.insert(entry.node_id.clone());
+                        dirty_parts.insert(entry.source.part.clone());
+                    }
+                }
+                blocks[index] = preserved;
+                return Ok(false);
+            }
             let first_node_id = old.entries.first().map(|entry| entry.node_id.clone());
             dirty_nodes.extend(old.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(old.entries.iter().map(|entry| entry.source.part.clone()));
@@ -1013,7 +1231,230 @@ fn apply_operation(
             blocks[index] = generated;
         }
     }
-    Ok(())
+    Ok(true)
+}
+
+/// A table stays an opaque layout block. Only the text of explicitly mapped,
+/// editable runs may change; neither formatting nor source identity is supplied
+/// by the client. This runs in the same atomic commit as other shared edits.
+fn replace_table_text(
+    original: &Block,
+    replacement: &EditorBlockContent,
+) -> Result<Block, HcdError> {
+    let allowed: HashSet<String> = table_text_node_ids(original).into_iter().collect();
+    if allowed.is_empty()
+        || original.content.kind != replacement.kind
+        || original.content.level != replacement.level
+        || original.content.font != replacement.font
+        || original.content.inlines.len() != replacement.inlines.len()
+    {
+        return Err(HcdError::InvalidPatch(
+            "table structure is read-only".to_string(),
+        ));
+    }
+    let mut bytes = 0usize;
+    let mut updated = original.clone();
+    for (before, after) in original.content.inlines.iter().zip(&replacement.inlines) {
+        bytes = bytes
+            .checked_add(after.text.len())
+            .ok_or_else(|| HcdError::ResourceLimit("table text overflow".to_string()))?;
+        if bytes > MAX_INLINE_BYTES {
+            return Err(HcdError::ResourceLimit(
+                "table text exceeds 1 MiB".to_string(),
+            ));
+        }
+        if before.node_id != after.node_id
+            || before.bold != after.bold
+            || before.italic != after.italic
+            || before.link != after.link
+        {
+            return Err(HcdError::InvalidPatch(
+                "table run identity and formatting are read-only".to_string(),
+            ));
+        }
+        if before.text == after.text {
+            continue;
+        }
+        let id = before
+            .node_id
+            .as_ref()
+            .filter(|id| allowed.contains(*id))
+            .ok_or_else(|| HcdError::InvalidPatch("table run is read-only".to_string()))?;
+        let hash = hash_bytes(after.text.as_bytes());
+        crate::patch::replace_node_text(&mut updated.html, id, &after.text, &hash)?;
+        let entry = updated
+            .entries
+            .iter_mut()
+            .find(|entry| entry.node_id == *id)
+            .ok_or_else(|| HcdError::NodeNotFound(id.clone()))?;
+        entry.node_hash = hash;
+    }
+    updated.content = replacement.clone();
+    Ok(updated)
+}
+
+/// A semantic editor coalesces adjacent runs with the same editable marks.
+/// Text-only edits retain Word presentation and HTML source byte ranges.
+/// DOCX bold/italic changes can use subruns inside the stable anchor; other
+/// changes that the source writer cannot express use semantic reconstruction.
+fn replace_text_preserving_presentation(
+    original: &Block,
+    replacement: &EditorBlockContent,
+) -> Result<Option<Block>, HcdError> {
+    let source_docx = original
+        .entries
+        .iter()
+        .all(|entry| entry.source.part == "word/document.xml" && entry.source.node_kind == "text");
+    let source_html = original
+        .entries
+        .iter()
+        .all(|entry| entry.source.part == "html/document");
+    if original.content.kind != replacement.kind
+        || original.content.level != replacement.level
+        || original.content.font != replacement.font
+        || original.entries.is_empty()
+        || original.entries.iter().any(|entry| !entry.source.editable)
+        || !(source_docx || source_html)
+    {
+        return Ok(None);
+    }
+    fn same_marks(left: &EditorInline, right: &EditorInline) -> bool {
+        left.bold == right.bold && left.italic == right.italic && left.link == right.link
+    }
+    fn groups(inlines: &[EditorInline]) -> Vec<Vec<usize>> {
+        let mut result: Vec<Vec<usize>> = Vec::new();
+        for (index, inline) in inlines
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| !value.text.is_empty())
+        {
+            if let Some(group) = result.last_mut() {
+                if same_marks(&inlines[group[0]], inline) {
+                    group.push(index);
+                    continue;
+                }
+            }
+            result.push(vec![index]);
+        }
+        result
+    }
+    let old_groups = groups(&original.content.inlines);
+    let new_groups = groups(&replacement.inlines);
+    if original.html.contains("data-hcd-docx-inline=")
+        || old_groups.len() != new_groups.len()
+        || old_groups.is_empty()
+        || old_groups.iter().zip(&new_groups).any(|(before, after)| {
+            !same_marks(
+                &original.content.inlines[before[0]],
+                &replacement.inlines[after[0]],
+            )
+        })
+    {
+        // HTML source export can patch original text ranges, but cannot encode
+        // changed marks into those ranges. Only DOCX has the rich-run writer.
+        return if source_docx {
+            replace_rich_text_preserving_presentation(original, replacement)
+        } else {
+            Ok(None)
+        };
+    }
+    let mut updated = original.clone();
+    for (before, after) in old_groups.iter().zip(&new_groups) {
+        if !same_marks(
+            &original.content.inlines[before[0]],
+            &replacement.inlines[after[0]],
+        ) {
+            return Ok(None);
+        }
+        let old: Vec<char> = before
+            .iter()
+            .flat_map(|&i| original.content.inlines[i].text.chars())
+            .collect();
+        let new: Vec<char> = after
+            .iter()
+            .flat_map(|&i| replacement.inlines[i].text.chars())
+            .collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let end = old.len() - suffix;
+        let inserted: String = new[prefix..new.len() - suffix].iter().collect();
+        let mut offset = 0;
+        let mut placed = false;
+        for &index in before {
+            let inline = &mut updated.content.inlines[index];
+            let Some(node_id) = &inline.node_id else {
+                return Ok(None);
+            };
+            let Some(entry) = updated
+                .entries
+                .iter_mut()
+                .find(|entry| entry.node_id == *node_id)
+            else {
+                return Ok(None);
+            };
+            let chars: Vec<char> = inline.text.chars().collect();
+            let next = offset + chars.len();
+            let mut text: String = chars[..prefix.saturating_sub(offset).min(chars.len())]
+                .iter()
+                .collect();
+            if !placed && prefix <= next {
+                text.push_str(&inserted);
+                placed = true;
+            }
+            text.extend(chars[end.saturating_sub(offset).min(chars.len())..].iter());
+            if text != inline.text {
+                let hash = hash_bytes(text.as_bytes());
+                crate::patch::replace_node_text(&mut updated.html, node_id, &text, &hash)?;
+                entry.node_hash = hash;
+                inline.text = text;
+            }
+            offset = next;
+        }
+    }
+    Ok(Some(updated))
+}
+
+fn replace_rich_text_preserving_presentation(
+    original: &Block,
+    replacement: &EditorBlockContent,
+) -> Result<Option<Block>, HcdError> {
+    let Some(anchors) = crate::docx_inline::distribute_docx_inlines(
+        &original.content.inlines,
+        &replacement.inlines,
+    ) else {
+        return Ok(None);
+    };
+    let mut updated = original.clone();
+    updated.content.inlines.clear();
+    for (id, inlines) in anchors {
+        let Some(entry) = updated.entries.iter_mut().find(|entry| entry.node_id == id) else {
+            return Ok(None);
+        };
+        let text: String = inlines.iter().map(|inline| inline.text.as_str()).collect();
+        let hash = hash_bytes(text.as_bytes());
+        let runs: Vec<_> = inlines
+            .iter()
+            .map(|inline| crate::DocxInlineRun {
+                text: inline.text.clone(),
+                bold: inline.bold,
+                italic: inline.italic,
+            })
+            .collect();
+        crate::patch::replace_node_content(
+            &mut updated.html,
+            &id,
+            &crate::docx_inline::render_docx_inline_runs(&runs),
+            &hash,
+        )?;
+        entry.node_hash = hash;
+        updated.content.inlines.extend(inlines);
+    }
+    Ok(Some(updated))
 }
 
 fn block_index(
@@ -1096,11 +1537,7 @@ fn validate_content(content: &EditorBlockContent) -> Result<(), HcdError> {
             ));
         }
         if let Some(link) = &inline.link {
-            if link.len() > 2048
-                || !(link.starts_with("https://")
-                    || link.starts_with("http://")
-                    || link.starts_with("mailto:"))
-            {
+            if link.len() > 2048 || !crate::is_safe_hyperlink(link) {
                 return Err(HcdError::InvalidPatch("unsafe inline link".to_string()));
             }
         }
@@ -1462,6 +1899,344 @@ mod tests {
     use crate::{BundleWriter, HcdCapabilities, SourceDescriptor, StorageCodec};
 
     #[test]
+    fn table_structure_batches_validate_and_reject_stale_or_partial_updates() {
+        let (_temp, bundle) = fixture_format("html");
+        let manifest = bundle.manifest().unwrap();
+        project_editor(&bundle, manifest.revision).unwrap();
+        let projection = editor_projection(&bundle, None).unwrap();
+        let batch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: projection.document_id.clone(),
+            patch_id: "insert-table".into(),
+            base_revision: projection.revision,
+            operations: vec![StructureOperation::TableInsert {
+                after_block_id: Some(projection.blocks[0].block_id.clone()),
+                rows: 3,
+                columns: 2,
+            }],
+        };
+        let inserted = apply_structure_patch(&bundle, &batch, projection.revision).unwrap();
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{report:?}");
+        let projection = editor_projection(&bundle, None).unwrap();
+        let table = &projection.blocks[1];
+        assert_eq!(table.editable_text_node_ids.len(), 6);
+        assert!(
+            bundle
+                .revision(inserted.revision)
+                .unwrap()
+                .structural_change
+        );
+        let op = |action, index| StructureOperation::TableEdit {
+            block_id: table.block_id.clone(),
+            table_index: 0,
+            action,
+            index,
+            precondition: BlockPrecondition {
+                block_hash: table.block_hash.clone(),
+            },
+        };
+        let mut patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: projection.document_id.clone(),
+            patch_id: "atomic-table".into(),
+            base_revision: projection.revision,
+            operations: vec![
+                op(TableEditAction::InsertRow, 1),
+                op(TableEditAction::DeleteColumn, 99),
+            ],
+        };
+        assert!(apply_structure_patch(&bundle, &patch, projection.revision).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, inserted.revision);
+        patch.operations.truncate(1);
+        let edited = apply_structure_patch(&bundle, &patch, projection.revision).unwrap();
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{report:?}");
+        assert_eq!(
+            editor_projection(&bundle, None).unwrap().blocks[1]
+                .editable_text_node_ids
+                .len(),
+            8
+        );
+        patch.patch_id = "stale-table".into();
+        patch.base_revision = edited.revision;
+        assert!(apply_structure_patch(&bundle, &patch, edited.revision).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, edited.revision);
+        assert_eq!(
+            editor_projection(&bundle, Some(inserted.revision))
+                .unwrap()
+                .blocks[1]
+                .editable_text_node_ids
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn table_undo_restores_only_guarded_table_and_keeps_other_blocks() {
+        let (_temp, bundle) = fixture_format("html");
+        project_editor(&bundle, 0).unwrap();
+        let first = editor_projection(&bundle, None).unwrap();
+        let apply = |operations: Vec<StructureOperation>| {
+            let head = bundle.manifest().unwrap().revision;
+            apply_structure_patch(
+                &bundle,
+                &StructurePatchBatch {
+                    schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+                    document_id: first.document_id.clone(),
+                    patch_id: format!("history-{head}"),
+                    base_revision: head,
+                    operations,
+                },
+                head,
+            )
+        };
+        apply(vec![StructureOperation::TableInsert {
+            after_block_id: Some(first.blocks[0].block_id.clone()),
+            rows: 2,
+            columns: 2,
+        }])
+        .unwrap();
+        let inserted = editor_projection(&bundle, None).unwrap();
+        let table = &inserted.blocks[1];
+        apply(vec![StructureOperation::TableEdit {
+            block_id: table.block_id.clone(),
+            table_index: 0,
+            action: TableEditAction::DeleteRow,
+            index: 0,
+            precondition: BlockPrecondition {
+                block_hash: table.block_hash.clone(),
+            },
+        }])
+        .unwrap();
+        let deleted = editor_projection(&bundle, None).unwrap();
+        replace(&bundle, deleted.revision, 2, "Peer paragraph remains");
+        apply(vec![StructureOperation::TableRestore {
+            block_id: table.block_id.clone(),
+            source_revision: inserted.revision,
+            after_block_id: None,
+            precondition: TableRestorePrecondition {
+                block_hash: Some(deleted.blocks[1].block_hash.clone()),
+            },
+        }])
+        .unwrap();
+        let restored = editor_projection(&bundle, None).unwrap();
+        assert_eq!(restored.blocks[1].block_hash, table.block_hash);
+        assert_eq!(
+            restored.blocks[2].content.inlines[0].text,
+            "Peer paragraph remains"
+        );
+        assert!(apply(vec![StructureOperation::TableRestore {
+            block_id: table.block_id.clone(),
+            source_revision: deleted.revision,
+            after_block_id: None,
+            precondition: TableRestorePrecondition {
+                block_hash: Some(deleted.blocks[1].block_hash.clone())
+            }
+        }])
+        .is_err());
+        apply(vec![StructureOperation::TableDelete {
+            block_id: table.block_id.clone(),
+            precondition: BlockPrecondition {
+                block_hash: table.block_hash.clone(),
+            },
+        }])
+        .unwrap();
+        apply(vec![StructureOperation::TableRestore {
+            block_id: table.block_id.clone(),
+            source_revision: inserted.revision,
+            after_block_id: Some(first.blocks[0].block_id.clone()),
+            precondition: TableRestorePrecondition { block_hash: None },
+        }])
+        .unwrap();
+        assert_eq!(
+            editor_projection(&bundle, None).unwrap().blocks[1].block_hash,
+            table.block_hash
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn table_text_edits_preserve_layout_and_reject_changes_to_protected_runs() {
+        let values = ["Outside", "甲😀", "", "Field"];
+        let entries: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| NodeMapEntry {
+                node_id: format!("n_{index:032x}"),
+                node_hash: hash_bytes(value.as_bytes()),
+                source: SourceAnchor {
+                    source_cell_ref: None,
+                    created_in_hcd: false,
+                    part: "word/document.xml".into(),
+                    text_ordinal: index as u64,
+                    paragraph_id: Some(format!("P{index}")),
+                    text_id: None,
+                    node_kind: "text".into(),
+                    editable: index != 3,
+                },
+            })
+            .collect();
+        let span = |index: usize| {
+            format!("<span style=\"font-size:{}pt\" data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span>", 12 + index, entries[index].node_id, entries[index].node_hash, values[index])
+        };
+        let original = Block { id: "table".into(), region: "body".into(), read_only: true,
+            content: EditorBlockContent { kind: EditorBlockKind::Opaque, level: None, font: None,
+                inlines: entries.iter().zip(values).map(|(entry, text)| EditorInline {
+                    text: text.into(), node_id: Some(entry.node_id.clone()), bold: false, italic: false, link: None,
+                }).collect() },
+            html: format!("<section><p>{}</p><table style=\"width:600px\"><tr><td colspan=\"2\"><p>{}{}</p><table><tr><td>{}</td></tr></table></td></tr></table></section>", span(0),span(1),span(2),span(3)),
+            entries,
+        };
+        assert_eq!(
+            table_text_node_ids(&original),
+            vec![
+                original.entries[1].node_id.clone(),
+                original.entries[2].node_id.clone()
+            ]
+        );
+        let mut desired = original.content.clone();
+        desired.inlines[1].text = "甲中文🙂".into();
+        desired.inlines[2].text = "Added".into();
+        let edited = replace_table_text(&original, &desired).unwrap();
+        let mut expected = original.html.clone();
+        for index in [1, 2] {
+            let text = &desired.inlines[index].text;
+            expected = expected.replace(
+                &original.entries[index].node_hash,
+                &hash_bytes(text.as_bytes()),
+            );
+        }
+        expected = expected
+            .replace("甲😀", "甲中文🙂")
+            .replace(&format!(">{}</span>", values[2]), ">Added</span>");
+        // Apart from the two mapped texts/hashes, all markup is byte-identical.
+        assert_eq!(edited.html, expected);
+        for (before, after) in original.entries.iter().zip(&edited.entries) {
+            assert_eq!(
+                serde_json::to_value(&before.source).unwrap(),
+                serde_json::to_value(&after.source).unwrap()
+            );
+        }
+        for index in [0, 3] {
+            let mut invalid = desired.clone();
+            invalid.inlines[index].text = "Forbidden".into();
+            assert!(replace_table_text(&original, &invalid).is_err());
+        }
+        let mut invalid = desired.clone();
+        invalid.inlines[1].bold = true;
+        assert!(replace_table_text(&original, &invalid).is_err());
+        invalid = desired.clone();
+        invalid.inlines.swap(1, 2);
+        assert!(replace_table_text(&original, &invalid).is_err());
+        invalid = desired;
+        invalid.inlines.pop();
+        assert!(replace_table_text(&original, &invalid).is_err());
+        let mut header = original;
+        header.region = "header".into();
+        assert!(table_text_node_ids(&header).is_empty());
+    }
+
+    #[test]
+    fn word_text_edits_keep_unicode_run_boundaries_styles_and_source_anchors() {
+        let values = ["甲😀", "乙丙", "丁"];
+        let mut original = Block {
+            id: "word-paragraph".to_string(),
+            region: "body".to_string(),
+            read_only: false,
+            content: EditorBlockContent {
+                kind: EditorBlockKind::Paragraph,
+                level: None,
+                font: None,
+                inlines: Vec::new(),
+            },
+            html: "<p style=\"text-align:center\">".to_string(),
+            entries: Vec::new(),
+        };
+        for (index, value) in values.iter().enumerate() {
+            let id = format!("n_{index:032x}");
+            let hash = hash_bytes(value.as_bytes());
+            original.html.push_str(&format!("<span style=\"font-size:{}pt\" data-hcd-id=\"{id}\" data-hcd-node-hash=\"{hash}\">{value}</span>", 12 + index * 2));
+            original.content.inlines.push(EditorInline {
+                text: value.to_string(),
+                node_id: Some(id.clone()),
+                bold: false,
+                italic: false,
+                link: None,
+            });
+            original.entries.push(NodeMapEntry {
+                node_id: id,
+                node_hash: hash,
+                source: SourceAnchor {
+                    source_cell_ref: None,
+                    created_in_hcd: false,
+                    part: "word/document.xml".to_string(),
+                    text_ordinal: index as u64 + 1,
+                    paragraph_id: Some("A1".to_string()),
+                    text_id: None,
+                    node_kind: "text".to_string(),
+                    editable: true,
+                },
+            });
+        }
+        original.html.push_str("</p>");
+        for (text, expected) in [
+            ("甲修订丁", ["甲修订", "", "丁"]),
+            ("甲😀追加乙丙丁", ["甲😀追加", "乙丙", "丁"]),
+            ("前甲😀乙丙丁", ["前甲😀", "乙丙", "丁"]),
+            ("甲😀乙丙丁后", ["甲😀", "乙丙", "丁后"]),
+        ] {
+            let mut replacement = original.content.clone();
+            replacement.inlines.truncate(1);
+            replacement.inlines[0].node_id = None;
+            replacement.inlines[0].text = text.to_string();
+            let updated = replace_text_preserving_presentation(&original, &replacement)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                updated
+                    .content
+                    .inlines
+                    .iter()
+                    .map(|inline| inline.text.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for (index, (old, new)) in original.entries.iter().zip(&updated.entries).enumerate() {
+                assert_eq!(
+                    serde_json::to_value(&old.source).unwrap(),
+                    serde_json::to_value(&new.source).unwrap()
+                );
+                assert_eq!(old.node_id, new.node_id);
+                assert_eq!(new.node_hash, hash_bytes(expected[index].as_bytes()));
+                assert!(updated
+                    .html
+                    .contains(&format!("font-size:{}pt", 12 + index * 2)));
+            }
+            assert!(updated.html.contains("text-align:center"));
+            replacement.inlines[0].bold = true;
+            let bold = replace_text_preserving_presentation(&original, &replacement)
+                .unwrap()
+                .unwrap();
+            assert!(bold
+                .content
+                .inlines
+                .iter()
+                .filter(|inline| !inline.text.is_empty())
+                .all(|inline| inline.bold));
+            assert!(bold.html.contains("text-align:center"));
+            assert_eq!(
+                bold.content
+                    .inlines
+                    .iter()
+                    .map(|inline| inline.text.as_str())
+                    .collect::<String>(),
+                text
+            );
+        }
+    }
+
+    #[test]
     fn body_insert_can_use_the_boundary_before_a_footer() {
         let block = |id: &str, region: &str| Block {
             id: id.to_string(),
@@ -1551,7 +2326,10 @@ mod tests {
         assert!(blocks[1].read_only && blocks[3].read_only && blocks[4].read_only);
     }
 
-    fn fixture() -> (tempfile::TempDir, Bundle) {
+    pub(super) fn fixture() -> (tempfile::TempDir, Bundle) {
+        fixture_format("txt")
+    }
+    fn fixture_format(format: &str) -> (tempfile::TempDir, Bundle) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("document.hcd");
         let mut writer = BundleWriter::create_with_codec(&path, StorageCodec::Gzip).unwrap();
@@ -1571,7 +2349,12 @@ mod tests {
                 source: SourceAnchor {
                     source_cell_ref: None,
                     created_in_hcd: false,
-                    part: "text/document".to_string(),
+                    part: if format == "html" {
+                        "html/document"
+                    } else {
+                        "text/document"
+                    }
+                    .to_string(),
                     text_ordinal: number + 1,
                     paragraph_id: None,
                     text_id: Some(format!("bytes:{source_offset}:{source_end}")),
@@ -1603,7 +2386,7 @@ mod tests {
                 profile: "semantic-flow".to_string(),
                 revision: 0,
                 source: SourceDescriptor {
-                    format: "txt".to_string(),
+                    format: format.to_string(),
                     sha256: "0".repeat(64),
                     size_bytes: source_offset as u64,
                 },

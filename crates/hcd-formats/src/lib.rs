@@ -1,7 +1,9 @@
 //! Streaming/source-backed HCD adapters for Office, PDF, HTML, Markdown and plain text.
 
 mod common;
+pub mod images;
 mod mermaid;
+mod native_images;
 mod pdf;
 mod pptx;
 mod textual;
@@ -46,6 +48,9 @@ where
         "pdf" => pdf::import_pdf(source, output.as_ref(), options, emit),
         "html" | "htm" => textual::import_html(source, output.as_ref(), options, emit),
         "md" | "markdown" => textual::import_markdown(source, output.as_ref(), options, emit),
+        "png" | "jpg" | "jpeg" | "webp" => {
+            images::import_image(source, output.as_ref(), options, emit)
+        }
         "txt" => textual::import_text(source, output.as_ref(), options, emit),
         extension => Err(HcdError::Unsupported(format!(
             "HCD import does not support .{extension}"
@@ -61,11 +66,11 @@ pub fn export_document(
 ) -> Result<hcd_core::FidelityReport, HcdError> {
     let opened = hcd_core::Bundle::open(bundle.as_ref())?;
     let manifest = opened.manifest()?;
-    match manifest.source.format.as_str() {
+    let mut report = match manifest.source.format.as_str() {
         "docx" => hcd_docx::export_docx(
-            bundle,
-            source,
-            target,
+            bundle.as_ref(),
+            source.as_ref(),
+            target.as_ref(),
             &hcd_docx::ExportOptions {
                 revision: options.revision,
                 fidelity_report: options.fidelity_report.clone(),
@@ -76,11 +81,34 @@ pub fn export_document(
         "pdf" => pdf::export_pdf(&opened, source.as_ref(), target.as_ref(), options),
         "html" => textual::export_html(&opened, source.as_ref(), target.as_ref(), options),
         "md" => textual::export_markdown(&opened, source.as_ref(), target.as_ref(), options),
+        "png" | "jpg" | "jpeg" | "webp" => images::export_image(&opened, target.as_ref(), options),
         "txt" => textual::export_text(&opened, source.as_ref(), target.as_ref(), options),
         format => Err(HcdError::Unsupported(format!(
             "HCD export does not support source format {format}"
         ))),
+    }?;
+    let images = native_images::apply(&opened, target.as_ref(), options.revision)?;
+    if images > 0 {
+        if report.level == hcd_core::FidelityLevel::Exact {
+            report.level = hcd_core::FidelityLevel::High;
+        }
+        report.preserved.push(format!(
+            "{images} HCD-created image assets embedded with explicit native dimensions"
+        ));
+        common::write_fidelity_report(options, &report)?;
     }
+    Ok(report)
+}
+
+/// Apply only versioned HCD-created media to an already materialized native
+/// artifact of the document's source format. Used after the visual PDF rebuild,
+/// which intentionally draws the original page raster separately from new media.
+pub fn append_created_images(
+    bundle: &hcd_core::Bundle,
+    target: &Path,
+    revision: Option<u64>,
+) -> Result<(), HcdError> {
+    native_images::apply(bundle, target, revision).map(|_| ())
 }
 
 /// Check source identity and known revision restrictions without writing output.
@@ -96,6 +124,9 @@ pub fn validate_source_export(
         ..Default::default()
     };
     match bundle.manifest()?.source.format.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" => {
+            images::image_content(bundle, revision)?;
+        }
         "pdf" | "xlsx" => {
             checked_export_state_with_restores(bundle, source, &options, RunFontSupport::Rejects)?;
         }

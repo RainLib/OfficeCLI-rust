@@ -1,15 +1,23 @@
+import { keepHistory } from './editHistory.ts'
+import { LeftPanelShell } from './LeftPanelShell.tsx'
+import { AppearanceSelect, useAppearance } from './Appearance.tsx'
+import { WorkspaceDrawers } from './WorkspaceDrawers.tsx'
 import { useDocumentViewState } from './DocumentViewState.tsx'
 import { CanvasViewport, useCanvasZoom } from './CanvasZoom.tsx'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
-import { BooleanNumber, createUniver, defaultTheme, LocaleType, RANGE_TYPE, type IWorkbookData } from '@univerjs/presets'
-import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
+import { BooleanNumber, createUniver, defaultTheme, LocaleType, RANGE_TYPE, type IWorkbookData, type ICellData } from '@univerjs/presets'
+import { CellAlertManagerService, DeviceInputEventType, extractFormulaError, SetFormulaCalculationResultMutation, SetSelectionsOperation, UniverSheetsCorePreset,
+  SetInlineFormatBoldCommand, SetInlineFormatItalicCommand, SetInlineFormatUnderlineCommand,
+  SetInlineFormatFontSizeCommand, SetInlineFormatTextColorCommand } from '@univerjs/preset-sheets-core'
 import { UniverSheetsDrawingPreset } from '@univerjs/preset-sheets-drawing'
 import { HcdUniverAdapter, type HcdPatchEventDetail } from '../../xlsx-univer-viewer/src/adapter.ts'
 import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
+import { editedInlineRuns, inheritInlineRuns, validateInlineRuns, type XlsxInlineRun } from '../../xlsx-univer-viewer/src/rich-text.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
-import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon } from './EditorChrome.tsx'
+import type { CalculationResult } from './capabilities.ts'
+import { EditorHeader, EditorStatusbar, ContentToolbar, CollapseSidebarIcon } from './EditorChrome.tsx'
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
@@ -17,7 +25,11 @@ import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { api, type Session } from './api.ts'
 import { loadThemeCss } from './themeCss.ts'
 import { ErrorToast } from './ErrorToast.tsx'
-import { agentColor, agentStatus, useAgentActivities, useAgentWorkspace, AgentPanel } from './AgentActivityLayer.tsx'
+import { useAgentActivities, useAgentWorkspace, AgentPanel } from './AgentActivityLayer.tsx'
+import { GridAgentOverlay } from './GridAgentOverlay.tsx'
+import { InputDraftRecovery, useInputDraft } from './useInputDraft.tsx'
+import type { InputDraft } from './inputDraftJournal.ts'
+import { gridBatchDraft, parseGridBatch, type GridBatchDraft } from './gridBatchDraft.ts'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
 
@@ -48,6 +60,21 @@ async function loadUniverMessages(locale: string) {
 type GridSelectionKind = 'cell' | 'row' | 'column' | 'all'
 type EditStep = { revision: number; label: string }
 type EditHistory = { head: number | null; past: EditStep[]; future: EditStep[] }
+type GridInput = { schemaVersion: 'hcd-grid-input/1'; baseRevision: number; sheetId: string; row: number; column: number;
+  address: string; original: string; text: string; nodeId?: string; nodeHash?: string; richRuns?: XlsxInlineRun[] }
+function parseGridInput(record: InputDraft): GridInput {
+  const input = JSON.parse(record.content) as GridInput
+  if (!input || input.schemaVersion !== 'hcd-grid-input/1' || !Number.isSafeInteger(input.baseRevision) || input.baseRevision < 0
+    || typeof input.sheetId !== 'string' || !input.sheetId || !Number.isSafeInteger(input.row) || input.row < 0 || input.row >= 1_048_576
+    || !Number.isSafeInteger(input.column) || input.column < 0 || input.column >= 16_384 || typeof input.address !== 'string'
+    || typeof input.original !== 'string' || typeof input.text !== 'string' || input.text.length > 100_000
+    || (input.nodeId !== undefined && (typeof input.nodeId !== 'string' || typeof input.nodeHash !== 'string'))) throw new Error('这份单元格输入无法安全恢复，请下载草稿保留')
+  if (input.richRuns !== undefined) {
+    validateInlineRuns(input.richRuns, input.text)
+    if (input.nodeId ? !input.nodeHash : input.original !== '' || input.nodeHash !== undefined) throw new Error('富文本草稿缺少原单元格位置')
+  }
+  return input
+}
 
 function selectionKind(sheet: ReturnType<HcdUniverAdapter['workbook']['getActiveSheet']>): GridSelectionKind {
   const range = sheet.getActiveRange()
@@ -65,9 +92,10 @@ function selectionKind(sheet: ReturnType<HcdUniverAdapter['workbook']['getActive
 }
 
 export function UniverViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
+  const { theme: appearanceTheme } = useAppearance()
   const agents = useAgentActivities()
-  const { panelOpen, setPanelOpen } = useAgentWorkspace()
-  const { preview, setPreview, focused, setFocused, activeTab, setActiveTab } = useDocumentViewState()
+  const { panelOpen, setPanelOpen, requestTask } = useAgentWorkspace()
+  const { preview, setPreview, focused, setFocused, activeTab, setActiveTab, rightPanel, setRightPanel } = useDocumentViewState()
   const { zoom, setZoom } = useCanvasZoom()
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -77,6 +105,20 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [history, setHistory] = useState<EditHistory>({ head: null, past: [], future: [] })
   const [historyBusy, setHistoryBusy] = useState(false)
   const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
+  const epochRef = useRef(collaborationEpoch)
+  epochRef.current = collaborationEpoch
+  const inputProtection = useInputDraft(session, collaborationEpoch)
+  const protectionRef = useRef(inputProtection)
+  protectionRef.current = inputProtection
+  const gridInput = useRef<GridInput | null>(null)
+  const gridBatch = useRef<GridBatchDraft | null>(null)
+  const [batchInput, setBatchInput] = useState<GridBatchDraft | null>(null)
+  const [batchReview, setBatchReview] = useState(false)
+  const [batchBusy, setBatchBusy] = useState(false)
+  const batchBusyRef = useRef(false)
+  const commitBatchRef = useRef<(draft: GridBatchDraft, review: boolean) => Promise<void>>(async () => {})
+  const [restoringInput, setRestoringInput] = useState(false)
+  const restoringRef = useRef(false)
   const [error, setError] = useState('')
   const [themeCss, setThemeCss] = useState('')
   const editing = session.scope === 'write' && !preview
@@ -84,7 +126,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const editingRef = useRef(editing)
   editingRef.current = editing
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(session.documentId))
-  const [settingsOpen, setSettingsOpen] = useState(false)
+  const settingsOpen = rightPanel === 'settings'
+  const setSettingsOpen = (value: boolean | ((open: boolean) => boolean)) => setRightPanel(previous => (typeof value === 'function' ? value(previous === 'settings') : value) ? 'settings' : null)
   function openSettings() { setFocused(false); setPanelOpen(false); setSettingsOpen(true) }
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -113,52 +156,133 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [formulaAddress, setFormulaAddress] = useState('A1')
   const [formulaText, setFormulaText] = useState('')
   const [formulaDirty, setFormulaDirty] = useState(false)
+  const [formulaCalculation, setFormulaCalculation] = useState<CalculationResult | null>(null)
+  const [verifiedFunctions, setVerifiedFunctions] = useState<string[]>([])
+  const calculationRequest = useRef(0)
   const [gridSelectionKind, setGridSelectionKind] = useState<GridSelectionKind>('cell')
   const formulaInput = useRef<HTMLInputElement>(null)
   const updateFormulaBarRef = useRef<() => void>(() => {})
   const host = useRef<HTMLDivElement>(null)
+  const mousePointerUp = useRef(false)
+  const mouseClickCount = useRef(0)
   const runtime = useRef<{ client: ServiceGridClient; adapter: HcdUniverAdapter } | null>(null)
+  function changeGridInput(sheetId: string, row: number, column: number, text: string, document?: ICellData['p']) {
+    const current = runtime.current
+    if (!current || !editingRef.current || gridBatch.current) return
+    const sheet = current.adapter.workbook.getSheetBySheetId(sheetId)
+    if (!sheet) return
+    const previous = gridInput.current
+    if (previous && (previous.sheetId !== sheetId || previous.row !== row || previous.column !== column)) {
+      setError('请先应用或取消当前未提交输入'); return
+    }
+    const cell = sheet.getRange(row, column), link = current.adapter.getNodeAt(sheetId, row, column)
+    let richRuns: XlsxInlineRun[] | undefined
+    try {
+      if (document && (!link || link.editable || link.formulaEditable) && !text.startsWith('=')) {
+        richRuns = editedInlineRuns(text, document, link ?? { text: '' }) ?? undefined
+      } else if (!document && previous?.richRuns && !text.startsWith('=')) {
+        richRuns = inheritInlineRuns(previous.richRuns, text)
+      }
+    } catch (cause) { setError(String(cause)); return }
+    const input: GridInput = { ...(previous ?? { schemaVersion: 'hcd-grid-input/1', baseRevision: current.client.manifest.revision,
+      sheetId, row, column, address: cell.getA1Notation(),
+      original: link?.formula ?? link?.text ?? String(cell.getFormulas?.()[0]?.[0] || (cell.getValue() ?? '')),
+      nodeId: link?.nodeId, nodeHash: link?.nodeHash }), text, richRuns }
+    gridInput.current = text === input.original && !richRuns ? null : input
+    protectionRef.current.write(gridInput.current)
+    setFormulaText(text); setFormulaDirty(!!gridInput.current)
+  }
+  function changeFormulaInput(text: string) {
+    const current = runtime.current
+    if (!current || gridBatch.current || restoringRef.current) return
+    const input = gridInput.current, sheet = current.adapter.workbook.getActiveSheet(), selection = sheet.getActiveRange()
+    if (input) changeGridInput(input.sheetId, input.row, input.column, text)
+    else if (selection) changeGridInput(sheet.getSheetId(), selection.getRow(), selection.getColumn(), text)
+  }
+  function cancelGridInput() {
+    if (gridBatch.current) return
+    if (runtime.current?.adapter.hasPendingPatch() || runtime.current?.adapter.workbook.isCellEditing()) {
+      setError('请先结束单元格编辑或等待当前保存完成'); return
+    }
+    gridInput.current = null; protectionRef.current.write(null); setFormulaDirty(false)
+    updateFormulaBarRef.current()
+  }
+  async function reviewGridBatch(input: GridBatchDraft) {
+    const result = await (await api(session, '/node-patch-review', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-HCD-Collaboration-Epoch': String(input.collaborationEpoch) },
+      body: JSON.stringify(input.patch), signal: AbortSignal.timeout(15_000),
+    })).json() as { protocolVersion: string; documentId: string; patchId: string; state: string; revision: number; appliedRevision?: number }
+    if (result.protocolVersion !== 'hcd-node-patch-review/1' || result.documentId !== session.documentId || result.patchId !== input.patch.patchId
+      || !Number.isSafeInteger(result.revision) || !['ready','applied'].includes(result.state)
+      || result.state === 'ready' && result.revision !== input.patch.baseRevision
+      || result.state === 'applied' && (result.appliedRevision !== input.patch.baseRevision + 1 || result.revision < result.appliedRevision)) {
+      throw new Error('文档版本或提交回执不一致；草稿已保留，请下载核对')
+    }
+    return result
+  }
+  async function discardGridBatch() {
+    const current = runtime.current
+    if (!current || batchBusyRef.current || !gridBatch.current) return
+    batchBusyRef.current = true; setBatchBusy(true)
+    try {
+      await current.adapter.refreshFromServer()
+      if (runtime.current !== current) return
+      gridBatch.current = null; setBatchInput(null); protectionRef.current.write(null)
+      setRevision(current.client.manifest.revision); resetHistory(current.client.manifest.revision)
+      updateFormulaBarRef.current(); setError(''); setStatus('已同步服务端内容')
+    } catch (cause) { setError(`刷新失败，草稿仍保留：${String(cause)}`) }
+    finally { batchBusyRef.current = false; if (runtime.current === current) { setBatchBusy(false); current.adapter.setInputBlocked(!!gridBatch.current) } }
+  }
+  function downloadGridBatch() {
+    if (!gridBatch.current) return
+    const url = URL.createObjectURL(new Blob([JSON.stringify(gridBatch.current, null, 2)], {type:'application/json'}))
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${session.documentId}-grid-draft.json`; anchor.click()
+    setTimeout(() => URL.revokeObjectURL(url), 30000)
+  }
+  async function restoreGridInput(record: InputDraft) {
+    const current = runtime.current
+    if (!current || !editingRef.current || gridInput.current || gridBatch.current || current.adapter.hasPendingPatch() || current.adapter.workbook.isCellEditing() || restoringRef.current) throw new Error('请先应用或取消当前输入并等待保存完成')
+    restoringRef.current = true; setRestoringInput(true)
+    current.adapter.setInputBlocked(true)
+    try {
+      if (JSON.parse(record.content)?.schemaVersion === 'hcd-grid-batch-input/1') {
+        const input = parseGridBatch(record), receipt = await protectionRef.current.validate(record)
+        if (input.collaborationEpoch !== record.epoch) throw new Error('草稿协同版本不一致，请下载核对')
+        const reviewed = await reviewGridBatch(input)
+        if (runtime.current !== current || !protectionRef.current.unchanged(receipt)) throw new Error('当前文档或输入已变化，请重新核对')
+        if (reviewed.state === 'applied') {
+          await current.adapter.refreshFromServer()
+          if (runtime.current !== current || !protectionRef.current.unchanged(receipt)) throw new Error('当前文档或输入已变化，请重新核对')
+          await protectionRef.current.dismiss(record)
+          setRevision(current.client.manifest.revision); resetHistory(current.client.manifest.revision)
+          setStatus(`已核对：这批输入已保存为 r${reviewed.appliedRevision}，没有再次提交`)
+          updateFormulaBarRef.current()
+        } else {
+          await protectionRef.current.adopt(record)
+          if (runtime.current !== current) return
+          gridBatch.current = input; setBatchInput(input); setBatchReview(true); setError('')
+        }
+        return
+      }
+      const input = parseGridInput(record), receipt = await protectionRef.current.validate(record)
+      const manifest = await (await api(session, '')).json() as { revision: number }
+      if (manifest.revision !== input.baseRevision || manifest.revision !== current.client.manifest.revision) throw new Error('文档版本已变化；草稿已保留，请下载核对')
+      await current.adapter.focusCell(input.sheetId, input.row, input.column)
+      const link = current.adapter.getNodeAt(input.sheetId, input.row, input.column)
+      if (link?.nodeId !== input.nodeId || link?.nodeHash !== input.nodeHash) throw new Error('目标单元格已变化；草稿已保留，请下载核对')
+      if (runtime.current !== current || !protectionRef.current.unchanged(receipt)) throw new Error('当前文档或输入已变化，请重新核对')
+      await protectionRef.current.adopt(record)
+      if (runtime.current !== current) return
+      gridInput.current = input; setFormulaText(input.text); setFormulaAddress(input.address); setFormulaDirty(true)
+      formulaInput.current?.focus()
+    } finally { restoringRef.current = false; setRestoringInput(false); current.adapter.setInputBlocked(!!gridBatch.current) }
+  }
   const localeApi = useRef<Pick<ReturnType<typeof createUniver>['univerAPI'], 'loadLocales' | 'setLocale'> | null>(null)
   useEffect(() => {
     const sheet = runtime.current?.adapter.workbook.getActiveSheet()
     if (sheet && Math.abs(sheet.getZoom() - zoom) > 0.005) sheet.zoom(zoom)
   }, [zoom])
   const syncing = useRef(false)
-  useEffect(() => {
-    let decorations: Array<{ dispose: () => void }> = []
-    let signature = ''
-    const refresh = () => {
-      const current = runtime.current
-      const visible = !!host.current?.getClientRects().length
-      const sheet = current?.adapter.workbook.getActiveSheet()
-      const targets = agents.map(agent => ({ agent, address: agent.nodeId ? current?.adapter.nodeAddress(agent.nodeId) : undefined }))
-      const next = JSON.stringify([visible, sheet?.getSheetId(), targets, revision])
-      if (next === signature) return
-      signature = next
-      decorations.forEach(item => item.dispose()); decorations = []
-      if (!current || !visible || !sheet) return
-      const occupants = new Map<string, number>()
-      for (const { agent, address } of targets) {
-        if (!address || sheet.getSheetId() !== address.sheetId) continue
-        try {
-          const range = sheet.getRange(address.row, address.column)
-          const color = agentColor(agent.agentId)
-          const key = `${address.row}:${address.column}`
-          const offset = occupants.get(key) || 0
-          occupants.set(key, offset + 1)
-          decorations.push(range.highlight({ stroke: color, fill: `${color}18`, strokeWidth: 2 }))
-          const popup = range.attachPopup({
-            componentKey: () => <span className="agent-grid-cursor" data-agent-id={agent.agentId} style={{pointerEvents:'none',color,background:'#fff',border:`1px solid ${color}`,borderRadius:4,padding:'3px 7px',fontSize:11,whiteSpace:'nowrap'}}>➤ {agent.name} · {agentStatus[agent.status]}</span>,
-            direction: 'top-left', offset: [0, -24 * offset], hideOnInvisible: true, zIndex: 34,
-          })
-          if (popup) decorations.push(popup)
-        } catch { /* Virtualized or inactive cells keep their activity card. */ }
-      }
-    }
-    refresh()
-    const timer = setInterval(refresh, 300)
-    return () => { clearInterval(timer); decorations.forEach(item => item.dispose()) }
-  }, [agents, revision])
   const gridBusy = useRef(false)
   const collaborationSession = useMemo(() => ({ ...session, collaborationEpoch }), [session, collaborationEpoch])
   const collaboration = useFixedCollaboration(collaborationSession, revision, next => setRemoteRevision(previous => Math.max(previous ?? 0, next)))
@@ -166,18 +290,18 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   announceRevision.current = collaboration.announceRevision
   function recordEdit(nextRevision: number, label: string) {
     setHistory(previous => ({ head: nextRevision,
-      past: [...(previous.head === nextRevision - 1 ? previous.past : []), { revision: nextRevision - 1, label }],
+      past: keepHistory([...(previous.head === nextRevision - 1 ? previous.past : []), { revision: nextRevision - 1, label }]),
       future: [] }))
   }
   function resetHistory(nextRevision: number) {
     setHistory({ head: nextRevision, past: [], future: [] })
   }
   const historyLocked = historyBusy || mergeBusy || rowBusy || columnBusy || columnWidthBusy || rowHeightBusy || renameBusy
-    || addBusy || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
+    || addBusy || formatBusy || deleteBusy || freezeBusy || !!batchInput || batchBusy || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
   async function travelHistory(direction: 'undo' | 'redo') {
     const current = runtime.current
     const steps = direction === 'undo' ? history.past : history.future
-    if (!current || !editing || session.scope !== 'write' || historyLocked || gridBusy.current || !steps.length) return
+    if (!current || !editing || session.scope !== 'write' || historyLocked || gridBusy.current || gridInput.current || gridBatch.current || restoringRef.current || !steps.length) return
     const target = steps[steps.length - 1]
     const head = current.client.manifest.revision
     if (history.head !== head) {
@@ -195,8 +319,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       const saved = await response.json() as { revision: number }
       setHistory(previous => direction === 'undo'
         ? { head: saved.revision, past: previous.past.slice(0, -1),
-          future: [...previous.future, { revision: head, label: target.label }] }
-        : { head: saved.revision, past: [...previous.past, { revision: head, label: target.label }],
+          future: keepHistory([...previous.future, { revision: head, label: target.label }]) }
+        : { head: saved.revision, past: keepHistory([...previous.past, { revision: head, label: target.label }]),
           future: previous.future.slice(0, -1) })
       collaboration.announceRevision(saved.revision)
       setRevision(saved.revision)
@@ -263,20 +387,23 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     const current = runtime.current
     if (!current || remoteRevision === null || syncing.current || gridBusy.current || historyBusy) return
     if (remoteRevision <= current.client.manifest.revision) { setRemoteRevision(null); return }
-    if (current.adapter.hasPendingPatch()) return
+    if (current.adapter.hasPendingPatch() || gridInput.current || gridBatch.current || current.adapter.workbook.isCellEditing() || restoringRef.current) return
     syncing.current = true
     void current.adapter.refreshFromServer().then(refreshed => {
       if (!refreshed || runtime.current !== current) return
       setRevision(current.client.manifest.revision)
       updateFormulaBarRef.current()
-      resetHistory(current.client.manifest.revision)
+      // A refresh started before our local acknowledgement may finish after
+      // it. Only a genuinely different head invalidates the local undo stack.
+      const actual = current.client.manifest.revision
+      setHistory(previous => previous.head === actual ? previous : { head: actual, past: [], future: [] })
       setRemoteRevision(null)
       setError('')
       void api(session, '/auth').then(response => response.json())
         .then((auth: { collaborationEpoch: number }) => setCollaborationEpoch(auth.collaborationEpoch))
         .catch(() => {})
     }).catch(cause => setError(`协作修订同步失败：${String(cause)}`)).finally(() => { syncing.current = false })
-  }, [remoteRevision, revision, status, historyBusy, session])
+  }, [remoteRevision, revision, status, historyBusy, session, formulaDirty, restoringInput, batchInput])
 
   useEffect(() => {
     const current = localeApi.current
@@ -314,6 +441,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     let removePatchListener: (() => void) | undefined
     const boot = async () => {
       await client.open()
+      const auth = await (await api(session, '/auth')).json() as { collaborationEpoch: number }
+      if (!alive) return
+      epochRef.current = auth.collaborationEpoch
+      setCollaborationEpoch(auth.collaborationEpoch)
       const styleCatalog = parseStyleCatalog(await client.readStyles())
       const sheets = client.sheets()
       if (!sheets.length || !host.current || !alive) throw new Error('工作簿没有可显示的工作表')
@@ -358,65 +489,158 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       univerAPI.addEvent(univerAPI.Event.SheetZoomChanged, () => setZoom(workbook.getActiveSheet().getZoom()))
       univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, () => setZoom(workbook.getActiveSheet().getZoom()))
       const updateFormulaBar = () => {
+        if (!alive) return
         const sheet = workbook.getActiveSheet()
         const selection = sheet.getActiveRange()
         if (!selection || !alive) return
         setGridSelectionKind(selectionKind(sheet))
         const cell = sheet.getRange(selection.getRow(), selection.getColumn())
         setFormulaAddress(cell.getA1Notation())
-        setFormulaText(String(cell.getFormulas?.()[0]?.[0] || (cell.getValue() ?? '')))
+        // Continue tracking the real selection while keeping the draft's own
+        // target visible separately. Calculation must not replace its text.
+        if (gridInput.current || gridBatch.current) return
+        setFormulaText(String(cell.getFormulas?.()[0]?.[0] || (cell.getValue()
+          ?? runtime.current?.adapter.getNodeAt(sheet.getSheetId(), selection.getRow(), selection.getColumn())?.text ?? '')))
         setFormulaDirty(false)
+        const request = ++calculationRequest.current
+        const address = cell.getA1Notation()
+        setFormulaCalculation(null)
+        void client.readCalculation(sheet.getSheetId(), address).then(value => {
+          if (!alive || request !== calculationRequest.current || runtime.current?.adapter.hasPendingPatch()) return
+          setFormulaCalculation(value?.formula ? value.calculation : null)
+        }).catch(() => {
+          if (alive && request === calculationRequest.current && String(cell.getFormulas?.()[0]?.[0] ?? '').startsWith('=')) {
+            setFormulaCalculation({ status: 'unavailable', value: null, error: 'calculation_unavailable' })
+          }
+        })
       }
       updateFormulaBarRef.current = updateFormulaBar
-      univerAPI.addEvent(univerAPI.Event.SelectionChanged, updateFormulaBar)
+      // The UI selection observable may attach before/after the first render
+      // depending on lazy boot. Follow the completed model operation instead.
+      univerAPI.addEvent(univerAPI.Event.CommandExecuted, ({ id }) => {
+        if (id === SetSelectionsOperation.id) queueMicrotask(updateFormulaBar)
+        if (id === SetFormulaCalculationResultMutation.id) queueMicrotask(() => {
+          if (!alive) return
+          // Univer's error popup follows pointer movement. Recheck it after
+          // both native and verified recalculations under a stationary pointer.
+          const alerts = univer.__getInjector().get(CellAlertManagerService)
+          for (const [key, { alert }] of alerts.currentAlert) {
+            if (key !== 'SHEET_FORMULA_ALERT' || alert.location.unitId !== client.manifest.documentId) continue
+            const cell = workbook.getSheetBySheetId(alert.location.subUnitId)
+              ?.getRange(alert.location.row, alert.location.col).getCellData()
+            if (!extractFormulaError(cell)) alerts.removeAlert(key)
+          }
+        })
+      })
       univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, updateFormulaBar)
       const adapter = new HcdUniverAdapter(client, univerAPI, workbook, editingRef.current ? 'editable' : 'readonly', message => {
         if (alive) setStatus(message)
-      }, styleCatalog)
-      let saveQueue = Promise.resolve()
+      }, styleCatalog, message => { if (alive) setError(message) })
+      univerAPI.addEvent(univerAPI.Event.BeforeSheetEditStart, event => {
+        // Univer counts canvas releases within 500 ms as a double click even
+        // when the user clicked our external toolbar in between. For a mouse,
+        // require the browser's mousedown click count to confirm a double click.
+        // Touch double taps, typing, F2 and programmatic editing keep their
+        // own entry points; this gate only covers the pointerup dispatch.
+        if (mousePointerUp.current && event.eventType === DeviceInputEventType.Dblclick) { event.cancel = true; return }
+        if (gridInput.current || gridBatch.current || restoringRef.current) { event.cancel = true; setError('请先应用或取消当前未提交输入') }
+      })
+      univerAPI.addEvent(univerAPI.Event.SheetEditChanging, event => {
+        if (alive) changeGridInput(event.worksheet.getSheetId(), event.row, event.column, event.value.toPlainText(), event.value.getData())
+      })
+      univerAPI.addEvent(univerAPI.Event.BeforeSheetEditEnd, event => {
+        if (!alive) return
+        if (event.isConfirm) changeGridInput(event.worksheet.getSheetId(), event.row, event.column, event.value.toPlainText(), event.value.getData())
+        else if (gridInput.current?.sheetId === event.worksheet.getSheetId() && gridInput.current.row === event.row && gridInput.current.column === event.column) {
+          gridInput.current = null; protectionRef.current.write(null); setFormulaDirty(false)
+          queueMicrotask(updateFormulaBar)
+        }
+      })
+      commitBatchRef.current = async (draft, review) => {
+        if (!alive || batchBusyRef.current || !editingRef.current || gridBatch.current !== draft) return
+        batchBusyRef.current = true; setBatchBusy(true); adapter.setInputBlocked(true)
+        const receipt = protectionRef.current.capture()
+        try {
+          // A request may commit even when its response never reaches this
+          // browser. Preserve its exact identity before the first network write.
+          await protectionRef.current.flush(receipt, draft)
+          if (!alive || !protectionRef.current.unchanged(receipt)) return
+          if (review) {
+            const checked = await reviewGridBatch(draft)
+            if (!alive || !protectionRef.current.unchanged(receipt)) return
+            if (checked.state === 'applied') {
+              await adapter.refreshFromServer()
+              if (!alive) return
+              protectionRef.current.acknowledge(receipt)
+              gridBatch.current = null; setBatchInput(null)
+              setRevision(client.manifest.revision); resetHistory(client.manifest.revision)
+              updateFormulaBar()
+              setStatus(`已核对：这批输入已保存为 r${checked.appliedRevision}，没有再次提交`); setError('')
+              return
+            }
+          }
+          setStatus('保存中…')
+          const patch = draft.patch
+          const response = await api(session, '/node-patch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-HCD-Collaboration-Epoch': String(draft.collaborationEpoch) },
+            body: JSON.stringify(patch), signal: AbortSignal.timeout(20_000),
+          })
+          const result = await response.json() as { revision: number }
+          if (!alive) return
+          if (result.revision !== patch.baseRevision + 1) throw new Error('提交回执不一致，请核对后重试')
+          const hashes: Record<string, string> = {}
+          for (const operation of patch.operations) {
+            if (operation.op !== 'text.splice' && operation.op !== 'xlsx.richText.set' && operation.op !== 'xlsx.formula.set'
+              && operation.op !== 'xlsx.formula.to-value') continue
+            const newText = operation.op === 'xlsx.formula.set' ? operation.formula
+              : operation.op === 'xlsx.formula.to-value' ? operation.text
+              : operation.op === 'xlsx.richText.set' ? operation.runs.map(run => run.text).join('')
+              : draft.changes.find(change => change.nodeId === operation.nodeId)?.newText
+            if (newText === undefined) continue
+            const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(newText))
+            hashes[operation.nodeId] = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+          }
+          if (!alive) return
+          const optimistic = adapter.hasPendingPatch()
+          adapter.acknowledgePatch(patch.patchId, result.revision, hashes)
+          protectionRef.current.acknowledge(receipt)
+          recordEdit(result.revision, '编辑单元格')
+          announceRevision.current(result.revision)
+          setRevision(result.revision); setError('')
+          try {
+            if (optimistic) await adapter.refreshChangedCells(draft.changes)
+            else await adapter.refreshFromServer()
+            if (alive) setStatus(`revision ${result.revision} · 已保存`)
+          } catch (cause) { if (alive) setError(`修订已保存，但索引刷新失败：${String(cause)}`) }
+          if (alive) { gridBatch.current = null; setBatchInput(null); updateFormulaBar() }
+        } catch (cause) {
+          if (alive) {
+            adapter.rejectPatch(draft.patch.patchId, '保存未确认，输入已保留')
+            setBatchReview(true)
+            setError(`${String(cause)}。修改已保留，请核对后重试或下载草稿。`)
+          }
+        } finally {
+          batchBusyRef.current = false
+          if (alive) { setBatchBusy(false); adapter.setInputBlocked(!!gridBatch.current) }
+        }
+      }
       const onPatch = (event: Event) => {
         const detail = (event as CustomEvent<HcdPatchEventDetail>).detail
         if (!detail || detail.patch.documentId !== session.documentId) return
-        saveQueue = saveQueue.catch(() => {}).then(async () => {
-          const patch = { ...detail.patch, baseRevision: client.manifest.revision }
-          try {
-            if (alive) setStatus('保存中…')
-            const response = await api(session, '/node-patch', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ...patch, operations: patch.operations.map(({ type, ...operation }) => ({ op: type, ...operation })) }),
-            })
-            const result = await response.json() as { revision: number }
-            const hashes: Record<string, string> = {}
-            for (let index = 0; index < patch.operations.length; index += 1) {
-              const operation = patch.operations[index]
-              if (operation.type !== 'text.splice' && operation.type !== 'xlsx.formula.set'
-                && operation.type !== 'xlsx.formula.to-value') continue
-              const newText = operation.type === 'xlsx.formula.set' ? operation.formula
-                : operation.type === 'xlsx.formula.to-value' ? operation.text
-                : detail.changes.find(change => change.nodeId === operation.nodeId)?.newText
-              if (newText === undefined) continue
-              const bytes = new TextEncoder().encode(newText)
-              const digest = await crypto.subtle.digest('SHA-256', bytes)
-              hashes[operation.nodeId] = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
-            }
-            adapter.acknowledgePatch(patch.patchId, result.revision, hashes)
-            if (alive) recordEdit(result.revision, '编辑单元格')
-            announceRevision.current(result.revision)
-            if (alive) { setRevision(result.revision); setError('') }
-            try {
-              await adapter.refreshChangedCells(detail.changes)
-              updateFormulaBar()
-              if (alive) setStatus(`revision ${result.revision} · 已保存`)
-            } catch (cause) { if (alive) setError(`修订已保存，但索引刷新失败：${String(cause)}`) }
-          } catch (cause) {
-            adapter.rejectPatch(patch.patchId, '保存失败，已恢复单元格原值')
-            if (alive) setError(`${String(cause)}。如其他人已更新，请重新打开文档。`)
-          }
-        })
+        if (gridBatch.current || restoringRef.current) {
+          adapter.rejectPatch(detail.patch.patchId, '请先处理保留的单元格修改')
+          setError('请先核对并提交或舍弃保留的单元格修改'); return
+        }
+        const draft = gridBatchDraft(detail, epochRef.current ?? 0)
+        gridBatch.current = draft; setBatchInput(draft); setBatchReview(false); adapter.setInputBlocked(true)
+        gridInput.current = null; setFormulaDirty(false)
+        protectionRef.current.write(draft)
+        void commitBatchRef.current(draft, false)
       }
       window.addEventListener('hcd-patch', onPatch)
       removePatchListener = () => window.removeEventListener('hcd-patch', onPatch)
       await adapter.start()
+      if (alive) setVerifiedFunctions(client.verifiedFunctions)
       updateFormulaBar()
       runtime.current = { client, adapter }
       if (alive) {
@@ -433,7 +657,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   function changeMode(readOnly: boolean) {
     if (!readOnly && session.scope !== 'write') return
     if (runtime.current?.adapter.workbook.isCellEditing()) { setError('请先确认单元格编辑，再切换模式。'); return }
-    if (formulaDirty || runtime.current?.adapter.hasPendingPatch() || historyLocked || gridBusy.current) {
+    if (formulaDirty || gridBatch.current || runtime.current?.adapter.hasPendingPatch() || historyLocked || gridBusy.current) {
       setError('请先应用当前公式并等待保存完成，再切换模式。')
       return
     }
@@ -446,6 +670,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || mergeBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if (!range || range.getHeight() * range.getWidth() < 2) {
@@ -504,6 +729,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || mergeBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const selected = sheet.getActiveRange()
       if (!selected) throw new Error('请先选中合并单元格')
@@ -551,6 +777,27 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || formatBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (current.adapter.workbook.isCellEditing()) {
+        if (format.fill !== undefined) throw new Error('请先确认文字编辑，再设置单元格填充')
+        const commands = [
+          ...(format.bold !== undefined ? [{id: SetInlineFormatBoldCommand.id}] : []),
+          ...(format.italic !== undefined ? [{id: SetInlineFormatItalicCommand.id}] : []),
+          ...(format.underline !== undefined ? [{id: SetInlineFormatUnderlineCommand.id}] : []),
+          ...(format.fontSizePt !== undefined ? [{id: SetInlineFormatFontSizeCommand.id, value: String(format.fontSizePt)}] : []),
+          ...(format.color !== undefined ? [{id: SetInlineFormatTextColorCommand.id, value: format.color}] : []),
+        ]
+        for (const command of commands) {
+          if (!await current.adapter.univerAPI.executeCommand(command.id, {value: 'value' in command ? command.value : undefined})) {
+            throw new Error('请先在单元格内选中要修改的文字')
+          }
+        }
+        const document = current.adapter.univerAPI.getActiveDocument()?.getSnapshot()
+        const sheet = current.adapter.workbook.getActiveSheet(), range = sheet.getActiveRange()
+        if (document && range) changeGridInput(sheet.getSheetId(), range.getRow(), range.getColumn(),
+          current.adapter.univerAPI.newRichTextValue(document).toPlainText(), document)
+        return
+      }
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const link = selectedCellLink()
       if (!link) throw new Error('请先选中已有内容的单元格')
       setFormatBusy(true)
@@ -582,6 +829,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || formatBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const link = selectedCellLink()
       if (!link) throw new Error('请先选中已有内容的单元格')
       setFormatBusy(true)
@@ -613,6 +861,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || formatBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const link = selectedCellLink()
       if (!link) throw new Error('请先选中已有内容的单元格')
       const code = formatCode.trim()
@@ -664,6 +913,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     const trimmed = name.trim()
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const problem = sheetNameProblem(trimmed)
       if (problem) throw new Error(problem)
       if (trimmed === activeSheetName()) throw new Error('新名称必须与当前工作表名不同')
@@ -698,6 +948,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     const trimmed = name.trim()
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const problem = sheetNameProblem(trimmed)
       if (problem) throw new Error(problem)
       // HCD compares tab names without regard to case, so the button checks the
@@ -744,6 +995,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     const name = sheet.getSheetName()
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       // What the bundle holds decides whether a tab may go, not the tabs on
       // screen: a hidden worksheet is still a tab, and a workbook left with no
       // visible tab is not a file Excel opens.
@@ -802,6 +1054,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     const name = sheet.getSheetName()
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       if (!Number.isInteger(rows) || rows < 0 || rows > 1_048_575) throw new Error('冻结行数须在 0 到 1048575 之间')
       if (!Number.isInteger(columns) || columns < 0 || columns > 16_383) throw new Error('冻结列数须在 0 到 16383 之间')
       setFreezeBusy(true)
@@ -855,6 +1108,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || rowBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const sheetId = sheet.getSheetId()
       const count = Number(rowInsertCount)
@@ -911,6 +1165,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     else setColumnBusy(true)
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       setStatus(`正在${action === 'insert' ? '插入' : '删除'} ${count} ${label}…`)
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -945,6 +1200,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || rowBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if (!range) throw new Error('请先选中目标行中的单元格')
@@ -993,6 +1249,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || rowBusy || columnBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if (!range) throw new Error('请先选中目标列中的单元格')
@@ -1037,6 +1294,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || rowBusy || columnBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if ((range?.getWidth() ?? 0) > 1) {
@@ -1075,6 +1333,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || rowBusy || columnBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if ((range?.getHeight() ?? 0) > 1) {
@@ -1113,6 +1372,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || rowBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const sheetId = sheet.getSheetId()
       const row = Math.max(0, ...current.client.descriptors
@@ -1151,6 +1411,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || columnWidthBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if (!range) throw new Error('请先选中一个单元格或列')
@@ -1192,6 +1453,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (!current || !editing || session.scope !== 'write' || rowHeightBusy) return
     try {
       if (current.adapter.hasPendingPatch()) throw new Error('请等待当前单元格保存完成')
+      if (gridInput.current || gridBatch.current || restoringRef.current) throw new Error('请先应用或取消当前未提交输入')
       const sheet = current.adapter.workbook.getActiveSheet()
       const range = sheet.getActiveRange()
       if (!range) throw new Error('请先选中一个单元格或行')
@@ -1243,13 +1505,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   function applyFormulaBarInput() {
     const current = runtime.current
     if (!current || !editing || session.scope !== 'write') return
-    if (!formulaDirty) return
+    if (!formulaDirty || gridBatch.current) return
     if (current.adapter.hasPendingPatch()) { setError('请等待当前单元格保存完成'); return }
-    const sheet = current.adapter.workbook.getActiveSheet()
-    const selection = sheet.getActiveRange()
-    if (!selection) { setError('请先选择一个单元格'); return }
+    const input = gridInput.current
+    if (!input || restoringRef.current) return
+    if (current.adapter.workbook.isCellEditing()) { setError('请先结束单元格编辑'); return }
+    if (input.baseRevision !== current.client.manifest.revision) { setError('文档版本已变化，请复制输入并核对最新单元格'); return }
+    const link = current.adapter.getNodeAt(input.sheetId, input.row, input.column)
+    if (link?.nodeId !== input.nodeId || link?.nodeHash !== input.nodeHash) { setError('目标单元格已变化，请复制输入并核对'); return }
     try {
-      current.adapter.applyCellInput(sheet.getSheetId(), selection.getRow(), selection.getColumn(), formulaText)
+      if (input.richRuns) current.adapter.applyRichCellInput(input.sheetId, input.row, input.column, input.richRuns)
+      else current.adapter.applyCellInput(input.sheetId, input.row, input.column, input.text)
       setError('')
     } catch (cause) {
       setError(String(cause))
@@ -1268,9 +1534,13 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     && activeRange.getRow() < range.getRow() + range.getHeight()
     && activeRange.getColumn() >= range.getColumn()
     && activeRange.getColumn() < range.getColumn() + range.getWidth())
-  const gridActionDisabled = !editing || session.scope !== 'write' || mergeBusy || rowBusy || columnBusy
+  const gridActionDisabled = !editing || session.scope !== 'write' || mergeBusy || rowBusy || columnBusy || formulaDirty || !!batchInput || restoringInput
     || !!runtime.current?.adapter.hasPendingPatch()
   const contextActions: MenuAction[] = [
+    { label: '用 Agent 修改选区…', accent: true, disabled: gridActionDisabled || !activeRange, action: () => {
+      setFocused(false)
+      requestTask('请修改当前选区，保留其他单元格、公式与格式：', { sheetId: activeSheet?.getSheetId(), range: activeRange?.getA1Notation(), nodeId: selectedCellLink()?.nodeId, format: 'xlsx' })
+    } },
     ...(contextSelectionKind === 'cell' ? [{ label: '合并单元格', action: () => void mergeSelection(),
       disabled: gridActionDisabled || !activeRange || !!selectedMerge || activeRange.getHeight() * activeRange.getWidth() < 2 },
     { label: '拆分单元格', action: () => void unmergeSelection(), disabled: gridActionDisabled || !selectedMerge }] : []),
@@ -1287,7 +1557,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     ...(!showRowContext && !showColumnContext ? [{ label: '请选中行、列或单元格', action: () => {}, disabled: true }] : []),
   ]
 
-  const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : editing ? '已保存' : '只读'
+  const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : formulaDirty || batchInput ? '编辑中' : editing ? '已保存' : '只读'
+  const draftTargetLabel = gridInput.current ? `${runtime.current?.adapter.workbook.getSheetBySheetId(gridInput.current.sheetId)?.getSheetName() || localizeSource(locale, '工作表')}!${gridInput.current.address}` : ''
   return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(!panelOpen && !settingsOpen && activeTab !== 'revisions') || focused ? 'right-hidden' : ''} ${focused ? 'focus-mode' : ''}`}>
     {themeCss && <style>{themeCss}</style>}
     {deletionPrompt && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) answerDeletion(false) }}>
@@ -1296,16 +1567,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         <div className="hcd-dialog-actions"><button autoFocus onClick={() => answerDeletion(false)}><LocalText source={"取消"} /></button><button className="primary" onClick={() => answerDeletion(true)}><LocalText source={"删除"} /></button></div>
       </div>
     </div>}
-    {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
-      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); setSettingsOpen(false) } }} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen && !panelOpen} readOnly={!editing} onReadOnly={changeMode} focused={focused} onFocus={() => setFocused(value => !value)} presence={layout.showCollaborators ? collaboration.avatars : null} />}
+    {layout.showHeader && <EditorHeader outlineOpen={layout.showOutline && !focused} onToggleOutline={() => { setFocused(false); setLayoutOption('showOutline', !layout.showOutline || focused) }} session={session} revision={revision} status={headerStatus} activeTab={activeTab}
+      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen && !panelOpen} readOnly={!editing} onReadOnly={changeMode} focused={focused} onFocus={() => setFocused(value => !value)} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => openSettings()}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     <div className="layout editor-layout">
-      {layout.showOutline && !focused ? <aside className="outline-panel" aria-label={localizeSource(locale, '工作表')}><div className="panel-head"><h2><LocalText source="工作表" /></h2><button className="icon-button panel-close" aria-label={localizeSource(locale, '隐藏文档目录')} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div><nav>{runtime.current?.client.sheets().filter(sheet => sheet.sheetState === 'visible').map(sheet => <button key={sheet.sheetId} onClick={() => { const workbook = runtime.current?.adapter.workbook; const target = workbook?.getSheetBySheetId(sheet.sheetId); if (target) workbook?.setActiveSheet(target) }}>{sheet.sheetName}</button>)}</nav></aside> : <PanelDock side="left" onOpen={() => { setFocused(false); setLayoutOption('showOutline', true) }} />}
+      <WorkspaceDrawers leftOpen={layout.showOutline && !focused} rightOpen={!focused && (panelOpen || rightPanel !== null)} onCloseLeft={() => setLayoutOption('showOutline', false)} onCloseRight={() => { setPanelOpen(false); setSettingsOpen(false); if (activeTab === 'revisions') setActiveTab('home') }} />
+      <LeftPanelShell session={session} hidden={!layout.showOutline || focused} label="工作表" onClose={() => setLayoutOption('showOutline', false)} onSearch={() => setSearchOpen(true)} onWorkspace={onClose} onSettings={openSettings}><div className="panel-head"><h2><LocalText source="工作表" /></h2></div><nav>{runtime.current?.client.sheets().filter(sheet => sheet.sheetState === 'visible').map(sheet => <button key={sheet.sheetId} onClick={() => { const workbook = runtime.current?.adapter.workbook; const target = workbook?.getSheetBySheetId(sheet.sheetId); if (target) workbook?.setActiveSheet(target) }}>{sheet.sheetName}</button>)}</nav></LeftPanelShell>
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
-        {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); setSettingsOpen(false) } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={!editing} format="xlsx" />}
+        {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={!editing} format="xlsx" />}
     {layout.showToolbar && editing && !focused && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button className={selectedCellLink()?.bold ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.bold} onClick={() => void saveCellFormat({ bold: !selectedCellLink()?.bold })}><LocalText source={"加粗"} /></button><button className={selectedCellLink()?.italic ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.italic} onClick={() => void saveCellFormat({ italic: !selectedCellLink()?.italic })}><LocalText source={"斜体"} /></button><button className={selectedCellLink()?.underline ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.underline} onClick={() => void saveCellFormat({ underline: !selectedCellLink()?.underline })}><LocalText source={"下划线"} /></button><label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="409" step="0.5" value={cellFontSize} disabled={!editing || formatBusy} onChange={event => setCellFontSize(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || formatBusy || !Number.isFinite(Number(cellFontSize)) || Number(cellFontSize) < 1 || Number(cellFontSize) > 409} onClick={() => void saveCellFormat({ fontSizePt: Number(cellFontSize) })}><LocalText source={"应用字号"} /></button><label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={cellFontColor} disabled={!editing || formatBusy} onChange={event => setCellFontColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ color: cellFontColor })}><LocalText source={"应用颜色"} /></button></div></>}
+      {activeTab === 'home' && <><div className="tool-group" onMouseDown={event => { if (runtime.current?.adapter.workbook.isCellEditing() && (event.target as Element).closest('button')) event.preventDefault() }}><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button className={selectedCellLink()?.bold ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.bold} onClick={() => void saveCellFormat({ bold: !selectedCellLink()?.bold })}><LocalText source={"加粗"} /></button><button className={selectedCellLink()?.italic ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.italic} onClick={() => void saveCellFormat({ italic: !selectedCellLink()?.italic })}><LocalText source={"斜体"} /></button><button className={selectedCellLink()?.underline ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.underline} onClick={() => void saveCellFormat({ underline: !selectedCellLink()?.underline })}><LocalText source={"下划线"} /></button><label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="409" step="0.5" value={cellFontSize} disabled={!editing || formatBusy} onChange={event => setCellFontSize(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || formatBusy || !Number.isFinite(Number(cellFontSize)) || Number(cellFontSize) < 1 || Number(cellFontSize) > 409} onClick={() => void saveCellFormat({ fontSizePt: Number(cellFontSize) })}><LocalText source={"应用字号"} /></button><label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={cellFontColor} disabled={!editing || formatBusy} onChange={event => setCellFontColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ color: cellFontColor })}><LocalText source={"应用颜色"} /></button></div></>}
       {activeTab === 'format' && <><div className="tool-group"><label><LocalText source={"填充"} /><input aria-label={localizeSource(locale, "填充")} type="color" value={cellFillColor} disabled={!editing || formatBusy} onChange={event => setCellFillColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ fill: cellFillColor })}><LocalText source={"应用填充"} /></button><button className={selectedCellLink()?.horizontal === 'left' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'left'} onClick={() => void saveCellLayout({ horizontal: 'left' })}><LocalText source={"左对齐"} /></button><button className={selectedCellLink()?.horizontal === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'center'} onClick={() => void saveCellLayout({ horizontal: 'center' })}><LocalText source={"居中"} /></button><button className={selectedCellLink()?.horizontal === 'right' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'right'} onClick={() => void saveCellLayout({ horizontal: 'right' })}><LocalText source={"右对齐"} /></button><button className={selectedCellLink()?.vertical === 'top' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'top'} onClick={() => void saveCellLayout({ vertical: 'top' })}><LocalText source={"顶端对齐"} /></button><button className={selectedCellLink()?.vertical === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'center'} onClick={() => void saveCellLayout({ vertical: 'center' })}><LocalText source={"垂直居中"} /></button><button className={selectedCellLink()?.vertical === 'bottom' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'bottom'} onClick={() => void saveCellLayout({ vertical: 'bottom' })}><LocalText source={"底端对齐"} /></button><button className={selectedCellLink()?.wrap ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.wrap} onClick={() => void saveCellLayout({ wrap: !selectedCellLink()?.wrap })}><LocalText source={"自动换行"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'thin' })}><LocalText source={"所有框线"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'none' })}><LocalText source={"无框线"} /></button><label><LocalText source={"数字格式 "} /><select aria-label={localizeSource(locale, "数字格式")} value={cellNumberFormat} disabled={!editing || formatBusy} onChange={event => setCellNumberFormat(event.target.value)}><option value="General">{localizeSource(locale, "常规")}</option><option value="0.00">{localizeSource(locale, "数值")}</option><option value="#,##0.00">{localizeSource(locale, "会计数值")}</option><option value="0%">{localizeSource(locale, "百分比")}</option><option value="0.00E+00">{localizeSource(locale, "科学计数")}</option><option value="yyyy-mm-dd">{localizeSource(locale, "日期")}</option><option value="@">{localizeSource(locale, "文本")}</option></select></label><label><LocalText source={"格式代码 "} /><input aria-label={localizeSource(locale, "格式代码")} value={cellNumberFormat} disabled={!editing || formatBusy} maxLength={1024} onChange={event => setCellNumberFormat(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellNumberFormat(cellNumberFormat)}><LocalText source={"应用数字格式"} /></button></div></>}
       {activeTab === 'sheet' && <><div className="tool-group"><label><LocalText source={"工作表名 "} /><input aria-label={localizeSource(locale, "工作表名")} value={sheetNameDraft} disabled={!editing || renameBusy} maxLength={31} onFocus={() => setSheetNameDraft(previous => previous || activeSheetName())} onChange={event => setSheetNameDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "重命名当前工作表，公式与内部链接会跟随新名称")} disabled={!editing || renameBusy || addBusy || formatBusy || !sheetNameDraft.trim()} onClick={() => void renameActiveSheet(sheetNameDraft)}><LocalText source={"重命名工作表"} /></button><label><LocalText source={"新增工作表名 "} /><input aria-label={localizeSource(locale, "新增工作表名")} value={sheetAddDraft} disabled={!editing || addBusy} maxLength={31} onChange={event => setSheetAddDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "在工作簿末尾新增一个空白工作表")} disabled={!editing || addBusy || renameBusy || formatBusy || !sheetAddDraft.trim()} onClick={() => void addWorksheet(sheetAddDraft)}><LocalText source={"新增工作表"} /></button><button title={localizeSource(locale, "删除当前工作表，它的单元格一并删除，引用它的公式变为 #REF!")} disabled={!editing || deleteBusy || addBusy || renameBusy || formatBusy} onClick={() => void deleteActiveSheet()}><LocalText source={"删除工作表"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一行，已经冻结的列保持不变")} className={currentFreeze().rows > 0 ? 'primary' : ''} aria-pressed={currentFreeze().rows > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(1, currentFreeze().columns)}><LocalText source={"冻结首行"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一列，已经冻结的行保持不变")} className={currentFreeze().columns > 0 ? 'primary' : ''} aria-pressed={currentFreeze().columns > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(currentFreeze().rows, 1)}><LocalText source={"冻结首列"} /></button><button title={localizeSource(locale, "在选中单元格的上方和左侧冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={freezeAtSelection}><LocalText source={"冻结窗格"} /></button><button title={localizeSource(locale, "取消当前工作表的冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy || !currentFreeze().rows && !currentFreeze().columns} onClick={() => void freezeActiveSheet(0, 0)}><LocalText source={"取消冻结"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
       {activeTab === 'insert' && <><div className="tool-group">
@@ -1331,40 +1603,84 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       <span className="xlsx-formula-address" aria-label={localizeSource(locale, "选中单元格")}>{formulaAddress}</span>
       <label htmlFor={`xlsx-formula-expression-${session.documentId}`}>ƒx</label>
       <input id={`xlsx-formula-expression-${session.documentId}`} ref={formulaInput} aria-label={localizeSource(locale, "单元格内容或公式")} value={formulaText}
-        disabled={!editing} placeholder={localizeSource(locale, "输入文字、数字或 =SUM(A1:A10)")}
-        onChange={event => { setFormulaText(event.target.value); setFormulaDirty(true) }} />
-      <select aria-label={localizeSource(locale, "插入常用函数")} disabled={!editing} value="" onChange={event => {
+        disabled={!editing || restoringInput || !!batchInput} maxLength={100_000} placeholder={localizeSource(locale, "输入文字、数字或 =SUM(A1:A10)")}
+        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); cancelGridInput() } }}
+        onChange={event => changeFormulaInput(event.target.value)} />
+      {(formulaCalculation || formulaDirty && formulaText.startsWith('=')) && <output className="xlsx-calculation-status" aria-label={localizeSource(locale, "计算校验")}
+        data-calculation-status={formulaDirty ? 'pending' : formulaCalculation?.status}
+        title={formulaCalculation?.error === 'literal_type_metadata_missing'
+          ? localizeSource(locale, '此工作簿由旧版导入，请重新导入原始 XLSX 后核验计算')
+          : formulaCalculation?.error || ''}>
+        {formulaDirty ? <LocalText source="保存后核算" /> : formulaCalculation?.status === 'calculated'
+          ? <><LocalText source="已核验" /> · {formulaCalculation.value}</> : <LocalText source="计算暂不可用" />}
+      </output>}
+      <select aria-label={localizeSource(locale, "插入常用函数")} disabled={!editing || restoringInput || !!batchInput} value="" onChange={event => {
         if (!event.target.value) return
-        setFormulaText(`=${event.target.value}(`)
-        setFormulaDirty(true)
+        changeFormulaInput(`=${event.target.value}(`)
         formulaInput.current?.focus()
       }}>
         <option value=""><LocalText source={"常用函数"} /></option>
-        {['SUM', 'AVERAGE', 'COUNT', 'MIN', 'MAX', 'IF'].map(name => <option key={name} value={name}>{name}</option>)}
+        {verifiedFunctions.map(name => name.replace('RANK_', 'RANK.')).map(name => <option key={name} value={name}>{name}</option>)}
       </select>
-      <button type="submit" disabled={!editing}><LocalText source={"应用内容"} /></button>
+      <button type="submit" disabled={!editing || restoringInput || !!batchInput}><LocalText source={"应用内容"} /></button>
+      {formulaDirty && <><output className="xlsx-draft-target" aria-label="未应用输入位置" title={`${localizeSource(locale, '未应用输入')} · ${draftTargetLabel}`}>{draftTargetLabel}</output><button className="xlsx-input-cancel" type="button" aria-label={localizeSource(locale, '取消输入')} onClick={cancelGridInput}><LocalText source="取消输入" /></button></>}
     </form>}
-    <CanvasViewport native className="univer-editor-area" onContextMenu={openGridContextMenu} onMouseDownCapture={() => setContextMenu(null)} onWheelCapture={() => setContextMenu(null)}><div ref={host} className="hcd-univer-host" /></CanvasViewport>
+    <InputDraftRecovery protection={inputProtection} disabled={!editing || restoringInput || formulaDirty || !!batchInput || !runtime.current || !!runtime.current?.adapter.hasPendingPatch()} onRestore={restoreGridInput} onError={setError} />
+    {batchInput && batchReview && <details open className="epoch-draft-conflict" aria-label="待保存的单元格修改">
+      <summary>{batchBusy ? '正在保存单元格修改' : '有一批单元格修改待核对'} · {batchInput.changes.length} 个单元格</summary>
+      <p>修改已保留。核对后提交会先检查服务端回执；已保存的修改不会再次提交。</p>
+      <textarea aria-label="待保存的单元格修改内容" readOnly value={batchInput.text} />
+      <button disabled={!editing || batchBusy || restoringInput || inputProtection.status !== 'protected'} onClick={() => void commitBatchRef.current(batchInput, true)}>核对并提交</button>
+      <button onClick={downloadGridBatch}>下载本地草稿</button>
+      <button disabled={batchBusy || restoringInput} onClick={() => void discardGridBatch()}>舍弃本地修改</button>
+    </details>}
+    <CanvasViewport native className="univer-editor-area" onContextMenu={openGridContextMenu} onMouseDownCapture={() => setContextMenu(null)} onWheelCapture={() => setContextMenu(null)}><div ref={host} className={`hcd-univer-host${appearanceTheme === 'dark' ? ' univer-dark' : ''}`}
+      onMouseDownCapture={event => { mouseClickCount.current = event.detail }}
+      onPointerUpCapture={event => { mousePointerUp.current = event.pointerType === 'mouse' && mouseClickCount.current < 2 }}
+      onPointerUp={() => { mousePointerUp.current = false }}
+      onPointerDownCapture={() => { mousePointerUp.current = false }}
+      onPointerCancel={() => { mousePointerUp.current = false }} /></CanvasViewport>
+    <GridAgentOverlay session={session} host={host} runtime={runtime} revision={revision} />
       </section>
-      {panelOpen && !focused && <AgentPanel onLocate={async agent => {
+      <AgentPanel targetLabel={target => {
+        const address = target.nodeId ? runtime.current?.adapter.nodeAddress(target.nodeId) : target.sheetId && target.row && target.column ? {row:target.row-1,column:target.column-1} : undefined
+        let col='', n=(address?.column ?? -1)+1
+        while(n>0) {col=String.fromCharCode(65+(n-1)%26)+col;n=Math.floor((n-1)/26)}
+        return `${address ? `${col}${address.row+1} · ` : ''}${localizeSource(locale,target.label || '内容区域')}`
+      }} beforeRun={async () => {
+        if (formulaDirty || gridBatch.current || runtime.current?.adapter.workbook.isCellEditing() || runtime.current?.adapter.hasPendingPatch() || historyLocked || gridBusy.current) throw new Error('请先确认单元格或公式编辑，并等待保存完成。')
+      }} onLocate={async agent => {
         const current = runtime.current
-        if (!current || !agent.nodeId) return false
+        if (!current) return false
+        if (!agent.nodeId && agent.sheetId && agent.row && agent.column) {
+          const sheet=current.adapter.workbook.getSheetBySheetId(agent.sheetId)
+          if(!sheet) return false
+          await current.adapter.scrollCell(agent.sheetId, Math.max(0,agent.row-5),Math.max(0,agent.column-3))
+          return true
+        }
+        if (!agent.nodeId) return false
         const descriptor = current.client.descriptors.find(item => item.sequence === agent.chunkSequence)
         if (descriptor?.grid?.sheetId && descriptor.grid.rowStart !== undefined && descriptor.grid.rowEnd !== undefined) await current.adapter.loadRange(descriptor.grid.sheetId, descriptor.grid.rowStart - 1, descriptor.grid.rowEnd - 1)
-        return current.adapter.focusNode(agent.nodeId)
-      }} />}
+        const address = current.adapter.nodeAddress(agent.nodeId)
+        if (!address) return false
+        const sheet = current.adapter.workbook.getSheetBySheetId(address.sheetId)
+        if (!sheet) return false
+        // Follow the Agent with the viewport; retain the person's active cell.
+        // Leave context above the target when frozen rows occupy the top.
+        await current.adapter.scrollCell(address.sheetId, Math.max(0,address.row-4),Math.max(0,address.column-2))
+        return true
+      }} />
 
-      {settingsOpen && !panelOpen && !focused && <aside className="workspace-sidebar" aria-label={localizeSource(locale, "界面设置")}><section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setSettingsOpen(false)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset></section></aside>}
-      {activeTab === 'revisions' && !settingsOpen && !panelOpen && !focused && <aside className="workspace-sidebar xlsx-history-sidebar" aria-label={localizeSource(locale, "编辑步骤")}><div className="panel-head"><h2><LocalText source={"编辑步骤"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "关闭编辑步骤")} onClick={() => setActiveTab('home')}>×</button></div><p><LocalText source={"本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。"} /></p>
+      {settingsOpen && !panelOpen && !focused && <aside className="workspace-sidebar" aria-label={localizeSource(locale, "界面设置")}><section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setSettingsOpen(false)}><CollapseSidebarIcon /></button></div><LocaleSelect /><AppearanceSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset></section></aside>}
+      {rightPanel === 'revisions' && !panelOpen && !focused && <aside className="workspace-sidebar xlsx-history-sidebar" aria-label={localizeSource(locale, "编辑步骤")}><div className="panel-head"><h2><LocalText source={"编辑步骤"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "关闭编辑步骤")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div><p><LocalText source={"本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。"} /></p>
         {history.past.length ? <ol className="xlsx-edit-steps">{history.past.map((step, index) => <li key={`${index}-${step.revision}`}><span>{index + 1}</span><strong>{localizeDynamic(locale, step.label)}</strong><small><LocalText source={"保存前 r"} />{step.revision}</small></li>).reverse()}</ol> : <p><LocalText source={"暂无可撤销步骤"} /></p>}
         {history.future.length > 0 && <><h3><LocalText source={"可重做"} /></h3><ol className="xlsx-edit-steps">{history.future.slice().reverse().map((step, index) => <li key={`${index}-${step.revision}`}><span>↷</span><strong>{localizeDynamic(locale, step.label)}</strong></li>)}</ol></>}
       </aside>}
-      {(focused || (!settingsOpen && !panelOpen && activeTab !== 'revisions')) && <PanelDock side="right" onOpen={() => { setFocused(false); setPanelOpen(false); openSettings() }} onAgents={() => { setFocused(false); setPanelOpen(true) }} onHistory={() => { setFocused(false); setPanelOpen(false); setSettingsOpen(false); setActiveTab('revisions') }} />}
     </div>
-    {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions}
+    {contextMenu && <ContextMenu title="单元格与选区" x={contextMenu.x} y={contextMenu.y} actions={contextActions}
       count={showRowContext ? { label: '插入行数', value: rowInsertCount, onChange: value => { setRowInsertCount(value); if (error.includes('插入行数必须')) setError('') } } : undefined}
       onClose={() => setContextMenu(null)} />}
-    <EditorStatusbar mode={localizeSource(locale, "工作簿视图")} format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
+    <EditorStatusbar mode={localizeSource(locale, "工作簿视图")} format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} draftProtection={session.scope === 'write' ? inputProtection.status : undefined} />
     {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>
 }

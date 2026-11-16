@@ -373,6 +373,8 @@ pub enum Command {
     Merge(MergeCommand),
     /// Show schema-driven capability reference
     Help(HelpCommand),
+    /// Print runtime operation, patch-version and calculation capabilities
+    Capabilities,
     /// Import CSV/TSV data into an Excel sheet
     Import(ImportCommand),
     /// Convert supported documents to and from the chunked HTML Canonical Document format

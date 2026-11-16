@@ -8,7 +8,7 @@ export type Inline = { text: string; bold?: boolean; italic?: boolean; link?: st
  * like, so a projection can be sent back unchanged. */
 export type BlockFont = { latin?: string; eastAsia?: string; bidi?: string }
 export type BlockContent = { kind: 'paragraph' | 'heading' | 'list_item' | 'opaque'; level?: number | null; font?: BlockFont | null; inlines: Inline[] }
-export type Block = { blockId: string; blockHash: string; region: string; readOnly: boolean; content: BlockContent; readOnlyHtml?: string }
+export type Block = { blockId: string; blockHash: string; region: string; readOnly: boolean; editableTextNodeIds?: string[]; content: BlockContent; readOnlyHtml?: string; presentationHtml?: string }
 export type Projection = { documentId: string; revision: number; blocks: Block[] }
 
 /** The DOM form of a block face: the same `data-hcd-font*` attributes the server
@@ -55,6 +55,9 @@ export const HcdOpaque = Node.create({
   name: 'hcdOpaque',
   group: 'block',
   atom: true,
+  // The canonical DOM is owned by the NodeView, while these mapped runs carry
+  // character-level collaborative edits and undo in the main Y.Doc.
+  content: 'hcdOpaqueRun*',
   selectable: true,
   addAttributes() {
     return {
@@ -68,7 +71,17 @@ export const HcdOpaque = Node.create({
   renderHTML({ node }) { return ['div', { 'data-hcd-opaque': '', 'data-hcd-block-id': node.attrs.hcdBlockId, contenteditable: 'false', class: 'hcd-opaque' }, node.attrs.preview || '▣'] },
 })
 
-export const schemaExtensions = [StarterKit.configure({ undoRedo: false, link: { openOnClick: false } }), HcdIdentity, HcdOpaque]
+export const HcdOpaqueRun = Node.create({
+  name: 'hcdOpaqueRun',
+  content: 'text*',
+  selectable: false,
+  addAttributes() { return { nodeId: { default: null } } },
+  parseHTML() { return [{ tag: 'span[data-hcd-opaque-run]' }] },
+  renderHTML({ node }) { return ['span', { 'data-hcd-opaque-run': node.attrs.nodeId }, 0] },
+})
+
+export const schemaExtensions = [// Imported documents must not gain an implicit empty paragraph on checkpoint.
+  StarterKit.configure({ undoRedo: false, trailingNode: false, link: { openOnClick: false } }), HcdIdentity, HcdOpaque, HcdOpaqueRun]
 
 // A pasted or split block must receive its own HCD identity at the next checkpoint.
 export function clearPastedBlockIds(slice: Slice): Slice {
@@ -96,13 +109,20 @@ function inlineJson(inline: Inline): JSONContent {
 
 function blockJson(block: Block, revision: number): JSONContent {
   if (block.readOnly || block.content.kind === 'opaque') {
-    return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, previewRevision: revision, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '▣' } }
+    return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, previewRevision: revision, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '▣' }, content: opaqueRunJson(block.content) }
   }
   const content = block.content.inlines.filter(part => part.text.length > 0).map(inlineJson)
   const attrs = { hcdBlockId: block.blockId, ...(block.content.font ? { hcdFont: block.content.font } : {}) }
   if (block.content.kind === 'heading') return { type: 'heading', attrs: { ...attrs, level: block.content.level || 1 }, content }
   if (block.content.kind === 'list_item') return { type: 'listItem', attrs, content: [{ type: 'paragraph', content }] }
   return { type: 'paragraph', attrs, content }
+}
+
+export function opaqueRunJson(content: BlockContent): JSONContent[] {
+  return content.inlines.filter(inline => inline.nodeId).map(inline => ({
+    type: 'hcdOpaqueRun', attrs: { nodeId: inline.nodeId },
+    content: inline.text ? [{ type: 'text', text: inline.text }] : [],
+  }))
 }
 
 export function projectionToJson(projection: Projection): JSONContent {
@@ -158,7 +178,11 @@ export function jsonToSnapshot(json: JSONContent): Array<{ blockId: string | nul
   const result: Array<{ blockId: string | null; content: BlockContent }> = []
   const push = (node: JSONContent) => {
     if (node.type === 'hcdOpaque') {
-      result.push({ blockId: node.attrs?.hcdBlockId || null, content: node.attrs?.hcdContent || { kind: 'opaque', inlines: [] } })
+      const content: BlockContent = node.attrs?.hcdContent || { kind: 'opaque', inlines: [] }
+      const runs = new Map(node.content?.map(run => [run.attrs?.nodeId, (run.content || []).map(text => text.text || '').join('')]))
+      result.push({ blockId: node.attrs?.hcdBlockId || null, content: {
+        ...content, inlines: content.inlines.map(inline => inline.nodeId && runs.has(inline.nodeId) ? { ...inline, text: runs.get(inline.nodeId)! } : inline),
+      } })
     } else if (node.type === 'paragraph' || node.type === 'heading') {
       result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: node.type, ...(node.type === 'heading' ? { level: node.attrs?.level || 1 } : {}), ...blockFontAttribute(node.attrs), inlines: inlinesFromNode(node) } })
     } else if (node.type === 'listItem') {

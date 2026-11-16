@@ -2,7 +2,25 @@
 //! The HTTP surface only returns decoded, verified objects requested by the client.
 use crate::commands::hdoc::{HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope};
 use crate::hdoc_remote::RemoteStore;
+mod admin;
+mod agent_continuation;
+mod agent_execution;
+mod agent_operations;
+mod agent_run_store;
+mod agent_runs;
+mod agent_team;
+mod agent_tools;
+mod agent_workflow_store;
+mod agent_workflows;
 mod exports;
+mod grid_drafts;
+mod identity;
+mod image_job_store;
+mod image_jobs;
+mod image_workspace;
+mod integration;
+mod mcp_http;
+mod spreadsheet;
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -48,6 +66,16 @@ struct ServerState {
     downloads: Arc<Mutex<HashMap<String, DownloadTicket>>>,
     export_jobs: Arc<tokio::sync::Semaphore>,
     agents: Arc<Mutex<HashMap<(String, String), AgentActivity>>>,
+    agent_operations: agent_operations::OperationStore,
+    agent_runs: agent_runs::RunStore,
+    agent_workflows: agent_workflow_store::Store,
+    worker_generation: Arc<String>,
+    worker_fences: Arc<std::sync::RwLock<HashSet<String>>>,
+    image_jobs: image_jobs::JobStore,
+    image_edits: image_workspace::Store,
+    image_slots: Arc<tokio::sync::Semaphore>,
+    mcp_sessions: mcp_http::SessionStore,
+    integration: Option<Arc<integration::Integration>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,6 +91,7 @@ struct AgentActivity {
     revision: u64,
     collaboration_epoch: u64,
     updated_at_epoch_ms: u64,
+    operation_at_epoch_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +103,8 @@ struct AgentFocus {
     chunk_sequence: Option<usize>,
     message: Option<String>,
     expected_revision: u64,
+    #[serde(default)]
+    targets: Vec<agent_operations::OperationTarget>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,6 +118,10 @@ struct Claims {
     aud: String,
     iat: usize,
     exp: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    integration_session: Option<String>,
 }
 
 fn load_secret(name: &str) -> Result<Vec<u8>> {
@@ -126,6 +161,8 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
         aud: "hcd-core".to_string(),
         iat: now,
         exp: now + command.ttl_seconds as usize,
+        worker_generation: None,
+        integration_session: None,
     };
     Ok(encode(
         &Header::new(Algorithm::HS256),
@@ -135,9 +172,18 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
 }
 
 pub async fn serve(command: HdocServeCommand) -> Result<()> {
+    admin::started_at();
     let secret = Arc::new(load_secret(&command.secret_env)?);
     std::fs::create_dir_all(&command.root)?;
     let root = command.root.canonicalize()?;
+    // Acquire before remote hydration or other startup writes, so a second
+    // API cannot alter this root while the original workers are still alive.
+    let task_process_lock = agent_runs::RunStore::acquire_root(&root)?;
+    if command.integration_config.is_none() && root.join("integration/identity.json").exists() {
+        return Err(anyhow!(
+            "this root contains managed host documents; --integration-config is required"
+        ));
+    }
     let database_url = std::env::var(&command.database_url_env).ok();
     let bucket = std::env::var(&command.s3_bucket_env).ok();
     let remote = match (database_url, bucket) {
@@ -160,6 +206,16 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         None => root.join("catalog"),
     })?;
     let default_theme = configured_default_theme(command.default_theme.clone())?;
+    identity::service_id(&root)?;
+    let agent_runs = agent_runs::RunStore::recover(&root, task_process_lock)?;
+    let agent_workflows = agent_workflow_store::Store::recover(&root)?;
+    let image_jobs = image_jobs::JobStore::recover(&root, "generation")?;
+    let image_edits = image_workspace::Store::recover(&root, "inpaint")?;
+    let integration = command
+        .integration_config
+        .as_ref()
+        .map(|path| integration::Integration::open(path, &root).map(Arc::new))
+        .transpose()?;
     let state = ServerState {
         root,
         catalog,
@@ -170,18 +226,86 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         downloads: Arc::new(Mutex::new(HashMap::new())),
         export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
         agents: Arc::new(Mutex::new(HashMap::new())),
+        agent_operations: Arc::new(Mutex::new(HashMap::new())),
+        agent_runs,
+        agent_workflows,
+        worker_generation: Arc::new(uuid::Uuid::new_v4().to_string()),
+        worker_fences: Default::default(),
+        image_jobs,
+        image_edits,
+        image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        mcp_sessions: Default::default(),
+        integration,
     };
+    integration::start_events(&state);
     let router = Router::new()
-        .route("/health", get(|| async { Json(json!({"ok": true})) }))
+        .route("/v1/documents/{id}/agent-workflows", get(agent_workflows::list).post(agent_workflows::create))
+        .route("/v1/documents/{id}/agent-workflows/{workflow_id}", get(agent_workflows::read).delete(agent_workflows::cancel))
+        .route("/v1/documents/{id}/agent-workflows/{workflow_id}/review", get(agent_workflows::review))
+        .route("/v1/documents/{id}/agent-workflows/{workflow_id}/actions", post(agent_workflows::execute))
+        .route("/integration/v1/sessions", post(integration::open_session))
+        .route("/integration/v1/sessions/{session_id}/refresh", post(integration::refresh_session))
+        .route("/integration/v1/sessions/{session_id}", delete(integration::close_session))
+        .route("/v1/documents/{id}/integration", get(integration::document_status))
+        .route("/v1/documents/{id}/publications", post(integration::publish))
+        .route("/v1/documents/{id}/publications/{publication_id}", get(integration::publication_status))
+        .route("/health", get(|| async { Json(json!({"ok": true,"build":crate::capabilities::runtime()["build"],"protocolFingerprint":crate::capabilities::fingerprint()})) }))
+        .route("/v1/capabilities", get(|| async { Json(crate::capabilities::runtime().clone()) }))
         .route("/admin", get(catalog_admin))
+        .route("/v1/admin/session", get(admin::session))
+        .route("/v1/admin/workspace", get(admin::workspace))
+        .route("/v1/admin/service", get(admin::service))
+        .route("/v1/admin/jobs", get(admin::jobs))
+        .route("/v1/admin/agent-runs", get(admin::agent_runs))
         .route("/v1/documents", get(catalog_documents))
         .route("/v1/documents/{id}", get(manifest))
+        .route("/v1/documents/{id}/capabilities", get(document_capabilities))
         .route("/v1/import", post(import_document))
+        .route(
+            "/v1/images",
+            post(image_workspace::upload).layer(DefaultBodyLimit::max(34 * 1024 * 1024)),
+        )
+        .route("/v1/documents/{id}/image", get(image_workspace::info))
+        .route(
+            "/v1/documents/{id}/image/content",
+            get(image_workspace::content),
+        )
+        .route(
+            "/v1/documents/{id}/image/commit",
+            post(image_workspace::commit).layer(DefaultBodyLimit::max(46 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/documents/{id}/image/copies",
+            post(image_workspace::copy).layer(DefaultBodyLimit::max(46 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs",
+            get(image_workspace::jobs)
+                .post(image_workspace::start)
+                .layer(DefaultBodyLimit::max(46 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}",
+            delete(image_workspace::cancel),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}/content",
+            get(image_workspace::candidate),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}/mask",
+            get(image_workspace::mask_content),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}/apply",
+            post(image_workspace::apply),
+        )
         .route("/v1/jobs/{job_id}", get(job_status))
         .route("/v1/documents/{id}/editor", get(editor))
         .route("/v1/documents/{id}/project", post(project))
         .route("/v1/documents/{id}/patch", post(patch))
         .route("/v1/documents/{id}/node-patch", post(node_patch))
+        .route("/v1/documents/{id}/node-patch-review", post(grid_drafts::review))
         .route("/v1/documents/{id}/checkpoints", post(checkpoint))
         .route("/v1/documents/{id}/revisions", get(revisions))
         .route("/v1/documents/{id}/revisions/{revision}", get(revision))
@@ -190,16 +314,52 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/chunks/{sequence}", get(chunk))
         .route("/v1/documents/{id}/search", get(search))
         .route("/v1/documents/{id}/nodes/{node_id}", get(text_node))
+        .route("/v1/documents/{id}/sheets/{index}", get(spreadsheet::read))
         .route(
             "/v1/documents/{id}/agents",
             get(agent_list).post(agent_focus),
         )
         .route(
+            "/v1/documents/{id}/agent-runs",
+            get(agent_runs::list).post(agent_runs::start),
+        )
+        .route(
+            "/v1/documents/{id}/agent-runs/{run_id}",
+            get(agent_runs::read).delete(agent_runs::cancel),
+        )
+        .route(
+            "/v1/documents/{id}/agent-runs/{run_id}/continuation",
+            get(agent_continuation::review).post(agent_continuation::resume),
+        )
+        .route(
+            "/v1/documents/{id}/mcp",
+            get(mcp_http::get)
+                .post(mcp_http::post)
+                .delete(mcp_http::delete),
+        )
+        .route(
             "/v1/documents/{id}/collaboration/pending",
             post(collaboration_pending),
         )
+        .route(
+            "/v1/documents/{id}/image-jobs",
+            get(image_jobs::list).post(image_jobs::start),
+        )
+        .route(
+            "/v1/documents/{id}/image-jobs/{job_id}",
+            delete(image_jobs::cancel),
+        )
+        .route(
+            "/v1/documents/{id}/image-jobs/{job_id}/content",
+            get(image_jobs::content),
+        )
+        .route(
+            "/v1/documents/{id}/image-jobs/{job_id}/insert",
+            post(image_jobs::insert),
+        )
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
+        .route("/v1/documents/{id}/presentation", get(word_presentation))
         .route(
             "/v1/documents/{id}/theme",
             get(document_theme).put(pin_theme),
@@ -268,6 +428,8 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             "/v1/documents/{id}/collaboration/state",
             get(collaboration_get).put(collaboration_put),
         )
+        .layer(axum::middleware::from_fn(protocol_guard))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), integration::guard))
         .layer(DefaultBodyLimit::max(MAX_PATCH_JSON_BYTES as usize))
         .with_state(state);
     let address: SocketAddr = command.bind.parse().context("invalid --bind address")?;
@@ -278,6 +440,41 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
     );
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+async fn protocol_guard(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if request.method() == axum::http::Method::POST
+        && (request.uri().path().ends_with("/patch")
+            || request.uri().path().ends_with("/node-patch")
+            || request.uri().path().ends_with("/node-patch-review")
+            || request.uri().path().ends_with("/agent-workflows"))
+        && request
+            .headers()
+            .get(crate::capabilities::PROTOCOL_HEADER)
+            .is_some_and(|value| value.to_str().ok() != Some(crate::capabilities::fingerprint()))
+    {
+        return (StatusCode::CONFLICT, Json(json!({"code":"service_version_changed","error":"服务操作协议已变化，请刷新能力后重新读取文档；未执行本次修改。"}))).into_response();
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        crate::capabilities::PROTOCOL_HEADER,
+        crate::capabilities::fingerprint()
+            .parse()
+            .expect("hex header"),
+    );
+    response
+}
+
+async fn document_capabilities(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let actor = claims(&state, &headers, &id)?;
+    let manifest = open(&state, &id)?.manifest().map_err(hcd_error)?;
+    let mut result = crate::capabilities::runtime().clone();
+    result["document"] = json!({"documentId":id,"revision":manifest.revision,"format":manifest.source.format,"capabilities":manifest.capabilities,"canWrite":actor.scope == "write"});
+    Ok(Json(result))
 }
 
 /// Upload routes need a token of their own scope, and the claims are handed back
@@ -303,6 +500,9 @@ fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<Claims, 
             )
         })?
         .claims;
+    if let Some(integration) = &state.integration {
+        integration.validate_actor(&claims)?;
+    }
     if claims.doc != "*" || claims.scope != "upload" {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -393,7 +593,20 @@ async fn import_document(
         .to_ascii_lowercase();
     if !matches!(
         extension.as_str(),
-        "docx" | "html" | "htm" | "md" | "markdown" | "txt" | "pdf" | "pptx" | "xlsx" | "hcd"
+        "docx"
+            | "html"
+            | "htm"
+            | "md"
+            | "markdown"
+            | "txt"
+            | "pdf"
+            | "pptx"
+            | "xlsx"
+            | "hcd"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
     ) {
         return Err(bad("unsupported import extension"));
     }
@@ -444,6 +657,15 @@ async fn import_document(
     let jobs = state.root.join("jobs");
     tokio::fs::create_dir_all(&jobs).await.map_err(internal)?;
     let job_path = jobs.join(format!("{job_id}.json"));
+    write_job(
+        &job_path,
+        state.remote.as_ref(),
+        &job_id,
+        json!({"jobId": job_id, "documentId": document_id, "state": "queued",
+            "kind": "import", "filename": query.filename, "format": extension}),
+    )
+    .await
+    .map_err(internal)?;
     if destination.exists() {
         if let Some(remote) = &state.remote {
             remote
@@ -651,9 +873,26 @@ async fn write_job(
     path: &std::path::Path,
     remote: Option<&RemoteStore>,
     job_id: &str,
-    payload: Value,
+    mut payload: Value,
 ) -> Result<()> {
-    tokio::fs::write(path, serde_json::to_vec(&payload)?).await?;
+    let previous = tokio::fs::read(path)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if let Some(Value::Object(previous)) = previous {
+        if let Some(object) = payload.as_object_mut() {
+            for (key, value) in previous {
+                object.entry(key).or_insert(value);
+            }
+        }
+    }
+    if payload.get("createdAtEpochMs").is_none() {
+        payload["createdAtEpochMs"] = json!(agent_now());
+    }
+    payload["updatedAtEpochMs"] = json!(agent_now());
+    let temporary = path.with_extension("tmp");
+    tokio::fs::write(&temporary, serde_json::to_vec(&payload)?).await?;
+    tokio::fs::rename(&temporary, path).await?;
     if let Some(remote) = remote {
         remote.job_set(job_id, &payload).await?;
     }
@@ -735,10 +974,34 @@ fn claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, 
             )
         })?
         .claims;
+    if let Some(integration) = &state.integration {
+        integration.validate_actor(&claims)?;
+    }
     if claims.doc != id || !matches!(claims.scope.as_str(), "read" | "write") {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "token document or scope mismatch".to_string(),
+        ));
+    }
+    let managed_actor = claims
+        .sub
+        .as_deref()
+        .and_then(|id| id.strip_prefix("agent-"))
+        .and_then(|id| id.get(..36))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    if managed_actor && claims.worker_generation.is_none()
+        || claims.worker_generation.as_ref().is_some_and(|generation| {
+            generation != state.worker_generation.as_ref()
+                && !state
+                    .worker_fences
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(generation)
+        })
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Agent worker requires fresh authorization for this service process".into(),
         ));
     }
     Ok(claims)
@@ -903,6 +1166,9 @@ fn record_catalog_audit(
 
 fn write_claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
     let actor = claims(state, headers, id)?;
+    if actor.worker_generation.is_some() {
+        state.agent_runs.ensure_healthy()?;
+    }
     if actor.scope != "write" {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -939,9 +1205,22 @@ async fn auth_check(
     let claims = claims(&state, &headers, &id)?;
     open(&state, &id)?;
     let epoch = collaboration_epoch(&state, &id).await?;
+    let host_access = integration::access(&state, &headers, &id).await?;
+    let scope = host_access
+        .as_ref()
+        .map(|decision| {
+            if decision.granted.iter().any(|op| op == "document.edit") {
+                "write"
+            } else {
+                "read"
+            }
+        })
+        .unwrap_or(&claims.scope);
     Ok(Json(
-        json!({"documentId": id, "scope": claims.scope, "userId": claims.sub,
-        "displayName": claims.name, "expiresAt": claims.exp, "collaborationEpoch": epoch}),
+        json!({"documentId": id, "scope": scope, "userId": claims.sub,
+        "displayName": claims.name, "expiresAt": claims.exp, "collaborationEpoch": epoch,
+        "hostIntegration":host_access.is_some(),"operations":host_access.as_ref().map(|v| &v.granted),
+        "serviceId": identity::service_id(&state.root).map_err(internal)?}),
     ))
 }
 
@@ -985,11 +1264,6 @@ async fn check_collaboration_epoch(
         ));
     }
     Ok(requested)
-}
-
-async fn reset_collaboration(state: &ServerState, id: &str) -> Result<u64, ApiError> {
-    let _guard = state.collaboration_lock.lock().await;
-    reset_collaboration_locked(state, id).await
 }
 
 /// Caller holds collaboration_lock across the content commit and epoch reset.
@@ -1190,8 +1464,19 @@ async fn text_node(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    let node = hcd_core::get_text_node(&open(&state, &id)?, &node_id).map_err(hcd_error)?;
-    Ok(Json(serde_json::to_value(node).map_err(internal)?))
+    let bundle = open(&state, &id)?;
+    match hcd_core::get_text_node(&bundle, &node_id) {
+        Ok(node) => Ok(Json(serde_json::to_value(node).map_err(internal)?)),
+        Err(hcd_core::HcdError::NodeNotFound(_)) => {
+            // Images intentionally do not participate in textual lookup.
+            let image = hcd_core::get_image_node(&bundle, &node_id).map_err(hcd_error)?;
+            let mut value = serde_json::to_value(image).map_err(internal)?;
+            value["nodeHash"] = json!(hcd_core::hash_bytes(b""));
+            value["text"] = json!("");
+            Ok(Json(value))
+        }
+        Err(error) => Err(hcd_error(error)),
+    }
 }
 
 fn agent_now() -> u64 {
@@ -1207,7 +1492,7 @@ async fn agent_list(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    open(&state, &id)?;
+    let revision = open(&state, &id)?.manifest().map_err(hcd_error)?.revision;
     let epoch = collaboration_epoch(&state, &id).await?;
     let mut agents = state.agents.lock().await;
     let now = agent_now();
@@ -1218,8 +1503,10 @@ async fn agent_list(
         .map(|(_, activity)| activity.clone())
         .collect();
     current.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    drop(agents);
+    let operations = agent_operations::list(&state, &id, epoch, revision).await;
     Ok(Json(
-        json!({"documentId":id,"collaborationEpoch":epoch,"agents":current}),
+        json!({"documentId":id,"collaborationEpoch":epoch,"agents":current,"operations":operations}),
     ))
 }
 
@@ -1227,11 +1514,12 @@ async fn agent_focus(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(focus): Json<AgentFocus>,
+    Json(mut focus): Json<AgentFocus>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
     let agent_id = actor
         .sub
+        .clone()
         .filter(|id| !id.is_empty() && id.len() <= 128)
         .ok_or_else(|| bad("agent token requires a distinct user-id"))?;
     let _guard = state.collaboration_lock.lock().await;
@@ -1244,7 +1532,7 @@ async fn agent_focus(
             "agent focus revision changed; reread document".into(),
         ));
     }
-    if !["locating", "reading", "editing", "idle"].contains(&focus.status.as_str())
+    if !["locating", "reading", "planning", "editing", "idle"].contains(&focus.status.as_str())
         || focus
             .message
             .as_ref()
@@ -1256,8 +1544,27 @@ async fn agent_focus(
         return Err(bad("choose nodeId or blockId"));
     }
     if let Some(node_id) = &focus.node_id {
-        if hcd_core::get_text_node(&bundle, node_id).is_err() {
-            hcd_core::get_image_node(&bundle, node_id).map_err(hcd_error)?;
+        let chunk_id = match hcd_core::get_text_node(&bundle, node_id) {
+            Ok(node) => node.node.chunk_id,
+            Err(_) => {
+                hcd_core::get_image_node(&bundle, node_id)
+                    .map_err(hcd_error)?
+                    .chunk_id
+            }
+        };
+        if focus.chunk_sequence.is_none() {
+            for page in 0..manifest.index_page_count {
+                if let Some(chunk) = bundle
+                    .read_index_page(&manifest, page)
+                    .map_err(hcd_error)?
+                    .chunks
+                    .iter()
+                    .find(|chunk| chunk.chunk_id == chunk_id)
+                {
+                    focus.chunk_sequence = Some(chunk.sequence);
+                    break;
+                }
+            }
         }
     }
     if let Some(block_id) = &focus.block_id {
@@ -1275,6 +1582,38 @@ async fn agent_focus(
         .is_some_and(|n| n >= manifest.chunk_count)
     {
         return Err(bad("agent chunkSequence out of bounds"));
+    }
+    let targets = agent_operations::validate_targets(&bundle, &focus.targets)?;
+    if focus.status == "idle" {
+        agent_operations::stop(&state, &id, &agent_id, "cancelled").await;
+    }
+    if matches!(focus.status.as_str(), "planning" | "editing") {
+        let targets = if targets.is_empty()
+            && focus.node_id.is_none()
+            && focus.block_id.is_none()
+            && focus.chunk_sequence.is_none()
+        {
+            Vec::new()
+        } else if targets.is_empty() {
+            vec![agent_operations::OperationTarget {
+                node_id: focus.node_id.clone(),
+                block_id: focus.block_id.clone(),
+                chunk_sequence: focus.chunk_sequence,
+                ..Default::default()
+            }]
+        } else {
+            targets
+        };
+        agent_operations::record(
+            &state,
+            &id,
+            &actor,
+            "pending",
+            manifest.revision,
+            epoch,
+            targets,
+        )
+        .await;
     }
     let mut agents = state.agents.lock().await;
     agents.retain(|_, item| agent_now().saturating_sub(item.updated_at_epoch_ms) < 15_000);
@@ -1304,6 +1643,7 @@ async fn agent_focus(
         revision: manifest.revision,
         collaboration_epoch: epoch,
         updated_at_epoch_ms: agent_now(),
+        operation_at_epoch_ms: agent_now(),
     };
     agents.insert((id, agent_id), activity.clone());
     Ok(Json(serde_json::to_value(activity).map_err(internal)?))
@@ -1313,6 +1653,7 @@ async fn agent_result(
     state: &ServerState,
     id: &str,
     actor: &Claims,
+    headers: &HeaderMap,
     status: &str,
     revision: u64,
     target: Option<Value>,
@@ -1321,6 +1662,13 @@ async fn agent_result(
         return Ok(());
     };
     let epoch = collaboration_epoch(state, id).await?;
+    if headers
+        .get("x-hcd-agent-edit")
+        .and_then(|value| value.to_str().ok())
+        == Some("true")
+    {
+        agent_operations::result(state, id, actor, status, revision, epoch, target.as_ref()).await;
+    }
     if let Some(activity) = state
         .agents
         .lock()
@@ -1328,12 +1676,22 @@ async fn agent_result(
         .get_mut(&(id.to_string(), agent.clone()))
     {
         activity.status = status.into();
+        activity.message = if status == "applied" {
+            "修改已提交"
+        } else {
+            "操作未提交，等待重新读取"
+        }
+        .into();
         activity.revision = revision;
         activity.collaboration_epoch = epoch;
         activity.updated_at_epoch_ms = agent_now();
+        activity.operation_at_epoch_ms = activity.updated_at_epoch_ms;
         // A commit can affect a different target from the last reading focus.
         // Show its first addressed operation rather than highlighting stale focus.
-        if let Some(target) = target {
+        if let Some(target) = target
+            .as_ref()
+            .and_then(|value| value.as_array().and_then(|v| v.first()).or(Some(value)))
+        {
             let node = target.get("nodeId").and_then(Value::as_str);
             let block = target.get("blockId").and_then(Value::as_str);
             if node.is_some() || block.is_some() {
@@ -1404,6 +1762,16 @@ async fn agent_edit_preflight(
     if actor.sub.as_ref().is_none_or(|id| id.is_empty()) {
         return Err(bad("agent edit requires a distinct user-id"));
     }
+    require_clean_collaboration(state, id, headers).await
+}
+
+// Source-mapped semantic edits invalidate the shared block projection. Protect
+// pending human edits for these writes too, regardless of the caller's identity.
+async fn require_clean_collaboration(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
     let epoch = check_collaboration_epoch(state, id, headers).await?;
     let path = state
         .root
@@ -1433,6 +1801,9 @@ async fn check_agent_patch(
     actor: &Claims,
 ) -> Result<(), ApiError> {
     let result = async {
+        if actor.worker_generation.is_some() {
+            agent_workflows::guard_write(state, id, actor).await?;
+        }
         if headers.contains_key("x-hcd-collaboration-epoch") {
             check_collaboration_epoch(state, id, headers).await?;
         }
@@ -1441,7 +1812,7 @@ async fn check_agent_patch(
     .await;
     if result.is_err() {
         let revision = open(state, id)?.manifest().map_err(hcd_error)?.revision;
-        agent_result(state, id, actor, "conflict", revision, None).await?;
+        agent_result(state, id, actor, headers, "conflict", revision, None).await?;
     }
     result
 }
@@ -1453,6 +1824,8 @@ async fn project(
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
+    check_agent_patch(&state, &id, &headers, &actor).await?;
     let bundle = open(&state, &id)?;
     let result = project_editor(&bundle, request.expected_revision).map_err(hcd_error)?;
     stamp_revision_author(&bundle, result.revision, &actor)?;
@@ -1469,9 +1842,28 @@ async fn patch(
     let actor = write_claims(&state, &headers, &id)?;
     let _guard = state.collaboration_lock.lock().await;
     check_agent_patch(&state, &id, &headers, &actor).await?;
+    if patch.operations.iter().any(|op| {
+        matches!(
+            op,
+            hcd_core::StructureOperation::TableInsert { .. }
+                | hcd_core::StructureOperation::TableEdit { .. }
+                | hcd_core::StructureOperation::TableDelete { .. }
+                | hcd_core::StructureOperation::TableRestore { .. }
+        )
+    }) {
+        require_clean_collaboration(&state, &id, &headers).await?;
+    }
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
+    agent_team::check_write(
+        &state,
+        &id,
+        &actor,
+        &headers,
+        &serde_json::to_value(&patch.operations).map_err(internal)?,
+    )
+    .await?;
     let bundle = open(&state, &id)?;
     let result = match apply_structure_patch(&bundle, &patch, patch.base_revision) {
         Ok(result) => result,
@@ -1480,6 +1872,7 @@ async fn patch(
                 &state,
                 &id,
                 &actor,
+                &headers,
                 "conflict",
                 bundle.manifest().map_err(hcd_error)?.revision,
                 None,
@@ -1497,12 +1890,10 @@ async fn patch(
         &state,
         &id,
         &actor,
+        &headers,
         "applied",
         result.revision,
-        patch
-            .operations
-            .first()
-            .and_then(|op| serde_json::to_value(op).ok()),
+        serde_json::to_value(&patch.operations).ok(),
     )
     .await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
@@ -1520,10 +1911,39 @@ async fn node_patch(
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
+    agent_team::check_write(
+        &state,
+        &id,
+        &actor,
+        &headers,
+        &serde_json::to_value(&patch.operations).map_err(internal)?,
+    )
+    .await?;
     let bundle = open(&state, &id)?;
     let format = bundle.manifest().map_err(hcd_error)?.source.format;
-    if !matches!(format.as_str(), "pdf" | "pptx" | "xlsx") {
-        return Err(bad("node patch endpoint accepts PDF, PPTX or XLSX bundles"));
+    let semantic = matches!(format.as_str(), "docx" | "html" | "md" | "txt");
+    if semantic {
+        require_clean_collaboration(&state, &id, &headers).await?;
+        if patch.operations.iter().any(|op| {
+            !matches!(
+                op,
+                hcd_core::PatchOperation::TextSplice { .. }
+                    | hcd_core::PatchOperation::ImageInsert { .. }
+                    | hcd_core::PatchOperation::ImageReplace { .. }
+                    | hcd_core::PatchOperation::ImageGeometry { .. }
+            )
+        }) {
+            return Err(bad("semantic node edits accept mapped text and image operations; use structure patches for block changes"));
+        }
+    } else if !matches!(
+        format.as_str(),
+        "pdf" | "pptx" | "xlsx" | "png" | "jpg" | "jpeg" | "webp"
+    ) {
+        return Err(bad("unsupported node patch source format"));
+    }
+    if hcd_formats::images::is_image_format(&format) {
+        check_collaboration_epoch(&state, &id, &headers).await?;
+        image_workspace::check_region(&state, &id, None).await?;
     }
     let result = match apply_patch(&bundle, &patch, patch.base_revision) {
         Ok(result) => result,
@@ -1532,6 +1952,7 @@ async fn node_patch(
                 &state,
                 &id,
                 &actor,
+                &headers,
                 "conflict",
                 bundle.manifest().map_err(hcd_error)?.revision,
                 None,
@@ -1543,17 +1964,18 @@ async fn node_patch(
     if !result.idempotent_replay {
         stamp_revision_author(&bundle, result.revision, &actor)?;
         publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
+        if semantic {
+            reset_collaboration_locked(&state, &id).await?;
+        }
     }
     agent_result(
         &state,
         &id,
         &actor,
+        &headers,
         "applied",
         result.revision,
-        patch
-            .operations
-            .first()
-            .and_then(|op| serde_json::to_value(op).ok()),
+        serde_json::to_value(&patch.operations).ok(),
     )
     .await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
@@ -1602,6 +2024,7 @@ async fn checkpoint(
     Json(request): Json<SnapshotRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
     check_collaboration_epoch(&state, &id, &headers).await?;
     if request.blocks.len() > 1_000_000 {
         return Err(bad("snapshot block limit exceeded"));
@@ -1632,7 +2055,8 @@ async fn checkpoint(
                     return Err(bad("duplicate block ID in snapshot"));
                 }
                 if original.read_only
-                    && normalized(block.content.clone()) != normalized(original.content.clone())
+                    && block.content != original.content
+                    && original.editable_text_node_ids.is_empty()
                 {
                     return Err(bad("read-only block was changed"));
                 }
@@ -1696,11 +2120,19 @@ async fn checkpoint(
         let Some(original) = existing.get(block_id) else {
             continue;
         };
-        let desired = normalized(block.content.clone());
-        if desired != normalized(original.content.clone()) {
-            if original.read_only {
-                return Err(bad("read-only block cannot be replaced"));
-            }
+        // Opaque table text retains every mapped run, including empty runs and
+        // mixed formatting. The core validates all identities and permissions.
+        let desired = if original.read_only {
+            block.content.clone()
+        } else {
+            normalized(block.content.clone())
+        };
+        let baseline = if original.read_only {
+            original.content.clone()
+        } else {
+            normalized(original.content.clone())
+        };
+        if desired != baseline {
             operations.push(StructureOperation::Replace {
                 block_id: block_id.to_string(),
                 block: desired,
@@ -1805,11 +2237,21 @@ async fn restore(
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
     let bundle = open(&state, &id)?;
+    if hcd_formats::images::is_image_format(&bundle.manifest().map_err(hcd_error)?.source.format) {
+        check_collaboration_epoch(&state, &id, &headers).await?;
+        image_workspace::check_region(&state, &id, None).await?;
+        let result =
+            restore_revision(&bundle, number, request.expected_revision).map_err(hcd_error)?;
+        stamp_revision_author(&bundle, result.revision, &actor)?;
+        publish_mutation(&state, &id, &bundle, request.expected_revision).await?;
+        return Ok(Json(serde_json::to_value(result).map_err(internal)?));
+    }
     let result = restore_revision(&bundle, number, request.expected_revision).map_err(hcd_error)?;
     stamp_revision_author(&bundle, result.revision, &actor)?;
     publish_mutation(&state, &id, &bundle, request.expected_revision).await?;
-    reset_collaboration(&state, &id).await?;
+    reset_collaboration_locked(&state, &id).await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
@@ -1964,6 +2406,53 @@ async fn styles(
     }
     Ok((
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        Body::from(bytes),
+    )
+        .into_response())
+}
+
+/// A derived, revision-pinned Word preview. It shares its pagination renderer
+/// with CLI HTML export; it never saves or advances the authoritative head.
+async fn word_presentation(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ApiError> {
+        let bundle = open(&state, &id)?;
+        let head = bundle.manifest().map_err(internal)?;
+        let (manifest, revision) =
+            manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+        if manifest.source.format != "docx" {
+            return Err(bad("paginated presentation requires a DOCX document"));
+        }
+        let options = hcd_core::HtmlPresentationOptions {
+            revision: Some(revision),
+            max_output_bytes: 32 * 1024 * 1024,
+            text_hitboxes_enabled: false,
+            image_hitboxes_enabled: false,
+            theme_stylesheet: hcd_core::theme_presentation_css(
+                &state.catalog,
+                &bundle,
+                Some(revision),
+            )
+            .map_err(internal)?,
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+        hcd_core::render_standalone_html(&bundle, &options, &mut output).map_err(bad)?;
+        Ok(output)
+    })
+    .await
+    .map_err(internal)??;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
         Body::from(bytes),
     )
         .into_response())
@@ -2256,16 +2745,29 @@ async fn pin_theme(
     Json(body): Json<PinThemeBody>,
 ) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
     let claims = authorize_theme(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
     let bundle = open(&state, &id)?;
     // A re-pin of the theme already on the head, or an unpin of a document that
     // carries nothing, is a no-op the commit path reports with the same revision
     // number. Those requests are not recorded: the log answers "who changed
     // what", and a repeated click on an unchanged document changed nothing.
     let before = bundle.manifest().map_err(internal)?.revision;
+    let expected_revision = headers
+        .get("x-hcd-expected-revision")
+        .map(|value| value.to_str().map_err(bad)?.parse::<u64>().map_err(bad))
+        .transpose()?;
     let (manifest, action, detail) = match body.theme_revision_id.as_deref() {
         Some(theme_revision_id) => {
-            let manifest = pin_document_theme(&state.catalog, &bundle, theme_revision_id)
-                .map_err(hcd_error)?;
+            let manifest = match expected_revision {
+                Some(expected) => hcd_core::set_document_theme_at_revision(
+                    &state.catalog,
+                    &bundle,
+                    Some(theme_revision_id),
+                    expected,
+                ),
+                None => pin_document_theme(&state.catalog, &bundle, theme_revision_id),
+            }
+            .map_err(hcd_error)?;
             // The name comes from the catalog, which the pin already proved
             // resolves; a theme deleted out from under us still leaves the digest.
             let named = state
@@ -2280,7 +2782,16 @@ async fn pin_theme(
             )
         }
         None => (
-            unpin_document_theme(&state.catalog, &bundle).map_err(hcd_error)?,
+            match expected_revision {
+                Some(expected) => hcd_core::set_document_theme_at_revision(
+                    &state.catalog,
+                    &bundle,
+                    None,
+                    expected,
+                ),
+                None => unpin_document_theme(&state.catalog, &bundle),
+            }
+            .map_err(hcd_error)?,
             audit_action::DOCUMENT_THEME_UNPIN,
             "取消钉版，文档回到自己的样式".to_string(),
         ),
@@ -3101,6 +3612,466 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn semantic_node_edits_round_trip_html_markdown_and_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"semantic-node-formats-test-secret-012345";
+        let state = test_state(secret, temp.path());
+        for (format, text) in [
+            ("html", "<!doctype html><html><body><p>Editable text</p><table><tr><td>Cell</td></tr></table></body></html>"),
+            ("md", "# Title\n\nEditable text\n"),
+            ("txt", "Editable text\n"),
+        ] {
+            let id = format!("semantic-{format}");
+            let source = temp.path().join(format!("source.{format}"));
+            std::fs::write(&source, text).unwrap();
+            hcd_formats::import_document(&source, temp.path().join(format!("{id}.hcd")),
+                &hcd_formats::ImportOptions::new(&id), |_| Ok(())).unwrap();
+            let bundle = open(&state, &id).unwrap();
+            let projection = editor_projection(&bundle, None).unwrap();
+            let node_id = projection.blocks.iter().flat_map(|block| &block.content.inlines)
+                .find(|inline| inline.text == "Editable text").unwrap().node_id.as_ref().unwrap();
+            let node = hcd_core::get_text_node(&bundle, node_id).unwrap();
+            let mut headers = bearer_as(secret, &id, "write", Some("format-agent"), None);
+            headers.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+            headers.insert("x-hcd-agent-edit", "true".parse().unwrap());
+            let patch = serde_json::from_value(json!({
+                "schemaVersion":"hcd-patch/1", "documentId":id, "patchId":"mapped-text-edit",
+                "baseRevision":projection.revision,
+                "operations":[{"op":"text.splice", "nodeId":node_id, "start":0,
+                    "deleteCount":0,"insertText":"协同🙂 ","precondition":{"nodeHash":node.node.node_hash}}]
+            })).unwrap();
+            let _ = node_patch(State(state.clone()), Path(id.clone()), headers, Json(patch)).await.unwrap();
+            assert_eq!(collaboration_epoch(&state, &id).await.unwrap(), 1);
+            let output = temp.path().join(format!("edited.{format}"));
+            hcd_formats::export_document(bundle.root(), &source, &output, &hcd_formats::ExportOptions::default()).unwrap();
+            assert!(std::fs::read_to_string(&output).unwrap().contains("协同🙂 Editable text"));
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), text);
+            let reimported = temp.path().join(format!("{id}-reopened.hcd"));
+            hcd_formats::import_document(&output, &reimported, &hcd_formats::ImportOptions::new(format!("reopened-{format}")), |_| Ok(())).unwrap();
+            assert!(hcd_core::validate_bundle(&Bundle::open(reimported).unwrap()).unwrap().valid);
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_table_node_edits_preserve_source_and_guard_collaborators() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"semantic-table-test-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let id = "table-edit";
+        let (bundle, source) = export_fixture(
+            &state,
+            id,
+            "examples/hdoc/editor/e2e/fixtures/word-page-layout.docx",
+        );
+        project_editor(&bundle, 0).unwrap();
+        let original = editor_projection(&bundle, None).unwrap();
+        let table = original
+            .blocks
+            .iter()
+            .find(|block| {
+                block
+                    .read_only_html
+                    .as_ref()
+                    .is_some_and(|html| html.contains("<table"))
+            })
+            .unwrap();
+        let node_id = table.content.inlines[0].node_id.as_ref().unwrap();
+        let node = hcd_core::get_text_node(&bundle, node_id).unwrap();
+        let headers = |scope, user, epoch: u64| {
+            let mut headers = bearer_as(secret, id, scope, Some(user), None);
+            headers.insert(
+                "x-hcd-collaboration-epoch",
+                epoch.to_string().parse().unwrap(),
+            );
+            headers
+        };
+        let make_patch = || {
+            serde_json::from_value(json!({
+                "schemaVersion":"hcd-patch/1", "documentId":id, "patchId":"table-text",
+                "baseRevision":original.revision,
+                "operations":[{"op":"text.splice", "nodeId":node_id,
+                    "start":node.node.text.chars().count(),"deleteCount":0,"insertText":"🙂已更新",
+                    "precondition":{"nodeHash":node.node.node_hash}}]
+            }))
+            .unwrap()
+        };
+        for scope in ["read", "wrong-document"] {
+            let auth = if scope == "read" {
+                headers("read", "reader", 0)
+            } else {
+                bearer(secret, "other-doc", "write")
+            };
+            assert_eq!(
+                node_patch(
+                    State(state.clone()),
+                    Path(id.into()),
+                    auth,
+                    Json(make_patch())
+                )
+                .await
+                .unwrap_err()
+                .0,
+                StatusCode::FORBIDDEN
+            );
+        }
+        for (dirty, sequence) in [(true, 1), (false, 2)] {
+            let _ = collaboration_pending(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "hcd-collaboration", 0),
+                Json(PendingCollaboration { dirty, sequence }),
+            )
+            .await
+            .unwrap();
+            if dirty {
+                assert_eq!(
+                    node_patch(
+                        State(state.clone()),
+                        Path(id.into()),
+                        headers("write", "human", 0),
+                        Json(make_patch())
+                    )
+                    .await
+                    .unwrap_err()
+                    .0,
+                    StatusCode::CONFLICT
+                );
+                assert_eq!(bundle.manifest().unwrap().revision, original.revision);
+            }
+        }
+        let mut stale_hash: hcd_core::PatchBatch = make_patch();
+        if let hcd_core::PatchOperation::TextSplice { precondition, .. } =
+            &mut stale_hash.operations[0]
+        {
+            precondition.node_hash = "0".repeat(64);
+        }
+        assert_eq!(
+            node_patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(stale_hash)
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 0);
+        let (a, b) = tokio::join!(
+            node_patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "agent-a", 0),
+                Json(make_patch())
+            ),
+            node_patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "agent-b", 0),
+                Json(make_patch())
+            ),
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        assert_eq!(a.err().or(b.err()).unwrap().0, StatusCode::CONFLICT);
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 1);
+        let current = editor_projection(&bundle, None).unwrap();
+        assert_eq!(current.revision, original.revision + 1);
+        assert_eq!(current.blocks.len(), original.blocks.len());
+        assert!(current.blocks.iter().any(|block| block
+            .read_only_html
+            .as_ref()
+            .is_some_and(|html| html.contains("🙂已更新"))));
+        let stale_snapshot = SnapshotRequest {
+            expected_revision: current.revision,
+            blocks: original
+                .blocks
+                .iter()
+                .filter(|block| block.region == "body")
+                .map(|block| SnapshotBlock {
+                    block_id: Some(block.block_id.clone()),
+                    content: block.content.clone(),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            checkpoint(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(stale_snapshot)
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        let output = temp.path().join("edited.docx");
+        let source_before = std::fs::read(&source).unwrap();
+        hcd_formats::export_document(
+            bundle.root(),
+            &source,
+            &output,
+            &hcd_formats::ExportOptions::default(),
+        )
+        .unwrap();
+        let source_package = oxml::OxmlPackage::open(source.to_str().unwrap(), false).unwrap();
+        let output_package = oxml::OxmlPackage::open(output.to_str().unwrap(), false).unwrap();
+        assert_eq!(
+            source_package.list_parts().len(),
+            output_package.list_parts().len()
+        );
+        for part in source_package.list_parts() {
+            let before = source_package.read_part_bytes(part).unwrap();
+            let after = output_package.read_part_bytes(part).unwrap();
+            if part.trim_start_matches('/') == "word/document.xml" {
+                let expected = String::from_utf8(before.clone()).unwrap().replacen(
+                    &format!(">{}<", node.node.text),
+                    &format!(">{}🙂已更新<", node.node.text),
+                    1,
+                );
+                assert_eq!(String::from_utf8(after.clone()).unwrap(), expected);
+            } else {
+                assert_eq!(before, after, "unmodified part {part}");
+            }
+        }
+        assert_eq!(std::fs::read(source).unwrap(), source_before);
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn table_structure_edits_guard_human_drafts_epochs_and_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"table-structure-test-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let id = "table-structure";
+        let (bundle, _) = export_fixture(
+            &state,
+            id,
+            "examples/hdoc/editor/e2e/fixtures/word-table-edit.docx",
+        );
+        project_editor(&bundle, 0).unwrap();
+        let original = editor_projection(&bundle, None).unwrap();
+        let table = original
+            .blocks
+            .iter()
+            .find(|block| {
+                block
+                    .read_only_html
+                    .as_ref()
+                    .is_some_and(|html| html.contains("<table"))
+            })
+            .unwrap();
+        let headers = |scope, user, epoch: u64| {
+            let mut headers = bearer_as(secret, id, scope, Some(user), None);
+            headers.insert(
+                "x-hcd-collaboration-epoch",
+                epoch.to_string().parse().unwrap(),
+            );
+            headers
+        };
+        let make_patch = || StructurePatchBatch {
+            schema_version: "hcd-patch/4".into(),
+            document_id: id.into(),
+            patch_id: "table-row".into(),
+            base_revision: original.revision,
+            operations: vec![hcd_core::StructureOperation::TableEdit {
+                block_id: table.block_id.clone(),
+                table_index: 0,
+                action: hcd_core::TableEditAction::InsertRow,
+                index: 1,
+                precondition: hcd_core::BlockPrecondition {
+                    block_hash: table.block_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("read", "reader", 0),
+                Json(make_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 0),
+            Json(PendingCollaboration {
+                dirty: true,
+                sequence: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        // Human table controls use the same draft fence as Agents.
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(make_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, original.revision);
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 0),
+            Json(PendingCollaboration {
+                dirty: false,
+                sequence: 2,
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = patch(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "human", 0),
+            Json(make_patch()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 1);
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(make_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        let current = editor_projection(&bundle, None).unwrap();
+        let current_table = current
+            .blocks
+            .iter()
+            .find(|block| block.block_id == table.block_id)
+            .unwrap();
+        assert_eq!(
+            current_table.editable_text_node_ids.len(),
+            table.editable_text_node_ids.len() + 2
+        );
+    }
+
+    #[tokio::test]
+    async fn word_pages_are_authorized_revision_pinned_and_do_not_mutate_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"word-pages-test-secret-012345678901";
+        let state = test_state(secret, temp.path());
+        let id = "word-pages";
+        let (bundle, _) = export_fixture(
+            &state,
+            id,
+            "examples/hdoc/editor/e2e/fixtures/word-page-layout.docx",
+        );
+        let manifest = bundle.manifest().unwrap();
+        let chunk = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let map = bundle.read_map(chunk).unwrap();
+        let node = map
+            .entries
+            .iter()
+            .find(|node| node.source.editable)
+            .unwrap();
+        let patch = serde_json::from_value(json!({
+            "schemaVersion":"hcd-patch/1", "documentId":id, "patchId":"pages-revision", "baseRevision":0,
+            "operations":[{"op":"text.splice", "nodeId":node.node_id, "start":0, "deleteCount":0,
+                "insertText":"New revision ", "precondition":{"nodeHash":node.node_hash}}]
+        })).unwrap();
+        apply_patch(&bundle, &patch, 0).unwrap();
+        let before = bundle.manifest().unwrap();
+        for (revision, changed) in [(Some(0), false), (Some(1), true), (None, true)] {
+            let response = word_presentation(
+                State(state.clone()),
+                Path(id.into()),
+                Query(RevisionQuery { revision }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/html; charset=utf-8"
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let bytes = axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
+                .await
+                .unwrap();
+            let html = std::str::from_utf8(&bytes).unwrap();
+            assert_eq!(html.contains("New revision COVER TITLE"), changed);
+            assert!(html.contains("hcd-docx-virtual-pages"));
+            assert!(html.contains("data-hcd-section=\"1\""));
+        }
+        assert_eq!(
+            serde_json::to_value(bundle.manifest().unwrap()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        for (headers, expected) in [
+            (HeaderMap::new(), StatusCode::UNAUTHORIZED),
+            (
+                bearer(secret, "another-document", "read"),
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            assert_eq!(
+                word_presentation(
+                    State(state.clone()),
+                    Path(id.into()),
+                    Query(RevisionQuery { revision: None }),
+                    headers
+                )
+                .await
+                .err()
+                .unwrap()
+                .0,
+                expected
+            );
+        }
+        assert!(word_presentation(
+            State(state.clone()),
+            Path(id.into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        imported_bundle_from(
+            &temp.path().join("non-word.hcd"),
+            "non-word",
+            None,
+            "txt",
+            "ab".repeat(32),
+            1,
+        );
+        assert_eq!(
+            word_presentation(
+                State(state),
+                Path("non-word".into()),
+                Query(RevisionQuery { revision: None }),
+                bearer(secret, "non-word", "read")
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
     async fn export_capabilities_detect_missing_and_mismatched_sources() {
         let temp = tempfile::tempdir().unwrap();
         let secret = b"export-test-secret-01234567890123456";
@@ -3392,6 +4363,7 @@ mod tests {
             node_id: None,
             block_id: Some(block.block_id.clone()),
             chunk_sequence: None,
+            targets: Vec::new(),
             message: Some("Working".into()),
             expected_revision: original.revision,
         };
@@ -3546,7 +4518,114 @@ mod tests {
         );
     }
 
-    fn test_state(secret: &[u8], root: &std::path::Path) -> ServerState {
+    #[tokio::test]
+    async fn operation_traces_keep_all_targets_and_preserve_commits_after_idle_or_cancel() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(b"operation-tests", temp.path());
+        let actor = Claims {
+            doc: "trace-doc".into(),
+            scope: "write".into(),
+            sub: Some("editor-a".into()),
+            name: Some("Editor A".into()),
+            aud: "hcd-core".into(),
+            iat: 0,
+            exp: usize::MAX,
+            worker_generation: None,
+            integration_session: None,
+        };
+        agent_result(
+            &state,
+            "trace-doc",
+            &actor,
+            &HeaderMap::new(),
+            "applied",
+            3,
+            Some(json!([{"op":"text.splice","nodeId":"human-node"}])),
+        )
+        .await
+        .unwrap();
+        assert!(
+            agent_operations::list(&state, "trace-doc", 0, 3)
+                .await
+                .is_empty(),
+            "human edits must not become agent traces"
+        );
+        let operations: Vec<_> = (0..150).map(|i| json!({"op":"xlsx.formula.create","sheetId":"sheet-1","row":i+1,"column":11,"formula":"=2*2"})).collect();
+        agent_operations::record(
+            &state,
+            "trace-doc",
+            &actor,
+            "pending",
+            3,
+            2,
+            agent_operations::from_operations(&operations),
+        )
+        .await;
+        let listed =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 2, 3).await).unwrap();
+        assert_eq!(listed[0]["totalTargets"], 150);
+        assert_eq!(listed[0]["targets"].as_array().unwrap().len(), 128);
+        assert_eq!(listed[0]["targets"][0]["row"], 1);
+        assert_eq!(listed[0]["targets"][0]["column"], 11);
+        assert!(
+            listed[0]["targets"][0]["nodeId"].is_null(),
+            "new cells must not invent node IDs"
+        );
+        assert!(agent_operations::list(&state, "other-doc", 2, 3)
+            .await
+            .is_empty());
+        agent_operations::result(
+            &state,
+            "trace-doc",
+            &actor,
+            "applied",
+            4,
+            3,
+            Some(&json!(operations)),
+        )
+        .await;
+        let committed =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 4).await).unwrap();
+        agent_operations::stop(&state, "trace-doc", "editor-a", "cancelled").await;
+        let after =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 4).await).unwrap();
+        assert_eq!(
+            committed, after,
+            "stopping cannot relabel a successful commit"
+        );
+        agent_operations::record(
+            &state,
+            "trace-doc",
+            &actor,
+            "pending",
+            4,
+            3,
+            agent_operations::from_operations(&operations),
+        )
+        .await;
+        agent_operations::stop(&state, "trace-doc", "editor-a", "cancelled").await;
+        let cancelled =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 4).await).unwrap();
+        assert_eq!(cancelled[0]["status"], "cancelled");
+        agent_operations::record(
+            &state,
+            "trace-doc",
+            &actor,
+            "pending",
+            4,
+            3,
+            agent_operations::from_operations(&operations),
+        )
+        .await;
+        let stale =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 5).await).unwrap();
+        assert_eq!(
+            stale[0]["status"], "conflict",
+            "even grid revision changes invalidate pending plans"
+        );
+    }
+
+    pub(super) fn test_state(secret: &[u8], root: &std::path::Path) -> ServerState {
         ServerState {
             root: root.to_path_buf(),
             catalog: DiskCatalog::open(root.join("catalog")).unwrap(),
@@ -3557,6 +4636,16 @@ mod tests {
             downloads: Arc::new(Mutex::new(HashMap::new())),
             export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
             agents: Arc::new(Mutex::new(HashMap::new())),
+            agent_operations: Arc::new(Mutex::new(HashMap::new())),
+            agent_runs: Default::default(),
+            agent_workflows: Default::default(),
+            worker_generation: Arc::new(uuid::Uuid::new_v4().to_string()),
+            worker_fences: Default::default(),
+            image_jobs: Default::default(),
+            image_edits: Default::default(),
+            image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            mcp_sessions: Default::default(),
+            integration: None,
         }
     }
 
@@ -3566,7 +4655,7 @@ mod tests {
 
     /// The same token with the identity a real one carries (`--user-id`,
     /// `--display-name`), which is what makes the audit actor worth reading.
-    fn bearer_as(
+    pub(super) fn bearer_as(
         secret: &[u8],
         doc: &str,
         scope: &str,
@@ -3587,6 +4676,8 @@ mod tests {
                 aud: "hcd-core".to_string(),
                 iat: now,
                 exp: now + 600,
+                worker_generation: None,
+                integration_session: None,
             },
             &EncodingKey::from_secret(secret),
         )
@@ -4166,7 +5257,7 @@ mod tests {
         // catalogue management and document content in separate views.
         assert!(html.contains("<div id=\"root\">"));
         assert!(html.contains("/v1/documents"));
-        assert!(html.contains("目录管理"));
+        assert!(html.contains("字体目录"));
         assert!(html.contains("上传登记"));
         // The operation log view is part of the same shipped bundle: it calls the
         // admin-only audit route and labels the sidebar group it lives under.
@@ -4188,7 +5279,7 @@ mod tests {
         // raise before any export loses the font: the server's own window read
         // off the response, the count in 概览, and the day count on the font row.
         assert!(html.contains("licenseWarnWindowDays"));
-        assert!(html.contains("许可证到期提醒的窗口"));
+        assert!(html.contains("授权到期提醒"));
         assert!(html.contains("天内到期"));
     }
 
@@ -6407,5 +7498,245 @@ mod tests {
         assert!(transport.contains("Demo Serif"), "{transport}");
         assert!(!transport.contains("--hcd-major-latin:"), "{transport}");
         assert!(!transport.contains("body[data-hcd-profile"), "{transport}");
+    }
+    #[tokio::test]
+    async fn authenticated_tools_initialize_semantic_editing_and_guard_document_and_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"agent-tool-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let id = "agent-tool-doc";
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "Original text\n").unwrap();
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let headers = bearer_as(secret, id, "write", Some("agent-a"), Some("Agent A"));
+        let read = |resource| json!({"document_id":id,"resource":resource});
+        let initial = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_read",
+            read("manifest"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initial["capabilities"]["structurePatch"], false);
+        let projected = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_project",
+            json!({"document_id":id,"expected_revision":0,"collaboration_epoch":0}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(projected["revision"], 1);
+        let projection = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_read",
+            read("editor"),
+        )
+        .await
+        .unwrap();
+        let block = &projection["blocks"][0];
+        let args = json!({"document_id":id,"mode":"structure","expected_revision":1,"collaboration_epoch":0,
+            "patch":{"schemaVersion":"hcd-patch/4","documentId":id,"patchId":"agent-tool-patch","baseRevision":1,
+                "operations":[{"op":"block.replace","blockId":block["blockId"],"block":{"kind":"paragraph","inlines":[{"text":"Verified edit"}]},"precondition":{"blockHash":block["blockHash"]}}]}});
+        let denied = agent_tools::call(
+            state.clone(),
+            id.into(),
+            bearer_as(secret, id, "read", Some("reader"), None),
+            "hcd_patch",
+            args.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            agent_tools::call(
+                state.clone(),
+                id.into(),
+                headers.clone(),
+                "hcd_read",
+                json!({"document_id":"other-document","resource":"manifest"})
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let saved = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_patch",
+            args.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["revision"], 2);
+        assert_eq!(
+            agent_tools::call(state.clone(), id.into(), headers.clone(), "hcd_patch", args)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        let projection = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers,
+            "hcd_read",
+            read("editor"),
+        )
+        .await
+        .unwrap();
+        assert!(projection.to_string().contains("Verified edit"));
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "Original text\n");
+        let record = open(&state, id).unwrap().revision(2).unwrap();
+        assert_eq!(record.author_id.as_deref(), Some("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn mcp_http_sessions_negotiate_and_require_current_document_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"mcp-http-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let id = "mcp-http-doc";
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "MCP baseline\n").unwrap();
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let mut headers = bearer_as(secret, id, "write", Some("agent-a"), None);
+        let response = mcp_http::post(State(state.clone()),Path(id.into()),headers.clone(),Json(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"inline-test","version":"1"}}}))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let key = response.headers().get("mcp-session-id").unwrap().clone();
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["result"]["protocolVersion"], "2025-06-18");
+        headers.insert("mcp-session-id", key.clone());
+        headers.insert("mcp-protocol-version", "2025-06-18".parse().unwrap());
+        let response = mcp_http::post(
+            State(state.clone()),
+            Path(id.into()),
+            headers.clone(),
+            Json(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let response = mcp_http::post(
+            State(state.clone()),
+            Path(id.into()),
+            headers.clone(),
+            Json(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})),
+        )
+        .await
+        .unwrap();
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("hcd_activity"));
+        assert!(body.contains("hcd_project"));
+        assert!(!body.contains("token_env"));
+        assert!(!body.contains("\"name\":\"raw\""));
+        let mut stolen = bearer_as(secret, id, "write", Some("agent-b"), None);
+        stolen.insert("mcp-session-id", key);
+        stolen.insert("mcp-protocol-version", "2025-06-18".parse().unwrap());
+        let result = mcp_http::post(
+            State(state.clone()),
+            Path(id.into()),
+            stolen,
+            Json(json!({"jsonrpc":"2.0","id":3,"method":"ping"})),
+        )
+        .await;
+        assert_eq!(result.err().unwrap().0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            mcp_http::get(State(state.clone()), Path(id.into()), headers.clone())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            mcp_http::delete(State(state.clone()), Path(id.into()), headers.clone())
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            mcp_http::get(State(state), Path(id.into()), headers)
+                .await
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn model_tasks_validate_access_and_input_before_calling_a_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"model-run-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let id = "model-test-doc";
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "Do not change\n").unwrap();
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let request = || Json(serde_json::from_value(json!({"task":"   "})).unwrap());
+        assert_eq!(
+            agent_runs::start(
+                State(state.clone()),
+                Path(id.into()),
+                bearer_as(secret, id, "read", Some("reader"), None),
+                request()
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            agent_runs::start(
+                State(state.clone()),
+                Path(id.into()),
+                bearer_as(secret, id, "write", Some("writer"), None),
+                request()
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(state.agent_runs.lock().await.is_empty());
+        assert_eq!(open(&state, id).unwrap().manifest().unwrap().revision, 0);
     }
 }

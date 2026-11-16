@@ -34,14 +34,17 @@ office_oxide = { workspace = true }
 tempfile = { workspace = true }
 ironpress = { version = "=1.6.0", default-features = false }
 unicode-segmentation = { workspace = true }
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 quick-xml = { workspace = true }
 zip = { workspace = true }
 jsonwebtoken = "9.3"
 sha2 = { workspace = true }
+hmac = "0.12"
+subtle = "2"
+time = { workspace = true }
 base64 = "0.22"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "multipart", "stream"] }
 object_store = { version = "0.12", features = ["aws"] }
 tokio-postgres = "0.7"
 

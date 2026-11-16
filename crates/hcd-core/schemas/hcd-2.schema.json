@@ -124,7 +124,11 @@
             "pdf",
             "html",
             "md",
-            "txt"
+            "txt",
+            "png",
+            "jpg",
+            "jpeg",
+            "webp"
           ]
         },
         "sha256": {
@@ -342,7 +346,7 @@
       "properties": {
         "part": {
           "type": "string",
-          "pattern": "^(word|xl|ppt|pdf|html|markdown|text)/"
+          "pattern": "^(word|xl|ppt|pdf|html|markdown|text|image)/"
         },
         "textOrdinal": {
           "type": "integer",

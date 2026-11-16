@@ -1,3 +1,5 @@
+mod pages;
+
 use hcd_core::{
     hash_bytes, hash_file, stable_node_id, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdCapabilities, HcdError, HcdManifest, ImportEvent,
@@ -67,6 +69,8 @@ struct VisualPlacement {
 struct ParagraphBuilder {
     paragraph_id: Option<String>,
     format: ParagraphFormat,
+    mark_format: RunFormat,
+    section_index: Option<usize>,
     html: String,
     entries: Vec<NodeMapEntry>,
     nested: Vec<RenderedBlock>,
@@ -91,6 +95,7 @@ struct ParagraphFormat {
     after_twips: Option<i64>,
     line_twips: Option<i64>,
     line_rule: Option<String>,
+    snap_to_grid: Option<bool>,
     numbering_id: Option<String>,
     numbering_level: Option<String>,
     conditional_style: ConditionalStyleMask,
@@ -107,8 +112,8 @@ struct RunBuilder {
 #[derive(Default, Clone)]
 struct RunFormat {
     style_id: Option<String>,
-    bold: bool,
-    italic: bool,
+    bold: Option<bool>,
+    italic: Option<bool>,
     strike: bool,
     underline: Option<String>,
     color: Option<String>,
@@ -737,9 +742,11 @@ fn load_word_styles(
                                     style_id,
                                     WordStyleDefinition {
                                         kind: attribute_by_local_name(element, "type"),
-                                        is_default: on_off_value(
-                                            attribute_by_local_name(element, "default").as_deref(),
-                                        ),
+                                        // An absent attribute is false. This differs from
+                                        // an on/off element such as <w:b/>, whose absent
+                                        // value means true.
+                                        is_default: attribute_by_local_name(element, "default")
+                                            .is_some_and(|value| on_off_value(Some(&value))),
                                         ..Default::default()
                                     },
                                 ));
@@ -2283,6 +2290,7 @@ struct PartRelationships {
 }
 
 struct TextPartContext<'a> {
+    sections: &'a [pages::WordSection],
     document_id: &'a str,
     part: &'a str,
     relationships: &'a PartRelationships,
@@ -2292,45 +2300,8 @@ struct TextPartContext<'a> {
     table_bands: &'a TableBandCatalog,
 }
 
-#[derive(Clone, Copy)]
-struct DocumentPageLayout {
-    width_twips: u64,
-    height_twips: u64,
-    margin_top_twips: u64,
-    margin_right_twips: u64,
-    margin_bottom_twips: u64,
-    margin_left_twips: u64,
-}
-
-impl Default for DocumentPageLayout {
-    fn default() -> Self {
-        Self {
-            width_twips: 12_240,
-            height_twips: 15_840,
-            margin_top_twips: 1_440,
-            margin_right_twips: 1_440,
-            margin_bottom_twips: 1_440,
-            margin_left_twips: 1_440,
-        }
-    }
-}
-
-impl DocumentPageLayout {
-    fn presentation_css(self) -> String {
-        format!(
-            "body[data-hcd-source-format=\"docx\"]{{width:{:.2}pt;max-width:{:.2}pt;min-width:0;min-height:{:.2}pt;padding:{:.2}pt {:.2}pt {:.2}pt {:.2}pt}}",
-            self.width_twips as f64 / 20.0,
-            self.width_twips as f64 / 20.0,
-            self.height_twips as f64 / 20.0,
-            self.margin_top_twips as f64 / 20.0,
-            self.margin_right_twips as f64 / 20.0,
-            self.margin_bottom_twips as f64 / 20.0,
-            self.margin_left_twips as f64 / 20.0,
-        )
-    }
-}
-
 struct TableBuilder {
+    section_index: Option<usize>,
     table_id: String,
     html: String,
     entries: Vec<NodeMapEntry>,
@@ -2348,6 +2319,7 @@ struct TableBuilder {
     row_has_property_exceptions: bool,
     row_conditional_style: ConditionalStyleMask,
     row_opened: bool,
+    row_repeat_header: bool,
     grid_widths_twips: Vec<u64>,
     row_band_size: u32,
     column_band_size: u32,
@@ -2387,6 +2359,7 @@ struct ActiveVerticalMerge {
 impl TableBuilder {
     fn new(table_id: String) -> Self {
         let mut table = Self {
+            section_index: None,
             html: String::new(),
             table_id,
             entries: Vec::new(),
@@ -2404,6 +2377,7 @@ impl TableBuilder {
             row_has_property_exceptions: false,
             row_conditional_style: ConditionalStyleMask::default(),
             row_opened: false,
+            row_repeat_header: false,
             grid_widths_twips: Vec::new(),
             row_band_size: 1,
             column_band_size: 1,
@@ -2562,6 +2536,7 @@ impl TableBuilder {
         self.row_has_property_exceptions = false;
         self.row_conditional_style = ConditionalStyleMask::default();
         self.row_opened = false;
+        self.row_repeat_header = false;
         self.html.push_str("<tr");
         push_data_number(
             &mut self.html,
@@ -2581,6 +2556,11 @@ impl TableBuilder {
             &mut self.html,
             "data-hcd-table-property-exception",
             self.row_has_property_exceptions.then_some(true),
+        );
+        push_data_bool(
+            &mut self.html,
+            "data-hcd-repeat-header",
+            self.row_repeat_header.then_some(true),
         );
         push_conditional_style_attributes(&mut self.html, self.row_conditional_style);
         push_inline_style_attribute(&mut self.html, &self.row_css);
@@ -2889,9 +2869,10 @@ where
             ""
         };
         let html = format!(
-            "<section class=\"hcd-chunk{overflow_class}\" data-hcd-chunk-id=\"{}\" data-hcd-region=\"{}\">{}</section>",
+            "<section class=\"hcd-chunk{overflow_class}\" data-hcd-chunk-id=\"{}\" data-hcd-region=\"{}\" data-hcd-part=\"{}\">{}</section>",
             escape_attribute(&chunk_id),
             escape_attribute(self.region),
+            pages::part_key(self.part),
             self.html
         );
         let source_map = ChunkSourceMap {
@@ -2982,10 +2963,8 @@ where
     }
     let theme = load_word_theme(&mut archive)?;
     let mut rendered_styles = load_word_styles(&mut archive, &theme)?;
-    let page_layout = load_document_page_layout(&mut archive)?;
-    rendered_styles
-        .css
-        .push_str(&page_layout.presentation_css());
+    let sections = pages::load(&mut archive)?;
+    rendered_styles.css.push_str(&pages::stylesheet(&sections));
     hcd_core::validate_css_text(&rendered_styles.css)?;
     let numbering = load_word_numbering(&mut archive)?;
     let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
@@ -3020,6 +2999,11 @@ where
         archive
             .with_part(&part, |reader| {
                 let context = TextPartContext {
+                    sections: if part == "word/document.xml" {
+                        &sections
+                    } else {
+                        &[]
+                    },
                     document_id: &options.document_id,
                     part: &part,
                     relationships: &relationships,
@@ -3104,86 +3088,6 @@ where
     Ok(manifest)
 }
 
-fn load_document_page_layout(
-    archive: &mut StreamingOxmlArchive,
-) -> Result<DocumentPageLayout, HcdError> {
-    archive
-        .with_part("word/document.xml", |source| {
-            let mut layout = DocumentPageLayout::default();
-            let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
-            reader.config_mut().check_end_names = true;
-            let mut buffer = Vec::with_capacity(8 * 1024);
-            let mut elements = 0usize;
-            loop {
-                let event = reader.read_event_into(&mut buffer).map_err(|error| {
-                    PackageError::ReadPartError(format!(
-                        "XML error while reading Word page layout: {error}"
-                    ))
-                })?;
-                match event {
-                    Event::Start(ref element) | Event::Empty(ref element) => {
-                        elements += 1;
-                        if elements > MAX_XML_ELEMENTS {
-                            return Err(PackageError::ResourceLimit(
-                                "word/document.xml exceeds XML safety limits while reading page layout"
-                                    .to_string(),
-                            ));
-                        }
-                        match local_name(element.name().as_ref()) {
-                            "pgSz" => {
-                                layout.width_twips = bounded_twips_attribute(
-                                    element,
-                                    "w",
-                                    layout.width_twips,
-                                );
-                                layout.height_twips = bounded_twips_attribute(
-                                    element,
-                                    "h",
-                                    layout.height_twips,
-                                );
-                            }
-                            "pgMar" => {
-                                layout.margin_top_twips = bounded_twips_attribute(
-                                    element,
-                                    "top",
-                                    layout.margin_top_twips,
-                                );
-                                layout.margin_right_twips = bounded_twips_attribute(
-                                    element,
-                                    "right",
-                                    layout.margin_right_twips,
-                                );
-                                layout.margin_bottom_twips = bounded_twips_attribute(
-                                    element,
-                                    "bottom",
-                                    layout.margin_bottom_twips,
-                                );
-                                layout.margin_left_twips = bounded_twips_attribute(
-                                    element,
-                                    "left",
-                                    layout.margin_left_twips,
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                    Event::Eof => break,
-                    _ => {}
-                }
-                buffer.clear();
-            }
-            Ok(layout)
-        })
-        .map_err(package_error)
-}
-
-fn bounded_twips_attribute(element: &BytesStart<'_>, name: &str, fallback: u64) -> u64 {
-    attribute_by_local_name(element, name)
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| (1..=200_000).contains(value))
-        .unwrap_or(fallback)
-}
-
 fn import_assets<F>(
     archive: &mut StreamingOxmlArchive,
     writer: &BundleWriter,
@@ -3253,6 +3157,7 @@ where
     let mut revisions: Vec<RevisionFrame> = Vec::new();
     let mut property_change_depth = None;
     let mut paragraph_properties_depth = None;
+    let mut paragraph_mark_properties_depth = None;
     let mut run_properties_depth = None;
     let mut cell_properties_depth = None;
     let mut table_properties_depth = None;
@@ -3345,7 +3250,10 @@ where
                                     "table",
                                     &table_ordinal.to_string(),
                                 ]);
-                                table = Some(TableBuilder::new(table_id));
+                                let mut next_table = TableBuilder::new(table_id);
+                                next_table.section_index =
+                                    pages::section_at(context.sections, paragraph_ordinal + 1);
+                                table = Some(next_table);
                             } else if let Some(table) = &mut table {
                                 table
                                     .html
@@ -3432,6 +3340,10 @@ where
                             paragraphs.push(ParagraphBuilder {
                                 paragraph_id: attribute_by_local_name(start, "paraId"),
                                 ordinal: paragraph_ordinal,
+                                section_index: pages::section_at(
+                                    context.sections,
+                                    paragraph_ordinal,
+                                ),
                                 ..Default::default()
                             });
                         }
@@ -3448,6 +3360,9 @@ where
                                 });
                             }
                         }
+                        "rPr" if paragraph_properties_depth.is_some() => {
+                            paragraph_mark_properties_depth = Some(xml_depth);
+                        }
                         "rPr" if !runs.is_empty() && paragraph_properties_depth.is_none() => {
                             run_properties_depth = Some(xml_depth);
                         }
@@ -3455,6 +3370,10 @@ where
                             let is_anchor =
                                 append_hyperlink_start(start, relationships, paragraphs.last_mut());
                             hyperlink_tags.push(is_anchor);
+                        }
+                        "br" | "cr" => {
+                            ensure_run_open(paragraphs.last_mut(), runs.last_mut());
+                            append_line_break(start, paragraphs.last_mut());
                         }
                         "fldSimple" => {
                             let instruction =
@@ -3616,6 +3535,11 @@ where
                     if run_properties_depth.is_some() && name != "rPr" {
                         capture_run_property(start, runs.last_mut(), theme);
                     }
+                    if paragraph_mark_properties_depth.is_some() && name != "rPr" {
+                        if let Some(paragraph) = paragraphs.last_mut() {
+                            capture_run_format_property(start, &mut paragraph.mark_format, theme);
+                        }
+                    }
                     if cell_properties_depth.is_some() && name != "tcPr" {
                         capture_cell_property(
                             start,
@@ -3672,6 +3596,11 @@ where
                 if run_properties_depth.is_some() {
                     capture_run_property(empty, runs.last_mut(), theme);
                 }
+                if paragraph_mark_properties_depth.is_some() {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        capture_run_format_property(empty, &mut paragraph.mark_format, theme);
+                    }
+                }
                 if cell_properties_depth.is_some() {
                     capture_cell_property(
                         empty,
@@ -3710,6 +3639,7 @@ where
                         let paragraph = ParagraphBuilder {
                             paragraph_id: attribute_by_local_name(empty, "paraId"),
                             ordinal: paragraph_ordinal,
+                            section_index: pages::section_at(context.sections, paragraph_ordinal),
                             ..Default::default()
                         };
                         let block = finish_paragraph(
@@ -3782,9 +3712,7 @@ where
                     }
                     "br" | "cr" => {
                         ensure_run_open(paragraphs.last_mut(), runs.last_mut());
-                        if let Some(paragraph) = paragraphs.last_mut() {
-                            paragraph.html.push_str("<br/>");
-                        }
+                        append_line_break(empty, paragraphs.last_mut());
                     }
                     "extent" if !drawings.is_empty() => {
                         capture_drawing_extent(empty, drawings.last_mut());
@@ -3980,6 +3908,9 @@ where
                         }
                         "rPr" if run_properties_depth == Some(xml_depth) => {
                             run_properties_depth = None;
+                        }
+                        "rPr" if paragraph_mark_properties_depth == Some(xml_depth) => {
+                            paragraph_mark_properties_depth = None;
                         }
                         "hyperlink" => {
                             if let Some(is_anchor) = hyperlink_tags.pop() {
@@ -4485,7 +4416,15 @@ fn run_html_start(format: &RunFormat, ordinal: usize) -> String {
         format.underline.as_deref(),
     );
 
-    let css = run_css_declarations(format);
+    let mut css = run_css_declarations(format);
+    // Direct run properties can turn inherited emphasis off. Style-definition
+    // toggles keep their existing cascade handling in run_css_declarations.
+    if format.bold == Some(false) {
+        css.push("font-weight:normal".to_string());
+    }
+    if format.italic == Some(false) {
+        css.push("font-style:normal".to_string());
+    }
     if !css.is_empty() {
         attributes.push_str(" style=\"");
         attributes.push_str(&css.join(";"));
@@ -4511,8 +4450,8 @@ fn capture_run_format_property(
     let value = attribute_by_local_name(element, "val");
     match name {
         "rStyle" => format.style_id = value,
-        "b" => format.bold = on_off_value(value.as_deref()),
-        "i" => format.italic = on_off_value(value.as_deref()),
+        "b" => format.bold = Some(on_off_value(value.as_deref())),
+        "i" => format.italic = Some(on_off_value(value.as_deref())),
         "strike" | "dstrike" => format.strike = on_off_value(value.as_deref()),
         "u" if value.as_deref() != Some("none") => {
             format.underline = Some(value.unwrap_or_else(|| "single".to_string()))
@@ -4569,6 +4508,7 @@ fn capture_paragraph_format_property(element: &BytesStart<'_>, format: &mut Para
         "cnfStyle" => capture_conditional_style(element, &mut format.conditional_style),
         "jc" => format.alignment = value,
         "bidi" => format.bidi = on_off_value(value.as_deref()),
+        "snapToGrid" => format.snap_to_grid = Some(on_off_value(value.as_deref())),
         "keepNext" => format.keep_next = on_off_value(value.as_deref()),
         "keepLines" => format.keep_lines = on_off_value(value.as_deref()),
         "pageBreakBefore" => format.page_break_before = on_off_value(value.as_deref()),
@@ -4592,7 +4532,7 @@ fn capture_paragraph_format_property(element: &BytesStart<'_>, format: &mut Para
     }
 }
 
-fn paragraph_html_attributes(format: &ParagraphFormat) -> String {
+fn paragraph_html_attributes(format: &ParagraphFormat, empty_mark: Option<&RunFormat>) -> String {
     let mut attributes = String::new();
     push_data_attribute(
         &mut attributes,
@@ -4620,7 +4560,12 @@ fn paragraph_html_attributes(format: &ParagraphFormat) -> String {
     }
     push_conditional_style_attributes(&mut attributes, format.conditional_style);
 
-    let css = paragraph_css_declarations(format);
+    let mut css = paragraph_css_declarations(format);
+    // An empty paragraph's line box uses the paragraph mark's font. It does
+    // not set the font of ordinary runs in a non-empty paragraph.
+    if let Some(mark) = empty_mark {
+        css.extend(run_css_declarations(mark));
+    }
     if !css.is_empty() {
         attributes.push_str(" style=\"");
         attributes.push_str(&css.join(";"));
@@ -4631,10 +4576,10 @@ fn paragraph_html_attributes(format: &ParagraphFormat) -> String {
 
 fn run_css_declarations(format: &RunFormat) -> Vec<String> {
     let mut css = Vec::new();
-    if format.bold {
+    if format.bold == Some(true) {
         css.push("font-weight:700".to_string());
     }
-    if format.italic {
+    if format.italic == Some(true) {
         css.push("font-style:italic".to_string());
     }
     let mut decorations = Vec::new();
@@ -4711,6 +4656,27 @@ fn word_font_stack(fonts: &[&str]) -> String {
             stack.push("Georgia".to_string());
             stack.push("serif".to_string());
         }
+        Some(font) if matches!(font.as_str(), "楷体" | "楷体_gb2312" | "kaiti" | "stkaiti") => {
+            stack.extend(["'Kaiti SC'".into(), "'STKaiti'".into(), "serif".into()]);
+        }
+        Some(font)
+            if matches!(
+                font.as_str(),
+                "仿宋" | "仿宋_gb2312" | "fangsong" | "stfangsong"
+            ) =>
+        {
+            stack.extend(["'STFangsong'".into(), "'FangSong'".into(), "serif".into()]);
+        }
+        Some(font) if matches!(font.as_str(), "黑体" | "simhei") => {
+            stack.extend(["'Heiti SC'".into(), "'STHeiti'".into(), "sans-serif".into()]);
+        }
+        Some(font) if matches!(font.as_str(), "微软雅黑" | "microsoft yahei") => {
+            stack.extend([
+                "'PingFang SC'".into(),
+                "'Microsoft YaHei'".into(),
+                "sans-serif".into(),
+            ]);
+        }
         _ => {
             stack.push("'Songti SC'".to_string());
             stack.push("'STSong'".to_string());
@@ -4722,6 +4688,16 @@ fn word_font_stack(fonts: &[&str]) -> String {
 
 fn paragraph_css_declarations(format: &ParagraphFormat) -> Vec<String> {
     let mut css = Vec::new();
+    if let Some(snap) = format.snap_to_grid {
+        css.push(format!("--hcd-snap-grid:{}", u8::from(snap)));
+    }
+    if let Some(rule) = format
+        .line_rule
+        .as_deref()
+        .filter(|rule| matches!(*rule, "auto" | "exact" | "atLeast"))
+    {
+        css.push(format!("--hcd-line-rule:{rule}"));
+    }
     if let Some(alignment) = format.alignment.as_deref().and_then(html_alignment) {
         css.push(format!("text-align:{alignment}"));
     }
@@ -4891,6 +4867,10 @@ fn capture_row_property(element: &BytesStart<'_>, table: Option<&mut TableBuilde
     };
     match local_name(element.name().as_ref()) {
         "cnfStyle" => capture_conditional_style(element, &mut table.row_conditional_style),
+        "tblHeader" => {
+            table.row_repeat_header =
+                on_off_value(attribute_by_local_name(element, "val").as_deref())
+        }
         "trHeight" => {
             if let Some(twips) = attribute_by_local_name(element, "val")
                 .and_then(|value| value.parse::<u64>().ok())
@@ -5297,10 +5277,33 @@ fn handle_complex_field_marker(
     Ok(())
 }
 
+fn append_line_break(element: &BytesStart<'_>, paragraph: Option<&mut ParagraphBuilder>) {
+    if let Some(paragraph) = paragraph {
+        paragraph
+            .html
+            .push_str(match attribute_by_local_name(element, "type").as_deref() {
+                Some("page") => "<br data-hcd-break=\"page\"/>",
+                Some("column") => "<br data-hcd-break=\"column\"/>",
+                _ => "<br/>",
+            });
+    }
+}
+
 fn append_field_hyperlink_start(
     instruction: &str,
     paragraph: Option<&mut ParagraphBuilder>,
 ) -> Option<bool> {
+    let field = instruction
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if matches!(field.as_str(), "PAGE" | "NUMPAGES") {
+        paragraph?
+            .html
+            .push_str(&format!("<span data-hcd-field=\"{field}\">"));
+        return Some(false);
+    }
     let href = hyperlink_href_from_field_instruction(instruction)?;
     let paragraph = paragraph?;
     if let Some(href) = safe_hyperlink_href(&href) {
@@ -5761,8 +5764,21 @@ fn finish_paragraph(
             effective_format.hanging_twips = marker.definition.hanging_twips;
         }
     }
-    let format_attributes = paragraph_html_attributes(&effective_format);
     let is_empty = !paragraph.has_visible_text && marker.is_none() && paragraph.nested.is_empty();
+    let mut format_attributes = paragraph_html_attributes(
+        &effective_format,
+        is_empty.then_some(&paragraph.mark_format),
+    );
+    push_data_attribute(
+        &mut format_attributes,
+        "data-hcd-part",
+        Some(&pages::part_key(part)),
+    );
+    push_data_number(
+        &mut format_attributes,
+        "data-hcd-section",
+        paragraph.section_index,
+    );
     let empty_class = if is_empty { " hcd-empty-paragraph" } else { "" };
     let marker = marker.map(|marker| marker.html).unwrap_or_default();
     let mut requires_overflow_visible = false;
@@ -5815,6 +5831,13 @@ fn finish_paragraph(
 
 fn take_table_fragment(table: &mut TableBuilder) -> RenderedBlock {
     table.html.push_str("</tbody></table>");
+    if let Some(index) = table.section_index {
+        table.html = table.html.replacen(
+            "<table ",
+            &format!("<table data-hcd-section=\"{index}\" "),
+            1,
+        );
+    }
     RenderedBlock {
         html: std::mem::take(&mut table.html),
         entries: std::mem::take(&mut table.entries),
@@ -6240,6 +6263,7 @@ fn append_image(
             attributes.push_str(&style.join(";"));
             attributes.push('"');
         }
+        paragraph.has_visible_text = true;
         paragraph.html.push_str(&format!("<img{attributes}/>"));
         paragraph.entries.push(NodeMapEntry {
             node_id,
@@ -6738,9 +6762,9 @@ mod tests {
         let rendered = load_word_styles(&mut archive, &WordTheme::default()).unwrap();
 
         assert!(
-            rendered
-                .css
-                .contains(".hcd-paragraph{margin-bottom:0.00pt;line-height:1.1500}"),
+            rendered.css.contains(
+                ".hcd-paragraph{--hcd-line-rule:auto;margin-bottom:0.00pt;line-height:1.1500}"
+            ),
             "{}",
             rendered.css
         );
@@ -6751,6 +6775,42 @@ mod tests {
         assert!(rendered
             .css
             .contains(".hcd-list-marker{box-sizing:border-box;text-indent:0}"));
+    }
+
+    #[test]
+    fn non_default_styles_do_not_set_global_paragraph_spacing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("style-defaults.docx");
+        let xml = r#"<w:styles xmlns:w="w">
+          <w:style w:type="paragraph" w:styleId="001Custom">
+            <w:pPr><w:ind w:firstLine="420"/><w:spacing w:line="240" w:lineRule="exact"/></w:pPr>
+          </w:style>
+          <w:style w:type="paragraph" w:styleId="002False" w:default="0">
+            <w:pPr><w:spacing w:line="120" w:lineRule="exact"/></w:pPr>
+          </w:style>
+          <w:style w:type="paragraph" w:styleId="Normal" w:default="1">
+            <w:pPr><w:jc w:val="both"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr>
+          </w:style>
+        </w:styles>"#;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+        zip.start_file("word/styles.xml", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        let mut archive = StreamingOxmlArchive::open(&source).unwrap();
+        let rendered = load_word_styles(&mut archive, &WordTheme::default()).unwrap();
+        let global = rendered
+            .css
+            .split(".hcd-paragraph{")
+            .nth(2)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap();
+        assert_eq!(global, "text-align:justify;font-size:12.0pt");
+        assert!(rendered
+            .css
+            .contains("text-indent:21.00pt;line-height:12.00pt"));
     }
 
     #[test]
@@ -6768,12 +6828,33 @@ mod tests {
 
         assert_eq!(
             paragraph_css_declarations(&auto),
-            vec!["line-height:1.5000"]
+            vec!["--hcd-line-rule:auto", "line-height:1.5000"]
         );
         assert_eq!(
             paragraph_css_declarations(&exact),
-            vec!["line-height:18.00pt"]
+            vec!["--hcd-line-rule:exact", "line-height:18.00pt"]
         );
+    }
+
+    #[test]
+    fn paragraph_grid_opt_out_is_distinct_from_omitted_or_explicit_true() {
+        for (xml, expected) in [
+            (r#"<w:snapToGrid xmlns:w="w" w:val="0"/>"#, false),
+            (r#"<w:snapToGrid xmlns:w="w"/>"#, true),
+        ] {
+            let mut reader = Reader::from_str(xml);
+            let Event::Empty(element) = reader.read_event().unwrap() else {
+                panic!("expected property");
+            };
+            let mut format = ParagraphFormat::default();
+            capture_paragraph_format_property(&element, &mut format);
+            assert_eq!(format.snap_to_grid, Some(expected));
+            assert!(paragraph_css_declarations(&format)
+                .contains(&format!("--hcd-snap-grid:{}", u8::from(expected))));
+        }
+        assert!(!paragraph_css_declarations(&ParagraphFormat::default())
+            .iter()
+            .any(|s| s.contains("snap-grid")));
     }
 
     #[test]
@@ -7055,6 +7136,7 @@ mod tests {
             parse_text_part(
                 &mut Cursor::new(xml.as_bytes()),
                 &TextPartContext {
+                    sections: &[],
                     document_id: "format-test",
                     part: "word/document.xml",
                     relationships: &relationships,
@@ -7134,6 +7216,27 @@ mod tests {
         let styles = std::fs::read_to_string(root.join("styles.css")).unwrap();
         assert!(styles.contains("data-hcd-image-hitboxes"));
         assert!(styles.contains("data-hcd-text-hitboxes"));
+    }
+
+    #[test]
+    fn explicit_run_normal_survives_inherited_bold_and_italic_styles() {
+        let xml = r#"<w:document xmlns:w="w"><w:body><w:p>
+          <w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>strong</w:t></w:r>
+          <w:r><w:rPr><w:b w:val="0"/><w:i w:val="false"/></w:rPr><w:t>normal😀</w:t></w:r>
+          <w:r><w:t>inherit</w:t></w:r>
+        </w:p></w:body></w:document>"#;
+        let (html, map) = render_test_part(xml, &WordTheme::default(), None);
+        assert!(
+            html.contains("style=\"font-weight:700;font-style:italic\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("style=\"font-weight:normal;font-style:normal\""),
+            "{html}"
+        );
+        assert!(html.contains("data-hcd-run-index=\"3\"><span"), "{html}");
+        assert_eq!(map.entries.len(), 3);
+        assert_eq!(hcd_core::extract_html_text_nodes(&html).unwrap().len(), 3);
     }
 
     #[test]
@@ -7422,6 +7525,21 @@ mod tests {
     }
 
     #[test]
+    fn east_asian_font_fallbacks_retain_the_source_typeface_category() {
+        for (source, fallback) in [
+            ("楷体", "'Kaiti SC'"),
+            ("KaiTi", "'STKaiti'"),
+            ("仿宋_GB2312", "'STFangsong'"),
+            ("黑体", "'Heiti SC'"),
+            ("Microsoft YaHei", "'PingFang SC'"),
+        ] {
+            let stack = word_font_stack(&[source]);
+            assert!(stack.contains(fallback), "{stack}");
+            assert!(!stack.contains("Songti SC"), "{stack}");
+        }
+    }
+
+    #[test]
     fn first_chunk_is_emitted_before_source_part_eof() {
         let mut xml = String::from(
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
@@ -7464,6 +7582,7 @@ mod tests {
         let result = parse_text_part(
             &mut source,
             &TextPartContext {
+                sections: &[],
                 document_id: "progressive-test",
                 part: "word/document.xml",
                 relationships: &PartRelationships::default(),
@@ -7564,6 +7683,41 @@ mod tests {
         assert!(error.to_string().contains("position value"));
     }
 
+    #[test]
+    fn empty_paragraph_uses_mark_size_without_leaking_it_to_nonempty_runs() {
+        let xml = r#"<w:document xmlns:w="w"><w:body>
+            <w:p><w:pPr><w:jc w:val="center"/><w:rPr><w:sz w:val="48"/></w:rPr></w:pPr></w:p>
+            <w:p><w:pPr><w:rPr><w:sz w:val="48"/></w:rPr></w:pPr><w:r><w:t>Body</w:t></w:r></w:p>
+            </w:body></w:document>"#;
+        let (html, _) = render_test_part(xml, &WordTheme::default(), None);
+        let paragraphs: Vec<_> = html.split("</p>").collect();
+        assert!(paragraphs[0].contains("font-size:24.0pt"), "{html}");
+        assert!(paragraphs[0].contains("text-align:center"), "{html}");
+        assert!(!paragraphs[1].contains("font-size:24.0pt"), "{html}");
+        assert!(paragraphs[1].contains("Body"));
+    }
+
+    #[test]
+    fn page_breaks_fields_and_repeated_table_headers_survive_import() {
+        let xml = r#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:r><w:t>Before</w:t><w:br w:type="page"/><w:t>After</w:t>
+            <w:br w:type="column"></w:br><w:br/><w:t>Tail</w:t></w:r></w:p>
+          <w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>999</w:t></w:r></w:fldSimple>
+            <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> NUMPAGES </w:instrText></w:r>
+            <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>888</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+          <w:tbl><w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:p><w:r><w:t>Heading</w:t></w:r></w:p></w:tc></w:tr>
+            <w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+        </w:body></w:document>"#;
+        let (html, map) = render_test_part(xml, &WordTheme::default(), None);
+        assert_eq!(html.matches("data-hcd-break=\"page\"").count(), 1);
+        assert_eq!(html.matches("data-hcd-break=\"column\"").count(), 1);
+        assert!(html.contains("<br/>"));
+        assert!(html.contains("<span data-hcd-field=\"PAGE\"><span"));
+        assert!(html.contains("<span data-hcd-field=\"NUMPAGES\"><span"));
+        assert_eq!(html.matches("data-hcd-repeat-header=\"true\"").count(), 1);
+        assert!(!map.entries.is_empty());
+    }
+
     fn render_test_part(
         xml: &str,
         theme: &WordTheme,
@@ -7629,6 +7783,7 @@ mod tests {
             parse_text_part(
                 &mut Cursor::new(xml.as_bytes()),
                 &TextPartContext {
+                    sections: &[],
                     document_id: "render-test",
                     part: "word/document.xml",
                     relationships: &relationships,
@@ -7672,6 +7827,7 @@ mod tests {
         parse_text_part(
             &mut Cursor::new(xml.into_bytes()),
             &TextPartContext {
+                sections: &[],
                 document_id: "resource-test",
                 part: "word/document.xml",
                 relationships: &PartRelationships::default(),

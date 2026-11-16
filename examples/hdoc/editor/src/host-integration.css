@@ -1,0 +1,20 @@
+.host-integration-boundary{display:contents}
+.host-session-notice{margin:0;padding:10px 16px;background:var(--surface,#fff);color:var(--ink,#222);border-bottom:1px solid var(--line,#ddd);font-size:12px}
+.host-publication{position:relative;font-size:12px}
+.host-publication>summary{display:flex;align-items:center;gap:6px;cursor:pointer;list-style:none;border:1px solid var(--line,#ddd);border-radius:9px;padding:7px 10px;background:var(--surface,#fff);color:var(--ink,#222)}
+.host-publication>summary::-webkit-details-marker{display:none}
+.host-publication-popover{position:absolute;right:0;top:calc(100% + 10px);z-index:90;width:min(320px,calc(100vw - 24px));padding:18px;border:1px solid var(--line,#ddd);border-radius:14px;background:var(--surface-raised,var(--surface,#fff));color:var(--ink,#222);box-shadow:0 12px 36px #0002}
+.host-publication-popover p{margin:10px 0;line-height:1.6;overflow-wrap:anywhere}
+.host-publication-popover label{display:grid;gap:6px;margin:12px 0}
+.host-publication-popover select{padding:7px;border:1px solid var(--line,#ddd);border-radius:7px;background:inherit;color:inherit}
+.host-publication-popover small{display:block;line-height:1.6;opacity:.72}
+.host-publication-popover button{display:flex;gap:7px;align-items:center;justify-content:center;width:100%;margin:12px 0 4px;padding:9px;border:0;border-radius:8px;background:var(--ink,#222);color:var(--surface,#fff);cursor:pointer}
+.host-publication-popover button:disabled{opacity:.45;cursor:default}
+.host-publish-spinner{animation:host-publish-spin 1s linear infinite}
+@keyframes host-publish-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.host-publish-spinner{animation:none}}
+@media(max-width:700px){.host-publication-popover{position:fixed;top:150px;right:12px;width:calc(100vw - 24px);max-height:calc(100dvh - 170px);overflow:auto;box-sizing:border-box}}
+.hcd-surface[data-theme] .host-publication .host-publication-popover>button{background:var(--accent);color:var(--on-accent)}
+.hcd-surface[data-theme] .host-publication .host-publication-popover>button:hover{filter:brightness(.95)}
+.hcd-surface[data-theme] .host-publication .host-fidelity{margin-top:12px;color:var(--muted)}
+.host-fidelity>summary{cursor:pointer}

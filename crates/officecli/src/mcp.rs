@@ -19,6 +19,29 @@ use std::io::{self, BufRead, Write};
 #[path = "mcp_hcd.rs"]
 mod hcd;
 
+/// The authenticated HTTP transport and model harness expose the same HCD
+/// tools, without the stdio transport's environment-variable credentials.
+pub(crate) fn hcd_tool_definitions() -> Vec<Value> {
+    hcd::definitions()
+        .into_iter()
+        .filter(|tool| tool.name != "hcd_export")
+        .map(|tool| {
+            let mut value = serde_json::to_value(tool).expect("serializable tool");
+            value["inputSchema"]["properties"]
+                .as_object_mut()
+                .expect("tool properties")
+                .remove("token_env");
+            if value["name"] == "hcd_workflow" {
+                value["inputSchema"]["properties"].as_object_mut().expect("tool properties").remove("token_envs");
+                value["description"] = serde_json::json!("Coordinate a persisted cross-document Agent workflow. Create a plan with independently authorized documents, explicit shared fact selections and step dependencies; review its snapshot with the user before explicitly authorizing continue or compensate with the current fingerprint. The transport must supply other documents' signed tokens via the x-hcd-document-grants header (Base64 JSON mapping document IDs to tokens), never tool arguments. All grants must belong to the same principal. Ready independent steps share the four-Agent budget; downstream steps consume server-read facts with revision/hash provenance. Continuation resumes child checkpoints; compensation creates guarded reverse-order revisions and refuses unrelated/human changes. No cross-document atomic transaction. Only the original principal may manage the workflow; built-in workers cannot manage workflows.");
+            }
+            let read_only = matches!(value["name"].as_str(), Some("hcd_read" | "hcd_help" | "hcd_image_jobs"));
+            value["annotations"] = serde_json::json!({"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":value["name"]=="hcd_generate_image"});
+            value
+        })
+        .collect()
+}
+
 // ─── JSON-RPC 2.0 types ────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -636,19 +659,40 @@ fn run_stream(input: impl BufRead, stdout: &mut impl Write) -> Result<(), anyhow
 fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
     match req.method.as_str() {
         "ping" => JsonRpcResponse::success(req.id, serde_json::json!({})),
-        "initialize" => JsonRpcResponse::success(
-            req.id,
-            serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "officecli",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }),
-        ),
+        "initialize" => {
+            let requested = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let protocol = if [
+                "2025-11-25",
+                "2025-06-18",
+                "2025-03-26",
+                "2024-11-05",
+                "2024-10-07",
+            ]
+            .contains(&requested)
+            {
+                requested
+            } else {
+                "2025-11-25"
+            };
+            JsonRpcResponse::success(
+                req.id,
+                serde_json::json!({
+                    "protocolVersion": protocol,
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "serverInfo": {
+                        "name": "officecli",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }),
+            )
+        }
 
         "tools/list" => {
             let tools = get_tool_definitions();
@@ -703,6 +747,32 @@ fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdio_negotiates_current_and_legacy_protocol_versions() {
+        for requested in [
+            "2025-11-25",
+            "2025-06-18",
+            "2025-03-26",
+            "2024-11-05",
+            "unknown",
+        ] {
+            let response = handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(serde_json::json!(1)),
+                method: "initialize".into(),
+                params: Some(serde_json::json!({"protocolVersion":requested})),
+            });
+            assert_eq!(
+                response.result.unwrap()["protocolVersion"],
+                if requested == "unknown" {
+                    "2025-11-25"
+                } else {
+                    requested
+                }
+            );
+        }
+    }
 
     #[test]
     fn stdio_handles_notifications_errors_schema_and_eof() {

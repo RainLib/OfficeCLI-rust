@@ -1,0 +1,738 @@
+openapi: 3.1.0
+info:
+  title: OfficeCLI Business Provider V1 (draft)
+  version: 0.1.0-draft
+  description: |
+    DESIGN ONLY. These endpoints are implemented by the business Provider,
+    not by the current officecli hdoc serve runtime. See ../hcd-product-integration-v1.zh.md.
+    The built-in Workspace Provider and an external host use the same contract.
+    The host owns identities, permissions, source files and committed output versions;
+    OfficeCLI persists HCD, collaboration and publication/outbox records.
+
+    All requests are server-to-server over deployment-controlled TLS. Never expose
+    application signing keys, launch codes, transfer credentials or raw callback
+    URLs in document links. The server chooses the registered Provider.
+
+    Request signing (UTF-8, LF separators, no trailing LF):
+      UPPERCASE_METHOD + "\n" + RAW_PATH_AND_QUERY + "\n" + TIMESTAMP + "\n" +
+      NONCE + "\n" + LOWERCASE_HEX_SHA256(EXACT_BODY_BYTES)
+    X-HCD-Timestamp is canonical decimal Unix seconds; X-HCD-Nonce is a fresh UUID.
+    X-HCD-Signature is v1;kid=KEY_ID;mac=LOWERCASE_HEX_HMAC_SHA256(canonical_request).
+    Verify the key's configured tenant/app binding against the signed JSON body,
+    time skew <= 300 seconds, a nonce replay cache for at least 600 seconds, and
+    constant-time MAC comparison. Keys are separate for Provider calls and events.
+    Request IDs are correlation data, not authorization or idempotency keys.
+    A retry has a new nonce, timestamp and request ID; its exchangeId,
+    publicationId or eventId is stable. Sign the transmitted bytes, not re-serialized JSON.
+
+    Publication idempotency is scoped by tenant/app/file/publicationId and compares
+    immutable intent fields, not the transport nonce or a renewed session ID.
+    A changed actor, revision, hash, length, format or expectedVersion for an existing
+    publicationId is rejected. A committed publication always returns its original
+    receipt, including when the current business head has advanced again.
+
+    Transfer URLs are short-lived, restricted to configured internal origins and
+    revalidated on every redirect. Upload is to a staging object; only commit
+    verifies the bytes and atomically advances the external version. This protocol
+    does not replace the engine's revision/hash/epoch guards or object capability checks.
+x-officecli-implementation-status: design-only
+security:
+  - HcdSignature: []
+tags:
+  - name: identity
+  - name: permissions
+  - name: files
+  - name: publications
+  - name: events
+paths:
+  /officecli-provider/v1/sessions/resolve:
+    post:
+      operationId: resolveHostSession
+      tags: [identity]
+      summary: Exchange a host-issued, document-bound one-time credential
+      description: |
+        Required for viewing and editing. Resolve the actual authenticated actor;
+        do not accept a browser-supplied actor ID. Bind the launch code to the
+        tenant/app/file, purpose, expiry and intended engine audience.
+        Refresh uses a newly issued code bound to the existing session ID.
+        Duplicate exchangeId with the same credential/binding returns the same
+        result after an uncertain response, until expiry; another exchange ID
+        cannot consume the code again. Never extend the original credential expiry.
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SessionExchange'}
+      responses:
+        '200':
+          description: Resolved identity; permissions must be queried separately
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ResolvedSession'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-provider/v1/permissions/resolve:
+    post:
+      operationId: resolveDocumentPermissions
+      tags: [permissions]
+      summary: Authorize requested operations against current business policy
+      description: |
+        Required. Return only the granted subset of requested operations.
+        Missing operations are denied. This is a live business decision, not a
+        UI hint; publishing, edits, exports, restoration and AI/MCP tools recheck
+        before execution. An unavailable Provider never grants fallback access.
+        expiresAt must be at most 60 seconds in the future and no later than
+        the host session expiry. Capabilities and deployment restrictions can
+        further remove permissions. Unsupported operations cannot become executable.
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PermissionQuery'}
+      responses:
+        '200':
+          description: Current grants and restrictions, including an empty grant set
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PermissionDecision'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-provider/v1/users/resolve:
+    post:
+      operationId: resolveUsers
+      tags: [identity]
+      summary: Resolve minimal user profiles for collaboration and attribution
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [context, externalFileId, userIds]
+              properties:
+                context: {$ref: '#/components/schemas/Context'}
+                externalFileId: {$ref: '#/components/schemas/ExternalId'}
+                userIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  uniqueItems: true
+                  items: {$ref: '#/components/schemas/ExternalId'}
+      responses:
+        '200':
+          description: Requested profiles only; unknown IDs are omitted or tombstoned
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    maxItems: 100
+                    items: {$ref: '#/components/schemas/User'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-provider/v1/files/{fileId}/describe:
+    post:
+      operationId: describeFile
+      tags: [files]
+      summary: Read the latest or a specified immutable business version
+      description: |
+        Required. POST carries signed actor context; this is a read operation.
+        The returned id equals fileId. A version identifies immutable bytes.
+        Do not return a live URL whose contents silently change under the same version.
+        Missing view permission returns 403 (or non-disclosing 404).
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DescribeRequest'}
+      responses:
+        '200':
+          description: Immutable file descriptor
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FileDescriptor'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-provider/v1/files/{fileId}/download:
+    post:
+      operationId: prepareSourceDownload
+      tags: [files]
+      summary: Obtain an engine-only download for an exact immutable version
+      description: |
+        Required. The engine checks descriptor ID/version and verifies downloaded
+        length and SHA-256 before import or source-backed export. This transfer
+        is service access for authorized editing, not a user download permission.
+        Never give the browser this storage URL or its headers. Reissue after expiry
+        for the same version; never silently substitute the current head.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [context, version]
+              properties:
+                context: {$ref: '#/components/schemas/Context'}
+                version: {$ref: '#/components/schemas/Version'}
+      responses:
+        '200':
+          description: Exact descriptor and restricted transfer credentials
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [file, transfer]
+                properties:
+                  file: {$ref: '#/components/schemas/FileDescriptor'}
+                  transfer: {$ref: '#/components/schemas/DownloadTransfer'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-provider/v1/files/{fileId}/publications/prepare:
+    post:
+      operationId: preparePublication
+      tags: [publications]
+      summary: Reserve a staged upload for one immutable publication intent
+      description: |
+        Required only when publication is advertised. Recheck document.publish,
+        view/edit, deployment policy and expectedVersion. A stale business version
+        returns 409. Preparing does not advance the business head.
+        Repeating the same publication intent may renew expired transfer credentials
+        without creating a new publication. A prior committed intent returns 409
+        PUBLICATION_ALREADY_COMMITTED; query status for its original receipt.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PrepareRequest'}
+      responses:
+        '200':
+          description: Stage only; the target version has not been committed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PreparedPublication'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-provider/v1/files/{fileId}/publications/commit:
+    post:
+      operationId: commitPublication
+      tags: [publications]
+      summary: Verify the staged bytes and atomically commit a final business version
+      description: |
+        Reauthorize the recorded initiating actor. Check staging ownership, length,
+        hash and the immutable intent; atomically compare expectedVersion with the
+        current head and create exactly one new business version for this publication.
+        Status 200 requires a durable, final receipt; 202 is not a commit receipt.
+        Repeating an already committed intent returns its original receipt after
+        authenticating the caller, without creating or rewriting a business version.
+        A newer current head does not invalidate that original receipt.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CommitRequest'}
+      responses:
+        '200':
+          description: Final durable business version receipt
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublicationReceipt'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-provider/v1/files/{fileId}/publications/status:
+    post:
+      operationId: queryPublication
+      tags: [publications]
+      summary: Reconcile an uncertain or interrupted publication by its stable ID
+      description: |
+        Required with prepare/commit. Authenticate the context and its right to
+        inspect the publication. A registered application reconciliation policy
+        may recover its own historical receipt after the initiating session
+        expires; that policy never authorizes a new write or discloses the file
+        to the expired user. Absence is represented as unknown, never as a
+        fabricated failure or success. Retain committed receipts with business
+        version history. Noncommitted intent/dedup records live at least as long
+        as the engine retry/recovery window; the deployment must agree that window.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PublicationQuery'}
+      responses:
+        '200':
+          description: Known durable state, or unknown
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublicationStatus'}
+        default: {$ref: '#/components/responses/ProviderError'}
+  /officecli-events/v1/events:
+    post:
+      operationId: receiveOfficecliEvent
+      tags: [events]
+      summary: Receive an asynchronous, at-least-once engine event
+      description: |
+        Optional event consumer, independently registered from the synchronous Provider.
+        Uses a distinct event signing key with tenant/app binding. Durably record
+        eventId before 200/202/204; duplicates are acknowledged without repeating
+        business effects. Delivery order is not guaranteed. Sequence is scoped to
+        tenant/app/document; use it to detect gaps, not as proof of file commitment.
+        Signing a delivery retry changes its nonce, not the event body/eventId.
+        Never use event acknowledgements as publication receipts.
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Event'}
+      responses:
+        '204': {description: Event durably accepted or previously accepted}
+        '202': {description: Event durably queued by the receiver}
+        default: {$ref: '#/components/responses/ProviderError'}
+components:
+  securitySchemes:
+    HcdSignature:
+      type: apiKey
+      in: header
+      name: X-HCD-Signature
+      description: Application-bound HMAC signature defined in info.description
+  parameters:
+    FileId:
+      name: fileId
+      in: path
+      required: true
+      description: Opaque external ID; URL-encode as one path segment, never a filesystem path
+      schema: {$ref: '#/components/schemas/ExternalId'}
+    Timestamp:
+      name: X-HCD-Timestamp
+      in: header
+      required: true
+      schema: {type: string, pattern: '^[1-9][0-9]{0,11}$'}
+    Nonce:
+      name: X-HCD-Nonce
+      in: header
+      required: true
+      schema: {type: string, format: uuid}
+    RequestId:
+      name: X-HCD-Request-Id
+      in: header
+      required: true
+      schema: {type: string, format: uuid}
+  responses:
+    ProviderError:
+      description: |
+        400 invalid request; 401 signature/session invalid; 403 denied; 404 not
+        found or non-disclosing denial; 409 version/idempotency conflict;
+        410 expired transfer; 422 unsupported format/operation; 429 rate limit;
+        503 unavailable. 408/429/5xx/network failures may be retried with the same
+        business idempotency key. A 409 needs reconciliation, not blind overwrite.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    ExternalId:
+      type: string
+      minLength: 1
+      maxLength: 256
+      description: Opaque host ID, scoped by tenant/app; no filesystem interpretation
+    InternalDocumentId:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{1,128}$'
+    Version:
+      type: string
+      minLength: 1
+      maxLength: 256
+      description: Opaque immutable business version/CAS token; not an HCD revision number
+    Sha256:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+      description: Lowercase hex SHA-256 of complete file bytes, without a prefix
+    Revision:
+      type: integer
+      minimum: 0
+      maximum: 9007199254740991
+    Context:
+      type: object
+      additionalProperties: false
+      required: [tenantId, appId, sessionId, actorId]
+      properties:
+        tenantId: {$ref: '#/components/schemas/ExternalId'}
+        appId: {$ref: '#/components/schemas/ExternalId'}
+        sessionId: {type: string, format: uuid}
+        actorId:
+          $ref: '#/components/schemas/ExternalId'
+          description: Actual user resolved by Provider; delegated tools cannot replace it
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, displayName]
+      properties:
+        id: {$ref: '#/components/schemas/ExternalId'}
+        displayName: {type: string, minLength: 1, maxLength: 256}
+        avatarUrl:
+          type: string
+          format: uri
+          description: Optional deployment-local URL; omit rather than fetch a public avatar offline
+        deleted: {type: boolean, default: false}
+    SessionExchange:
+      type: object
+      additionalProperties: false
+      required: [tenantId, appId, externalFileId, sessionId, exchangeId, launchCode, purpose]
+      properties:
+        tenantId: {$ref: '#/components/schemas/ExternalId'}
+        appId: {$ref: '#/components/schemas/ExternalId'}
+        externalFileId: {$ref: '#/components/schemas/ExternalId'}
+        sessionId:
+          type: string
+          format: uuid
+          description: Engine-allocated new session, or existing session for refresh
+        exchangeId: {type: string, format: uuid}
+        launchCode: {type: string, minLength: 1, maxLength: 4096, writeOnly: true}
+        purpose: {type: string, enum: [open, refresh]}
+      examples:
+        - tenantId: acme
+          appId: archive
+          externalFileId: contract-42
+          sessionId: 0d0767af-3d33-4fc5-84a0-84f4c00ff159
+          exchangeId: f7895bdd-038f-4893-9b04-cc13e5f7a0f9
+          launchCode: illustrative-one-time-code-not-a-live-credential
+          purpose: open
+    ResolvedSession:
+      type: object
+      additionalProperties: false
+      required: [tenantId, appId, externalFileId, sessionId, actor, expiresAt]
+      properties:
+        tenantId: {$ref: '#/components/schemas/ExternalId'}
+        appId: {$ref: '#/components/schemas/ExternalId'}
+        externalFileId: {$ref: '#/components/schemas/ExternalId'}
+        sessionId: {type: string, format: uuid}
+        actor: {$ref: '#/components/schemas/User'}
+        expiresAt: {type: string, format: date-time}
+    Operation:
+      type: string
+      enum:
+        - document.view
+        - document.edit
+        - document.publish
+        - document.download
+        - document.export
+        - document.print
+        - document.copy
+        - document.rename
+        - document.comment
+        - document.share
+        - history.view
+        - history.restore
+        - theme.assign
+        - ai.read
+        - ai.write
+        - ai.image.generate
+        - mcp.read
+        - mcp.write
+      description: |
+        Policy identifiers, not a declaration of implemented features. comment/share
+        and optional host extensions remain non-executable until advertised by the engine.
+        publish requires view/edit; history.restore requires view/edit/history.view;
+        ai.write or ai.image.generate requires view/edit/ai.read; mcp.write requires
+        view/edit/mcp.read. HCD export requires history.view and hcd in exportFormats.
+    Operations:
+      type: array
+      uniqueItems: true
+      maxItems: 18
+      items: {$ref: '#/components/schemas/Operation'}
+    PermissionQuery:
+      type: object
+      additionalProperties: false
+      required: [context, externalFileId, operations]
+      properties:
+        context: {$ref: '#/components/schemas/Context'}
+        externalFileId: {$ref: '#/components/schemas/ExternalId'}
+        operations:
+          $ref: '#/components/schemas/Operations'
+          minItems: 1
+    PermissionDecision:
+      type: object
+      additionalProperties: false
+      required: [granted, permissionVersion, expiresAt, constraints]
+      properties:
+        granted: {$ref: '#/components/schemas/Operations'}
+        permissionVersion: {$ref: '#/components/schemas/Version'}
+        expiresAt: {type: string, format: date-time}
+        constraints:
+          type: object
+          additionalProperties: false
+          required: [exportFormats, modelIds]
+          properties:
+            exportFormats:
+              type: array
+              uniqueItems: true
+              items: {type: string, enum: [docx, xlsx, pptx, pdf, html, md, txt, png, jpeg, webp, hcd]}
+              description: Empty denies conversion/HCD export; source download is a separate operation
+            modelIds:
+              type: array
+              uniqueItems: true
+              items: {type: string, minLength: 1, maxLength: 256}
+              description: Empty denies model use; match deployment-configured IDs, never arbitrary URLs
+      examples:
+        - granted: [document.view, document.edit, document.publish, history.view]
+          permissionVersion: acl-12
+          expiresAt: '2026-11-15T06:00:30Z'
+          constraints: {exportFormats: [], modelIds: []}
+    DescribeRequest:
+      type: object
+      additionalProperties: false
+      required: [context]
+      properties:
+        context: {$ref: '#/components/schemas/Context'}
+        version:
+          $ref: '#/components/schemas/Version'
+          description: Omit to resolve current head, then use returned version for download
+    FileDescriptor:
+      type: object
+      additionalProperties: false
+      required: [id, version, name, mediaType, sizeBytes, sha256, createdAt, modifiedAt, creatorId, modifierId]
+      properties:
+        id: {$ref: '#/components/schemas/ExternalId'}
+        version: {$ref: '#/components/schemas/Version'}
+        name: {type: string, minLength: 1, maxLength: 1024}
+        mediaType: {type: string, minLength: 1, maxLength: 256}
+        sizeBytes: {type: integer, minimum: 0, maximum: 9007199254740991}
+        sha256: {$ref: '#/components/schemas/Sha256'}
+        createdAt: {type: string, format: date-time}
+        modifiedAt: {type: string, format: date-time}
+        creatorId: {$ref: '#/components/schemas/ExternalId'}
+        modifierId: {$ref: '#/components/schemas/ExternalId'}
+    DownloadTransfer:
+      type: object
+      additionalProperties: false
+      required: [url, method, headers, expiresAt]
+      properties:
+        url: {type: string, format: uri}
+        method: {type: string, const: GET}
+        headers:
+          type: object
+          additionalProperties: {type: string}
+        expiresAt: {type: string, format: date-time}
+    UploadTransfer:
+      type: object
+      additionalProperties: false
+      required: [url, method, headers, expiresAt]
+      properties:
+        url: {type: string, format: uri}
+        method: {type: string, const: PUT}
+        headers:
+          type: object
+          additionalProperties: {type: string}
+        expiresAt: {type: string, format: date-time}
+    PublicationIntent:
+      type: object
+      additionalProperties: false
+      required: [publicationId, documentId, revision, expectedVersion, output, trigger]
+      properties:
+        publicationId: {type: string, format: uuid}
+        documentId: {$ref: '#/components/schemas/InternalDocumentId'}
+        revision: {$ref: '#/components/schemas/Revision'}
+        expectedVersion: {$ref: '#/components/schemas/Version'}
+        output:
+          type: object
+          additionalProperties: false
+          required: [name, mediaType, format, exportMode, sizeBytes, sha256]
+          properties:
+            name: {type: string, minLength: 1, maxLength: 1024}
+            mediaType: {type: string, minLength: 1, maxLength: 256}
+            format: {type: string, enum: [docx, xlsx, pptx, pdf, html, md, txt, png, jpeg, webp]}
+            exportMode:
+              type: string
+              enum: [source-backed, semantic, visual]
+              description: Integration-level mode, mapped to actual engine export options after capability checks
+            sizeBytes: {type: integer, minimum: 0, maximum: 9007199254740991}
+            sha256: {$ref: '#/components/schemas/Sha256'}
+        trigger: {type: string, enum: [manual, idle-policy]}
+      examples:
+        - publicationId: 40c1fb9f-a4c1-4e42-9270-161049083771
+          documentId: hcd-contract-42
+          revision: 7
+          expectedVersion: file-v19
+          output:
+            name: contract.docx
+            mediaType: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+            format: docx
+            exportMode: source-backed
+            sizeBytes: 12345
+            sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+          trigger: manual
+    PrepareRequest:
+      type: object
+      additionalProperties: false
+      required: [context, intent]
+      properties:
+        context: {$ref: '#/components/schemas/Context'}
+        intent: {$ref: '#/components/schemas/PublicationIntent'}
+    PreparedPublication:
+      type: object
+      additionalProperties: false
+      required: [publicationId, uploadId, transfer]
+      properties:
+        publicationId: {type: string, format: uuid}
+        uploadId: {type: string, minLength: 1, maxLength: 256}
+        transfer: {$ref: '#/components/schemas/UploadTransfer'}
+    CommitRequest:
+      type: object
+      additionalProperties: false
+      required: [context, publicationId, uploadId]
+      properties:
+        context: {$ref: '#/components/schemas/Context'}
+        publicationId: {type: string, format: uuid}
+        uploadId: {type: string, minLength: 1, maxLength: 256}
+    PublicationQuery:
+      type: object
+      additionalProperties: false
+      required: [context, publicationId]
+      properties:
+        context: {$ref: '#/components/schemas/Context'}
+        publicationId: {type: string, format: uuid}
+    PublicationReceipt:
+      type: object
+      additionalProperties: false
+      required: [publicationId, externalFileId, documentId, revision, externalVersion, sha256, committedAt]
+      properties:
+        publicationId: {type: string, format: uuid}
+        externalFileId: {$ref: '#/components/schemas/ExternalId'}
+        documentId: {$ref: '#/components/schemas/InternalDocumentId'}
+        revision: {$ref: '#/components/schemas/Revision'}
+        externalVersion: {$ref: '#/components/schemas/Version'}
+        sha256: {$ref: '#/components/schemas/Sha256'}
+        committedAt: {type: string, format: date-time}
+    PublicationStatus:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [publicationId, state, receipt]
+          properties:
+            publicationId: {type: string, format: uuid}
+            state: {type: string, const: committed}
+            receipt: {$ref: '#/components/schemas/PublicationReceipt'}
+        - type: object
+          additionalProperties: false
+          required: [publicationId, state]
+          properties:
+            publicationId: {type: string, format: uuid}
+            state: {type: string, enum: [unknown, prepared, conflict, rejected, expired]}
+            currentVersion: {$ref: '#/components/schemas/Version'}
+            error: {$ref: '#/components/schemas/Error'}
+      description: Committed requires a receipt; any other state cannot contain one
+    Event:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, eventId, tenantId, appId, externalFileId, documentId, sequence, occurredAt, type, payload]
+      properties:
+        schemaVersion: {type: string, const: officecli-event/1}
+        eventId: {type: string, format: uuid}
+        tenantId: {$ref: '#/components/schemas/ExternalId'}
+        appId: {$ref: '#/components/schemas/ExternalId'}
+        externalFileId: {$ref: '#/components/schemas/ExternalId'}
+        documentId: {$ref: '#/components/schemas/InternalDocumentId'}
+        sequence: {type: integer, minimum: 1, maximum: 9007199254740991}
+        occurredAt: {type: string, format: date-time}
+        type:
+          type: string
+          enum: [document.imported, revision.committed, publication.committed, publication.failed, export.completed, agent.run.changed, session.closed]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            revision: {$ref: '#/components/schemas/Revision'}
+            publicationId: {type: string, format: uuid}
+            externalVersion: {$ref: '#/components/schemas/Version'}
+            sha256: {$ref: '#/components/schemas/Sha256'}
+            jobId: {type: string, minLength: 1, maxLength: 256}
+            runId: {type: string, minLength: 1, maxLength: 256}
+            sessionId: {type: string, format: uuid}
+            state: {type: string, minLength: 1, maxLength: 64}
+            errorCode: {type: string, minLength: 1, maxLength: 128}
+            receipt: {$ref: '#/components/schemas/PublicationReceipt'}
+      allOf:
+        - if:
+            properties:
+              type: {const: publication.committed}
+          then:
+            properties:
+              payload: {required: [receipt]}
+        - if:
+            properties:
+              type: {const: publication.failed}
+          then:
+            properties:
+              payload: {required: [publicationId, errorCode]}
+        - if:
+            properties:
+              type: {enum: [document.imported, revision.committed]}
+          then:
+            properties:
+              payload: {required: [revision]}
+        - if:
+            properties:
+              type: {const: export.completed}
+          then:
+            properties:
+              payload: {required: [jobId, revision]}
+        - if:
+            properties:
+              type: {const: agent.run.changed}
+          then:
+            properties:
+              payload: {required: [runId, state]}
+        - if:
+            properties:
+              type: {const: session.closed}
+          then:
+            properties:
+              payload: {required: [sessionId]}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, requestId, retryable]
+      properties:
+        code: {type: string, minLength: 1, maxLength: 128}
+        message: {type: string, minLength: 1, maxLength: 2048}
+        requestId: {type: string, format: uuid}
+        retryable: {type: boolean}
+        currentVersion: {$ref: '#/components/schemas/Version'}

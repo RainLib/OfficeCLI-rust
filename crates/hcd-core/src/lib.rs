@@ -1,9 +1,11 @@
 mod archive;
 mod bundle;
 mod catalog;
+mod docx_inline;
 mod error;
 mod hash;
 mod html;
+mod image_insert;
 mod patch;
 mod presentation;
 mod restore;
@@ -14,26 +16,28 @@ mod types;
 mod validate;
 mod xlsx_formula;
 mod xlsx_grid;
+mod xlsx_inline;
 
 pub use archive::{inspect_archive, pack_archive, unpack_archive, ArchiveReport};
 pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
 pub use catalog::{
     audit_action, detect_font_format, is_audit_calendar_day, list_documents, pin_document_theme,
-    resolve_document_theme, theme_document_css, theme_documents, theme_font_plan,
-    theme_font_report, theme_presentation_css, unpin_document_theme, AuditEntry, AuditPage,
-    AuditRecord, AuditWindow, DiskCatalog, DocumentSummary, DocumentThemeResolution,
+    resolve_document_theme, set_document_theme_at_revision, theme_document_css, theme_documents,
+    theme_font_plan, theme_font_report, theme_presentation_css, unpin_document_theme, AuditEntry,
+    AuditPage, AuditRecord, AuditWindow, DiskCatalog, DocumentSummary, DocumentThemeResolution,
     FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRef, FontRevision, FontScript,
     FontStretch, FontStyle, ResolvedFace, ResolvedTheme, ThemeDocumentRef, ThemeEmbedKind,
     ThemeFontAction, ThemeFontDecision, ThemeFontReport, ThemeFontSlots, ThemeRevision,
     FONT_CATALOG_SCHEMA, LICENSE_WARN_WINDOW_DAYS, MAX_AUDIT_LIMIT, MAX_FONT_BYTES, THEME_SCHEMA,
 };
+pub use docx_inline::{extract_docx_inline_runs, DocxInlineRun};
 pub use error::HcdError;
 pub use hash::{
     hash_bytes, hash_file, hash_reader, node_bloom, node_bloom_might_contain, stable_node_id,
 };
 pub use html::{
     extract_html_font_nodes, extract_html_image_nodes, extract_html_text_nodes, image_visual_hash,
-    validate_css_text, HtmlFontNode, HtmlImageNode,
+    is_safe_hyperlink, validate_css_text, HtmlFontNode, HtmlImageNode,
 };
 pub use patch::{
     apply_patch, extract_image_page, extract_text_page, get_image_node, get_text_node,
@@ -48,7 +52,7 @@ pub use stats::{bundle_stats, remove_orphan_objects, BundleStats, StorageCategor
 pub use structure::{
     apply_structure_patch, editor_projection, project_editor, BlockPrecondition,
     EditorBlockContent, EditorBlockKind, EditorBlockView, EditorInline, EditorProjection,
-    StructureOperation, StructurePatchBatch,
+    StructureOperation, StructurePatchBatch, TableEditAction, TableRestorePrecondition,
 };
 pub use types::*;
 pub use validate::validate_bundle;
@@ -57,6 +61,10 @@ pub use xlsx_formula::{
     rename_formula_sheet_references, FormulaDeletion, FormulaInsertion,
 };
 pub use xlsx_grid::{sheet_grid_id, sheet_window_chunk_id, XlsxSheetSection};
+pub use xlsx_inline::{
+    extract_xlsx_inline_runs, render_xlsx_inline_runs, splice_xlsx_inline_runs,
+    validate_xlsx_run_properties, XlsxInlineRun, XlsxRunProperties,
+};
 
 pub const HCD_SCHEMA_VERSION: &str = "hcd/2";
 pub const HCD_SCHEMA_VERSION_1: &str = "hcd/1";
@@ -106,6 +114,10 @@ pub const HCD_PATCH_SCHEMA_VERSION_44: &str = "hcd-patch/44";
 /// 45 is this line's first XLSX window op: freeze panes on a worksheet.
 /// 46 is this line's first PPTX paragraph op: align a slide text shape.
 pub const HCD_PATCH_SCHEMA_VERSION_45: &str = "hcd-patch/45";
+pub const HCD_PATCH_SCHEMA_VERSION_47: &str = "hcd-patch/47";
+pub const HCD_PATCH_SCHEMA_VERSION_48: &str = "hcd-patch/48";
+pub const HCD_PATCH_SCHEMA_VERSION_49: &str = "hcd-patch/49";
+pub const HCD_PATCH_SCHEMA_VERSION_50: &str = "hcd-patch/50";
 pub const HCD_PATCH_SCHEMA_VERSION_46: &str = "hcd-patch/46";
 pub const HCD_PATCH_SCHEMA_VERSION_37: &str = "hcd-patch/37";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
@@ -149,6 +161,7 @@ pub const HCD_PATCH_SCHEMA_V36_JSON: &str = include_str!("../schemas/hcd-patch-3
 pub const HCD_PATCH_SCHEMA_V41_JSON: &str = include_str!("../schemas/hcd-patch-41.schema.json");
 pub const HCD_PATCH_SCHEMA_V42_JSON: &str = include_str!("../schemas/hcd-patch-42.schema.json");
 pub const HCD_PATCH_SCHEMA_V43_JSON: &str = include_str!("../schemas/hcd-patch-43.schema.json");
+pub const HCD_PATCH_SCHEMA_V48_JSON: &str = include_str!("../schemas/hcd-patch-48.schema.json");
 pub const HCD_PATCH_SCHEMA_V44_JSON: &str = include_str!("../schemas/hcd-patch-44.schema.json");
 pub const HCD_PATCH_SCHEMA_V45_JSON: &str = include_str!("../schemas/hcd-patch-45.schema.json");
 pub const HCD_PATCH_SCHEMA_V46_JSON: &str = include_str!("../schemas/hcd-patch-46.schema.json");

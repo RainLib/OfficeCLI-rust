@@ -1,7 +1,13 @@
+import { keepHistory } from './editHistory.ts'
+import { AppearanceSelect } from './Appearance.tsx'
+import { WorkspaceDrawers } from './WorkspaceDrawers.tsx'
 import { useDocumentViewState } from './DocumentViewState.tsx'
 import { CanvasViewport, useCanvasZoom } from './CanvasZoom.tsx'
-import { PageThumbnail, type PagePreview } from './PageThumbnail.tsx'
-import { AgentPanel, useAgentWorkspace } from './AgentActivityLayer.tsx'
+import type { PagePreview } from './PageThumbnail.tsx'
+import { SlideNavigator, type NavigationPage } from './SlideNavigator.tsx'
+import { PptxProperties } from './PptxProperties.tsx'
+import './document-panels.css'
+import { AgentPanel, AgentProductionCanvas, useAgentWorkspace } from './AgentActivityLayer.tsx'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
@@ -11,21 +17,25 @@ import { redo, redoDepth, undo, undoDepth } from '@tiptap/pm/history'
 import { api, type Session } from './api.ts'
 import { hasThemeRegion, loadTheme, themeFontOptions, themeFontPatch, type ThemeFontOption } from './themeCss.ts'
 import { FixedTextBoxEditor } from './FixedTextBoxEditor.tsx'
-import { EditorHeader, EditorStatusbar, ContentToolbar, PanelDock, CollapseOutlineIcon } from './EditorChrome.tsx'
+import { FixedPreviewFrame } from './FixedPreviewFrame.tsx'
+import { EditorHeader, EditorStatusbar, ContentToolbar, CollapseOutlineIcon, CollapseSidebarIcon } from './EditorChrome.tsx'
 import { DocumentSearch, type SearchHit, type SearchResult } from './DocumentSearch.tsx'
 import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.ts'
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { ErrorToast } from './ErrorToast.tsx'
+import { ContextMenu } from './ContextMenu.tsx'
+import { InputDraftRecovery, useInputDraft } from './useInputDraft.tsx'
+import type { InputDraft } from './inputDraftJournal.ts'
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
-type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
-type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
+type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean; htmlHash: string; mapHash: string }
+export type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
 type PdfGeometry = { xPt: number; yPt: number; widthPt: number; heightPt: number }
-type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; runBold?: boolean; runItalic?: boolean; runUnderline?: boolean; runFontSizePt?: number; runColor?: string; shapeHorizontal?: PptxHorizontalAlign; shapeVertical?: PptxVerticalAlign; pinnedFont?: string; fontPinned?: boolean }
-type PptxRunFormat = { bold?: boolean; italic?: boolean; underline?: boolean; fontSizePt?: number; color?: string }
+export type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string; runBold?: boolean; runItalic?: boolean; runUnderline?: boolean; runFontSizePt?: number; runColor?: string; shapeHorizontal?: PptxHorizontalAlign; shapeVertical?: PptxVerticalAlign; pinnedFont?: string; fontPinned?: boolean }
+export type PptxRunFormat = { bold?: boolean; italic?: boolean; underline?: boolean; fontSizePt?: number; color?: string }
 type PptxHorizontalAlign = 'left' | 'center' | 'right' | 'justify' | 'distributed'
 type PptxVerticalAlign = 'top' | 'center' | 'bottom'
-type PptxShapeAlign = { horizontal?: PptxHorizontalAlign; vertical?: PptxVerticalAlign }
+export type PptxShapeAlign = { horizontal?: PptxHorizontalAlign; vertical?: PptxVerticalAlign }
 type ShapeDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PptxGeometry; current: PptxGeometry; shape: HTMLElement }
 type PdfDrag = { pointerId: number; mode: 'move' | 'resize'; startX: number; startY: number; initial: PdfGeometry; current: PdfGeometry; shape: HTMLElement; pointsPerPixel: number }
 function cssDeclaration(style: string, property: string): string | undefined {
@@ -97,7 +107,30 @@ type Selection = { node: TextNode; page: number }
 type NewTextBox = (
   | { format: 'pdf'; page: number; xPt: number; yPt: number; widthPt: number; heightPt: number; fontSizePt: number }
   | { format: 'pptx'; chunkId: string; slidePart: string; xEmu: number; yEmu: number; widthEmu: number; heightEmu: number; fontSizePt: number }
-) & { left: string; top: string; width: string; height: string }
+) & { sequence: number; left: string; top: string; width: string; height: string }
+type FixedInput = { schemaVersion: 'hcd-fixed-input/1'; format: string; baseRevision: number; text: string } & (
+  | { kind: 'text'; page: number; nodeId: string; nodeHash: string; originalText: string }
+  | { kind: 'insert'; box: NewTextBox }
+)
+function parseFixedInput(draft: InputDraft, format: string): FixedInput {
+  const value = JSON.parse(draft.content) as FixedInput
+  const positive = (n: number) => Number.isFinite(n) && n > 0
+  const page = (n: number) => Number.isSafeInteger(n) && n >= 0
+  let valid = value && value.schemaVersion === 'hcd-fixed-input/1' && value.format === format
+    && page(value.baseRevision) && typeof value.text === 'string' && value.text.length <= 10_000
+  if (value?.kind === 'text') valid &&= page(value.page) && typeof value.nodeId === 'string' && !!value.nodeId
+    && typeof value.nodeHash === 'string' && !!value.nodeHash && typeof value.originalText === 'string'
+  else if (value?.kind === 'insert' && value.box) {
+    const box = value.box
+    valid &&= page(box.sequence) && box.format === format && positive(box.fontSizePt) && box.fontSizePt <= 256
+      && [box.left, box.top, box.width, box.height].every(css => typeof css === 'string' && /^\d+(\.\d+)?(px|pt)$/.test(css))
+      && (box.format === 'pdf'
+        ? page(box.page) && box.page > 0 && Number.isFinite(box.xPt) && box.xPt >= 0 && Number.isFinite(box.yPt) && box.yPt >= 0 && positive(box.widthPt) && positive(box.heightPt)
+        : typeof box.chunkId === 'string' && typeof box.slidePart === 'string' && page(box.xEmu) && page(box.yEmu) && positive(box.widthEmu) && positive(box.heightEmu))
+  } else valid = false
+  if (!valid) throw new Error('这份输入无法安全恢复，请下载草稿保留')
+  return value
+}
 type Revision = { revision: number; patchId?: string; authorName?: string; createdAtEpochMs?: number }
 type EditStep = { revision: number; label: string }
 type EditHistory = { head: number | null; past: EditStep[]; future: EditStep[] }
@@ -159,6 +192,9 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [editHistory, setEditHistory] = useState<EditHistory>({ head: null, past: [], future: [] })
   const [historyBusy, setHistoryBusy] = useState(false)
   const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
+  const inputProtection = useInputDraft(session, collaborationEpoch)
+  const pendingInput = useRef<FixedInput | null>(null)
+  const pageNodes = useRef(new Map<number, TextNode[]>())
   const [descriptors, setDescriptors] = useState<Descriptor[]>([])
   const [style, setStyle] = useState('')
   const [loadedPages, setLoadedPages] = useState(0)
@@ -174,7 +210,33 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     setPreviews(previous => previous[sequence]?.html === preview.html ? previous : { ...Object.fromEntries(Object.entries(previous).filter(([key]) => Number(key) !== sequence).slice(-23)), [sequence]: preview })
   }, [])
   const [selected, setSelected] = useState<Selection | null>(null)
+  const pendingPropertySelection = useRef<Selection | null>(null)
+  const restorePropertySelection = useCallback((page: number, nodes: TextNode[]) => {
+    pageNodes.current.set(page, nodes)
+    if (pageNodes.current.size > 24) pageNodes.current.delete(pageNodes.current.keys().next().value!)
+    const input = pendingInput.current
+    if (input?.kind === 'text' && input.page === page) {
+      pendingInput.current = null
+      const node = nodes.find(node => node.nodeId === input.nodeId && node.nodeHash === input.nodeHash && node.text === input.originalText && node.editable)
+      if (!node) { setError('目标文字已变化，草稿仍在本地保留，请重新打开后下载核对'); return }
+      setSelected({ page, node }); setDraft(input.text)
+      return
+    }
+    const pending = pendingPropertySelection.current
+    if (!pending || pending.page !== page) return
+    // Formatting/geometry can preserve the text hash. This callback only runs
+    // after canonical nodes have been rendered again, so bind that fresh node.
+    const node = nodes.find(node => node.nodeId === pending.node.nodeId)
+    if (!node) return
+    pendingPropertySelection.current = null
+    setSelected({ page, node }); setDraft(node.text)
+  }, [])
   const [draft, setDraft] = useState('')
+  const [thumbnailPages, setThumbnailPages] = useState<Set<string>>(new Set())
+  const previewVisiblePage = useCallback((id: string) => setThumbnailPages(previous => previous.has(id) ? previous : new Set([...previous].slice(-23)).add(id)), [])
+  const [activePageId, setActivePageId] = useState<string | null>(null)
+  const [organizing, setOrganizing] = useState(false)
+  const topologyBusy = useRef(false)
   const [newBox, setNewBox] = useState<NewTextBox | null>(null)
   const [newDraft, setNewDraft] = useState('')
   const [placingText, setPlacingText] = useState(false)
@@ -182,7 +244,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const { panelOpen, setPanelOpen } = useAgentWorkspace()
   const layoutScope = session.documentId
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(layoutScope))
-  function showRightPanel(panel: 'settings' | 'revisions') { setFocused(false); setPanelOpen(false); setRightPanel(panel) }
+  function showRightPanel(panel: 'settings' | 'revisions' | 'properties') { setFocused(false); setPanelOpen(false); setRightPanel(panel) }
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [snapshot, setSnapshot] = useState<{ revision: number; manifest: Manifest; style: string } | null>(null)
   const [snapshotError, setSnapshotError] = useState('')
@@ -197,9 +259,59 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const tail = useRef<HTMLDivElement>(null)
   const pagesRef = useRef<HTMLElement>(null)
   const collaborationSession = useMemo(() => ({ ...session, collaborationEpoch }), [session, collaborationEpoch])
+  function changeText(value: string) {
+    setDraft(value)
+    if (!selected || !manifest) return
+    inputProtection.write(value === selected.node.text ? null : {
+      schemaVersion: 'hcd-fixed-input/1', format: session.format, baseRevision: manifest.revision, kind: 'text',
+      page: selected.page, nodeId: selected.node.nodeId, nodeHash: selected.node.nodeHash, originalText: selected.node.text, text: value,
+    } satisfies FixedInput)
+  }
+  function changeNewText(value: string) {
+    setNewDraft(value)
+    if (!newBox || !manifest) return
+    inputProtection.write(!value.trim() ? null : { schemaVersion: 'hcd-fixed-input/1', format: session.format,
+      baseRevision: manifest.revision, kind: 'insert', box: newBox, text: value } satisfies FixedInput)
+  }
+  function cancelInput() {
+    pendingInput.current = null
+    inputProtection.write(null)
+    setSelected(null); setNewBox(null); setNewDraft('')
+  }
+  async function restoreInput(record: InputDraft) {
+    if (selected || newBox || saving || historyBusy || readOnly || viewRevision !== null) throw new Error('请先保存或取消当前输入')
+    setSaving(true)
+    try {
+      const input = parseFixedInput(record, session.format)
+      const receipt = await inputProtection.validate(record)
+      const current = await (await api(session, '')).json() as Manifest
+      if (current.revision !== input.baseRevision || current.revision !== manifest?.revision) throw new Error('文档版本已变化；草稿已保留，请下载核对')
+      const sequence = input.kind === 'text' ? input.page : input.box.sequence
+      const indexPage = Math.floor(sequence / 128)
+      if (indexPage >= current.indexPageCount) throw new Error('目标页面已变化；草稿已保留，请下载核对')
+      const indexes = await Promise.all(Array.from({ length: indexPage + 1 }, (_, index) =>
+        api(session, `/index/${index}?revision=${current.revision}`).then(response => response.json() as Promise<{ chunks: Descriptor[] }>)))
+      const chunks = indexes.flatMap(index => index.chunks), chunk = chunks.find(chunk => chunk.sequence === sequence)
+      if (!chunk || input.kind === 'insert' && input.box.format === 'pptx' && input.box.chunkId !== chunk.chunkId) throw new Error('目标页面已变化；草稿已保留，请下载核对')
+      if (input.kind === 'text') {
+        const node = await (await api(session, `/nodes/${encodeURIComponent(input.nodeId)}`)).json() as { nodeHash: string; text: string }
+        if (node.nodeHash !== input.nodeHash || node.text !== input.originalText) throw new Error('目标文字已变化；草稿已保留，请下载核对')
+      }
+      if (!inputProtection.unchanged(receipt)) throw new Error('当前输入已变化；请先保存或取消')
+      await inputProtection.adopt(record)
+      setDescriptors(previous => mergeDescriptors(previous, chunks)); setLoadedPages(previous => Math.max(previous, indexPage + 1))
+      setThumbnailPages(previous => new Set(previous).add(chunk.chunkId))
+      if (input.kind === 'text') {
+        pendingInput.current = input
+        const nodes = pageNodes.current.get(sequence)
+        if (nodes) restorePropertySelection(sequence, nodes)
+      } else { setNewBox(input.box); setNewDraft(input.text) }
+      requestAnimationFrame(() => pagesRef.current?.querySelector(`[id="hcd-page-${sequence}"]`)?.scrollIntoView({ block: 'center' }))
+    } finally { setSaving(false) }
+  }
   function recordEdit(nextRevision: number, label: string) {
     setEditHistory(previous => ({ head: nextRevision,
-      past: [...(previous.head === nextRevision - 1 ? previous.past : []), { revision: nextRevision - 1, label }],
+      past: keepHistory([...(previous.head === nextRevision - 1 ? previous.past : []), { revision: nextRevision - 1, label }]),
       future: [] }))
   }
   function resetEditHistory(nextRevision: number) {
@@ -216,13 +328,11 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   }, [])
   function showRemoteRevision(next: number) {
     if (next <= (manifest?.revision ?? -1)) return
-    if (saving || historyBusy || selected || newBox || viewRevision !== null) {
+    if (saving || historyBusy || selected || newBox || pendingInput.current || viewRevision !== null) {
       setRemoteRevision(previous => Math.max(previous ?? 0, next))
       return
     }
     resetEditHistory(next)
-    setDescriptors([])
-    setLoadedPages(0)
     setManifest(previous => previous && ({ ...previous, revision: next }))
     setRefresh(previous => previous + 1)
   }
@@ -234,7 +344,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   }, [remoteRevision, saving, historyBusy, selected, newBox, viewRevision, manifest?.revision])
   useEffect(() => { saveLayout(layout, layoutScope) }, [layout, layoutScope])
   const displayedRevision = viewRevision ?? manifest?.revision ?? null
-  useEffect(() => { setPreviews({}) }, [refresh, viewRevision])
+  useEffect(() => { setPreviews({}) }, [viewRevision])
   const historical = viewRevision !== null
   const visibleManifest = historical ? snapshot?.revision === viewRevision ? snapshot.manifest : null : manifest
   const visibleStyle = historical ? snapshot?.revision === viewRevision ? snapshot.style : '' : style
@@ -272,8 +382,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       const saved = await response.json() as { revision: number }
       setEditHistory(previous => direction === 'undo'
         ? { head: saved.revision, past: previous.past.slice(0, -1),
-          future: [...previous.future, { revision: head, label: target.label }] }
-        : { head: saved.revision, past: [...previous.past, { revision: head, label: target.label }],
+          future: keepHistory([...previous.future, { revision: head, label: target.label }]) }
+        : { head: saved.revision, past: keepHistory([...previous.past, { revision: head, label: target.label }]),
           future: previous.future.slice(0, -1) })
       setManifest(previous => previous && ({ ...previous, revision: saved.revision }))
       setSelected(null)
@@ -320,7 +430,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     setLayout(previous => ({ ...previous, [key]: value }))
   }
   async function select(selection: Selection) {
-    if (historyBusy) return
+    if (saving || historyBusy || pendingInput.current) return
     if (selected?.node.nodeId === selection.node.nodeId) return
     if (newBox && newDraft.trim()) {
       const revision = await saveNewBox(newBox, newDraft)
@@ -330,19 +440,35 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       const revision = await saveText(selected.node, draft)
       if (revision === null) return
     }
+    pendingPropertySelection.current = null
     setSelected(selection)
     setDraft(selection.node.text)
     setNewBox(null)
     setPlacingText(false)
-    setRightPanel(null)
+    if (session.format === 'pptx') showRightPanel('properties')
+    else setRightPanel(null)
   }
+  const loadedPagesRef = useRef(loadedPages)
+  loadedPagesRef.current = loadedPages
   useEffect(() => {
+    pageNodes.current.clear()
     let live = true
     Promise.all([api(session, '').then(response => response.json()), api(session, '/styles').then(response => response.text())])
-      .then(([info, css]) => { if (live) { setManifest(info as Manifest); setEditHistory(previous => previous.head === (info as Manifest).revision ? previous : { head: (info as Manifest).revision, past: [], future: [] }); setStyle(css) } })
+      .then(async ([info, css]) => {
+        const manifest = info as Manifest
+        if (refresh > 0 && viewRevision === null) {
+          // Keep the last complete pages on screen while resolving the new
+          // topology. Clearing the list unmounts every iframe and flashes white.
+          const count = Math.min(Math.max(1, loadedPagesRef.current), manifest.indexPageCount)
+          const indexes = await Promise.all(Array.from({ length: count }, (_, page) => api(session, `/index/${page}?revision=${manifest.revision}`).then(response => response.json() as Promise<{ chunks: Descriptor[] }>)))
+          if (!live) return
+          setDescriptors(indexes.flatMap(index => index.chunks)); setLoadedPages(count)
+        }
+        if (live) { setManifest(manifest); setEditHistory(previous => previous.head === manifest.revision ? previous : { head: manifest.revision, past: [], future: [] }); setStyle(css) }
+      })
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
-  }, [session, refresh])
+  }, [session, refresh, viewRevision])
   useEffect(() => {
     if (viewRevision === null) return
     const request = new AbortController()
@@ -434,6 +560,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     if (readOnly || historical || !node.editable || saving || historyBusy) return null
     setSaving(true)
     setError('')
+    const inputReceipt = inputProtection.capture()
     try {
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -445,6 +572,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
             precondition: { nodeHash: node.nodeHash } }] }),
       })
       const result = await response.json() as { revision: number }
+      inputProtection.acknowledge(inputReceipt)
       recordEdit(result.revision, '编辑文字')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
@@ -473,6 +601,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       collaboration.announceRevision(result.revision)
       setRefresh(previous => previous + 1)
       // The reloaded node carries a new hash, so the old selection cannot patch again.
+      pendingPropertySelection.current = selected
       setSelected(null)
       return result.revision
     } catch (cause) { setError(`${String(cause)}。请重新选择文字后重试。`); return null }
@@ -518,6 +647,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       recordEdit(result.revision, '调整文字框位置')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
+      pendingPropertySelection.current = selected
       setSelected(null)
       setRefresh(previous => previous + 1)
       return result.revision
@@ -541,6 +671,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       recordEdit(result.revision, '设置文字格式')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
+      pendingPropertySelection.current = selected
       setSelected(null)
       setRefresh(previous => previous + 1)
       return result.revision
@@ -564,6 +695,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       recordEdit(result.revision, '设置形状对齐')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
+      pendingPropertySelection.current = selected
       setSelected(null)
       setRefresh(previous => previous + 1)
       return result.revision
@@ -641,6 +773,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   }
   async function saveBeforeExport(): Promise<number | null> {
     if (saving || historyBusy) return null
+    if (pendingInput.current) { setError('正在恢复目标页面，请稍后再试'); return null }
     if (selected && draft !== selected.node.text && !readOnly && !historical) return saveText(selected.node, draft)
     if (newBox && newDraft.trim() && !readOnly && !historical) return saveNewBox(newBox, newDraft)
     return displayedRevision
@@ -669,6 +802,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     if (!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy || !value.trim()) return null
     setSaving(true)
     setError('')
+    const inputReceipt = inputProtection.capture()
     try {
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -682,6 +816,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
               yEmu: box.yEmu, widthEmu: box.widthEmu, heightEmu: box.heightEmu, fontSizePt: box.fontSizePt, text: value }] }),
       })
       const result = await response.json() as { revision: number }
+      inputProtection.acknowledge(inputReceipt)
       recordEdit(result.revision, '新增文字框')
       setManifest(previous => previous && ({ ...previous, revision: result.revision }))
       collaboration.announceRevision(result.revision)
@@ -693,11 +828,12 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     finally { setSaving(false) }
   }
   async function addSlide(): Promise<number | null> {
-    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || topologyBusy.current) return null
     // A new page reshuffles what the editor has loaded, so text that is still
     // being typed is committed first and its revision becomes the patch base.
+    topologyBusy.current = true; setOrganizing(true)
     const base = await saveBeforeExport()
-    if (base === null) return null
+    if (base === null) { topologyBusy.current = false; setOrganizing(false); return null }
     setSaving(true)
     setError('')
     try {
@@ -730,14 +866,15 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       setRefresh(previous => previous + 1)
       return result.revision
     } catch (cause) { setError(String(cause)); return null }
-    finally { setSaving(false) }
+    finally { setSaving(false); topologyBusy.current = false; setOrganizing(false) }
   }
   async function deleteSlide(chunkId: string): Promise<number | null> {
-    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || topologyBusy.current) return null
     // The page a deletion takes out is whichever one the row names, so text still
     // being typed has to reach a revision before the patch asks for its base.
+    topologyBusy.current = true; setOrganizing(true)
     const base = await saveBeforeExport()
-    if (base === null) return null
+    if (base === null) { topologyBusy.current = false; setOrganizing(false); return null }
     setSaving(true)
     setError('')
     try {
@@ -770,38 +907,43 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       setRefresh(previous => previous + 1)
       return result.revision
     } catch (cause) { setError(`删除幻灯片失败：${String(cause)}`); return null }
-    finally { setSaving(false) }
+    finally { setSaving(false); topologyBusy.current = false; setOrganizing(false) }
   }
-  async function moveSlide(chunkId: string, direction: 'up' | 'down'): Promise<number | null> {
-    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+  async function moveSlide(chunkId: string, targetIndex: number): Promise<number | null> {
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || topologyBusy.current) return null
     // The page that moves is whichever one the row names, so text still being
     // typed has to reach a revision before the patch asks for its base.
+    topologyBusy.current = true; setOrganizing(true)
     const base = await saveBeforeExport()
-    if (base === null) return null
+    if (base === null) { topologyBusy.current = false; setOrganizing(false); return null }
     setSaving(true)
     setError('')
     try {
       const response = await api(session, '/node-patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaVersion: 'hcd-patch/43', documentId: session.documentId,
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/48', documentId: session.documentId,
           patchId: crypto.randomUUID(), baseRevision: base,
           actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
-          operations: [{ op: 'pptx.slide.reorder', chunkId, direction }] }),
+          operations: [{ op: 'pptx.slide.reorder', chunkId, targetIndex }] }),
       })
       const result = await response.json() as { revision: number }
-      // Two pages trade their places, so every row between them is numbered wrong
-      // rather than only the one that moved: the pages the editor had loaded are
-      // read again and replace the list. Nothing left the deck, so it keeps its
-      // chunk count and its index pages, and the frontier stays where it was.
+      // Moving one page shifts the intervening rows. Reload the existing index
+      // frontier so the canvas and navigator share the server's new sequences.
+      // The chunk count and index page count remain unchanged.
       const info = await api(session, '').then(current => current.json() as Promise<Manifest>)
       const pages = Math.min(loadedPages, info.indexPageCount)
       const indexes = await Promise.all(Array.from({ length: pages }, (_, page) =>
         api(session, `/index/${page}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
           .then(current => current.json() as Promise<{ chunks: Descriptor[] }>)))
-      recordEdit(result.revision, direction === 'up' ? '上移幻灯片' : '下移幻灯片')
+      recordEdit(result.revision, '拖动排序幻灯片')
       setManifest(info)
       collaboration.announceRevision(result.revision)
-      setDescriptors(indexes.flatMap(index => index.chunks))
+      const next = indexes.flatMap(index => index.chunks)
+      setPreviews(previous => Object.fromEntries(next.flatMap(chunk => { const original = descriptors.find(item => item.chunkId === chunk.chunkId); return original && previous[original.sequence] ? [[chunk.sequence, previous[original.sequence]]] : [] })))
+      setDescriptors(next)
+      setActivePageId(chunkId)
+      const destination = next.find(page => page.chunkId === chunkId)
+      if (destination) requestAnimationFrame(() => pagesRef.current?.querySelector(`[id="hcd-page-${destination.sequence}"]`)?.scrollIntoView({ block: 'start' }))
       setLoadedPages(pages)
       setSelected(null)
       setNewBox(null)
@@ -809,15 +951,16 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       setPlacingText(false)
       setRefresh(previous => previous + 1)
       return result.revision
-    } catch (cause) { setError(`${direction === 'up' ? '上移' : '下移'}幻灯片失败：${String(cause)}`); return null }
-    finally { setSaving(false) }
+    } catch (cause) { setError(`幻灯片排序失败，未覆盖其他修改：${String(cause)}`); return null }
+    finally { setSaving(false); topologyBusy.current = false; setOrganizing(false) }
   }
   async function duplicateSlide(chunkId: string): Promise<number | null> {
-    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy) return null
+    if (session.format !== 'pptx' || readOnly || historical || saving || historyBusy || topologyBusy.current) return null
     // The page that is duplicated is whichever one the row names, so text still
     // being typed has to reach a revision before the patch asks for its base.
+    topologyBusy.current = true; setOrganizing(true)
     const base = await saveBeforeExport()
-    if (base === null) return null
+    if (base === null) { topologyBusy.current = false; setOrganizing(false); return null }
     setSaving(true)
     setError('')
     try {
@@ -852,7 +995,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       setRefresh(previous => previous + 1)
       return result.revision
     } catch (cause) { setError(`复制幻灯片失败：${String(cause)}`); return null }
-    finally { setSaving(false) }
+    finally { setSaving(false); topologyBusy.current = false; setOrganizing(false) }
   }
   function placeText(box: NewTextBox) {
     setSelected(null)
@@ -868,23 +1011,58 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     setNewBox(null)
     setNewDraft('')
   }
+  useEffect(() => {
+    const pages = pagesRef.current, viewport = pages?.closest('.document-scroll')
+    if (!pages || !viewport) return
+    const visible = new Map<Element, number>()
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) visible.set(entry.target, Math.abs(entry.boundingClientRect.top - viewport.getBoundingClientRect().top))
+        else visible.delete(entry.target)
+      }
+      const nearest = [...visible].sort((a, b) => a[1] - b[1])[0]?.[0]
+      const sequence = Number(nearest?.id.replace('hcd-page-', ''))
+      const page = descriptors.find(item => item.sequence === sequence)
+      if (page) setActivePageId(page.chunkId)
+    }, { root: viewport, threshold: [0, .25, .5, .75, 1] })
+    pages.querySelectorAll('.fixed-page').forEach(page => observer.observe(page))
+    return () => observer.disconnect()
+  }, [descriptors])
+  async function navigatePage(page: NavigationPage) {
+    if (saving || historyBusy || topologyBusy.current) return
+    if (await saveBeforeExport() === null) return
+    setActivePageId(page.chunkId)
+    pagesRef.current?.querySelector(`[id="hcd-page-${page.sequence}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    if (window.innerWidth <= 900) setLayoutOption('showOutline', false)
+  }
+  async function loadMorePages() {
+    if (!visibleManifest || loadedPages >= visibleManifest.indexPageCount || saving || historyBusy) return
+    try {
+      const index = await (await api(session, `/index/${loadedPages}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)).json() as { chunks: Descriptor[] }
+      setDescriptors(previous => mergeDescriptors(previous, index.chunks))
+      setLoadedPages(previous => previous === loadedPages ? previous + 1 : previous)
+    } catch (cause) { setError(String(cause)) }
+  }
   // The rows a page can move from are its head: a slide whose table split repeats
   // its section in a continuation, and a continuation is the same page, not a
   // second one the deck could put somewhere else.
-  const slidePages = descriptors.filter(chunk => chunk.region === 'slide' && !chunk.continuation)
+  const slidePages = useMemo(() => descriptors.filter(chunk => chunk.region === 'slide' && !chunk.continuation), [descriptors])
   // Loading walks index pages in order, so the first row is the deck's first page
   // however far the reader got; the last row is its last page only once every
   // chunk has arrived, which is what puts a downward move out of reach.
   const deckFullyLoaded = descriptors.length >= (manifest?.chunkCount ?? descriptors.length)
   return <div data-format={session.format} data-hcd-history={historical ? 'true' : undefined} className={`workspace semantic-workspace fixed-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(rightPanel || panelOpen) && !focused ? '' : 'right-hidden'} ${focused ? 'focus-mode' : ''}`}>
-    {layout.showHeader && <EditorHeader session={session} revision={displayedRevision} status={status} activeTab={activeTab}
+    {layout.showHeader && <EditorHeader outlineOpen={layout.showOutline && !focused} onToggleOutline={() => { setFocused(false); setLayoutOption('showOutline', !layout.showOutline || focused) }} session={session} revision={displayedRevision} status={status} activeTab={activeTab}
       onTab={tab => { setActiveTab(tab); setPlacingText(false); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} onClose={() => void closeEditor()}
       onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings' && !panelOpen && !focused} focused={focused} onFocus={() => setFocused(value => !value)} readOnly={readOnly || historical} onReadOnly={value => { if (value && !readOnly) void saveBeforeExport().then(saved => { if (saved !== null) { setPlacingText(false); setReadOnly(true) } }); else if (session.scope === 'write') { if (historical) void showRevision(null); setReadOnly(value) } }} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => showRightPanel('settings')}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={displayedRevision} />
     <div className="layout editor-layout">
-      {layout.showOutline && !focused && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}><CollapseOutlineIcon /></button></div><nav>{descriptors.map(chunk => <div className="outline-entry" key={chunk.sequence}><button onClick={() => pagesRef.current?.querySelector(`[id="hcd-page-${chunk.sequence}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}><PageThumbnail preview={previews[chunk.sequence]} format={session.format} /><span className="page-thumbnail-label">{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</span></button>{session.format === 'pptx' && chunk.region === 'slide' && !chunk.continuation && !readOnly && !historical && <><button className="outline-move" title={localizeSource(locale, "把这一页上移一位")} disabled={saving || historyBusy || slidePages[0]?.chunkId === chunk.chunkId} onClick={() => void moveSlide(chunk.chunkId, 'up')}><LocalText source={"↑ 上移"} /></button><button className="outline-move" title={localizeSource(locale, "把这一页下移一位")} disabled={saving || historyBusy || (deckFullyLoaded && slidePages[slidePages.length - 1]?.chunkId === chunk.chunkId)} onClick={() => void moveSlide(chunk.chunkId, 'down')}><LocalText source={"↓ 下移"} /></button><button className="outline-copy" title={localizeSource(locale, "把这一页复制一份")} disabled={saving || historyBusy} onClick={() => void duplicateSlide(chunk.chunkId)}><LocalText source={"⧉ 复制"} /></button><button className="outline-remove" title={localizeSource(locale, "删除这一页幻灯片")} disabled={saving || historyBusy} onClick={() => void deleteSlide(chunk.chunkId)}><LocalText source={"✕ 删除"} /></button></>}</div>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {visibleManifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
-      {(!layout.showOutline || focused) && <PanelDock side="left" onOpen={() => { setFocused(false); setLayoutOption('showOutline', true) }} />}
+      <WorkspaceDrawers leftOpen={layout.showOutline && !focused} rightOpen={!focused && (panelOpen || !!rightPanel)} onCloseLeft={() => setLayoutOption('showOutline', false)} onCloseRight={() => { setPanelOpen(false); setRightPanel(null) }} />
+      <SlideNavigator session={session} onSearch={() => setSearchOpen(true)} onWorkspace={() => void closeEditor()} onSettings={() => showRightPanel('settings')} pages={session.format === 'pptx' ? slidePages : descriptors} previews={previews} format={session.format} hidden={!layout.showOutline || focused}
+        busy={saving || historyBusy || organizing} writable={!readOnly && !historical} revision={displayedRevision} activeId={activePageId || descriptors[0]?.chunkId || null}
+        hasMore={loadedPages < (visibleManifest?.indexPageCount || 0)} onMore={() => void loadMorePages()} onClose={() => setLayoutOption('showOutline', false)}
+        onVisible={previewVisiblePage} onSelect={page => void navigatePage(page)} onMove={(id, index) => void moveSlide(id, index)} onCopy={id => void duplicateSlide(id)} onDelete={id => void deleteSlide(id)} onAdd={() => void addSlide()} />
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
         {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setPlacingText(false); setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={readOnly || !!historical} format={session.format} />}
     {layout.showToolbar && !focused && !readOnly && !historical && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
@@ -908,31 +1086,37 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
         <button className="return-current" disabled={switchingRevision} onClick={() => void showRevision(null)}><LocalText source="返回当前" /></button>
       </section>}
       {snapshotLoading && <div className="revision-empty" role="status"><LocalText source="正在加载历史版本…" /></div>}
+      <InputDraftRecovery protection={inputProtection} disabled={readOnly || historical || saving || historyBusy || !!selected || !!newBox} onRestore={restoreInput} onError={setError} />
       {historical && snapshotError && <div className="revision-empty" role="alert"><p>{snapshotError}</p><button onClick={() => { setSnapshotError(''); setSnapshotReload(value => value + 1) }}><LocalText source="重试" /></button></div>}
-      <CanvasViewport hidden={!visibleManifest || !!snapshotError}><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{visibleManifest && descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} onPreview={recordPreview} revision={viewRevision} stylesheet={`${visibleStyle}\n${themeCss}`} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></CanvasViewport>
+      <CanvasViewport hidden={!visibleManifest || !!snapshotError}>{!historical && session.format === 'pptx' && <AgentProductionCanvas />}<main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{visibleManifest && descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.chunkId}`} session={session} descriptor={chunk} preload={thumbnailPages.has(chunk.chunkId)} onNodesReady={restorePropertySelection} onPreview={recordPreview} revision={viewRevision} stylesheet={`${visibleStyle}\n${themeCss}`} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={changeText} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={cancelInput} onPlace={placeText} onNewDraft={changeNewText} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={cancelInput} />)}<div ref={tail} className="load-tail" /></main></CanvasViewport>
       </section>
-      {panelOpen && !focused && <AgentPanel />}
-      {!panelOpen && !focused && rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>
-        {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示页面目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
-        {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div>
+      {session.format === 'pptx' && <PptxProperties node={selected?.node || null} fonts={themeFonts} hidden={panelOpen || focused || rightPanel !== 'properties'} disabled={readOnly || historical || saving || historyBusy || organizing}
+        dirty={!!selected && draft !== selected.node.text} onClose={() => setRightPanel(null)} onAgents={() => setPanelOpen(true)}
+        onFormat={format => { if (selected) void saveRunFormat(selected.node, format) }} onAlign={align => { if (selected) void saveShapeAlign(selected.node, align) }}
+        onFont={font => { if (selected) void saveFont(selected.node, font) }} onGeometry={geometry => { if (selected) void saveGeometry(selected.node, geometry) }} />}
+      <AgentPanel beforeRun={async () => { if (await saveBeforeExport() === null) throw new Error('请先保存当前文字修改。') }} />
+      {!panelOpen && !focused && rightPanel && rightPanel !== 'properties' && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>
+        {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div><LocaleSelect /><AppearanceSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示页面目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
+        {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div>
           {historical && <button onClick={() => void showRevision(null)}><LocalText source={"返回当前版本"} /></button>}
           <h3><LocalText source={"本次编辑步骤"} /></h3><p><LocalText source={"保存后的撤销和重做会生成新的修订。协作者更新后，本地步骤会清空。"} /></p>
           {editHistory.past.length ? <ol className="fixed-edit-steps">{editHistory.past.map((step, index) => <li key={`${step.revision}-${index}`}><strong>{index + 1}. {localizeDynamic(locale, step.label)}</strong><small><LocalText source={"保存前 r"} />{step.revision}</small></li>).reverse()}</ol> : <p><LocalText source={"暂无可撤销步骤"} /></p>}
           {editHistory.future.length > 0 && <><h3><LocalText source={"可重做"} /></h3><ol className="fixed-edit-steps">{editHistory.future.slice().reverse().map((step, index) => <li key={`${step.revision}-${index}`}>{localizeDynamic(locale, step.label)}</li>)}</ol></>}
           <h3><LocalText source={"全部修订"} /></h3><div className="history">{revisions.slice().reverse().map(item => <button key={item.revision} data-revision={item.revision} aria-pressed={viewRevision === item.revision} disabled={saving || historyBusy || switchingRevision} onClick={() => void showRevision(item.revision)}><span className="revision-avatar">{item.authorName?.slice(0, 1) || (item.revision === 0 ? localizeSource(locale, '导入').slice(0, 1) : '?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs ? new Date(item.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</small></strong><small>{item.authorName || (localizeSource(locale, item.revision === 0 ? '初始导入' : '作者未记录'))}</small><span><LocalText source={"查看版本"} /></span></span></button>)}</div></section>}
       </aside>}
-      {(focused || (!rightPanel && !panelOpen)) && <PanelDock side="right" onOpen={() => { setFocused(false); setPanelOpen(false); showRightPanel('settings') }} onHistory={() => { setFocused(false); setPanelOpen(false); showRightPanel('revisions') }} onAgents={() => { setFocused(false); setPanelOpen(true) }} />}
     </div>
-    <EditorStatusbar mode={localizeSource(locale, "页面视图")} format={session.format} revision={displayedRevision} readOnly={readOnly || historical} status={status} />
+    <EditorStatusbar mode={localizeSource(locale, "页面视图")} format={session.format} revision={displayedRevision} readOnly={readOnly || historical} status={status} draftProtection={session.scope === 'write' ? inputProtection.status : undefined} />
     {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>
 }
 
 type LazyChunkProps = {
+  onNodesReady: (page: number, nodes: TextNode[]) => void
+  preload: boolean
   onPreview: (sequence: number, preview: PagePreview) => void
   session: Session; descriptor: Descriptor; revision: number | null; stylesheet: string; readOnly: boolean
   selected: TextNode | null; highlightNodeId: string | null; draft: string; newBox: NewTextBox | null; newDraft: string; placingText: boolean
-  saving: boolean; refresh: number; placeholderHeight: number; availableWidth: number; onMeasureHeight: (height: number) => void
+  saving: boolean; placeholderHeight: number; availableWidth: number; onMeasureHeight: (height: number) => void
   onSelect: (node: TextNode) => void; onDraft: (value: string) => void
   onEditorReady: (editor: Editor | null) => void; onSave: (node: TextNode, value: string) => void
   onGeometry: (node: TextNode, geometry: PptxGeometry) => Promise<number | null>
@@ -943,11 +1127,15 @@ type LazyChunkProps = {
   onSaveNew: (box: NewTextBox, value: string) => void; onCancelNew: () => void
 }
 
-function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readOnly, selected, highlightNodeId, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPptxDelete, onPdfGeometry, onPdfDelete, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
+function LazyChunk({ onNodesReady, preload, session, descriptor, onPreview, revision, stylesheet, readOnly, selected, highlightNodeId, draft, newBox, newDraft, placingText, saving, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPptxDelete, onPdfGeometry, onPdfDelete, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
+  const { requestTask } = useAgentWorkspace()
+  const [agentMenu, setAgentMenu] = useState<{ x: number; y: number; node: TextNode } | null>(null)
   const { zoom: canvasZoom } = useCanvasZoom()
   const { locale } = useI18n()
   const [active, setActive] = useState(false)
   const [srcDoc, setSrcDoc] = useState('')
+  const [chunkError, setChunkError] = useState('')
+  const installedContent = useRef('')
   const [frameHeight, setFrameHeight] = useState(940)
   const [canvasWidth, setCanvasWidth] = useState('100%')
   const [pageNumber, setPageNumber] = useState(0)
@@ -962,6 +1150,7 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
   const [previewGeometry, setPreviewGeometry] = useState<PptxGeometry | null>(null)
   const [previewPdfGeometry, setPreviewPdfGeometry] = useState<PdfGeometry | null>(null)
   const marker = useRef<HTMLDivElement>(null)
+  const assetCache = useRef(new Map<string, Promise<string>>())
   const frame = useRef<HTMLIFrameElement>(null)
   function setFrameLocale() {
     try { if (frame.current?.contentDocument) frame.current.contentDocument.documentElement.lang = locale }
@@ -976,7 +1165,7 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
   useEffect(() => {
     if (session.format === 'pptx' && srcDoc) onMeasureHeight(Math.ceil(frameHeight * zoom))
   }, [session.format, srcDoc, frameHeight, zoom, onMeasureHeight])
-  useEffect(() => { setPreviewGeometry(null); setPreviewPdfGeometry(null); drag.current = null; pdfDrag.current = null }, [selected?.nodeId, refresh])
+  useEffect(() => { setPreviewGeometry(null); setPreviewPdfGeometry(null); drag.current = null; pdfDrag.current = null }, [selected?.nodeId, descriptor.htmlHash])
   function findDirectTarget() {
     if (!['pdf', 'pptx'].includes(session.format) || !selected) { setDirectTarget(null); return }
     const selector = session.format === 'pdf' ? `.hcd-pdf-text[data-hcd-text-node="${selected.nodeId}"]` : `.hcd-slide [data-hcd-id="${selected.nodeId}"]`
@@ -992,6 +1181,7 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
     setDirectTarget(target || null)
   }
   useEffect(() => { findDirectTarget() }, [selected?.nodeId, session.format, srcDoc])
+  const lastSearchTarget = useRef<string | null>(null)
   function highlightSearchTarget() {
     const doc = frame.current?.contentDocument
     if (!doc) return
@@ -999,7 +1189,8 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
       element.classList.toggle('hcd-search-hit', element.getAttribute('data-hcd-id') === highlightNodeId)
     }
     const target = doc.querySelector<HTMLElement>('.hcd-search-hit')
-    target?.scrollIntoView({ block: 'center', inline: 'center' })
+    if (target && lastSearchTarget.current !== highlightNodeId) target.scrollIntoView({ block: 'center', inline: 'center' })
+    if (target || !highlightNodeId) lastSearchTarget.current = highlightNodeId
   }
   useEffect(() => { highlightSearchTarget() }, [highlightNodeId, srcDoc])
   useEffect(() => {
@@ -1032,10 +1223,13 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
     return () => observer.disconnect()
   }, [])
   useEffect(() => {
-    if (!active) { setSrcDoc(''); setNodes([]); return }
+    if (!active && !preload) return // Retain the mounted page and its measured height offscreen.
+    const contentKey = JSON.stringify([descriptor.chunkId, descriptor.htmlHash, descriptor.mapHash, revision, stylesheet])
+    if (installedContent.current === contentKey) return
     let live = true
+    const request = new AbortController()
     const render = async () => {
-      const chunk = await (await api(session, `/chunks/${descriptor.sequence}${revision === null ? '' : `?revision=${revision}`}`)).json() as { html: string; map: { entries: Array<{ nodeId: string; nodeHash: string; source: { nodeKind: string; editable: boolean; createdInHcd: boolean } }> } }
+      const chunk = await (await api(session, `/chunks/${descriptor.sequence}${revision === null ? '' : `?revision=${revision}`}`, { signal: request.signal })).json() as { html: string; map: { entries: Array<{ nodeId: string; nodeHash: string; source: { nodeKind: string; editable: boolean; createdInHcd: boolean } }> } }
       const parsed = new DOMParser().parseFromString(chunk.html, 'text/html')
       const canvas = parsed.querySelector('.hcd-pdf-page,.hcd-slide') as HTMLElement | null
       const mapped = new Map(Array.from(parsed.querySelectorAll('[data-hcd-id]'), element => [element.getAttribute('data-hcd-id'), element]))
@@ -1070,6 +1264,9 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
       const hashes = Array.from(new Set(Array.from(chunk.html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g), match => match[1])))
       if (hashes.length > 64) throw new Error(`分片 ${descriptor.sequence} 引用过多资产`)
       const assets = await Promise.all(hashes.map(async hash => {
+        let cached = assetCache.current.get(hash)
+        if (!cached) {
+          cached = (async () => {
         const blob = await (await api(session, `/assets/${hash}`)).blob()
         if (blob.size > 64 * 1024 * 1024) throw new Error('预览资产超过 64 MiB')
         const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -1078,7 +1275,12 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
           reader.onerror = () => reject(reader.error)
           reader.readAsDataURL(blob)
         })
-        return [hash, dataUrl] as const
+        return dataUrl
+          })()
+          assetCache.current.set(hash, cached)
+          void cached.catch(() => assetCache.current.delete(hash))
+        }
+        return [hash, await cached] as const
       }))
       const replacements = new Map(assets)
       const html = chunk.html.replace(/asset:\/\/sha256\/([0-9a-f]{64})/g, (_, hash: string) => replacements.get(hash) || '')
@@ -1104,14 +1306,16 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
           : '.hcd-search-hit{outline:3px solid #f0a500!important;background:#ffdb6180!important;color:#111!important}'
         const previewHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}${safeCss}${directCss}${searchCss}</style></head><body data-hcd-image-hitboxes="off" data-hcd-text-hitboxes="off">${html}</body></html>`
         setSrcDoc(previewHtml)
+        installedContent.current = contentKey
+        setChunkError('')
         const pixels = (length: string | undefined) => Number.parseFloat(length || '0') * (length?.endsWith('pt') ? 4 / 3 : 1)
         const width = pixels(canvas?.style.width), height = pixels(canvas?.style.height)
         if (width > 0 && height > 0) onPreview(descriptor.sequence, { html: previewHtml, width, height })
       }
     }
-    void render().catch(cause => { if (live) setSrcDoc(`<p style="padding:24px;color:#b33">${String(cause).replaceAll('<', '&lt;')}</p>`) })
-    return () => { live = false }
-  }, [active, session, descriptor.sequence, descriptor.continuation, revision, stylesheet, refresh, onMeasureHeight, onPreview])
+    void render().catch(cause => { if (live) setChunkError(String(cause)) })
+    return () => { live = false; request.abort() }
+  }, [active, preload, session, descriptor.sequence, descriptor.continuation, descriptor.htmlHash, descriptor.mapHash, revision, stylesheet, onMeasureHeight, onPreview])
   const emuToPx = (value: number) => `${(value * 96 / 914_400).toFixed(2)}px`
   function showShapeGeometry(shape: HTMLElement, geometry: PptxGeometry) {
     shape.style.left = emuToPx(geometry.xEmu)
@@ -1239,7 +1443,7 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
       const y = Math.min(Math.max(0, (event.clientY - rect.top) * pointerScale), slideHeightEmu / scale - 30)
       const width = Math.min(260, pageWidthPt - x)
       const height = Math.min(42, slideHeightEmu / scale - y)
-      onPlace({ format: 'pptx', chunkId: descriptor.chunkId, slidePart,
+      onPlace({ format: 'pptx', sequence: descriptor.sequence, chunkId: descriptor.chunkId, slidePart,
         xEmu: Math.round(x * scale), yEmu: Math.round(y * scale),
         widthEmu: Math.round(width * scale), heightEmu: Math.round(height * scale), fontSizePt: 18,
         left: `${x}px`, top: `${y}px`, width: `${width}px`, height: `${height}px` })
@@ -1251,21 +1455,33 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
     const topPt = Math.min(Math.max(0, (event.clientY - rect.top) * pageWidthPt / rect.width), pageHeightPt - 24)
     const widthPt = Math.min(240, pageWidthPt - xPt)
     const heightPt = 18
-    onPlace({ format: 'pdf', page: pageNumber, xPt, yPt: pageHeightPt - topPt - heightPt, widthPt, heightPt,
+    onPlace({ format: 'pdf', sequence: descriptor.sequence, page: pageNumber, xPt, yPt: pageHeightPt - topPt - heightPt, widthPt, heightPt,
       fontSizePt: 12, left: `${xPt}pt`, top: `${topPt}pt`, width: `${widthPt}pt`, height: `${heightPt}pt` })
   }
   // Fixed-page editors need same-origin DOM access for the portal; scripts stay disabled.
   const frameSandbox = ['pdf', 'pptx'].includes(session.format) ? 'allow-same-origin' : ''
   const scaledWidth = session.format === 'pptx' && sourceWidth > 0 ? Math.ceil(sourceWidth * zoom) : undefined
   const scaledHeight = session.format === 'pptx' ? Math.ceil(frameHeight * zoom) : frameHeight
+  function effectiveNode(node: TextNode): TextNode {
+    const doc = frame.current?.contentDocument
+    const element = doc?.querySelector<HTMLElement>(`[data-hcd-id="${CSS.escape(node.nodeId)}"]`)
+    if (!element || !doc?.defaultView) return node
+    const computed = doc.defaultView.getComputedStyle(element)
+    const rgb = computed.color.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/)
+    const color = rgb ? `#${rgb.slice(1, 4).map(value => Number(value).toString(16).padStart(2, '0')).join('')}` : undefined
+    return { ...node, fontFamily: computed.fontFamily || node.fontFamily, runFontSizePt: node.runFontSizePt || Number.parseFloat(computed.fontSize) * 3 / 4,
+      runColor: node.runColor || color, shapeHorizontal: node.shapeHorizontal || (computed.textAlign === 'start' ? 'left' : computed.textAlign === 'end' ? 'right' : computed.textAlign) as PptxHorizontalAlign }
+  }
+  useEffect(() => { if (srcDoc) onNodesReady(descriptor.sequence, nodes.map(effectiveNode)) }, [nodes, srcDoc, descriptor.sequence, onNodesReady])
   return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? scaledHeight : placeholderHeight, width: session.format === 'pptx' && srcDoc ? scaledWidth : session.format === 'pdf' && srcDoc ? canvasWidth : undefined }}>
+    {chunkError && <p role="alert">{chunkError}</p>}
     <div className="fixed-canvas-slot" style={{ height: srcDoc ? scaledHeight : placeholderHeight }}>
     <div className="fixed-canvas-layer" style={{ width: session.format === 'pptx' && srcDoc ? canvasWidth : '100%', height: srcDoc ? frameHeight : placeholderHeight, transform: session.format === 'pptx' && srcDoc ? `scale(${zoom})` : undefined }}>
-    {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={localizeDynamic(locale, `HCD 分片 ${descriptor.sequence + 1}`)} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight, width: session.format === 'pptx' ? canvasWidth : undefined }} onLoad={() => { setFrameLocale(); findDirectTarget(); highlightSearchTarget() }} />
+    {srcDoc ? <FixedPreviewFrame frame={frame} sandbox={frameSandbox} title={localizeDynamic(locale, `HCD 分片 ${descriptor.sequence + 1}`)} source={srcDoc} height={frameHeight} width={session.format === 'pptx' ? canvasWidth : undefined} onReady={() => { setFrameLocale(); findDirectTarget(); highlightSearchTarget() }} />
       : <div className="skeleton" style={{ minHeight: placeholderHeight }}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${descriptor.sequence + 1}` : `第 ${descriptor.sequence + 1} 个分片`)}</div>}
     {!readOnly && ['pdf', 'pptx'].includes(session.format) && selected && directTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus={session.format === 'pptx' ? 'start' : true} onSave={value => onSave(selected, value)} onCancel={onCancel} /></div>, directTarget)}
     {!readOnly && newBox && newTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor text={newDraft} disabled={saving} onChange={onNewDraft} onReady={onEditorReady} autoFocus onSave={value => onSaveNew(newBox, value)} onCancel={onCancelNew} /></div>, newTarget)}
-    {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => selected?.nodeId === node.nodeId ? null : <button key={node.nodeId} className="fixed-page-hitbox" style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`${localizeDynamic(locale, "编辑文字：")}${node.text.slice(0, 48) || localizeDynamic(locale, "空文字框")}`} title={node.text || localizeDynamic(locale, '空文字框')} onClick={() => onSelect(node)} />)}
+    {!readOnly && srcDoc && <div className={`fixed-page-hitboxes ${session.format === 'pdf' ? 'centered' : ''}`} style={{ width: canvasWidth }}>{nodes.filter(node => node.editable && node.left && node.top && node.width && node.height).map(node => selected?.nodeId === node.nodeId ? null : <button key={node.nodeId} className="fixed-page-hitbox" style={{ left: node.left, top: node.top, width: node.width, height: node.height }} aria-label={`${localizeDynamic(locale, "编辑文字：")}${node.text.slice(0, 48) || localizeDynamic(locale, "空文字框")}`} title={node.text || localizeDynamic(locale, '空文字框')} onClick={() => onSelect(effectiveNode(node))} onContextMenu={event => { event.preventDefault(); setAgentMenu({ x: event.clientX, y: event.clientY, node }) }} />)}
       {session.format === 'pptx' && selected?.geometry && directTarget && (() => {
         const geometry = previewGeometry || selected.geometry
         return <div className="pptx-shape-controls" style={{ left: emuToPx(geometry.xEmu), top: emuToPx(geometry.yEmu), width: emuToPx(geometry.widthEmu), height: emuToPx(geometry.heightEmu) }}>
@@ -1286,7 +1502,12 @@ function LazyChunk({ session, descriptor, onPreview, revision, stylesheet, readO
     </div>}
     </div>
     </div>
-    {!readOnly && nodes.some(node => node.editable && (!node.left || !node.top || !node.width || !node.height)) && <div className="fixed-text-panel"><strong><LocalText source={"第 "} />{descriptor.sequence + 1} <LocalText source={" 页未定位文字"} /></strong><div className="fixed-text-list">{nodes.filter(node => node.editable && (!node.left || !node.top || !node.width || !node.height)).map(node => <button key={node.nodeId} className={selected?.nodeId === node.nodeId ? 'selected' : ''} onClick={() => onSelect(node)} title={node.nodeId}>{node.text || localizeDynamic(locale, '（空文字框）')}</button>)}</div>{selected && (!selected.left || !selected.top || !selected.width || !selected.height) && <div className="fixed-text-form"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div><button onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}><LocalText source={"保存"} /></button><button onClick={onCancel}><LocalText source={"取消"} /></button></div></div>}</div>}
+    {!readOnly && nodes.some(node => node.editable && (!node.left || !node.top || !node.width || !node.height)) && <div className="fixed-text-panel"><strong><LocalText source={"第 "} />{descriptor.sequence + 1} <LocalText source={" 页未定位文字"} /></strong><div className="fixed-text-list">{nodes.filter(node => node.editable && (!node.left || !node.top || !node.width || !node.height)).map(node => <button key={node.nodeId} className={selected?.nodeId === node.nodeId ? 'selected' : ''} onClick={() => onSelect(effectiveNode(node))} title={node.nodeId}>{node.text || localizeDynamic(locale, '（空文字框）')}</button>)}</div>{selected && (!selected.left || !selected.top || !selected.width || !selected.height) && <div className="fixed-text-form"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus onSave={value => onSave(selected, value)} onCancel={onCancel} /><div><button onClick={() => onSave(selected, draft)} disabled={saving || draft === selected.text}><LocalText source={"保存"} /></button><button onClick={onCancel}><LocalText source={"取消"} /></button></div></div>}</div>}
     {!readOnly && srcDoc && nodes.length === 0 && session.format === 'pdf' && <div className="fixed-text-panel"><LocalText source={"本页没有可映射的文字节点；扫描图像里的文字需要 OCR 后才能编辑。"} /></div>}
+    {agentMenu && marker.current?.closest('.workspace') && createPortal(<ContextMenu title={session.format === 'pptx' ? '幻灯片内容' : '页面内容'} x={agentMenu.x} y={agentMenu.y} onClose={() => setAgentMenu(null)} actions={[
+      { label: '用 Agent 修改文字…', accent: true, disabled: readOnly || saving, action: () => requestTask('只修改当前文字节点，保留其他对象与原有格式：', { nodeId: agentMenu.node.nodeId, chunkSequence: descriptor.sequence, format: session.format }) },
+      { label: '润色选中文字框', disabled: readOnly || saving, action: () => requestTask('润色当前文字节点，保留原意、数字、日期和格式。仅修改此节点。', { nodeId: agentMenu.node.nodeId, chunkSequence: descriptor.sequence, format: session.format }) },
+      { label: '编辑文字', disabled: readOnly || saving, action: () => onSelect(effectiveNode(agentMenu.node)) },
+    ]} />, marker.current.closest('.workspace')!)}
   </div>
 }

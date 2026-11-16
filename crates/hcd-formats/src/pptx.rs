@@ -3290,10 +3290,13 @@ pub(crate) fn export_pptx(
                     "a deleted slide has no entry in the presentation's slide list".to_string(),
                 ));
             }
-            // The patch refuses to drop the last page of a deck; this is the same
-            // bound on a package whose list a history would empty, counting only the
-            // pages the source itself carried.
-            if list.entries.len() == dropped_slide_ids.len() {
+            // A complete remake may replace every source page with newly
+            // created pages. They are written below, after removals: the final
+            // deck, rather than this intermediate source list, must be nonempty.
+            let surviving_created = created_parts
+                .iter()
+                .any(|part| !cancelled_parts.contains(part));
+            if list.entries.len() == dropped_slide_ids.len() && !surviving_created {
                 return Err(HcdError::InvalidPatch(
                     "PPTX presentation must keep one slide".to_string(),
                 ));
@@ -5873,6 +5876,91 @@ mod tests {
         HCD_PATCH_SCHEMA_VERSION_46,
     };
     use std::cell::Cell;
+
+    #[test]
+    fn complete_remake_exports_when_new_slides_replace_every_source_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let output = temp.path().join("remade.pptx");
+        let bundle_path = temp.path().join("bundle");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("full-remake"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let original_parts = index_slide_order(&bundle, &manifest);
+        let original_chunks = original_parts
+            .iter()
+            .map(|part| slide_page_chunk(&bundle, &manifest, part))
+            .collect::<Vec<_>>();
+        let mut revision = 0;
+        let mut commit = |schema: &str, operations: Vec<PatchOperation>| {
+            revision = apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: schema.into(),
+                    document_id: manifest.document_id.clone(),
+                    patch_id: format!("remake-{}", revision + 1),
+                    base_revision: revision,
+                    actor: BTreeMap::new(),
+                    metadata: BTreeMap::new(),
+                    operations,
+                },
+                revision,
+            )
+            .unwrap()
+            .revision;
+        };
+        commit(
+            HCD_PATCH_SCHEMA_VERSION_41,
+            vec![PatchOperation::PptxSlideAdd {}],
+        );
+        let head = bundle.manifest().unwrap();
+        let part = index_slide_order(&bundle, &head).last().unwrap().clone();
+        let chunk = slide_page_chunk(&bundle, &head, &part);
+        commit(
+            HCD_PATCH_SCHEMA_VERSION_16,
+            vec![PatchOperation::PptxTextInsert {
+                chunk_id: chunk,
+                slide_part: part.clone(),
+                x_emu: 100_000,
+                y_emu: 100_000,
+                width_emu: 2_000_000,
+                height_emu: 500_000,
+                font_size_pt: 20.0,
+                text: "北凪寿司 280".into(),
+            }],
+        );
+        for chunk in original_chunks {
+            commit(
+                HCD_PATCH_SCHEMA_VERSION_42,
+                vec![PatchOperation::PptxSlideDelete { chunk_id: chunk }],
+            );
+        }
+        export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        let order = deck_shows(&output);
+        assert_eq!(order, vec![part.clone()]);
+        assert!(read_zip_entry(&output, &part).contains("北凪寿司 280"));
+        for old in original_parts {
+            assert!(!order.contains(&old));
+        }
+        let baseline = temp.path().join("baseline.pptx");
+        export_pptx(
+            &bundle,
+            &source,
+            &baseline,
+            &ExportOptions {
+                revision: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(deck_shows(&baseline).len(), 2);
+    }
     use std::rc::Rc;
     use zip::write::SimpleFileOptions;
 
@@ -6574,6 +6662,7 @@ mod tests {
             operations: vec![PatchOperation::PptxSlideReorder {
                 chunk_id: chunk_id.to_string(),
                 direction: direction.to_string(),
+                target_index: None,
             }],
         }
     }
@@ -6770,6 +6859,22 @@ mod tests {
         assert_eq!(
             index_slide_order(&reopened_bundle, &reopened),
             ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml"]
+        );
+
+        // Absolute drag ordering shares the same source-backed export path.
+        let mut drag = move_slide_patch(&head.document_id, &chunk_id, "", 1);
+        drag.schema_version = hcd_core::HCD_PATCH_SCHEMA_VERSION_48.to_string();
+        drag.operations = vec![PatchOperation::PptxSlideReorder {
+            chunk_id: chunk_id.clone(),
+            direction: String::new(),
+            target_index: Some(1),
+        }];
+        apply_patch(&bundle, &drag, 1).unwrap();
+        let returned = temp.path().join("dragged-back.pptx");
+        export_pptx(&bundle, &source, &returned, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&returned, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml")
         );
     }
 

@@ -5,14 +5,14 @@
   --panel-radius:24px; --content-radius:26px; --panel-gap:14px;
   color:var(--ink); background:var(--canvas); font-family:Inter,"Noto Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 }
-.hcd-surface button,.hcd-surface select,.hcd-surface input,.hcd-surface textarea { color:var(--ink); border-color:var(--line); border-radius:10px; }
-.hcd-surface button { display:inline-flex; align-items:center; justify-content:center; gap:7px; }
-.hcd-surface button:hover { background:var(--accent-soft); border-color:transparent; color:var(--accent); }
-.hcd-surface button.primary { background:var(--accent); border-color:transparent; color:var(--surface); }
-.hcd-surface button.primary:hover { background:#4a56b5; }
+.hcd-surface button:where(:not(.hcd-univer-host *)),.hcd-surface select:where(:not(.hcd-univer-host *)),.hcd-surface input:where(:not(.hcd-univer-host *)),.hcd-surface textarea:where(:not(.hcd-univer-host *)) { color:var(--ink); border-color:var(--line); border-radius:10px; }
+.hcd-surface button:where(:not(.hcd-univer-host *)) { display:inline-flex; align-items:center; justify-content:center; gap:7px; }
+.hcd-surface button:where(:not(.hcd-univer-host *)):hover { background:var(--accent-soft); border-color:transparent; color:var(--accent); }
+.hcd-surface button:where(:not(.hcd-univer-host *)).primary { background:var(--accent); border-color:transparent; color:var(--surface); }
+.hcd-surface button:where(:not(.hcd-univer-host *)).primary:hover { background:#4a56b5; }
 .hcd-surface :is(button,a,input,textarea,select,summary):focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .hcd-surface .icon-button { width:34px; height:34px; padding:7px; border:0; background:transparent; flex:none; color:var(--muted); border-radius:10px; }
-.hcd-surface button[aria-pressed=true] { color:var(--accent); background:var(--accent-soft); }
+.hcd-surface button:where(:not(.hcd-univer-host *))[aria-pressed=true] { color:var(--accent); background:var(--accent-soft); }
 .hcd-surface .document-tabs { min-height:64px; padding:14px 20px 8px; gap:10px; background:var(--canvas); border:0; align-items:center; }
 .hcd-surface .document-tabs button { display:flex; align-items:center; gap:8px; height:36px; color:var(--muted); font-size:12px; }
 .hcd-surface .document-tabs .tabs-brand { flex:none; color:var(--ink); font-size:18px; padding-left:0; margin-right:12px; }
@@ -83,8 +83,6 @@
 .hcd-surface .workspace.semantic-workspace .outline-panel nav button:hover { color:var(--accent); background:var(--accent-soft); }
 .hcd-surface .outline-panel>p,.hcd-surface .outline-panel>small { font-size:11px; color:var(--muted); line-height:1.8; }
 .hcd-surface .workspace.semantic-workspace .outline-panel .outline-move,.hcd-surface .workspace.semantic-workspace .outline-panel .outline-copy,.hcd-surface .workspace.semantic-workspace .outline-panel .outline-remove { padding:3px 4px; font-size:10px; }
-.hcd-surface .panel-dock { width:52px; flex:0 0 52px; height:max-content; align-self:flex-start; background:var(--surface); border-radius:19px; padding:9px; display:flex; flex-direction:column; align-items:center; gap:7px; box-shadow:0 6px 24px #29354b04; }
-.hcd-surface .panel-dock button { color:var(--muted); }
 .hcd-surface .workspace.semantic-workspace .document-scroll { flex:1; height:auto; min-height:0; overflow:auto; background:var(--stage); scrollbar-width:thin; scrollbar-color:#d8dce5 transparent; }
 .hcd-surface .workspace.semantic-workspace .document { width:min(840px,calc(100% - 80px)); min-height:calc(100% - 80px); margin:40px auto; padding:54px clamp(24px,4vw,64px); border:1px solid var(--line); border-radius:0; box-shadow:0 2px 9px #29354b04; background:var(--surface); }
 .hcd-surface .workspace.semantic-workspace[data-format=txt] .hcd-editor-body { font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace; font-size:14px; color:var(--ink); line-height:1.9; }
@@ -136,6 +134,9 @@
 .hcd-surface .xlsx-formula-bar input { background:var(--stage); border:0; font-size:12px; }
 .hcd-surface .xlsx-formula-address { background:var(--stage); border:0; border-radius:7px; color:var(--muted); font-size:11px; }
 .hcd-surface .xlsx-formula-bar select,.hcd-surface .xlsx-formula-bar button { font-size:11px; }
+.hcd-surface .xlsx-calculation-status { flex:none; max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }
+.hcd-surface .xlsx-calculation-status[data-calculation-status="calculated"] { color:var(--accent, #277153); }
+.hcd-surface .xlsx-draft-target { flex:0 1 auto; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }
 .hcd-surface .format-icon { display:inline-flex; align-items:center; justify-content:center; flex:none; width:29px; height:29px; border-radius:8px; color:#4b72b8; background:#eff3fb; }
 .hcd-surface .format-xlsx { color:#27866a; background:#ecf5f1; }
 .hcd-surface .format-pptx { color:#cb8252; background:#fcf2eb; }
@@ -272,8 +273,6 @@
   .hcd-surface .header-actions .focus-trigger { width:28px; }
   .hcd-surface .workspace.semantic-workspace .layout.editor-layout,.hcd-surface.hcd-embedded .workspace.semantic-workspace .layout.editor-layout { display:flex; flex-direction:row; gap:7px; overflow:hidden; }
   .hcd-surface .workspace.semantic-workspace .content-shell { border-radius:20px; min-width:0; }
-  .hcd-surface .panel-dock { width:36px; flex-basis:36px; padding:6px 2px; border-radius:14px; gap:5px; }
-  .hcd-surface .panel-dock button { width:30px; height:30px; padding:6px; }
   .hcd-surface .workspace.semantic-workspace .document-scroll { min-height:0; }
   .hcd-surface .workspace.semantic-workspace .outline-panel,.hcd-surface .workspace.semantic-workspace .workspace-sidebar { height:100%; max-height:none; border-radius:20px; }
   .hcd-surface .workspace.semantic-workspace .document { width:calc(100% - 24px); min-height:calc(100% - 30px); margin:15px auto; padding:25px 18px; }
@@ -289,6 +288,8 @@
   .hcd-surface .xlsx-formula-bar select { display:none; }
   .hcd-surface .xlsx-formula-bar button { font-size:0; padding:6px; }
   .hcd-surface .xlsx-formula-bar button::after { content:'↵'; font-size:14px; }
+  .hcd-surface .xlsx-formula-bar .xlsx-input-cancel::after { content:'×'; }
+  .hcd-surface .xlsx-draft-target { max-width:76px; }
   .hcd-surface .xlsx-formula-address { min-width:42px; }
   .hcd-surface .workspace-library { padding:0 10px 10px; gap:10px; flex-direction:column; height:auto; min-height:100%; }
   .hcd-surface .library-navigation,.hcd-surface .library-collapsed .library-navigation { width:100%; border-radius:20px; padding:10px 12px; display:flex; flex-direction:row; align-items:center; gap:12px; }

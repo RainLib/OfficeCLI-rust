@@ -1,3 +1,6 @@
+mod rich_text;
+use rich_text::{InlineKey, InlineSpan, InlineStyle};
+
 use docx_handler::WordHandler;
 use handler_common::{DocumentHandler, HandlerError, InsertPosition};
 use ironpress::{HtmlConverter, Margin, PageSize};
@@ -108,6 +111,7 @@ impl ImageGeometry {
 #[derive(Default)]
 struct SemanticSlide {
     lines: Vec<String>,
+    line_styles: Vec<Vec<InlineSpan>>,
     images: Vec<(String, String, ImageGeometry)>,
     table: Option<SemanticTableWindow>,
 }
@@ -164,6 +168,7 @@ struct SemanticHtml {
     table_links: Vec<SemanticTableLink>,
     merges: Vec<SemanticMerge>,
     block_fonts: Vec<SemanticBlockFont>,
+    inline_styles: HashMap<InlineKey, Vec<InlineSpan>>,
     table_row_heights: HashMap<usize, HashMap<usize, f64>>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
@@ -288,6 +293,7 @@ struct PendingBlock {
     kind: PendingKind,
     text: String,
     links: Vec<PendingLink>,
+    styles: Vec<InlineSpan>,
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +316,8 @@ struct TableBuilder {
     row: Vec<String>,
     cell: Option<String>,
     cell_count: usize,
+    styles: HashMap<(usize, usize), Vec<InlineSpan>>,
+    cell_styles: Vec<InlineSpan>,
     links: Vec<TablePendingLink>,
     fragment: Option<HcdTableFragment>,
     hcd_grid: bool,
@@ -348,6 +356,7 @@ struct LogicalTableBuilder {
     rows: Vec<Vec<String>>,
     row_heights: HashMap<usize, f64>,
     cell_count: usize,
+    styles: HashMap<(usize, usize), Vec<InlineSpan>>,
     links: Vec<TablePendingLink>,
 }
 
@@ -368,6 +377,7 @@ struct HtmlParser {
     image_geometry_stack: Vec<Option<ImageGeometry>>,
     pdf_line: Option<PdfLineBuilder>,
     pending_font: Option<BlockFaces>,
+    inline_stack: Vec<(String, InlineStyle)>,
     in_title: bool,
     suppressed_tag: Option<String>,
 }
@@ -405,11 +415,28 @@ struct Tag {
 }
 
 fn image_geometry(attributes: &HashMap<String, String>) -> ImageGeometry {
+    let factor = if attributes
+        .get("data-hcd-geometry-unit")
+        .is_some_and(|v| v == "pt")
+    {
+        12700.0
+    } else {
+        1.0
+    };
+    let number = |native: &str, unit: &str| {
+        signed_emu_attribute(attributes, unit).or_else(|| {
+            attributes
+                .get(native)
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+                .map(|v| (v * factor).round() as i64)
+        })
+    };
     ImageGeometry {
-        x_emu: signed_emu_attribute(attributes, "data-hcd-x-emu"),
-        y_emu: signed_emu_attribute(attributes, "data-hcd-y-emu"),
-        width_emu: positive_emu_attribute(attributes, "data-hcd-width-emu"),
-        height_emu: positive_emu_attribute(attributes, "data-hcd-height-emu"),
+        x_emu: number("data-hcd-x", "data-hcd-x-emu"),
+        y_emu: number("data-hcd-y", "data-hcd-y-emu"),
+        width_emu: number("data-hcd-width", "data-hcd-width-emu").filter(|v| *v > 0),
+        height_emu: number("data-hcd-height", "data-hcd-height-emu").filter(|v| *v > 0),
     }
 }
 
@@ -418,13 +445,6 @@ fn signed_emu_attribute(attributes: &HashMap<String, String>, name: &str) -> Opt
         .get(name)
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| (-MAX_SEMANTIC_IMAGE_EMU..=MAX_SEMANTIC_IMAGE_EMU).contains(value))
-}
-
-fn positive_emu_attribute(attributes: &HashMap<String, String>, name: &str) -> Option<i64> {
-    attributes
-        .get(name)
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|value| (1..=MAX_SEMANTIC_IMAGE_EMU).contains(value))
 }
 
 fn hcd_table_fragment(
@@ -1057,9 +1077,32 @@ fn export_textual(
     output: &Path,
     markdown: bool,
 ) -> Result<usize, HandlerError> {
+    let mut embedded = 0;
+    let mut blocks = document.blocks.clone();
+    if markdown {
+        use base64::Engine;
+        for block in &mut blocks {
+            if let HtmlBlock::Image { source, .. } = block {
+                if let Some(asset) = resolved_image(document, source, ImageTarget::Pdf) {
+                    let bytes = std::fs::read(&asset.path).map_err(HandlerError::IoError)?;
+                    let mime = if asset.format == "png" {
+                        "image/png"
+                    } else {
+                        "image/jpeg"
+                    };
+                    *source = format!(
+                        "data:{mime};base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    );
+                    embedded += 1;
+                }
+            }
+        }
+    }
     let content = if markdown {
         to_markdown_blocks(
-            document.blocks.iter().enumerate(),
+            document,
+            blocks.iter().enumerate(),
             &document.links,
             &document.table_links,
         )
@@ -1077,7 +1120,7 @@ fn export_textual(
         text
     };
     std::fs::write(output, content).map_err(HandlerError::IoError)?;
-    Ok(0)
+    Ok(embedded)
 }
 
 fn parse_html(source: &str) -> Result<SemanticHtml, HandlerError> {
@@ -1135,9 +1178,10 @@ impl HtmlParser {
             append_normalized(&mut self.document.title, &decoded, false);
             return Ok(());
         }
+        let style = self.inline_style();
         if let Some(table) = &mut self.table {
             if let Some(cell) = &mut table.cell {
-                append_normalized(cell, &decoded, false);
+                rich_text::append(cell, &mut table.cell_styles, &decoded, false, style)?;
             }
             return Ok(());
         }
@@ -1146,12 +1190,18 @@ impl HtmlParser {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
                 links: Vec::new(),
+                styles: Vec::new(),
             });
         }
         if let Some(pending) = &mut self.pending {
             let preserve = matches!(pending.kind, PendingKind::Preformatted);
-            append_normalized(&mut pending.text, &decoded, preserve);
-            ensure_text_limit(&pending.text)?;
+            rich_text::append(
+                &mut pending.text,
+                &mut pending.styles,
+                &decoded,
+                preserve,
+                style,
+            )?;
         }
         Ok(())
     }
@@ -1170,23 +1220,35 @@ impl HtmlParser {
             ));
             return Ok(());
         }
-        if tag.attributes.contains_key("style") {
-            self.document
-                .warnings
-                .insert("inline CSS was ignored".to_string());
-        }
+
         if !tag.closing {
             self.note_block_font(&tag.attributes);
         }
         if tag.closing {
-            self.end_tag(&tag.name)
+            self.end_tag(&tag.name)?;
+            if let Some(index) = self
+                .inline_stack
+                .iter()
+                .rposition(|(name, _)| name == &tag.name)
+            {
+                self.inline_stack.truncate(index);
+            }
         } else {
+            let style =
+                rich_text::tag_style(self.inline_style(), &tag, &mut self.document.warnings);
             self.start_tag(&tag)?;
             if tag.self_closing || is_void_element(&tag.name) {
                 self.end_tag(&tag.name)?;
+            } else {
+                if self.inline_stack.len() >= 512 {
+                    return Err(HandlerError::InvalidArgument(
+                        "HTML nesting exceeds 512 elements".to_string(),
+                    ));
+                }
+                self.inline_stack.push((tag.name, style));
             }
-            Ok(())
         }
+        Ok(())
     }
 
     fn start_tag(&mut self, tag: &Tag) -> Result<(), HandlerError> {
@@ -1200,10 +1262,10 @@ impl HtmlParser {
                 Some(geometry) => self.start_pending(PendingKind::PdfText(geometry))?,
                 None => self.start_pending(PendingKind::Paragraph)?,
             },
-            "article" | "header" | "footer" | "address" | "figure" | "figcaption" => {
+            "article" | "header" | "footer" | "address" | "figcaption" => {
                 self.start_pending(PendingKind::Paragraph)?
             }
-            "div" => {
+            "div" | "figure" => {
                 let geometry = tag
                     .attributes
                     .get("class")
@@ -1211,7 +1273,10 @@ impl HtmlParser {
                         classes.split_ascii_whitespace().any(|class| {
                             matches!(
                                 class,
-                                "hcd-slide-picture" | "hcd-sheet-picture" | "hcd-drawing"
+                                "hcd-slide-picture"
+                                    | "hcd-sheet-picture"
+                                    | "hcd-drawing"
+                                    | "hcd-generated-image"
                             )
                         })
                     })
@@ -1222,6 +1287,14 @@ impl HtmlParser {
                 } else {
                     self.start_pending(PendingKind::Paragraph)?;
                 }
+            }
+            "span" => {
+                let geometry = tag
+                    .attributes
+                    .get("data-hcd-node-kind")
+                    .is_some_and(|kind| kind == "image")
+                    .then(|| image_geometry(&tag.attributes));
+                self.image_geometry_stack.push(geometry);
             }
             "blockquote" => self.start_pending(PendingKind::Quote)?,
             "pre" => self.start_pending(PendingKind::Preformatted)?,
@@ -1457,7 +1530,10 @@ impl HtmlParser {
                             if table.cell.is_some() {
                                 table.links.push(TablePendingLink {
                                     row: table.rows.len(),
-                                    column: table.row.len(),
+                                    column: table
+                                        .cell_column
+                                        .map(|column| column - 1)
+                                        .unwrap_or(table.row.len()),
                                     start: link.start,
                                     end,
                                     target: link.target,
@@ -1479,7 +1555,7 @@ impl HtmlParser {
             }
             _ => {}
         }
-        if name == "div" {
+        if matches!(name, "div" | "figure" | "span") {
             self.image_geometry_stack.pop();
         }
         Ok(())
@@ -1491,6 +1567,7 @@ impl HtmlParser {
             row_heights,
             cell_count,
             links,
+            styles,
             fragment,
             merges,
             ..
@@ -1518,6 +1595,7 @@ impl HtmlParser {
             if !rows.is_empty() {
                 let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(rows))?;
+                rich_text::store_table_styles(&mut self.document, block_index, styles);
                 if !row_heights.is_empty() {
                     self.document
                         .table_row_heights
@@ -1579,6 +1657,7 @@ impl HtmlParser {
                 rows: Vec::new(),
                 row_heights: HashMap::new(),
                 cell_count: 0,
+                styles: HashMap::new(),
                 links: Vec::new(),
             });
         }
@@ -1616,6 +1695,11 @@ impl HtmlParser {
         }
         let row_offset = logical.rows.len();
         logical.rows.extend(rows);
+        logical.styles.extend(
+            styles
+                .into_iter()
+                .map(|((row, col), spans)| ((row + row_offset, col), spans)),
+        );
         logical.row_heights.extend(
             row_heights
                 .into_iter()
@@ -1651,6 +1735,7 @@ impl HtmlParser {
                         .insert(block_index, logical.row_heights.clone());
                 }
                 self.push_block(HtmlBlock::Table(logical.rows))?;
+                rich_text::store_table_styles(&mut self.document, block_index, logical.styles);
                 self.document
                     .table_links
                     .extend(logical.links.into_iter().map(|link| SemanticTableLink {
@@ -1675,6 +1760,7 @@ impl HtmlParser {
             kind,
             text: String::new(),
             links: Vec::new(),
+            styles: Vec::new(),
         });
         Ok(())
     }
@@ -1688,11 +1774,18 @@ impl HtmlParser {
             .unwrap_or(0)
     }
 
+    fn inline_style(&self) -> InlineStyle {
+        self.inline_stack
+            .last()
+            .map(|(_, style)| *style)
+            .unwrap_or_default()
+    }
+
     fn append_active(&mut self, value: &str, preserve: bool) -> Result<(), HandlerError> {
+        let style = self.inline_style();
         if let Some(table) = &mut self.table {
             if let Some(cell) = &mut table.cell {
-                append_normalized(cell, value, preserve);
-                ensure_text_limit(cell)?;
+                rich_text::append(cell, &mut table.cell_styles, value, preserve, style)?;
                 return Ok(());
             }
         }
@@ -1701,11 +1794,17 @@ impl HtmlParser {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
                 links: Vec::new(),
+                styles: Vec::new(),
             });
         }
         let pending = self.pending.as_mut().expect("created pending block");
-        append_normalized(&mut pending.text, value, preserve);
-        ensure_text_limit(&pending.text)
+        rich_text::append(
+            &mut pending.text,
+            &mut pending.styles,
+            value,
+            preserve,
+            style,
+        )
     }
 
     /// A `text.font` patch leaves its slots on the canonical node element as
@@ -1782,6 +1881,12 @@ impl HtmlParser {
         };
         let block_index = self.document.blocks.len();
         self.push_block(block)?;
+        let styles = rich_text::trim_spans(pending.styles, trim_start, trim_end);
+        if !styles.is_empty() {
+            self.document
+                .inline_styles
+                .insert(InlineKey::Block(block_index), styles);
+        }
         if let Some(faces) = self.pending_font.take() {
             if !faces.is_empty() {
                 self.document
@@ -1920,79 +2025,9 @@ fn export_docx(
     package: &Path,
     pinning: &mut SemanticFontPinning,
 ) -> Result<usize, HandlerError> {
-    let output = package.to_string_lossy();
-    super::create::create_blank_docx(&output)?;
-    let handler = WordHandler::open(&output, true)?;
-    let _ = handler.remove("/body/p[1]")?;
-    let mut pending = Vec::new();
-    let mut embedded = 0usize;
-    for (block_index, block) in document.blocks.iter().enumerate() {
-        if let HtmlBlock::Image {
-            source,
-            alt,
-            geometry,
-        } = block
-        {
-            if let Some(asset) = resolved_image(document, source, ImageTarget::Office) {
-                flush_docx_markdown(
-                    &handler,
-                    &mut pending,
-                    &document.links,
-                    &document.table_links,
-                )?;
-                let mut properties = HashMap::new();
-                properties.insert("src".to_string(), asset.path.to_string_lossy().into_owned());
-                properties.insert("format".to_string(), asset.format.clone());
-                properties.insert("alt".to_string(), alt.clone());
-                properties.insert("width".to_string(), geometry.width().to_string());
-                properties.insert("height".to_string(), geometry.height().to_string());
-                handler.add("/body", "image", InsertPosition::Append, &properties, None)?;
-                embedded += 1;
-                continue;
-            }
-        }
-        pending.push((block_index, block.clone()));
-    }
-    flush_docx_markdown(
-        &handler,
-        &mut pending,
-        &document.links,
-        &document.table_links,
-    )?;
-    handler.save()?;
+    let embedded = rich_text::export_docx(document, package)?;
     *pinning = pin_semantic_block_fonts(package, document, SemanticFontTarget::Word)?;
     Ok(embedded)
-}
-
-fn flush_docx_markdown(
-    handler: &WordHandler,
-    pending: &mut Vec<(usize, HtmlBlock)>,
-    links: &[SemanticLink],
-    table_links: &[SemanticTableLink],
-) -> Result<(), HandlerError> {
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let mut properties = HashMap::new();
-    properties.insert(
-        "markdown".to_string(),
-        to_markdown_blocks(
-            pending
-                .iter()
-                .map(|(block_index, block)| (*block_index, block)),
-            links,
-            table_links,
-        ),
-    );
-    handler.add(
-        "/body",
-        "markdown",
-        InsertPosition::Append,
-        &properties,
-        None,
-    )?;
-    pending.clear();
-    Ok(())
 }
 
 fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
@@ -2069,7 +2104,15 @@ fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
                         .get(&block_index)
                         .and_then(|heights| heights.get(&(table_row + 1)))
                         .copied();
-                    append_xlsx_row(&mut worksheet, row, cells, height)?;
+                    let styles = (0..cells.len())
+                        .map(|column| {
+                            rich_text::styles(
+                                document,
+                                InlineKey::Cell(block_index, table_row, column),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    append_xlsx_row(&mut worksheet, row, cells, height, &styles)?;
                     row = row.saturating_add(1);
                 }
             }
@@ -2087,14 +2130,17 @@ fn export_xlsx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
                     row = row.saturating_add(row_height);
                 } else {
                     for value in block_lines(block) {
-                        append_xlsx_row(&mut worksheet, row, &[value], None)?;
+                        append_xlsx_row(&mut worksheet, row, &[value], None, &[])?;
                         row = row.saturating_add(1);
                     }
                 }
             }
             other => {
-                for value in block_lines(other) {
-                    append_xlsx_row(&mut worksheet, row, &[value], None)?;
+                for (value, styles) in block_lines(other)
+                    .into_iter()
+                    .zip(rich_text::block_line_styles(document, block_index))
+                {
+                    append_xlsx_row(&mut worksheet, row, &[value], None, &[&styles])?;
                     row = row.saturating_add(1);
                 }
             }
@@ -2152,6 +2198,7 @@ fn append_xlsx_row(
     row: usize,
     cells: &[String],
     height: Option<f64>,
+    styles: &[&[InlineSpan]],
 ) -> Result<(), HandlerError> {
     match height {
         Some(height) => worksheet.push_str(&format!(
@@ -2174,17 +2221,12 @@ fn append_xlsx_row(
             )));
         }
         let reference = format!("{}{}", column_letters(column), row);
-        let preserve =
-            value.starts_with(char::is_whitespace) || value.ends_with(char::is_whitespace);
-        worksheet.push_str(&format!(
-            "<c r=\"{reference}\" t=\"inlineStr\"><is><t{}>{}</t></is></c>",
-            if preserve {
-                " xml:space=\"preserve\""
-            } else {
-                ""
-            },
-            escape_xml_text(value)?
-        ));
+        worksheet.push_str(&format!("<c r=\"{reference}\" t=\"inlineStr\"><is>"));
+        worksheet.push_str(&rich_text::xlsx_runs(
+            value,
+            styles.get(index).copied().unwrap_or(&[]),
+        )?);
+        worksheet.push_str("</is></c>");
     }
     worksheet.push_str("</row>");
     Ok(())
@@ -2291,6 +2333,7 @@ fn export_pptx(
         }
     }
     handler.save()?;
+    rich_text::pin_pptx_inline(package, document, &slides)?;
     *pinning = pin_semantic_block_fonts(package, document, SemanticFontTarget::PowerPoint)?;
     Ok(embedded)
 }
@@ -2941,6 +2984,7 @@ fn validate_output(path: &Path, format: &str) -> Result<(), HandlerError> {
 }
 
 fn to_markdown_blocks<'a>(
+    document: &SemanticHtml,
     blocks: impl IntoIterator<Item = (usize, &'a HtmlBlock)>,
     links: &[SemanticLink],
     table_links: &[SemanticTableLink],
@@ -2951,10 +2995,20 @@ fn to_markdown_blocks<'a>(
             HtmlBlock::Heading { level, text } => {
                 output.push_str(&"#".repeat(*level as usize));
                 output.push(' ');
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(&rich_text::markdown(
+                    text,
+                    document,
+                    InlineKey::Block(block_index),
+                    || markdown_linked_text(text, block_index, links),
+                ));
             }
             HtmlBlock::Paragraph(text) => {
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(&rich_text::markdown(
+                    text,
+                    document,
+                    InlineKey::Block(block_index),
+                    || markdown_linked_text(text, block_index, links),
+                ));
             }
             HtmlBlock::ListItem {
                 ordered,
@@ -2966,7 +3020,12 @@ fn to_markdown_blocks<'a>(
                 } else {
                     output.push_str("- ");
                 }
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(&rich_text::markdown(
+                    text,
+                    document,
+                    InlineKey::Block(block_index),
+                    || markdown_linked_text(text, block_index, links),
+                ));
             }
             HtmlBlock::Preformatted(text) => {
                 output.push_str("```\n");
@@ -2975,16 +3034,40 @@ fn to_markdown_blocks<'a>(
             }
             HtmlBlock::Quote(text) => {
                 output.push_str("> ");
-                output.push_str(&markdown_linked_text(text, block_index, links));
+                output.push_str(&rich_text::markdown(
+                    text,
+                    document,
+                    InlineKey::Block(block_index),
+                    || markdown_linked_text(text, block_index, links),
+                ));
             }
             HtmlBlock::Rule => output.push_str("---"),
             HtmlBlock::Table(rows) => {
-                append_markdown_table(&mut output, rows, block_index, table_links)
+                append_markdown_table(&mut output, rows, block_index, table_links, document)
             }
-            HtmlBlock::Image { source, alt, .. } => {
-                output.push_str(&format!("[Image: {alt}]"));
-                if !source.is_empty() {
-                    output.push_str(&format!(" ({source})"));
+            HtmlBlock::Image {
+                source,
+                alt,
+                geometry,
+            } => {
+                if source.starts_with("data:image/png;base64,")
+                    || source.starts_with("data:image/jpeg;base64,")
+                {
+                    let alt = alt
+                        .replace('&', "&amp;")
+                        .replace('"', "&quot;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    output.push_str(&format!(
+                        "<img src=\"{source}\" alt=\"{alt}\" width=\"{}\" height=\"{}\" />",
+                        geometry.width() as f64 / 9525.0,
+                        geometry.height() as f64 / 9525.0
+                    ));
+                } else {
+                    output.push_str(&format!("[Image: {alt}]"));
+                    if !source.is_empty() {
+                        output.push_str(&format!(" ({source})"));
+                    }
                 }
             }
             HtmlBlock::SectionBreak => {}
@@ -3033,6 +3116,7 @@ fn append_markdown_table(
     rows: &[Vec<String>],
     block_index: usize,
     links: &[SemanticTableLink],
+    document: &SemanticHtml,
 ) {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     if columns == 0 {
@@ -3045,6 +3129,7 @@ fn append_markdown_table(
         block_index,
         0,
         links,
+        document,
     );
     output.push('\n');
     output.push('|');
@@ -3053,7 +3138,15 @@ fn append_markdown_table(
     }
     for (row_index, row) in rows.iter().enumerate().skip(1) {
         output.push('\n');
-        append_markdown_row(output, row, columns, block_index, row_index, links);
+        append_markdown_row(
+            output,
+            row,
+            columns,
+            block_index,
+            row_index,
+            links,
+            document,
+        );
     }
 }
 
@@ -3064,14 +3157,20 @@ fn append_markdown_row(
     block_index: usize,
     row_index: usize,
     links: &[SemanticTableLink],
+    document: &SemanticHtml,
 ) {
     output.push('|');
     for column in 0..columns {
         output.push(' ');
         let text = row.get(column).map(String::as_str).unwrap_or("");
         output.push_str(
-            &markdown_table_linked_text(text, block_index, row_index, column, links)
-                .replace('|', "\\|"),
+            &rich_text::markdown(
+                text,
+                document,
+                InlineKey::Cell(block_index, row_index, column),
+                || markdown_table_linked_text(text, block_index, row_index, column, links),
+            )
+            .replace('|', "\\|"),
         );
         output.push_str(" |");
     }
@@ -3154,7 +3253,10 @@ fn semantic_slides(document: &SemanticHtml) -> Vec<SemanticSlide> {
                 continue;
             }
         }
-        for line in block_lines(block) {
+        for (line, styles) in block_lines(block)
+            .into_iter()
+            .zip(rich_text::block_line_styles(document, block_index))
+        {
             let line_chars = line.chars().count();
             if current_chars + line_chars > 1_600 && !current.is_empty() {
                 slides.push(std::mem::take(&mut current));
@@ -3162,6 +3264,7 @@ fn semantic_slides(document: &SemanticHtml) -> Vec<SemanticSlide> {
             }
             current_chars += line_chars + 1;
             current.lines.push(line);
+            current.line_styles.push(styles);
         }
     }
     if !current.is_empty() {
@@ -3170,6 +3273,7 @@ fn semantic_slides(document: &SemanticHtml) -> Vec<SemanticSlide> {
     if slides.is_empty() {
         slides.push(SemanticSlide {
             lines: vec![document.title.clone()],
+            line_styles: vec![Vec::new()],
             images: Vec::new(),
             table: None,
         });
@@ -4032,7 +4136,24 @@ fn finish_table_cell(table: &mut TableBuilder) {
         if let Some(column) = table.cell_column.take() {
             table.row.resize(column - 1, String::new());
         }
-        table.row.push(cell.trim().to_string());
+        let trimmed = cell.trim();
+        let start = trimmed.as_ptr() as usize - cell.as_ptr() as usize;
+        let end = start + trimmed.len();
+        let position = (table.rows.len(), table.row.len());
+        let styles = rich_text::trim_spans(std::mem::take(&mut table.cell_styles), start, end);
+        if !styles.is_empty() {
+            table.styles.insert(position, styles);
+        }
+        table.links.retain_mut(|link| {
+            if (link.row, link.column) == position {
+                link.start = link.start.max(start).min(end) - start;
+                link.end = link.end.min(end).max(start) - start;
+                link.end > link.start
+            } else {
+                true
+            }
+        });
+        table.row.push(trimmed.to_string());
     }
 }
 
@@ -5231,6 +5352,7 @@ mod tests {
             }]
         );
         let markdown = to_markdown_blocks(
+            &document,
             document.blocks.iter().enumerate(),
             &document.links,
             &document.table_links,
@@ -5313,6 +5435,33 @@ mod tests {
                 },
             }
         );
+        assert!(matches!(
+            document.blocks[1],
+            HtmlBlock::Image {
+                geometry: ImageGeometry {
+                    width_emu: None,
+                    height_emu: None,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn canonical_span_image_sizes_survive_nested_wrappers_without_leaking_to_siblings() {
+        let document = parse_html(r#"<span data-hcd-node-kind="image" data-hcd-width="48" data-hcd-height="24" data-hcd-geometry-unit="pt"><span><img src="asset://sha256/first" /></span></span><span><img src="asset://sha256/second" /></span>"#).unwrap();
+        assert!(matches!(
+            document.blocks[0],
+            HtmlBlock::Image {
+                geometry: ImageGeometry {
+                    width_emu: Some(609_600),
+                    height_emu: Some(304_800),
+                    ..
+                },
+                ..
+            }
+        ));
         assert!(matches!(
             document.blocks[1],
             HtmlBlock::Image {

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HocuspocusProvider } from '@hocuspocus/provider'
 import * as Y from 'yjs'
 import { api, type Session } from './api.ts'
-import { useAgentActivities } from './AgentActivityLayer.tsx'
+import { useAgentWorkspace } from './AgentActivityLayer.tsx'
 
 type Person = { id: string; name: string; color: string; connections: number }
 const palette = ['#d84a54', '#3478c0', '#9a5abb', '#13866a', '#d17d20', '#7b65d8']
@@ -28,25 +28,36 @@ function browserUserId(): string {
 
 /** Fixed-layout clients share presence and committed revisions, not uncommitted keystrokes. */
 export function useFixedCollaboration(session: Session, revision: number | null, onRemoteRevision: (revision: number) => void) {
-  const agents = useAgentActivities()
+  const { agents, operations } = useAgentWorkspace()
+  const operationRevision = Math.max(-1, ...operations.filter(operation=>operation.status === 'applied').map(operation=>operation.revision))
   const { locale } = useI18n()
   const [presence, setPresence] = useState<Person[]>([])
   const [connection, setConnection] = useState('连接中')
+  const revisionIdentity = JSON.stringify([session.apiUrl, session.documentId, session.collaborationEpoch])
+  const revisionIdentityRef = useRef(revisionIdentity)
   const revisionRef = useRef(revision)
+  if (revisionIdentityRef.current !== revisionIdentity) {
+    revisionIdentityRef.current = revisionIdentity
+    revisionRef.current = revision
+  }
   const onRemoteRef = useRef(onRemoteRevision)
-  revisionRef.current = revision
+  // React can render with an older prop while an acknowledged edit refreshes
+  // the canvas. Keep that acknowledgement through renders and its own echo.
+  if (revision !== null) revisionRef.current = Math.max(revisionRef.current ?? -1, revision)
   onRemoteRef.current = onRemoteRevision
   useEffect(() => {
-    const latest = Math.max(-1, ...agents.filter(agent => agent.status === 'applied').map(agent => agent.revision))
+    const latest = Math.max(operationRevision, ...agents.filter(agent => agent.status === 'applied').map(agent => agent.revision))
     if (latest > (revisionRef.current ?? -1)) onRemoteRef.current(latest)
-  }, [agents])
+  }, [agents, operationRevision])
   const ydoc = useMemo(() => new Y.Doc(), [session.documentId, session.collaborationEpoch])
+  const liveToken = useRef(session.token); liveToken.current = session.token
   const provider = useMemo(() => new HocuspocusProvider({
     url: session.collabUrl || import.meta.env.VITE_HCD_COLLAB_URL || 'ws://127.0.0.1:8768',
     name: `${session.documentId}:${session.collaborationEpoch ?? 0}`,
     document: ydoc,
-    token: session.token,
-  }), [session.documentId, session.collaborationEpoch, session.collabUrl, session.token, ydoc])
+    token: () => liveToken.current,
+  }), [session.documentId, session.collaborationEpoch, session.collabUrl, ydoc])
+  useEffect(() => { if (provider.isAuthenticated) void provider.sendToken().catch(() => {}) }, [provider, session.token])
   const user = useMemo(() => {
     const id = session.userId || browserUserId()
     return { id, clientId: ydoc.clientID, name: session.displayName?.trim() || `User ${id.slice(0, 4)}`, color: colorFor(id) }

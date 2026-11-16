@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+base64 = "0.22"
 hcd-core = { path = "../hcd-core" }
 hcd-docx = { path = "../hcd-docx" }
 oxml = { path = "../oxml" }
@@ -16,7 +17,7 @@ quick-xml = { workspace = true }
 tempfile = { workspace = true }
 time = { workspace = true }
 pulldown-cmark = { version = "0.13.4", default-features = false }
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
 zip = { workspace = true }

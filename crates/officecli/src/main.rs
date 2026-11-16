@@ -4,6 +4,7 @@
     clippy::let_and_return
 )]
 
+mod capabilities;
 mod commands;
 mod hdoc_remote;
 mod hdoc_server;
@@ -171,6 +172,10 @@ fn main() {
         commands::Command::Info(cmd) => commands::handle_info(cmd, format),
         commands::Command::Merge(cmd) => commands::handle_merge(cmd, format),
         commands::Command::Help(cmd) => commands::handle_help(cmd, cli.json),
+        commands::Command::Capabilities => Ok(commands::json_data_envelope(
+            crate::capabilities::runtime().clone(),
+            true,
+        )),
         commands::Command::Import(cmd) => commands::handle_import(cmd, format),
         commands::Command::Hdoc(cmd) => {
             commands::handle_hdoc(cmd, format).map(|(output, succeeded)| {

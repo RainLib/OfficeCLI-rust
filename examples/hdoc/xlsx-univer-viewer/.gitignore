@@ -1,0 +1,4 @@
+# JavaScript emitted alongside the authoritative TypeScript sources.
+/src/adapter.js
+/src/hcd-parser.js
+/src/hcd.js

@@ -1,0 +1,64 @@
+/* Soft Canvas / PPTX design: quiet thumbnails, numbered pages and a property drawer. */
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator {
+  display:flex; flex-direction:column; padding:0; overflow:hidden;
+}
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator>.panel-head { flex:none; margin:0; padding:18px 20px 14px; }
+.hcd-surface[data-theme] .page-navigator>.panel-head h2 { font-size:13px; font-weight:500; }
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator>nav { display:flex; flex:1; flex-direction:column; gap:14px; min-height:0; overflow:auto; padding:0 20px 20px; scrollbar-width:thin; }
+.hcd-surface[data-theme] .slide-card { position:relative; flex:none; border-radius:6px; }
+.hcd-surface[data-theme] .slide-card[draggable=true] { cursor:grab; }
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .slide-thumbnail-button {
+  display:flex; flex-direction:column; align-items:stretch; gap:8px; width:100%; padding:2px; background:transparent; border:0; border-radius:6px; text-align:left; cursor:inherit;
+}
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .slide-thumbnail-button:hover { background:transparent; }
+.hcd-surface[data-theme] .page-navigator .page-thumbnail { border-radius:4px; background:var(--stage); border:1px solid var(--line); transition:border-color .15s,opacity .15s; }
+.hcd-surface[data-theme] .slide-card.is-active .page-thumbnail { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+.hcd-surface[data-theme] .slide-number { color:var(--muted); font-size:10px; line-height:1; font-variant-numeric:tabular-nums; }
+.hcd-surface[data-theme] .slide-card.is-active .slide-number { color:var(--accent); }
+.hcd-surface[data-theme] .slide-actions { position:absolute; z-index:2; top:7px; right:7px; display:flex; gap:2px; padding:3px; border:1px solid var(--line); border-radius:8px; background:var(--surface-raised); box-shadow:0 2px 10px #0001; opacity:0; pointer-events:none; transition:opacity .12s; }
+.hcd-surface[data-theme] .slide-card:hover .slide-actions,.hcd-surface[data-theme] .slide-card:focus-within .slide-actions { opacity:1; pointer-events:auto; }
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .slide-actions button { display:flex; align-items:center; justify-content:center; width:24px; height:24px; min-height:0; padding:4px; border:0; background:transparent; color:var(--muted); border-radius:5px; }
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .slide-actions button:hover { background:var(--hover); color:var(--ink); }
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .slide-actions .slide-delete:hover { color:var(--warning); background:var(--warning-soft); }
+.hcd-surface[data-theme] .slide-drag-handle { cursor:grab; touch-action:none; }
+.hcd-surface[data-theme] .slide-card.is-dragging .page-thumbnail { opacity:.35; }
+.hcd-surface[data-theme] .slide-card:is(.drop-before,.drop-after)::after { content:''; position:absolute; height:2px; left:0; right:0; background:var(--accent); border-radius:2px; pointer-events:none; }
+.hcd-surface[data-theme] .slide-card.drop-before::after { top:-7px; }
+.hcd-surface[data-theme] .slide-card.drop-after::after { bottom:-7px; }
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator :is(.add-slide,.load-more-pages) { display:flex; align-items:center; justify-content:center; gap:7px; flex:none; width:100%; padding:8px; min-height:32px; border:1px solid var(--line); border-radius:12px; font-size:11px; background:transparent; color:var(--ink); }
+.hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .add-slide:hover { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+
+.hcd-surface[data-theme] .workspace.semantic-workspace .shape-properties { display:flex; flex-direction:column; padding:20px; overflow:hidden; }
+.hcd-surface[data-theme] .shape-properties>.panel-head { flex:none; margin:0 0 12px; }
+.hcd-surface[data-theme] .shape-properties>.panel-head h2 { font-size:13px; font-weight:500; }
+.hcd-surface[data-theme] .inspector-tabs { display:flex; align-items:center; gap:24px; flex:none; padding:0 0 20px; }
+.hcd-surface[data-theme] .inspector-tabs button { padding:0; min-height:24px; border:0; font-size:11px; background:transparent; color:var(--muted); }
+.hcd-surface[data-theme] .inspector-tabs button[aria-pressed=true] { color:var(--accent); }
+.hcd-surface[data-theme] .inspector-content { flex:1; min-height:0; overflow:auto; scrollbar-width:thin; }
+.hcd-surface[data-theme] .inspector-section { display:flex; flex-direction:column; gap:24px; padding:0 0 24px; margin-bottom:24px; border-bottom:1px solid var(--line); }
+.hcd-surface[data-theme] .inspector-section label { display:flex; flex-direction:column; gap:8px; color:var(--muted); font-size:10px; line-height:1.5; min-width:0; }
+.hcd-surface[data-theme] .inspector-section :is(input:not([type=color]),select) { box-sizing:border-box; width:100%; min-width:0; height:36px; border:1px solid transparent; background:var(--stage); border-radius:11px; padding:0 10px; font-size:11px; color:var(--ink); }
+.hcd-surface[data-theme] .inspector-section :is(input,select):focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.hcd-surface[data-theme] .inspector-section :is(input,select,button):disabled { opacity:.5; cursor:default; }
+.hcd-surface[data-theme] .inspector-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px 12px; }
+.hcd-surface[data-theme] .inspector-segments { display:flex; align-items:center; gap:8px; }
+.hcd-surface[data-theme] .inspector-segments button { display:flex; align-items:center; justify-content:center; width:32px; height:32px; padding:6px; border:0; border-radius:10px; background:transparent; color:var(--muted); }
+.hcd-surface[data-theme] .inspector-segments button[aria-pressed=true] { background:var(--accent-soft); color:var(--accent); }
+.hcd-surface[data-theme] .inspector-color.inspector-color { flex-direction:row; align-items:center; justify-content:space-between; }
+.hcd-surface[data-theme] .inspector-color>span { display:flex; align-items:center; gap:10px; }
+.hcd-surface[data-theme] .inspector-color input { width:24px; height:24px; padding:0; border:1px solid var(--line); border-radius:5px; background:transparent; cursor:pointer; }
+.hcd-surface[data-theme] .inspector-color code { font:10px ui-monospace,monospace; }
+.hcd-surface[data-theme] .inspector-section h3 { display:flex; align-items:center; justify-content:space-between; margin:0; font-size:11px; font-weight:500; }
+.hcd-surface[data-theme] .inspector-section h3 small { color:var(--muted); font-size:9px; font-weight:400; }
+.hcd-surface[data-theme] .inspector-apply { border:1px solid var(--line); border-radius:10px; background:transparent; color:var(--ink); padding:8px; font-size:11px; }
+.hcd-surface[data-theme] .inspector-empty { padding:46px 0; text-align:center; color:var(--muted); }
+.hcd-surface[data-theme] .inspector-empty>svg { margin-bottom:12px; opacity:.6; }
+.hcd-surface[data-theme] .inspector-empty p { margin:0 0 8px; font-size:12px; color:var(--ink); }
+.hcd-surface[data-theme] .inspector-empty small { font-size:10px; line-height:1.8; }
+.hcd-surface[data-theme] .inspector-notice { border-radius:10px; padding:10px; font-size:10px; background:var(--warning-soft); color:var(--warning); }
+.hcd-surface[data-theme] .inspector-presence { display:flex; flex-direction:column; gap:8px; flex:none; padding-top:12px; }
+.hcd-surface[data-theme] .inspector-presence>span { display:flex; align-items:center; gap:8px; font-size:9px; color:var(--muted); }
+.hcd-surface[data-theme] .inspector-presence i { width:24px; height:24px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--accent-soft); color:var(--accent); font-style:normal; }
+@media(max-width:760px) { .hcd-surface[data-theme] .header-actions .properties-trigger { display:none; } }
+@media(hover:none) { .hcd-surface[data-theme] .slide-actions { opacity:1; pointer-events:auto; } }
+@media(prefers-reduced-motion:reduce) { .hcd-surface[data-theme] :is(.slide-actions,.page-thumbnail) { transition:none; } }

@@ -2,6 +2,7 @@ import './standalone.css'
 import { createRoot } from 'react-dom/client'
 import { useEffect } from 'react'
 import { App } from './App.tsx'
+import { BusinessEditor } from './BusinessEditor.tsx'
 import { PdfExportPreview } from './PdfExportPreview.tsx'
 import { I18nProvider, standaloneLocale, useI18n } from './i18n.tsx'
 
@@ -13,6 +14,8 @@ function StandaloneContent() {
     document.documentElement.lang = locale
     document.title = t('appTitle')
   }, [locale, t])
+  const businessFile = new URLSearchParams(location.search).get('workspaceFile')
+  if (businessFile && /^[a-f0-9-]{36}$/.test(businessFile)) return <BusinessEditor fileId={businessFile} />
   return validPreview ? <PdfExportPreview sourcePath={previewPath} /> : <App />
 }
 

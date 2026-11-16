@@ -110,7 +110,7 @@ export type ThemeCssOptions = {
 export async function loadTheme(session: Session, revision: number | null, options: ThemeCssOptions = {}): Promise<{ css: string; faces: ThemeFace[] }> {
   const { editor = false, facesOnly = false } = options
   const response = await fetch(themeRequestUrl(session, revision, facesOnly), {
-    headers: { Authorization: `Bearer ${session.token}` },
+    headers: { Authorization: `Bearer ${session.accessToken?.() || session.token}` },
   })
   if (response.status === 404) return { css: '', faces: [] }
   if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`)
@@ -123,7 +123,7 @@ export async function loadTheme(session: Session, revision: number | null, optio
     if (!face.webPreview || !face.href || seen.has(face.href) || !face.href.startsWith('/v1/')) continue
     seen.add(face.href)
     const font = await fetch(fontRequestUrl(session, face.href), {
-      headers: { Authorization: `Bearer ${session.token}` },
+      headers: { Authorization: `Bearer ${session.accessToken?.() || session.token}` },
     })
     if (!font.ok) continue
     const blob = await font.blob()

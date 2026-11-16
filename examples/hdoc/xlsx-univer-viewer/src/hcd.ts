@@ -70,6 +70,18 @@ export interface LoadedChunk {
   map: ChunkSourceMap;
 }
 
+export interface GridCalculationResult {
+  status: 'calculated' | 'unavailable';
+  value: string | null;
+  valueType?: 'number' | 'string' | 'boolean' | 'blank' | 'error' | 'array';
+  error: string | null;
+}
+
+export interface GridCalculatedCell {
+  formula?: string;
+  calculation: GridCalculationResult;
+}
+
 function normalizeBaseUrl(value: string): URL {
   const url = new URL(value || '/hcd/', window.location.href);
   if (!url.pathname.endsWith('/')) url.pathname += '/';
@@ -149,6 +161,12 @@ export class HcdBundleClient {
 
   constructor(baseUrl: string) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
+  }
+
+  /** Static bundles retain compatibility caches. Service clients can supply
+   * revision-scoped results without changing immutable source chunks. */
+  async readCalculations(_sheetId: string): Promise<ReadonlyMap<string, GridCalculatedCell> | null> {
+    return null;
   }
 
   resolve(href: string): URL {

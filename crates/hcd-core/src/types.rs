@@ -449,6 +449,21 @@ pub enum PatchOperation {
         format: XlsxCellFormatPatch,
         precondition: NodePrecondition,
     },
+    /// Replace the text and font runs of an existing worksheet string cell.
+    #[serde(rename = "xlsx.richText.set", rename_all = "camelCase")]
+    XlsxRichTextSet {
+        node_id: String,
+        runs: Vec<crate::XlsxInlineRun>,
+        precondition: NodePrecondition,
+    },
+    /// Create a string cell with native font runs at an empty worksheet address.
+    #[serde(rename = "xlsx.richText.create", rename_all = "camelCase")]
+    XlsxRichTextCreate {
+        sheet_id: String,
+        row: u32,
+        column: u32,
+        runs: Vec<crate::XlsxInlineRun>,
+    },
     /// Set direct alignment, wrap, or borders on one worksheet cell.
     #[serde(rename = "xlsx.cell.layout", rename_all = "camelCase")]
     XlsxCellLayout {
@@ -624,12 +639,19 @@ pub enum PatchOperation {
     /// the slide part with them. A presentation cannot drop its last slide.
     #[serde(rename = "pptx.slide.delete", rename_all = "camelCase")]
     PptxSlideDelete { chunk_id: String },
-    /// Move one slide page one place through the deck, named by a chunk that
-    /// holds it. A page that spans chunks moves as a whole, and the page it
-    /// passes takes the place it leaves. HCD keeps the order on the index, so a
+    /// Move one slide page through the deck, named by a chunk that holds it.
+    /// Version 43 moves one place; version 48 names the final zero-based index.
+    /// A page that spans chunks moves as a whole. HCD keeps order on the index, so a
     /// source-backed export writes the presentation's slide list to match it.
     #[serde(rename = "pptx.slide.reorder", rename_all = "camelCase")]
-    PptxSlideReorder { chunk_id: String, direction: String },
+    PptxSlideReorder {
+        chunk_id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        direction: String,
+        /// Final zero-based slide position, accepted by hcd-patch/48 only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_index: Option<usize>,
+    },
     /// Duplicate one slide page, named by a chunk that holds it. The copy is a
     /// page of its own, carrying its own chunks under a slide part the source
     /// package does not have yet, and it stands immediately behind the page it
@@ -645,6 +667,14 @@ pub enum PatchOperation {
         node_id: String,
         style: NodeStylePatch,
         precondition: NodePrecondition,
+    },
+    /// Insert a staged image with an explicit, format-native rectangle.
+    #[serde(rename = "image.insert", rename_all = "camelCase")]
+    ImageInsert {
+        chunk_id: String,
+        asset_hash: String,
+        geometry: ImageGeometry,
+        alt: String,
     },
     /// Replace the content-addressed payload displayed by one mapped image
     /// node. The asset must already be indexed or have been staged with the
@@ -682,6 +712,7 @@ impl PatchOperation {
             | Self::PptxRunFormat { node_id, .. }
             | Self::PptxShapeAlign { node_id, .. }
             | Self::XlsxCellFormat { node_id, .. }
+            | Self::XlsxRichTextSet { node_id, .. }
             | Self::XlsxCellLayout { node_id, .. }
             | Self::XlsxCellNumberFormat { node_id, .. }
             | Self::PdfTextGeometry { node_id, .. }
@@ -694,9 +725,11 @@ impl PatchOperation {
             Self::XlsxNumberSet { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
+            | Self::ImageInsert { .. }
             | Self::PdfTextInsert { .. }
             | Self::PptxTextInsert { .. }
             | Self::XlsxCellSet { .. }
+            | Self::XlsxRichTextCreate { .. }
             | Self::XlsxFormulaCreate { .. }
             | Self::XlsxRowAppend { .. }
             | Self::XlsxRowInsert { .. }
@@ -725,6 +758,7 @@ impl PatchOperation {
             Self::TextSplice { .. }
                 | Self::TextFont { .. }
                 | Self::TextFontClear { .. }
+                | Self::ImageInsert { .. }
                 | Self::PdfTextInsert { .. }
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
@@ -732,6 +766,8 @@ impl PatchOperation {
                 | Self::PptxRunFormat { .. }
                 | Self::PptxShapeAlign { .. }
                 | Self::XlsxCellFormat { .. }
+                | Self::XlsxRichTextSet { .. }
+                | Self::XlsxRichTextCreate { .. }
                 | Self::XlsxCellLayout { .. }
                 | Self::XlsxCellNumberFormat { .. }
                 | Self::PdfTextGeometry { .. }
@@ -1168,6 +1204,8 @@ pub struct TextNodeLookup {
     pub revision: u64,
     #[serde(flatten)]
     pub node: TextExtractEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xlsx_runs: Option<Vec<crate::XlsxInlineRun>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

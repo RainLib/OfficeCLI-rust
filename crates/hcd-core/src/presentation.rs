@@ -433,16 +433,24 @@ pub fn render_standalone_html_with_transform(
 }
 
 const DOCX_VIRTUAL_PAGE_CSS: &str = r#"
+body[data-hcd-source-format="docx"]{font-family:"Times New Roman",serif;font-size:12pt;line-height:normal}
 body.hcd-docx-paginated{width:auto!important;max-width:none!important;min-width:0!important;min-height:0!important;margin:24px auto!important;padding:0!important;background:transparent!important;box-shadow:none!important;display:flex!important;flex-direction:column;align-items:center;gap:20px}
-body.hcd-docx-paginated>.hcd-virtual-page{box-sizing:border-box;flex:0 0 auto;position:relative;overflow:hidden;background:#fff;box-shadow:0 3px 18px #0002;content-visibility:visible;contain:none}
+body.hcd-docx-paginated>.hcd-virtual-page{box-sizing:border-box;flex:0 0 auto;position:relative;isolation:isolate;overflow:hidden;background:#fff;box-shadow:0 3px 18px #0002;content-visibility:visible;contain:none}
 body.hcd-docx-paginated>.hcd-virtual-page[data-hcd-page-overflow="true"]{height:auto!important;overflow:visible}
-body.hcd-docx-paginated .hcd-virtual-page-content{box-sizing:border-box;width:100%;overflow:visible;content-visibility:visible;contain:none}
-@media(max-width:720px){body.hcd-docx-paginated{margin:0!important;gap:12px}body.hcd-docx-paginated>.hcd-virtual-page{max-width:100%}}
+body.hcd-docx-paginated .hcd-virtual-page-content{box-sizing:border-box;width:100%;overflow:visible;content-visibility:visible;contain:none;display:flow-root;position:relative;z-index:1}
+.hcd-page-header,.hcd-page-footer{position:absolute;z-index:1;content-visibility:visible;contain:none;overflow:visible}
+.hcd-page-header .hcd-paragraph,.hcd-page-footer .hcd-paragraph{white-space:pre-wrap}
+body.hcd-docx-paginated .hcd-chunk{content-visibility:visible;contain-intrinsic-size:none}
+@media(max-width:720px){body.hcd-docx-paginated{margin:0!important;gap:12px}body.hcd-docx-paginated>.hcd-virtual-page{flex-shrink:0}}
 "#;
 
-const DOCX_VIRTUAL_PAGE_SCRIPT: &str = r#"<script id="hcd-docx-virtual-pages">
-(()=>{const paginate=()=>{const body=document.body;if(body.classList.contains("hcd-docx-paginated"))return;const chunks=[...body.querySelectorAll(":scope > section.hcd-chunk")];if(!chunks.length)return;const cs=getComputedStyle(body),rect=body.getBoundingClientRect();const number=name=>Number.parseFloat(cs[name])||0;const width=rect.width,height=number("minHeight")||rect.height,top=number("paddingTop"),right=number("paddingRight"),bottom=number("paddingBottom"),left=number("paddingLeft"),available=Math.max(1,height-top-bottom);const blocks=[];for(const chunk of chunks){const chunkId=chunk.dataset.hcdChunkId||"";for(const node of [...chunk.childNodes]){if(node.nodeType===1)blocks.push({node,chunkId});else if(node.nodeType===3&&node.textContent.trim())blocks.push({node,chunkId});}}body.replaceChildren();body.classList.add("hcd-docx-paginated");let pageNo=0,page,content,count=0;const newPage=()=>{page=document.createElement("section");page.className="hcd-virtual-page hcd-chunk";page.dataset.hcdVirtualPage=String(++pageNo);page.style.width=`${width}px`;page.style.height=`${height}px`;page.style.padding=`${top}px ${right}px ${bottom}px ${left}px`;content=document.createElement("div");content.className="hcd-virtual-page-content";content.style.height=`${available}px`;page.append(content);body.append(page);count=0;};newPage();for(const block of blocks){content.append(block.node);count++;if(block.chunkId){const ids=new Set((page.dataset.hcdChunkIds||"").split(",").filter(Boolean));ids.add(block.chunkId);page.dataset.hcdChunkIds=[...ids].join(",");}if(content.scrollHeight>available+.5){if(count>1){content.removeChild(block.node);newPage();content.append(block.node);count=1;if(block.chunkId)page.dataset.hcdChunkIds=block.chunkId;}if(content.scrollHeight>available+.5&&count===1){page.dataset.hcdPageOverflow="true";page.style.height="auto";content.style.height="auto";}}}body.dataset.hcdPageCount=String(pageNo);};const ready=()=>Promise.all([document.fonts?.ready||Promise.resolve(),...([...document.images].map(img=>img.complete?Promise.resolve():new Promise(resolve=>{img.addEventListener("load",resolve,{once:true});img.addEventListener("error",resolve,{once:true});}))) ]).then(paginate);if(document.readyState==="complete")ready();else window.addEventListener("load",ready,{once:true});})();
-</script>"#;
+const DOCX_VIRTUAL_PAGE_SCRIPT: &str = concat!(
+    "<script id=\"hcd-docx-virtual-pages\" type=\"module\">\n",
+    include_str!("docx_layout.js"),
+    "\n",
+    include_str!("docx_pagination.js"),
+    "\n</script>"
+);
 
 fn rewrite_asset_references(
     html: &str,
@@ -529,11 +537,14 @@ mod tests {
 
     #[test]
     fn docx_virtual_pagination_preserves_nodes_and_uses_measured_page_geometry() {
-        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("for(const node of [...chunk.childNodes])"));
-        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("content.append(block.node)"));
-        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("content.scrollHeight>available+.5"));
+        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("for (const node of [...chunk.children])"));
+        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("add(block.node)"));
+        assert!(DOCX_VIRTUAL_PAGE_SCRIPT
+            .contains("content.scrollHeight <= length(content.style.height) + 1"));
         assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("body.dataset.hcdPageCount"));
-        assert!(!DOCX_VIRTUAL_PAGE_SCRIPT.contains("cloneNode"));
+        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("data-hcd-break"));
+        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("splitTable"));
+        assert!(DOCX_VIRTUAL_PAGE_SCRIPT.contains("NUMPAGES"));
         assert!(DOCX_VIRTUAL_PAGE_CSS.contains(".hcd-virtual-page"));
         assert!(DOCX_VIRTUAL_PAGE_CSS.contains("content-visibility:visible"));
     }

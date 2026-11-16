@@ -6,6 +6,7 @@ import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { ArrowDown, ArrowLeft, ArrowUp, GitCompareArrows, History } from 'lucide-react'
 import { schemaExtensions, projectionToJson, type Projection } from './schema.ts'
 import { opaquePreviewExtension } from './opaquePreview.ts'
+import { loadWordPresentation, wordPresentation } from './wordPresentation.ts'
 import { type Session } from './api.ts'
 import { loadThemeCss } from './themeCss.ts'
 import { CanvasViewport } from './CanvasZoom.tsx'
@@ -55,10 +56,17 @@ function RevisionPaper({ session, projection, changes, side }: { session: Sessio
     },
   }), [changes, side, locale])
   const editor = useEditor({
-    extensions: [...schemaExtensions.map(extension => extension.name === 'hcdOpaque' ? opaquePreviewExtension(session) : extension), highlights],
+    extensions: [...schemaExtensions.map(extension => extension.name === 'hcdOpaque' ? opaquePreviewExtension(session) : extension), wordPresentation, highlights],
     content: projectionToJson(projection), editable: false,
     editorProps: { attributes: { class: 'hcd-editor-body revision-editor-body', 'aria-label': localizeSource(locale, side === 'old' ? '历史版本内容' : '当前内容') } },
   }, [session, projection, highlights])
+  useEffect(() => {
+    if (!editor || session.format !== 'docx') return
+    const request = new AbortController()
+    void loadWordPresentation(editor, session, projection.revision, request.signal)
+      .catch(() => { if (!request.signal.aborted) setThemeError(true) })
+    return () => request.abort()
+  }, [editor, session, projection.revision])
   return <article className="revision-paper" data-revision-scope={scope}>
     {theme && <style>{`@scope ([data-revision-scope="${scope}"]) {${theme.replaceAll(':root', ':scope')}}`}</style>}
     {themeError && <p role="status"><LocalText source="版本字体加载失败，正在使用后备字体。" /></p>}

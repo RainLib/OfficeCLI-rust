@@ -123,6 +123,7 @@ struct XlsxCellInsertion {
     column: u32,
     text: String,
     formula: bool,
+    runs: Option<Vec<crate::XlsxInlineRun>>,
 }
 
 #[derive(Clone)]
@@ -262,8 +263,9 @@ struct PptxSlideRemovalTarget {
 /// the run those chunks form is what changes place.
 #[derive(Clone)]
 struct PptxSlideMoveTarget {
-    /// `"up"` or `"down"`, as the patch asked.
+    /// Legacy adjacent move; empty for an absolute target position.
     direction: String,
+    target_index: Option<usize>,
     chunk_id: String,
     slide_part: String,
     moving_chunk_ids: Vec<String>,
@@ -424,7 +426,8 @@ pub fn apply_patch(
             || patch.operations.iter().any(|operation| {
                 matches!(
                     operation,
-                    PatchOperation::PdfTextInsert { .. }
+                    PatchOperation::ImageInsert { .. }
+                        | PatchOperation::PdfTextInsert { .. }
                         | PatchOperation::PdfTextGeometry { .. }
                         | PatchOperation::PdfTextDelete { .. }
                         | PatchOperation::PptxTextInsert { .. }
@@ -433,6 +436,8 @@ pub fn apply_patch(
                         | PatchOperation::PptxRunFormat { .. }
                         | PatchOperation::PptxShapeAlign { .. }
                         | PatchOperation::XlsxCellFormat { .. }
+                        | PatchOperation::XlsxRichTextSet { .. }
+                        | PatchOperation::XlsxRichTextCreate { .. }
                         | PatchOperation::XlsxCellLayout { .. }
                         | PatchOperation::XlsxCellNumberFormat { .. }
                         | PatchOperation::XlsxCellSet { .. }
@@ -491,6 +496,30 @@ pub fn apply_patch(
     let styles = collect_styles(patch)?;
     let fonts = collect_fonts(patch)?;
     let images = collect_image_changes(patch)?;
+    let image_insertions = crate::image_insert::collect(patch);
+    let mut flow_image_tail = None;
+    if !image_insertions.is_empty()
+        && matches!(manifest.source.format.as_str(), "docx" | "md" | "html")
+    {
+        for page in (0..manifest.index_page_count).rev() {
+            if let Some(chunk) = bundle
+                .read_index_page(&manifest, page)?
+                .chunks
+                .into_iter()
+                .rev()
+                .find(|chunk| chunk.region == "body")
+            {
+                flow_image_tail = Some(chunk.chunk_id);
+                break;
+            }
+        }
+        if flow_image_tail.is_none() {
+            return Err(HcdError::Unsupported(
+                "Flow document has no body chunk for image insertion".into(),
+            ));
+        }
+    }
+    let mut inserted_images = 0;
     let pdf_insertions = collect_pdf_insertions(patch);
     let pdf_geometry = collect_pdf_geometry(patch);
     let pdf_deletions = collect_pdf_deletions(patch);
@@ -500,6 +529,19 @@ pub fn apply_patch(
     let pptx_formats = collect_pptx_formats(patch);
     let pptx_aligns = collect_pptx_aligns(patch);
     let xlsx_formats = collect_xlsx_formats(patch);
+    let mut rich_converted_formula_ids = HashSet::new();
+    let xlsx_rich: HashMap<_, _> = patch
+        .operations
+        .iter()
+        .filter_map(|op| match op {
+            PatchOperation::XlsxRichTextSet {
+                node_id,
+                runs,
+                precondition,
+            } => Some((node_id.clone(), (runs, precondition))),
+            _ => None,
+        })
+        .collect();
     let xlsx_layouts = collect_xlsx_layouts(patch);
     let xlsx_number_formats = collect_xlsx_number_formats(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
@@ -651,6 +693,7 @@ pub fn apply_patch(
         .chain(pptx_formats.keys().cloned())
         .chain(pptx_aligns.keys().cloned())
         .chain(xlsx_formats.keys().cloned())
+        .chain(xlsx_rich.keys().cloned())
         .chain(xlsx_layouts.keys().cloned())
         .chain(xlsx_number_formats.keys().cloned())
         .chain(pdf_geometry.keys().cloned())
@@ -665,6 +708,7 @@ pub fn apply_patch(
         || !styles.is_empty()
         || !fonts.is_empty()
         || !images.is_empty()
+        || !image_insertions.is_empty()
         || !pdf_insertions.is_empty()
         || !pdf_geometry.is_empty()
         || !pdf_deletions.is_empty()
@@ -674,6 +718,7 @@ pub fn apply_patch(
         || !pptx_formats.is_empty()
         || !pptx_aligns.is_empty()
         || !xlsx_formats.is_empty()
+        || !xlsx_rich.is_empty()
         || !xlsx_layouts.is_empty()
         || !xlsx_number_formats.is_empty()
         || !xlsx_merges.is_empty()
@@ -761,10 +806,16 @@ pub fn apply_patch(
         .iter()
         .map(|asset| (asset.hash.clone(), asset.clone()))
         .collect();
-    for change in images.values() {
-        let Some(hash) = change.asset_hash.as_deref() else {
-            continue;
-        };
+    for hash in images
+        .values()
+        .filter_map(|change| change.asset_hash.as_deref())
+        .chain(
+            image_insertions
+                .values()
+                .flatten()
+                .map(|insertion| insertion.asset_hash.as_str()),
+        )
+    {
         if asset_by_hash.contains_key(hash) {
             continue;
         }
@@ -788,6 +839,7 @@ pub fn apply_patch(
         for descriptor in &mut page.chunks {
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
             let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
+            let inserted_visuals = image_insertions.get(&descriptor.chunk_id);
             let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let cell_row_extension = xlsx_cell_row_extensions.get(&descriptor.chunk_id).copied();
             let blank_merge_here =
@@ -962,6 +1014,7 @@ pub fn apply_patch(
                 && insertions.is_none()
                 && cell_insertions.is_empty()
                 && slide_insertions.is_none()
+                && inserted_visuals.is_none()
                 && !blank_merge_here
                 && !append_here
                 && !row_shift_here
@@ -1127,7 +1180,50 @@ pub fn apply_patch(
                     }
                     let replacement = splice_text(current_text, node_splices)?;
                     let replacement_hash = hash_bytes(replacement.as_bytes());
-                    replace_node_text(&mut html, &entry.node_id, &replacement, &replacement_hash)?;
+                    let mut rich = crate::extract_docx_inline_runs(&html)?;
+                    let mut grid_rich = crate::extract_xlsx_inline_runs(&html)?;
+                    if let Some(mut runs) = grid_rich.remove(&entry.node_id) {
+                        let mut ordered = node_splices.clone();
+                        ordered.sort_by_key(|splice| splice.start);
+                        for splice in ordered.into_iter().rev() {
+                            runs = crate::splice_xlsx_inline_runs(
+                                &runs,
+                                splice.start,
+                                splice.delete_count,
+                                &splice.insert_text,
+                            );
+                        }
+                        replace_node_content(
+                            &mut html,
+                            &entry.node_id,
+                            &crate::render_xlsx_inline_runs(&runs)?,
+                            &replacement_hash,
+                        )?;
+                    } else if let Some(mut runs) = rich.remove(&entry.node_id) {
+                        let mut ordered = node_splices.clone();
+                        ordered.sort_by_key(|splice| splice.start);
+                        for splice in ordered.into_iter().rev() {
+                            runs = crate::docx_inline::splice_docx_inline_runs(
+                                &runs,
+                                splice.start,
+                                splice.delete_count,
+                                &splice.insert_text,
+                            );
+                        }
+                        replace_node_content(
+                            &mut html,
+                            &entry.node_id,
+                            &crate::docx_inline::render_docx_inline_runs(&runs),
+                            &replacement_hash,
+                        )?;
+                    } else {
+                        replace_node_text(
+                            &mut html,
+                            &entry.node_id,
+                            &replacement,
+                            &replacement_hash,
+                        )?;
+                    }
                     if manifest.source.format == "xlsx" && entry.source.node_kind == "cell" {
                         set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
                     }
@@ -1203,7 +1299,12 @@ pub fn apply_patch(
                         }
                     };
                     let replacement_hash = hash_bytes(replacement.as_bytes());
-                    replace_node_text(&mut html, &entry.node_id, replacement, &replacement_hash)?;
+                    replace_node_content(
+                        &mut html,
+                        &entry.node_id,
+                        &escape_text(replacement),
+                        &replacement_hash,
+                    )?;
                     entry.node_hash = replacement_hash;
                     found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
                     html_nodes.insert(entry.node_id.clone(), replacement.clone());
@@ -1284,6 +1385,70 @@ pub fn apply_patch(
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
+                if let Some((runs, precondition)) = xlsx_rich.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell" {
+                        return Err(HcdError::Unsupported(
+                            "XLSX rich text requires an editable string cell".into(),
+                        ));
+                    }
+                    if precondition.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(
+                            "XLSX rich text cell has changed".into(),
+                        ));
+                    }
+                    let marker_at = html
+                        .find(&format!("data-hcd-id=\"{}\"", entry.node_id))
+                        .ok_or_else(|| HcdError::InvalidBundle("missing XLSX rich cell".into()))?;
+                    let cell_start = html[..marker_at].rfind("<td ").ok_or_else(|| {
+                        HcdError::InvalidBundle("missing XLSX rich cell container".into())
+                    })?;
+                    let cell_end = html[cell_start..]
+                        .find('>')
+                        .map(|i| cell_start + i)
+                        .ok_or_else(|| HcdError::InvalidBundle("unclosed XLSX rich cell".into()))?;
+                    let tag = &html[cell_start..=cell_end];
+                    let formula = xlsx_attribute(tag, "data-hcd-formula") == Some("true");
+                    if !entry.source.editable
+                        && (!formula
+                            || xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true"))
+                    {
+                        return Err(HcdError::Unsupported(
+                            "XLSX rich text target is read-only".into(),
+                        ));
+                    }
+                    if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
+                        && (formula
+                            || xlsx_attribute(tag, "data-hcd-value-type")
+                                .is_some_and(|kind| kind != "string")
+                            || xlsx_attribute(tag, "data-hcd-raw-value")
+                                .is_some_and(|value| !value.is_empty()))
+                    {
+                        return Err(HcdError::Unsupported(
+                            "Convert a numeric or formula cell to text before rich-text editing"
+                                .into(),
+                        ));
+                    }
+                    if formula {
+                        set_xlsx_formula_value(&mut html, &entry.node_id)?;
+                        rich_converted_formula_ids.insert(entry.node_id.clone());
+                    }
+                    let replacement: String = runs.iter().map(|run| run.text.as_str()).collect();
+                    let replacement_hash = hash_bytes(replacement.as_bytes());
+                    replace_node_content(
+                        &mut html,
+                        &entry.node_id,
+                        &crate::render_xlsx_inline_runs(runs)?,
+                        &replacement_hash,
+                    )?;
+                    set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
+                    entry.source.editable = true;
+                    entry.node_hash = replacement_hash;
+                    found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
+                    html_nodes.insert(entry.node_id.clone(), replacement);
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
                 if let Some(change) = xlsx_formats.get(&entry.node_id) {
                     if entry.source.node_kind != "cell" {
                         return Err(HcdError::Unsupported(
@@ -1296,7 +1461,12 @@ pub fn apply_patch(
                             entry.node_id, change.node_hash, entry.node_hash
                         )));
                     }
-                    update_xlsx_cell_format(&mut html, &entry.node_id, &change.format)?;
+                    let rich_changed =
+                        update_xlsx_cell_format(&mut html, &entry.node_id, &change.format)?;
+                    if rich_changed {
+                        dirty_nodes.insert(entry.node_id.clone());
+                        dirty_parts.insert(entry.source.part.clone());
+                    }
                     dirty_grid_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
@@ -1566,6 +1736,43 @@ pub fn apply_patch(
                     source_map.entries.last().map(|entry| entry.node_id.clone());
                 chunk_changed = true;
             }
+            if let Some(insertions) = inserted_visuals {
+                if flow_image_tail
+                    .as_ref()
+                    .is_some_and(|tail| tail != &descriptor.chunk_id)
+                {
+                    return Err(HcdError::Unsupported("Flow-document image insertion appends to the document body end; target the last chunk in the body region to preserve native export placement".into()));
+                }
+                for insertion in insertions {
+                    let asset = &asset_by_hash[&insertion.asset_hash];
+                    let node = crate::image_insert::insert(
+                        &mut html,
+                        &mut source_map,
+                        descriptor,
+                        &manifest.source.format,
+                        insertion,
+                        asset,
+                    )?;
+                    dirty_nodes.insert(node);
+                    dirty_parts.insert(source_map.entries.last().unwrap().source.part.clone());
+                    inserted_images += 1;
+                }
+                descriptor.node_count += insertions.len();
+                descriptor.block_count += insertions.len();
+                descriptor.node_bloom = node_bloom(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.node_id.as_str()),
+                );
+                descriptor.first_node_id = source_map
+                    .entries
+                    .first()
+                    .map(|entry| entry.node_id.clone());
+                descriptor.last_node_id =
+                    source_map.entries.last().map(|entry| entry.node_id.clone());
+                chunk_changed = true;
+            }
             if let Some(insertions) = slide_insertions {
                 for insertion in insertions {
                     insert_pptx_text(&mut html, &mut source_map, insertion)?;
@@ -1668,6 +1875,7 @@ pub fn apply_patch(
                     column: merge.start_column,
                     text: String::new(),
                     formula: false,
+                    runs: None,
                 };
                 let (node_id, part) = insert_xlsx_cell(
                     &mut html,
@@ -2423,6 +2631,11 @@ pub fn apply_patch(
         )?;
     }
 
+    if inserted_images != image_insertions.values().map(Vec::len).sum::<usize>() {
+        return Err(HcdError::InvalidPatch(
+            "image.insert target chunk was not found".into(),
+        ));
+    }
     validate_annotation_ranges(patch, &found_nodes)?;
     let (annotation_href, annotation_root_hash) =
         apply_annotations(bundle, &manifest, patch, &removed_nodes)?;
@@ -2613,6 +2826,7 @@ pub fn apply_patch(
                     None
                 }
             })
+            .chain(rich_converted_formula_ids)
             .collect(),
         grid_row_insertions: xlsx_row_insert
             .as_ref()
@@ -2810,6 +3024,7 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
     validate_node_id(node_id)?;
     let manifest = bundle.manifest()?;
     let mut found = None;
+    let mut xlsx_runs = None;
 
     for page_number in 0..manifest.index_page_count {
         let page = bundle.read_index_page(&manifest, page_number)?;
@@ -2834,6 +3049,9 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
                 )));
             }
             let html = bundle.read_chunk(descriptor)?;
+            if manifest.source.format == "xlsx" && entry.source.node_kind == "cell" {
+                xlsx_runs = crate::extract_xlsx_inline_runs(&html)?.remove(node_id);
+            }
             let html_nodes = extract_html_text_nodes(&html)?;
             let text = html_nodes.get(node_id).ok_or_else(|| {
                 HcdError::InvalidBundle(format!(
@@ -2862,6 +3080,7 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
         document_id: manifest.document_id,
         revision: manifest.revision,
         node,
+        xlsx_runs,
     })
 }
 
@@ -3043,6 +3262,10 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_43
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_44
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_45
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_49
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_48
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_47
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_46
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_37
     {
@@ -3263,6 +3486,60 @@ fn validate_patch_identity(
             "hcd-patch/30 accepts one PPTX run format operation only".to_string(),
         ));
     }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_50 {
+        if manifest.source.format != "xlsx"
+            || patch.operations.iter().any(|op| {
+                !matches!(
+                    op,
+                    PatchOperation::TextSplice { .. }
+                        | PatchOperation::XlsxCellSet { .. }
+                        | PatchOperation::XlsxRichTextSet { .. }
+                        | PatchOperation::XlsxRichTextCreate { .. }
+                        | PatchOperation::XlsxFormulaSet { .. }
+                        | PatchOperation::XlsxFormulaCreate { .. }
+                        | PatchOperation::XlsxFormulaToValue { .. }
+                        | PatchOperation::XlsxFormulaToNumber { .. }
+                        | PatchOperation::XlsxNumberSet { .. }
+                )
+            })
+        {
+            return Err(HcdError::Unsupported(
+                "hcd-patch/50 accepts XLSX cell content changes only".into(),
+            ));
+        }
+        let mut targets = HashSet::new();
+        for op in &patch.operations {
+            if let Some(node) = op.node_id() {
+                if !targets.insert(node) {
+                    return Err(HcdError::InvalidPatch(
+                        "XLSX content batch contains duplicate targets".into(),
+                    ));
+                }
+            }
+        }
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_49 {
+        if manifest.source.format != "xlsx"
+            || patch.operations.iter().any(|op| {
+                !matches!(
+                    op,
+                    PatchOperation::XlsxRichTextSet { .. } | PatchOperation::TextSplice { .. }
+                )
+            })
+        {
+            return Err(HcdError::Unsupported(
+                "hcd-patch/49 accepts XLSX rich-text updates only".into(),
+            ));
+        }
+        let mut targets = HashSet::new();
+        for op in &patch.operations {
+            if !targets.insert(op.node_id()) {
+                return Err(HcdError::InvalidPatch(
+                    "XLSX rich-text batch contains duplicate targets".into(),
+                ));
+            }
+        }
+    }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_31
         && (manifest.source.format != "xlsx"
             || patch.operations.len() != 1
@@ -3359,7 +3636,8 @@ fn validate_patch_identity(
             "hcd-patch/42 accepts one PPTX slide deletion operation only".to_string(),
         ));
     }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_43
+    if (patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_43
+        || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_48)
         && (manifest.source.format != "pptx"
             || patch.operations.len() != 1
             || !matches!(
@@ -3368,7 +3646,7 @@ fn validate_patch_identity(
             ))
     {
         return Err(HcdError::Unsupported(
-            "hcd-patch/43 accepts one PPTX slide reorder operation only".to_string(),
+            "slide reordering accepts one PPTX slide reorder operation only".to_string(),
         ));
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_44
@@ -3405,6 +3683,16 @@ fn validate_patch_identity(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/46 accepts one PPTX shape alignment operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_47
+        && patch
+            .operations
+            .iter()
+            .any(|op| !matches!(op, PatchOperation::ImageInsert { .. }))
+    {
+        return Err(HcdError::InvalidPatch(
+            "hcd-patch/47 accepts image.insert operations only".into(),
         ));
     }
     validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
@@ -3691,6 +3979,50 @@ fn validate_patch_identity(
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_pptx_shape_align(align)?;
             }
+            PatchOperation::XlsxRichTextSet {
+                node_id,
+                runs,
+                precondition,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_49
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
+                    || manifest.source.format != "xlsx"
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.richText.set requires XLSX hcd-patch/49 or hcd-patch/50".into(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("nodeHash", &precondition.node_hash)?;
+                inserted += validate_xlsx_rich_runs(runs)?;
+            }
+            PatchOperation::XlsxRichTextCreate {
+                sheet_id,
+                row,
+                column,
+                runs,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
+                    || manifest.source.format != "xlsx"
+                {
+                    return Err(HcdError::Unsupported(
+                        "xlsx.richText.create requires XLSX hcd-patch/50".into(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    || !(1..=1_048_576).contains(row)
+                    || !(1..=16_384).contains(column)
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid XLSX rich-text creation address".into(),
+                    ));
+                }
+                inserted += validate_xlsx_rich_runs(runs)?;
+            }
             PatchOperation::XlsxCellFormat {
                 node_id,
                 format,
@@ -3866,13 +4198,15 @@ fn validate_patch_identity(
             PatchOperation::PptxSlideReorder {
                 chunk_id,
                 direction,
+                target_index,
             } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_43
+                if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_43
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_48)
                     || manifest.source.format != "pptx"
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
-                        "pptx.slide.reorder requires one PPTX operation with hcd-patch/43"
+                        "pptx.slide.reorder requires one PPTX operation with hcd-patch/43 or hcd-patch/48"
                             .to_string(),
                     ));
                 }
@@ -3886,9 +4220,14 @@ fn validate_patch_identity(
                         "invalid PPTX slide reorder target".to_string(),
                     ));
                 }
-                if direction != "up" && direction != "down" {
+                let valid_position = if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_48 {
+                    direction.is_empty() && target_index.is_some_and(|index| index <= 100_000)
+                } else {
+                    target_index.is_none() && (direction == "up" || direction == "down")
+                };
+                if !valid_position {
                     return Err(HcdError::InvalidPatch(
-                        "pptx.slide.reorder direction must be \"up\" or \"down\"".to_string(),
+                        "pptx.slide.reorder needs a direction in version 43 or a targetIndex in version 48".to_string(),
                     ));
                 }
             }
@@ -4024,11 +4363,13 @@ fn validate_patch_identity(
                         | crate::HCD_PATCH_SCHEMA_VERSION_22
                         | crate::HCD_PATCH_SCHEMA_VERSION_28
                         | crate::HCD_PATCH_SCHEMA_VERSION_29
+                        | crate::HCD_PATCH_SCHEMA_VERSION_50
                 ) || manifest.source.format != "xlsx"
                     || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+                        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
                         && patch.operations.len() != 1)
                 {
                     return Err(HcdError::Unsupported(
@@ -4064,7 +4405,8 @@ fn validate_patch_identity(
                 if (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
                     || manifest.source.format != "xlsx"
                     || (patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
                         && patch.operations.len() != 1)
@@ -4102,7 +4444,8 @@ fn validate_patch_identity(
                 precondition,
             } => {
                 if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
                     || manifest.source.format != "xlsx"
                 {
                     return Err(HcdError::Unsupported(
@@ -4140,6 +4483,7 @@ fn validate_patch_identity(
                 precondition,
             } => {
                 if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
                     || manifest.source.format != "xlsx"
                 {
                     return Err(HcdError::Unsupported(
@@ -4172,7 +4516,8 @@ fn validate_patch_identity(
                 if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
+                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
                     || manifest.source.format != "xlsx"
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
@@ -4519,6 +4864,35 @@ fn validate_patch_identity(
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_node_style(style)?;
+            }
+            PatchOperation::ImageInsert {
+                chunk_id,
+                asset_hash,
+                geometry,
+                alt,
+            } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_47
+                    || !matches!(
+                        manifest.source.format.as_str(),
+                        "pptx" | "pdf" | "xlsx" | "docx" | "md" | "html"
+                    )
+                {
+                    return Err(HcdError::Unsupported(
+                        "image.insert requires hcd-patch/47 and a visual document format".into(),
+                    ));
+                }
+                validate_identifier("chunkId", chunk_id)?;
+                validate_sha256("assetHash", asset_hash)?;
+                crate::html::validate_image_geometry(geometry)?;
+                if alt.chars().count() > 2000 || alt.chars().any(is_forbidden_xml_character) {
+                    return Err(HcdError::InvalidPatch(
+                        "image description is invalid".into(),
+                    ));
+                }
+                let emu = matches!(manifest.source.format.as_str(), "pptx" | "xlsx");
+                if emu != (geometry.unit == ImageGeometryUnit::Emu) {
+                    return Err(HcdError::InvalidPatch("image geometry must use EMU for slides/sheets and points for PDF/flow documents".into()));
+                }
             }
             PatchOperation::ImageReplace {
                 node_id,
@@ -5271,24 +5645,68 @@ fn collect_xlsx_unmerges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
         .collect()
 }
 
+fn validate_xlsx_rich_runs(runs: &[crate::XlsxInlineRun]) -> Result<usize, HcdError> {
+    if runs.is_empty() || runs.len() > 4096 {
+        return Err(HcdError::ResourceLimit(
+            "rich text requires 1..4096 runs".into(),
+        ));
+    }
+    let mut units = 0;
+    let mut bytes = 0;
+    for run in runs {
+        crate::validate_xlsx_run_properties(&run.properties)?;
+        if runs.len() > 1 && run.text.is_empty()
+            || run.text.chars().any(|ch| {
+                is_forbidden_xml_character(ch)
+                    || ch.is_control() && !matches!(ch, '\n' | '\t' | '\r')
+            })
+        {
+            return Err(HcdError::InvalidPatch(
+                "invalid empty run or control character in rich text".into(),
+            ));
+        }
+        units += run.text.encode_utf16().count();
+        bytes += run.text.len();
+        if units > 32767 {
+            return Err(HcdError::ResourceLimit(
+                "Excel strings cannot exceed 32767 UTF-16 units".into(),
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
 fn collect_xlsx_cell_set(
     patch: &PatchBatch,
 ) -> Result<BTreeMap<(String, u32, u32), XlsxCellInsertion>, HcdError> {
     let mut insertions = BTreeMap::new();
     for operation in &patch.operations {
-        let (sheet_id, row, column, text, formula) = match operation {
+        let (sheet_id, row, column, text, formula, runs) = match operation {
             PatchOperation::XlsxCellSet {
                 sheet_id,
                 row,
                 column,
                 text,
-            } => (sheet_id, row, column, text, false),
+            } => (sheet_id, row, column, text.clone(), false, None),
             PatchOperation::XlsxFormulaCreate {
                 sheet_id,
                 row,
                 column,
                 formula,
-            } => (sheet_id, row, column, formula, true),
+            } => (sheet_id, row, column, formula.clone(), true, None),
+            PatchOperation::XlsxRichTextCreate {
+                sheet_id,
+                row,
+                column,
+                runs,
+            } => (
+                sheet_id,
+                row,
+                column,
+                runs.iter().map(|run| run.text.as_str()).collect(),
+                false,
+                Some(runs.clone()),
+            ),
             _ => continue,
         };
         let key = (sheet_id.clone(), *row, *column);
@@ -5299,8 +5717,9 @@ fn collect_xlsx_cell_set(
                     sheet_id: sheet_id.clone(),
                     row: *row,
                     column: *column,
-                    text: text.clone(),
+                    text,
                     formula,
+                    runs,
                 },
             )
             .is_some()
@@ -6338,12 +6757,14 @@ fn collect_pptx_slide_reorder(patch: &PatchBatch) -> Option<PptxSlideMoveTarget>
         let PatchOperation::PptxSlideReorder {
             chunk_id,
             direction,
+            target_index,
         } = operation
         else {
             return None;
         };
         Some(PptxSlideMoveTarget {
             direction: direction.clone(),
+            target_index: *target_index,
             chunk_id: chunk_id.clone(),
             slide_part: String::new(),
             moving_chunk_ids: Vec::new(),
@@ -6376,7 +6797,14 @@ fn resolve_pptx_slide_reorder(
             "PPTX presentation must hold two slides to move one".to_string(),
         ));
     }
-    let target = if request.direction == "up" {
+    let target = if let Some(target) = request.target_index {
+        if target >= pages.len() || target == placed {
+            return Err(HcdError::InvalidPatch(
+                "PPTX targetIndex must name a different slide position".into(),
+            ));
+        }
+        Some(target)
+    } else if request.direction == "up" {
         placed.checked_sub(1)
     } else {
         placed.checked_add(1).filter(|next| *next < pages.len())
@@ -6394,10 +6822,21 @@ fn resolve_pptx_slide_reorder(
     };
     Ok(PptxSlideMoveTarget {
         direction: request.direction.clone(),
+        target_index: request.target_index,
         chunk_id: request.chunk_id.clone(),
         slide_part: pages[placed].slide_part.clone(),
         moving_chunk_ids: pages[placed].chunks.clone(),
-        passed_chunk_ids: pages[target].chunks.clone(),
+        passed_chunk_ids: if target < placed {
+            pages[target..placed]
+                .iter()
+                .flat_map(|page| page.chunks.clone())
+                .collect()
+        } else {
+            pages[placed + 1..=target]
+                .iter()
+                .flat_map(|page| page.chunks.clone())
+                .collect()
+        },
     })
 }
 
@@ -8763,6 +9202,7 @@ fn set_xlsx_formula_value(html: &mut String, node_id: &str) -> Result<(), HcdErr
         ("data-hcd-formula-expression", ""),
         ("data-hcd-formula-edited", "false"),
         ("data-hcd-raw-value", ""),
+        ("data-hcd-value-type", "string"),
     ] {
         let cell_end = html[cell_start..]
             .find('>')
@@ -8814,7 +9254,18 @@ fn set_xlsx_raw_value(html: &mut String, node_id: &str, value: &str) -> Result<(
             "XLSX formula must use a formula conversion operation".to_string(),
         ));
     }
-    set_attribute_in_range(html, cell_start, cell_end, "data-hcd-raw-value", value)
+    set_attribute_in_range(html, cell_start, cell_end, "data-hcd-raw-value", value)?;
+    let cell_end = html[cell_start..]
+        .find('>')
+        .map(|offset| cell_start + offset)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX cell tag is not closed".to_string()))?;
+    set_attribute_in_range(
+        html,
+        cell_start,
+        cell_end,
+        "data-hcd-value-type",
+        if value.is_empty() { "string" } else { "number" },
+    )
 }
 
 fn xlsx_cells(html: &str) -> Result<Vec<XlsxCellSpan>, HcdError> {
@@ -8955,9 +9406,14 @@ fn insert_xlsx_cell(
     } else {
         String::new()
     };
+    let content = if let Some(runs) = &insertion.runs {
+        crate::render_xlsx_inline_runs(runs)?
+    } else {
+        escape_text(&insertion.text)
+    };
     let replacement = format!(
-        "<td class=\"hcd-cell\" data-hcd-cell=\"{reference}\" data-hcd-column=\"{}\"{formula_attrs}><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></td>",
-        insertion.column, escape_text(&insertion.text)
+        "<td class=\"hcd-cell\" data-hcd-cell=\"{reference}\" data-hcd-column=\"{}\"{formula_attrs} data-hcd-value-type=\"string\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></td>",
+        insertion.column, content
     );
     if let Some(cell) = cell {
         html.replace_range(cell.start..cell.end, &replacement);
@@ -9682,7 +10138,24 @@ fn update_xlsx_cell_format(
     html: &mut String,
     node_id: &str,
     format: &XlsxCellFormatPatch,
-) -> Result<(), HcdError> {
+) -> Result<bool, HcdError> {
+    let mut rich = crate::extract_xlsx_inline_runs(html)?.remove(node_id);
+    let mut rich_changed = false;
+    if let Some(runs) = &mut rich {
+        for run in runs {
+            for (key, requested) in [
+                ("b", format.bold.is_some()),
+                ("i", format.italic.is_some()),
+                ("u", format.underline.is_some()),
+                ("sz", format.font_size_pt.is_some()),
+                ("color", format.color.is_some()),
+            ] {
+                if requested {
+                    rich_changed |= run.properties.remove(key).is_some();
+                }
+            }
+        }
+    }
     let marker = format!("data-hcd-id=\"{node_id}\"");
     let marker_at = html
         .find(&marker)
@@ -9713,7 +10186,7 @@ fn update_xlsx_cell_format(
         color: color.or_else(|| existing.color.clone()),
         fill: fill.or_else(|| existing.fill.clone()),
     };
-    if merged == existing {
+    if merged == existing && !rich_changed {
         return Err(HcdError::InvalidPatch(
             "XLSX cell format is unchanged".to_string(),
         ));
@@ -9722,7 +10195,16 @@ fn update_xlsx_cell_format(
     write_xlsx_format_attributes(&mut cell, &merged);
     apply_xlsx_cell_css(&mut cell, &merged)?;
     html.replace_range(cell_start..=cell_end, &cell);
-    Ok(())
+    if let Some(runs) = rich {
+        let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+        replace_node_content(
+            html,
+            node_id,
+            &crate::render_xlsx_inline_runs(&runs)?,
+            &hash_bytes(text.as_bytes()),
+        )?;
+    }
+    Ok(rich_changed)
 }
 
 fn xlsx_format_from_tag(tag: &str) -> Result<XlsxCellFormatPatch, HcdError> {
@@ -11049,30 +11531,120 @@ fn splice_text(text: &str, splices: &[Splice]) -> Result<String, HcdError> {
     Ok(chars.into_iter().collect())
 }
 
-fn replace_node_text(
+pub(crate) fn replace_node_text(
     html: &mut String,
     node_id: &str,
     text: &str,
     node_hash: &str,
 ) -> Result<(), HcdError> {
-    let needle = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
-    let attribute = html
-        .find(&needle)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} missing from HTML")))?;
-    let content_start = html[attribute + needle.len()..]
-        .find('>')
-        .map(|offset| attribute + needle.len() + offset + 1)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has no start tag end")))?;
-    let content_end = html[content_start..]
-        .find("</span>")
-        .map(|offset| content_start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has no closing span")))?;
-    html.replace_range(content_start..content_end, &escape_text(text));
-    let tag_start = html[..attribute].rfind('<').unwrap_or(attribute);
-    let tag_end = html[attribute..]
-        .find('>')
-        .map(|offset| attribute + offset)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has no start tag")))?;
+    if let Some(runs) = crate::extract_xlsx_inline_runs(html)?.get(node_id) {
+        let old: Vec<char> = runs.iter().flat_map(|r| r.text.chars()).collect();
+        let new: Vec<char> = text.chars().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let inserted: String = new[prefix..new.len() - suffix].iter().collect();
+        let adjusted =
+            crate::splice_xlsx_inline_runs(runs, prefix, old.len() - prefix - suffix, &inserted);
+        return replace_node_content(
+            html,
+            node_id,
+            &crate::render_xlsx_inline_runs(&adjusted)?,
+            node_hash,
+        );
+    }
+    let rich = crate::extract_docx_inline_runs(html)?;
+    let content = if let Some(runs) = rich.get(node_id) {
+        // A text-only splice inherits the adjoining mark, without discarding
+        // earlier rich edits or leaving stale native export metadata behind.
+        let old: String = runs.iter().map(|run| run.text.as_str()).collect();
+        let a: Vec<char> = old.chars().collect();
+        let b: Vec<char> = text.chars().collect();
+        let prefix = a.iter().zip(&b).take_while(|(a, b)| a == b).count();
+        let suffix = a[prefix..]
+            .iter()
+            .rev()
+            .zip(b[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let inserted: String = b[prefix..b.len() - suffix].iter().collect();
+        let adjusted = crate::docx_inline::splice_docx_inline_runs(
+            runs,
+            prefix,
+            a.len() - prefix - suffix,
+            &inserted,
+        );
+        crate::docx_inline::render_docx_inline_runs(&adjusted)
+    } else {
+        escape_text(text)
+    };
+    replace_node_content(html, node_id, &content, node_hash)
+}
+
+pub(crate) fn replace_node_content(
+    html: &mut String,
+    node_id: &str,
+    content: &str,
+    node_hash: &str,
+) -> Result<(), HcdError> {
+    // Structural blocks can intentionally share their first text anchor's ID.
+    // Select the element carrying a node hash, and match its actual end rather
+    // than the first literal </span> or an attribute's quoted '>'.
+    let (tag_start, content_start, content_end) = {
+        let mut reader = quick_xml::Reader::from_str(html);
+        reader.config_mut().check_end_names = true;
+        let mut target = None;
+        let mut depth = 0usize;
+        loop {
+            let before = reader.buffer_position() as usize;
+            let event = reader.read_event().map_err(|error| {
+                HcdError::InvalidBundle(format!("text anchor parse error: {error}"))
+            })?;
+            match event {
+                quick_xml::events::Event::Start(start) => {
+                    if target.is_some() {
+                        depth += 1;
+                        continue;
+                    }
+                    let mut matching_id = false;
+                    let mut has_hash = false;
+                    for attribute in start.attributes() {
+                        let attribute = attribute
+                            .map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+                        if attribute.key.as_ref() == b"data-hcd-id" {
+                            matching_id = attribute
+                                .unescape_value()
+                                .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+                                == node_id;
+                        }
+                        has_hash |= attribute.key.as_ref() == b"data-hcd-node-hash";
+                    }
+                    if matching_id && has_hash {
+                        target = Some((before, reader.buffer_position() as usize));
+                        depth = 1;
+                    }
+                }
+                quick_xml::events::Event::End(_) if target.is_some() => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let (start, content) = target.expect("matched text anchor");
+                        break (start, content, before);
+                    }
+                }
+                quick_xml::events::Event::Eof => {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "canonical text node {node_id} missing or unclosed"
+                    )))
+                }
+                _ => {}
+            }
+        }
+    };
+    let tag_end = content_start - 1;
     let hash_marker = "data-hcd-node-hash=\"";
     let hash_start = html[tag_start..tag_end]
         .find(hash_marker)
@@ -11084,6 +11656,7 @@ fn replace_node_text(
         .find('"')
         .map(|offset| hash_start + offset)
         .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has invalid node hash")))?;
+    html.replace_range(content_start..content_end, content);
     html.replace_range(hash_start..hash_end, node_hash);
     Ok(())
 }
@@ -11219,6 +11792,8 @@ fn replace_image_geometry(
     geometry: &ImageGeometry,
 ) -> Result<(), HcdError> {
     crate::html::validate_image_geometry(geometry)?;
+    let (start, end) = element_start_tag_range(html, node_id)?;
+    let flow = html[start..=end].contains("data-hcd-image-flow=\"true\"");
     set_element_attribute(html, node_id, "data-hcd-image-geometry-patched", "true")?;
     for (name, value) in [
         ("data-hcd-x", canonical_f64(geometry.x)),
@@ -11246,6 +11821,15 @@ fn replace_image_geometry(
         ] {
             set_element_attribute(html, node_id, name, &value)?;
         }
+        // Absolute spreadsheet drawing anchors must follow edited geometry too.
+        for (name, value) in [
+            ("data-hcd-absolute-x-emu", geometry.x),
+            ("data-hcd-absolute-y-emu", geometry.y),
+            ("data-hcd-extent-width-emu", geometry.width),
+            ("data-hcd-extent-height-emu", geometry.height),
+        ] {
+            set_element_attribute(html, node_id, name, &canonical_f64(value))?;
+        }
     } else {
         set_element_attribute(
             html,
@@ -11269,15 +11853,20 @@ fn replace_image_geometry(
         ImageGeometryUnit::Pt => "pt",
     };
     let mut properties = BTreeMap::new();
-    properties.insert("position".to_string(), "absolute".to_string());
     properties.insert(
-        "left".to_string(),
-        format!("{}{suffix}", canonical_f64(geometry.x * scale)),
+        "position".to_string(),
+        if flow { "relative" } else { "absolute" }.to_string(),
     );
-    properties.insert(
-        "top".to_string(),
-        format!("{}{suffix}", canonical_f64(geometry.y * scale)),
-    );
+    if !flow {
+        properties.insert(
+            "left".to_string(),
+            format!("{}{suffix}", canonical_f64(geometry.x * scale)),
+        );
+        properties.insert(
+            "top".to_string(),
+            format!("{}{suffix}", canonical_f64(geometry.y * scale)),
+        );
+    }
     properties.insert(
         "width".to_string(),
         format!("{}{suffix}", canonical_f64(geometry.width * scale)),
@@ -11491,6 +12080,8 @@ fn apply_annotations(
             | PatchOperation::PptxRunFormat { .. }
             | PatchOperation::PptxShapeAlign { .. }
             | PatchOperation::XlsxCellFormat { .. }
+            | PatchOperation::XlsxRichTextSet { .. }
+            | PatchOperation::XlsxRichTextCreate { .. }
             | PatchOperation::XlsxCellLayout { .. }
             | PatchOperation::XlsxCellNumberFormat { .. }
             | PatchOperation::PdfTextGeometry { .. }
@@ -11522,6 +12113,7 @@ fn apply_annotations(
             | PatchOperation::PptxSlideReorder { .. }
             | PatchOperation::PptxSlideCopy { .. }
             | PatchOperation::NodeStyle { .. }
+            | PatchOperation::ImageInsert { .. }
             | PatchOperation::ImageReplace { .. }
             | PatchOperation::ImageGeometry { .. } => {}
         }
@@ -11615,6 +12207,27 @@ fn is_forbidden_xml_character(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_replacement_targets_the_hashed_anchor_and_preserves_structural_ids() {
+        let id = "n_00000000000000000000000000000001";
+        let old_hash = hash_bytes(b"old");
+        let new_hash = hash_bytes("新😀".as_bytes());
+        let before = format!("<p data-hcd-id=\"{id}\"><span title=\"a > b\" data-hcd-id=\"{id}\" data-hcd-node-hash=\"{old_hash}\"><span>old</span><em> content</em></span><i>untouched</i></p>");
+        let mut html = before.clone();
+        replace_node_content(&mut html, id, "新😀", &new_hash).unwrap();
+        assert_eq!(
+            html,
+            before
+                .replace("<span>old</span><em> content</em>", "新😀")
+                .replace(&old_hash, &new_hash)
+        );
+        assert_eq!(extract_html_text_nodes(&html).unwrap()[id], "新😀");
+        let missing = "n_00000000000000000000000000000002";
+        let unchanged = html.clone();
+        assert!(replace_node_content(&mut html, missing, "bad", &new_hash).is_err());
+        assert_eq!(html, unchanged);
+    }
 
     #[test]
     fn pdf_overlay_geometry_moves_and_resizes_without_changing_text_identity() {
@@ -12741,6 +13354,7 @@ mod tests {
             operations: vec![crate::PatchOperation::PptxSlideReorder {
                 chunk_id: chunk_id.to_string(),
                 direction: direction.to_string(),
+                target_index: None,
             }],
         }
     }
@@ -12848,6 +13462,33 @@ mod tests {
             html.find("page-1") < html.find("page-0"),
             "the moved page does not render first: {html}"
         );
+    }
+
+    #[test]
+    fn pptx_slide_drag_reorders_nonadjacent_pages_in_one_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 5);
+        let drag = |source: usize, target: usize, base: u64| {
+            let mut patch = move_slide_patch(&slide_chunk(source), "", base);
+            patch.schema_version = crate::HCD_PATCH_SCHEMA_VERSION_48.to_string();
+            patch.patch_id = format!("drag-{source}-{target}-{base}");
+            patch.operations = vec![crate::PatchOperation::PptxSlideReorder {
+                chunk_id: slide_chunk(source),
+                direction: String::new(),
+                target_index: Some(target),
+            }];
+            patch
+        };
+        assert_eq!(apply_patch(&bundle, &drag(0, 3, 0), 0).unwrap().revision, 1);
+        assert_eq!(index_chunk_order(&bundle), [1, 2, 3, 0, 4].map(slide_chunk));
+        assert_eq!(apply_patch(&bundle, &drag(4, 1, 1), 1).unwrap().revision, 2);
+        assert_eq!(index_chunk_order(&bundle), [1, 4, 2, 3, 0].map(slide_chunk));
+        for patch in [drag(0, 9, 2), drag(0, 4, 2), drag(0, 1, 0)] {
+            assert!(apply_patch(&bundle, &patch, 2).is_err());
+            assert_eq!(bundle.manifest().unwrap().revision, 2);
+            assert_eq!(index_chunk_order(&bundle), [1, 4, 2, 3, 0].map(slide_chunk));
+        }
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
     }
 
     #[test]
@@ -12972,6 +13613,7 @@ mod tests {
                     operations: vec![crate::PatchOperation::PptxSlideReorder {
                         chunk_id,
                         direction: direction.to_string(),
+                        target_index: None,
                     }],
                 },
                 0,

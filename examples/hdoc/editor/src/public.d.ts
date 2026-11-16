@@ -10,6 +10,9 @@ export type EmbeddedHcdEditorProps = {
   collabUrl: string
   /** Initial locale. Defaults to en-US; accepts en, zh, zh-Hant and supported region tags. */
   locale?: string
+  /** Workspace appearance; document colors are preserved. Defaults to system. */
+  appearance?: 'system' | 'light' | 'dark'
+  onAppearanceChange?: (appearance: 'system' | 'light' | 'dark') => void
   onLocaleChange?: (locale: HcdEditorLocale) => void
   onClose?: () => void
   onError?: (error: Error) => void

@@ -3,6 +3,19 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::BTreeMap;
 
+/// Navigable links in canonical HTML and semantic edits. Relative file URLs
+/// have no stable base inside a bundle. Length budgets belong to the caller.
+pub fn is_safe_hyperlink(value: &str) -> bool {
+    if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    value.starts_with('#')
+        || ["https://", "http://", "mailto:", "tel:"]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
+
 /// Extracts canonical editable text from one bounded HCD HTML fragment.
 ///
 /// Structural elements may carry `data-hcd-id`; canonical text nodes are the
@@ -11,7 +24,8 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
     let mut reader = Reader::from_str(html);
     reader.config_mut().check_end_names = true;
     let mut buffer = Vec::with_capacity(16 * 1024);
-    let mut current: Option<(String, Vec<u8>, String)> = None;
+    let mut current: Option<(String, Vec<u8>, String, usize)> = None;
+    let mut depth = 0usize;
     let mut nodes = BTreeMap::new();
 
     loop {
@@ -20,6 +34,7 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
             .map_err(|error| HcdError::InvalidBundle(format!("HTML XML parse error: {error}")))?;
         match event {
             Event::Start(start) => {
+                depth += 1;
                 let (node_id, has_node_hash) = node_attributes(&reader, &start)?;
                 if has_node_hash {
                     let node_id = node_id.ok_or_else(|| {
@@ -32,7 +47,12 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
                             "nested canonical text nodes are forbidden".to_string(),
                         ));
                     }
-                    current = Some((node_id, start.name().as_ref().to_vec(), String::new()));
+                    current = Some((
+                        node_id,
+                        start.name().as_ref().to_vec(),
+                        String::new(),
+                        depth,
+                    ));
                 }
             }
             Event::Empty(empty) => {
@@ -50,34 +70,34 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
                 }
             }
             Event::Text(text) => {
-                if let Some((_, _, value)) = &mut current {
+                if let Some((_, _, value, _)) = &mut current {
                     value.push_str(&text.unescape().map_err(|error| {
                         HcdError::InvalidBundle(format!("invalid HTML text: {error}"))
                     })?);
                 }
             }
             Event::CData(text) => {
-                if let Some((_, _, value)) = &mut current {
+                if let Some((_, _, value, _)) = &mut current {
                     value.push_str(&reader.decoder().decode(text.as_ref()).map_err(|error| {
                         HcdError::InvalidBundle(format!("invalid HTML CDATA: {error}"))
                     })?);
                 }
             }
             Event::End(end) => {
-                if current
-                    .as_ref()
-                    .is_some_and(|(_, name, _)| name.as_slice() == end.name().as_ref())
-                {
-                    let (node_id, _, text) = current.take().expect("checked current text node");
+                if current.as_ref().is_some_and(|(_, name, _, node_depth)| {
+                    *node_depth == depth && name.as_slice() == end.name().as_ref()
+                }) {
+                    let (node_id, _, text, _) = current.take().expect("checked current text node");
                     insert_unique(&mut nodes, node_id, text)?;
                 }
+                depth = depth.saturating_sub(1);
             }
             Event::Eof => break,
             _ => {}
         }
         buffer.clear();
     }
-    if let Some((node_id, _, _)) = current {
+    if let Some((node_id, _, _, _)) = current {
         return Err(HcdError::InvalidBundle(format!(
             "canonical text node {node_id} was not closed"
         )));
@@ -454,6 +474,9 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "break-before"
                 | "width"
                 | "min-width"
+                | "max-width"
+                | "margin"
+                | "object-fit"
                 | "height"
                 | "min-height"
                 | "table-layout"
@@ -480,6 +503,8 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "text-orientation"
                 | "flex-direction"
                 | "justify-content"
+                | "--hcd-line-rule"
+                | "--hcd-snap-grid"
         ) {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS property {property} is not allowed"
@@ -502,6 +527,14 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
             )));
         }
         let normalized_value = value.to_ascii_lowercase();
+        if (property == "--hcd-line-rule"
+            && !matches!(normalized_value.as_str(), "auto" | "exact" | "atleast"))
+            || (property == "--hcd-snap-grid" && !matches!(value, "0" | "1"))
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS value for {property} is not allowed"
+            )));
+        }
         if normalized_value.contains("url(") {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS value for {property} is unsafe"
@@ -690,5 +723,10 @@ mod tests {
         assert!(validate_inline_style("background-image:url(relative.png)").is_err());
         assert!(validate_inline_style("transform:translate(10px)").is_err());
         assert!(validate_inline_style("writing-mode:sideways-lr").is_err());
+        assert!(validate_inline_style("--hcd-line-rule:atLeast;--hcd-snap-grid:1").is_ok());
+        assert!(validate_inline_style("--hcd-line-rule:exact;--hcd-snap-grid:0").is_ok());
+        assert!(validate_inline_style("--hcd-line-rule:inherit").is_err());
+        assert!(validate_inline_style("--hcd-snap-grid:2").is_err());
+        assert!(validate_inline_style("--arbitrary-property:1").is_err());
     }
 }

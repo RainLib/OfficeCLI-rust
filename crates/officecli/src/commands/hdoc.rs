@@ -334,6 +334,9 @@ pub struct HdocServeCommand {
     /// Theme revision id pinned onto newly imported documents. Unset leaves imports unpinned.
     #[arg(long, value_name = "themeRevisionId")]
     pub default_theme: Option<String>,
+    /// Registered business Provider configuration; secrets are read from named environment variables
+    #[arg(long)]
+    pub integration_config: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -1250,6 +1253,27 @@ fn export(
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
     let head = bundle.manifest().map_err(handler_error)?;
     let target = semantic_target(&command.output, command.to.as_deref())?;
+    if hcd_formats::images::is_image_format(&head.source.format)
+        && hcd_formats::images::is_image_format(&target)
+    {
+        let report = hcd_formats::images::export_image(
+            &bundle,
+            Path::new(&command.output),
+            &hcd_formats::ExportOptions {
+                revision: command.revision,
+                fidelity_report: command.fidelity_report.clone(),
+            },
+        )
+        .map_err(handler_error)?;
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported image to {}", command.output),
+        );
+    }
     if target == "html"
         && !(command.source.is_some() && normalize_format(&head.source.format) == "html")
     {
@@ -1431,7 +1455,7 @@ fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, Hand
     let target = requested.unwrap_or(extension);
     if !matches!(
         target.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "png" | "jpg" | "jpeg" | "webp"
     ) {
         return Err(HandlerError::UnsupportedMode(format!(
             "HCD export supports .docx, .xlsx, .pptx, .pdf, .html, .md/.markdown, or .txt; found .{target}"
@@ -1489,6 +1513,8 @@ fn semantic_export(
     std::fs::create_dir_all(parent)?;
     if target == "pdf" && manifest.profile == "fixed-layout" && manifest.source.format == "pdf" {
         let pages = super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path)?;
+        hcd_formats::append_created_images(bundle, output_path, Some(revision))
+            .map_err(handler_error)?;
         let report = FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             level: FidelityLevel::Visual,

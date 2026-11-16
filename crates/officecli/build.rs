@@ -7,6 +7,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let workspace_dir = manifest_dir.join("../..");
     generate_schema_entries(&workspace_dir);
+    generate_hcd_patch_schemas(&workspace_dir);
     generate_plugin_lint_schema_index(&workspace_dir);
     generate_skill_entries(&workspace_dir);
 }
@@ -149,4 +150,34 @@ fn canonical_name(schema_root: &Path, path: &Path) -> String {
         relative.to_string_lossy().replace('\\', "/")
     )
     .to_lowercase()
+}
+
+/// Discover every embedded patch schema so operation negotiation cannot forget
+/// a newly introduced version. The definitions themselves remain in hcd-core.
+fn generate_hcd_patch_schemas(workspace_dir: &Path) {
+    let root = workspace_dir.join("crates/hcd-core/schemas");
+    println!("cargo:rerun-if-changed={}", root.display());
+    let mut files = Vec::new();
+    collect_json_files(&root, &mut files);
+    files.retain(|path| {
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("hcd-patch-")
+    });
+    files.sort();
+    assert!(!files.is_empty(), "no HCD patch schemas found");
+    let mut generated = String::from("const SCHEMAS: &[&str] = &[\n");
+    for path in files {
+        let absolute = fs::canonicalize(&path).unwrap();
+        writeln!(
+            generated,
+            "    include_str!({:?}),",
+            absolute.to_string_lossy()
+        )
+        .unwrap();
+    }
+    generated.push_str("];\n");
+    let output = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    fs::write(output.join("hcd_patch_schemas.rs"), generated).unwrap();
 }

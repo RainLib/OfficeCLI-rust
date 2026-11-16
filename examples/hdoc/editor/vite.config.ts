@@ -1,15 +1,22 @@
 import { createHmac } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { Agent as HttpAgent } from 'node:http'
+import { Agent as HttpsAgent } from 'node:https'
 import { join } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 
 const samples = [
+  { id: 'accept-image', title: '陶艺时刻.jpg', format: 'JPG', mode: '可编辑图片与局部重绘' },
   { id: 'accept-docx', title: '项目提案', format: 'DOCX', mode: '可编辑' },
+  { id: 'accept-pronunciation', title: '中文发音 · 图文课件', format: 'PPTX', mode: '可编辑文字与插图' },
   { id: 'accept-pptx', title: '产品发布演示', format: 'PPTX', mode: '可编辑文字框' },
+  { id: 'accept-sushi', title: '霜雪鮨 · 寿司介绍（280 元）', format: 'PPTX', mode: '可编辑文字框' },
   { id: 'accept-xlsx', title: '成绩册', format: 'XLSX', mode: '可编辑单元格' },
   { id: 'accept-usage-xlsx', title: '用量统计（CSV 转 XLSX）', format: 'XLSX', mode: '可编辑单元格' },
   { id: 'accept-md', title: 'Markdown 富文本', format: 'Markdown', mode: '可编辑' },
   { id: 'accept-txt', title: 'TXT 纯文本', format: 'TXT', mode: '可编辑' },
+  { id: 'accept-html', title: 'HTML 内容', format: 'HTML', mode: '可编辑' },
+  { id: 'accept-agent-table', title: 'Word 表格协作', format: 'DOCX', mode: '可编辑' },
   { id: 'accept-download-txt', title: '下载测试文本', format: 'TXT', mode: '附件下载验收' },
   { id: 'accept-physics-pdf-v2', title: '初三物理练习卷（1 页）', format: 'PDF', mode: '可编辑识别文字' },
   { id: 'demo-pdf-raster-quality', title: 'PDF 版式验证样例', format: 'PDF', mode: '可编辑识别文字' },
@@ -65,14 +72,22 @@ function localAcceptanceSamples(): Plugin {
   }
 }
 
+const apiTarget = process.env.HCD_API_TARGET || 'http://127.0.0.1:8766'
+const apiAgent = new (new URL(apiTarget).protocol === 'https:' ? HttpsAgent : HttpAgent)({
+  keepAlive: true, maxSockets: 32, maxFreeSockets: 8,
+})
+
 export default defineConfig({
   cacheDir: process.env.HCD_VITE_CACHE_DIR,
-  plugins: [localAcceptanceSamples()],
+  plugins: [localAcceptanceSamples(), {
+    name: 'hcd-api-proxy-connections',
+    configureServer(server) { server.httpServer?.once('close', () => apiAgent.destroy()) },
+  }],
   server: {
     port: 8767,
     proxy: {
-      '/v1': process.env.HCD_API_TARGET || 'http://127.0.0.1:8766',
-      '/health': process.env.HCD_API_TARGET || 'http://127.0.0.1:8766',
+      '/v1': { target: apiTarget, agent: apiAgent },
+      '/health': { target: apiTarget, agent: apiAgent },
     },
   },
 })

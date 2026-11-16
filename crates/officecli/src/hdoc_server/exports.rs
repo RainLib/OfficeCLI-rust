@@ -60,9 +60,27 @@ pub(super) async fn capabilities(
     headers: HeaderMap,
 ) -> Result<Json<ExportCapabilities>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    let plan = tokio::task::spawn_blocking(move || build_capabilities(&state, &id, query.revision))
-        .await
-        .map_err(internal)??;
+    let access = integration::access(&state, &headers, &id).await?;
+    let plan_state = state.clone();
+    let plan_id = id.clone();
+    let mut plan = tokio::task::spawn_blocking(move || {
+        build_capabilities(&plan_state, &plan_id, query.revision)
+    })
+    .await
+    .map_err(internal)??;
+    if let Some(decision) = access {
+        for format in &mut plan.formats {
+            if integration::export_permission(&state, &id, &format.format, &decision).is_err() {
+                format.available = false;
+                for mode in &mut format.modes {
+                    mode.disable(
+                        "permission_denied",
+                        "business policy does not allow this export".into(),
+                    );
+                }
+            }
+        }
+    }
     Ok(Json(plan))
 }
 
@@ -80,6 +98,32 @@ fn build_capabilities(
         other => other,
     }
     .to_string();
+    if hcd_formats::images::is_image_format(&source_format) {
+        let formats = ["png", "jpeg", "webp", "hcd"]
+            .into_iter()
+            .map(|format| FormatCapability {
+                format: format.into(),
+                available: format != "hcd" || revision == head.revision,
+                recommended_mode: if format == "hcd" { "archive" } else { "raster" }.into(),
+                modes: vec![ExportMode::new(
+                    if format == "hcd" { "archive" } else { "raster" },
+                    if format == "webp" {
+                        vec!["lossless_webp".into()]
+                    } else {
+                        vec![]
+                    },
+                )],
+            })
+            .collect();
+        return Ok(ExportCapabilities {
+            document_id: id.into(),
+            source_format,
+            revision,
+            head_revision: head.revision,
+            default_format: "png".into(),
+            formats,
+        });
+    }
     let source_path = state
         .root
         .join("sources")
@@ -228,15 +272,44 @@ const MAX_DOWNLOAD_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(super) struct DownloadTicket {
-    document_id: String,
-    format: String,
-    revision: u64,
+    pub(super) document_id: String,
+    pub(super) format: String,
+    pub(super) integration_session: Option<String>,
+    pub(super) revision: u64,
     artifact: Arc<tempfile::NamedTempFile>,
     size: usize,
     expires_at: Instant,
 }
 
 pub(super) async fn prepare_download(
+    State(state): State<ServerState>,
+    Path((id, format)): Path<(String, String)>,
+    Query(mut query): Query<ExportQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let actor = claims(&state, &headers, &id)?;
+    query.revision = Some(
+        query
+            .revision
+            .unwrap_or(open(&state, &id)?.manifest().map_err(hcd_error)?.revision),
+    );
+    admin::track_export(
+        &state,
+        &id,
+        &format,
+        query.revision,
+        &actor,
+        prepare_download_untracked(
+            State(state.clone()),
+            Path((id.clone(), format.clone())),
+            Query(query),
+            headers,
+        ),
+    )
+    .await
+}
+
+async fn prepare_download_untracked(
     State(state): State<ServerState>,
     Path((id, format)): Path<(String, String)>,
     Query(query): Query<ExportQuery>,
@@ -290,6 +363,7 @@ pub(super) async fn prepare_download(
         DownloadTicket {
             document_id: id.clone(),
             format: format.clone(),
+            integration_session: claims(&state, &headers, &id)?.integration_session,
             revision,
             artifact: Arc::new(artifact),
             size,
@@ -350,6 +424,34 @@ async fn serve_ticket(
 pub(super) async fn export_document(
     State(state): State<ServerState>,
     Path((id, format)): Path<(String, String)>,
+    Query(mut query): Query<ExportQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let actor = claims(&state, &headers, &id)?;
+    query.revision = Some(
+        query
+            .revision
+            .unwrap_or(open(&state, &id)?.manifest().map_err(hcd_error)?.revision),
+    );
+    admin::track_export(
+        &state,
+        &id,
+        &format,
+        query.revision,
+        &actor,
+        export_document_untracked(
+            State(state.clone()),
+            Path((id.clone(), format.clone())),
+            Query(query),
+            headers,
+        ),
+    )
+    .await
+}
+
+async fn export_document_untracked(
+    State(state): State<ServerState>,
+    Path((id, format)): Path<(String, String)>,
     Query(query): Query<ExportQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -385,6 +487,43 @@ async fn export_document_inner(
             "portable HCD includes history through the current revision",
         ));
     }
+    if hcd_formats::images::is_image_format(&head.source.format)
+        && hcd_formats::images::is_image_format(&format)
+    {
+        let output = tempfile::Builder::new()
+            .suffix(&format!(".{format}"))
+            .tempfile()
+            .map_err(internal)?;
+        let path = output.path().to_path_buf();
+        let options = hcd_formats::ExportOptions {
+            revision: Some(requested),
+            fidelity_report: None,
+        };
+        tokio::task::spawn_blocking(move || {
+            hcd_formats::images::export_image(&bundle, &path, &options)
+        })
+        .await
+        .map_err(internal)?
+        .map_err(hcd_error)?;
+        let bytes = tokio::fs::read(output.path()).await.map_err(internal)?;
+        let mime = match format.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+        return Ok((
+            [
+                (header::CONTENT_TYPE, mime.to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{id}.{format}\""),
+                ),
+                (header::CACHE_CONTROL, "private, no-store".into()),
+            ],
+            bytes,
+        )
+            .into_response());
+    }
     if !matches!(
         format.as_str(),
         "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
@@ -403,9 +542,13 @@ async fn export_document_inner(
         .iter()
         .find(|item| item.format == format)
         .and_then(|item| {
-            item.modes
-                .iter()
-                .find(|mode| mode.source == query.source.unwrap_or(false))
+            item.modes.iter().find(|mode| {
+                query
+                    .source
+                    .map_or(mode.id == item.recommended_mode, |source| {
+                        mode.source == source
+                    })
+            })
         })
         .ok_or_else(|| bad("source-backed export requires a matching source and target format"))?;
     if !mode.available {
@@ -468,7 +611,7 @@ async fn export_document_inner(
             .arg(requested.to_string())
             .arg("--catalog")
             .arg(state.catalog.root());
-        if query.source.unwrap_or(false) {
+        if mode.source {
             let source = state
                 .root
                 .join("sources")

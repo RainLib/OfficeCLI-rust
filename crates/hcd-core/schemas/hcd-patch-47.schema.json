@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:47",
+  "title": "HTML Canonical Document image insertion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/47"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "op",
+          "chunkId",
+          "assetHash",
+          "geometry",
+          "alt"
+        ],
+        "properties": {
+          "op": {
+            "const": "image.insert"
+          },
+          "chunkId": {
+            "type": "string",
+            "pattern": "^c_[0-9a-f]{32}$"
+          },
+          "assetHash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "alt": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "geometry": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height",
+              "unit"
+            ],
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": -1000000000000.0,
+                "maximum": 1000000000000.0
+              },
+              "y": {
+                "type": "number",
+                "minimum": -1000000000000.0,
+                "maximum": 1000000000000.0
+              },
+              "width": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1000000000000.0
+              },
+              "height": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1000000000000.0
+              },
+              "unit": {
+                "enum": [
+                  "pt",
+                  "emu"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

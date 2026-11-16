@@ -1,7 +1,21 @@
 import type { FUniver, ICellData, IObjectMatrixPrimitiveType, IStyleData } from '@univerjs/presets';
+import { CellValueType, LifecycleStages } from '@univerjs/presets';
 import type { FWorkbook, FWorksheet } from '@univerjs/preset-sheets-core';
+import { ScrollToRangeOperation, SetFormulaCalculationResultMutation } from '@univerjs/preset-sheets-core';
 import { HcdBundleClient, type ChunkDescriptor } from './hcd.ts';
 import { parseGridChunk, type NodeLink, type ParsedGridChunk, type ParsedVisual } from './hcd-parser.ts';
+import { documentFromInlineRuns, editedInlineRuns, validateInlineRuns, type XlsxInlineRun } from './rich-text.ts';
+
+export interface HcdXlsxRichTextSet {
+  type: 'xlsx.richText.set';
+  nodeId: string;
+  runs: XlsxInlineRun[];
+  precondition: { nodeHash: string };
+}
+
+export interface HcdXlsxRichTextCreate {
+  type: 'xlsx.richText.create'; sheetId: string; row: number; column: number; runs: XlsxInlineRun[];
+}
 
 export interface HcdTextSplice {
   type: 'text.splice';
@@ -61,12 +75,12 @@ export interface HcdXlsxFormulaCreate {
 }
 
 export interface HcdPatchBatch {
-  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7' | 'hcd-patch/19' | 'hcd-patch/20' | 'hcd-patch/21' | 'hcd-patch/22' | 'hcd-patch/28' | 'hcd-patch/29';
+  schemaVersion: 'hcd-patch/1' | 'hcd-patch/7' | 'hcd-patch/19' | 'hcd-patch/20' | 'hcd-patch/21' | 'hcd-patch/22' | 'hcd-patch/28' | 'hcd-patch/29' | 'hcd-patch/49' | 'hcd-patch/50';
   documentId: string;
   patchId: string;
   baseRevision: number;
   actor: Record<string, string>;
-  operations: Array<HcdTextSplice | HcdXlsxCellSet | HcdXlsxFormulaSet | HcdXlsxFormulaCreate | HcdXlsxFormulaToValue | HcdXlsxFormulaToNumber | HcdXlsxNumberSet>;
+  operations: Array<HcdTextSplice | HcdXlsxRichTextSet | HcdXlsxRichTextCreate | HcdXlsxCellSet | HcdXlsxFormulaSet | HcdXlsxFormulaCreate | HcdXlsxFormulaToValue | HcdXlsxFormulaToNumber | HcdXlsxNumberSet>;
   metadata: Record<string, string>;
 }
 
@@ -84,6 +98,7 @@ interface PendingPatch {
   convertedFormulaIds: Set<string>;
   convertedNumberValues: Map<string, string>;
   formulaUpdates: Map<string, string>;
+  richUpdates: Map<string, XlsxInlineRun[]>;
 }
 
 interface ChunkRuntime {
@@ -103,6 +118,14 @@ interface SheetDimensions {
 
 function cellKey(sheetId: string, row: number, column: number): string {
   return `${sheetId}:${row}:${column}`;
+}
+
+function restoredLiteral(link: NodeLink, fallback: string | number): ICellData {
+  if (link.valueType === 'boolean' && (link.text === 'TRUE' || link.text === 'FALSE')) {
+    return { v: link.text === 'TRUE' ? 1 : 0, t: CellValueType.BOOLEAN };
+  }
+  if (link.rawValue !== undefined) return { v: link.rawValue, t: CellValueType.NUMBER };
+  return { v: fallback, t: CellValueType.STRING, ...(link.richText ? { p: structuredClone(link.richText) } : {}) };
 }
 
 function diffText(oldText: string, newText: string): Pick<HcdTextSplice, 'start' | 'deleteCount' | 'insertText'> {
@@ -165,7 +188,11 @@ export class HcdUniverAdapter {
   private readonly dimensions = new Map<string, SheetDimensions>();
   private readonly recalculatedFormulas = new Set<string>();
   private readonly editInputs = new Map<string, string>();
+  private readonly editDocuments = new Map<string, ICellData['p']>();
   private applying = 0;
+  private inputBlocked = false;
+
+  setInputBlocked(blocked: boolean): void { this.inputBlocked = blocked; }
 
   constructor(
     readonly client: HcdBundleClient,
@@ -174,6 +201,7 @@ export class HcdUniverAdapter {
     private currentMode: HcdViewerMode,
     private readonly onStatus: (message: string) => void,
     private readonly styleCatalog: Record<string, IStyleData> = {},
+    private readonly onError: (message: string) => void = () => {},
   ) {
     for (const sheet of client.sheets()) {
       const defaults = client.sheetDefaults(sheet.sheetId);
@@ -203,7 +231,7 @@ export class HcdUniverAdapter {
       this.scheduleVisible(activeSheet);
     });
     this.univerAPI.addEvent(this.univerAPI.Event.BeforeSheetEditStart, (event) => {
-      if (this.mode === 'readonly') {
+      if (this.mode === 'readonly' || this.inputBlocked) {
         event.cancel = true;
         return;
       }
@@ -218,12 +246,14 @@ export class HcdUniverAdapter {
     });
     this.univerAPI.addEvent(this.univerAPI.Event.BeforeSheetEditEnd, (event) => {
       const key = cellKey(event.worksheet.getSheetId(), event.row, event.column);
-      if (event.isConfirm) this.editInputs.set(key, event.value.toPlainText());
-      else this.editInputs.delete(key);
+      if (event.isConfirm) {
+        this.editInputs.set(key, event.value.toPlainText());
+        this.editDocuments.set(key, structuredClone(event.value.getData()));
+      } else { this.editInputs.delete(key); this.editDocuments.delete(key); }
     });
     this.univerAPI.addEvent(this.univerAPI.Event.BeforeCommandExecute, (event) => {
       if (
-        this.mode === 'readonly'
+        (this.mode === 'readonly' || this.inputBlocked)
         && !this.applying
         && event.type === this.univerAPI.Enum.CommandType.MUTATION
       ) {
@@ -234,11 +264,30 @@ export class HcdUniverAdapter {
       if (this.applying) return;
       void this.captureChanges(event.effectedRanges);
     });
+    // A compatibility calculation can complete after a service result. Reapply
+    // only the changed caches, never a formula edit or a document transaction.
+    this.univerAPI.getFormula().calculationResultApplied(() => {
+      if (!this.applying) void this.refreshFormulaResults();
+    });
     await this.ensureVisible(this.workbook.getActiveSheet());
   }
 
   getNodeAt(sheetId: string, row: number, column: number): NodeLink | undefined {
     return this.linksByCell.get(cellKey(sheetId, row, column));
+  }
+
+  applyRichCellInput(sheetId: string, row: number, column: number, runs: XlsxInlineRun[]): void {
+    if (this.mode !== 'editable' || this.hasPendingPatch() || this.workbook.isCellEditing()) throw new Error('请先结束单元格编辑或等待保存');
+    const sheet = this.workbook.getSheetBySheetId(sheetId), link = this.getNodeAt(sheetId, row, column);
+    if (!sheet || !(link?.editable || link?.formulaEditable || (!link && this.canEditBlankCell(sheetId, row, column)))) {
+      throw new Error('当前单元格不能应用文字格式');
+    }
+    const text = runs.map(run => run.text).join('');
+    validateInlineRuns(runs, text);
+    const doc = documentFromInlineRuns(runs, link?.nodeId ?? `${sheetId}-${row}-${column}`, link?.baseStyle);
+    const key = cellKey(sheetId, row, column);
+    this.editInputs.set(key, text); this.editDocuments.set(key, doc);
+    sheet.getRange(row, column).setValue({ v: text, t: CellValueType.STRING, p: doc });
   }
 
   applyCellInput(sheetId: string, row: number, column: number, input: string): void {
@@ -275,23 +324,40 @@ export class HcdUniverAdapter {
     range.setValue(numericText === undefined ? input : Number(numericText));
   }
 
-  async focusCell(sheetId: string, row: number, column: number): Promise<void> {
+  async scrollCell(sheetId: string, row: number, column: number): Promise<void> {
+    if (this.univerAPI.getCurrentLifecycleStage() < LifecycleStages.Rendered) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { listener.dispose(); reject(new Error('工作表画布尚未就绪，请稍后重试')); }, 10_000);
+        const listener = this.univerAPI.addEvent(this.univerAPI.Event.LifeCycleChanged, ({ stage }) => {
+          if (stage < LifecycleStages.Rendered) return;
+          // The lifecycle notification precedes some plugin callbacks. Let
+          // those register the scrolling controller before addressing it.
+          queueMicrotask(() => { clearTimeout(timer); listener.dispose(); resolve(); });
+        });
+      });
+    }
     const sheet = this.workbook.getSheetBySheetId(sheetId);
     if (!sheet) throw new Error('工作表不存在');
     this.workbook.setActiveSheet(sheet);
-    sheet.scrollToCell(row, column);
-    sheet.setActiveRange(sheet.getRange(row, column));
+    const range = sheet.getRange(row, column);
+    // Scroll through the registered UI operation without changing selection.
+    await this.univerAPI.executeCommand(ScrollToRangeOperation.id, { range: range.getRange() });
+    await this.ensureVisible(sheet);
+  }
+
+  async focusCell(sheetId: string, row: number, column: number): Promise<void> {
+    await this.scrollCell(sheetId, row, column);
+    const sheet = this.workbook.getSheetBySheetId(sheetId)!;
+    const range = sheet.getRange(row, column);
+    sheet.setActiveRange(range);
     await this.ensureVisible(sheet);
   }
 
   async focusNode(nodeId: string): Promise<boolean> {
     const link = this.linksByNode.get(nodeId);
     if (!link) return false;
-    const sheet = this.workbook.getSheetBySheetId(link.sheetId);
-    if (!sheet) return false;
-    this.workbook.setActiveSheet(sheet);
-    sheet.scrollToCell(link.row, link.column);
-    sheet.setActiveRange(sheet.getRange(link.row, link.column));
+    if (!this.workbook.getSheetBySheetId(link.sheetId)) return false;
+    await this.focusCell(link.sheetId, link.row, link.column);
     return true;
   }
 
@@ -319,6 +385,54 @@ export class HcdUniverAdapter {
     const descriptors = [...cellDescriptors, ...visualDescriptors];
     const keep = new Set(descriptors.map(({ chunkId }) => chunkId));
     this.evictOutsideWindow(sheetId, keep);
+    await this.refreshFormulaResults();
+  }
+
+  /** Update real cell caches from the same checked results used by CLI/Agents.
+   * Keep formulas, formatting, selection, scroll and the renderer untouched. */
+  private async refreshFormulaResults(): Promise<void> {
+    if (this.hasPendingPatch() || this.workbook.isCellEditing()) return;
+    const revision = this.client.manifest.revision;
+    const sheetIds = new Set([...this.linksByNode.values()].filter(link => link.formula).map(link => link.sheetId));
+    try {
+      const results = await Promise.all([...sheetIds].map(async sheetId => [sheetId, await this.client.readCalculations(sheetId)] as const));
+      if (this.client.manifest.revision !== revision || this.hasPendingPatch() || this.workbook.isCellEditing()) return;
+      const unitData: Record<string, Record<string, Record<number, Record<number, ICellData>>>> = {};
+      for (const [sheetId, cells] of results) {
+        if (!cells) continue;
+        const sheet = this.workbook.getSheetBySheetId(sheetId);
+        if (!sheet) continue;
+        for (const link of this.linksByNode.values()) {
+          if (link.sheetId !== sheetId || !link.formula) continue;
+          const range = sheet.getRange(link.row, link.column);
+          if (String(range.getFormulas()?.[0]?.[0] ?? '') !== link.formula) continue;
+          const cell = cells.get(range.getA1Notation());
+          if (cell?.formula !== link.formula) continue;
+          const result = cell.calculation;
+          let data: ICellData;
+          if (result.status === 'unavailable') {
+            // A native Excel error must also replace a stale numeric cache.
+            // Unsupported functions/limits retain their compatibility preview.
+            if (!result.error || !/^#(?:N\/A|VALUE!|REF!|DIV\/0!|NUM!|NAME\?|NULL!)$/.test(result.error)) continue;
+            data = { v: result.error, t: CellValueType.STRING };
+          } else if (result.valueType === 'number' && result.value !== null && Number.isFinite(Number(result.value))) {
+            data = { v: Number(result.value), t: CellValueType.NUMBER };
+          } else if (result.valueType === 'boolean') {
+            data = { v: result.value === 'TRUE' ? 1 : 0, t: CellValueType.BOOLEAN };
+          } else if (result.valueType === 'string' || result.valueType === 'blank') {
+            data = { v: result.value ?? '', t: CellValueType.STRING };
+          } else continue; // An old service or array result has no scalar contract.
+          if (range.getValue() === data.v) continue;
+          const sheets = unitData[this.client.manifest.documentId] ??= {};
+          ((sheets[sheetId] ??= {})[link.row] ??= {})[link.column] = data;
+        }
+      }
+      if (!Object.keys(unitData).length) return;
+      this.withApplying(() => this.univerAPI.syncExecuteCommand(SetFormulaCalculationResultMutation.id, { unitData, unitOtherData: {} }));
+    } catch {
+      // Loading/reading a workbook must remain possible on a service without
+      // verified calculation. The selected-cell status reports unavailability.
+    }
   }
 
   acknowledgePatch(patchId: string, revision: number, nodeHashes: Record<string, string>): void {
@@ -328,13 +442,22 @@ export class HcdUniverAdapter {
       const nextHash = nodeHashes[link.nodeId];
       if (nextHash) link.nodeHash = nextHash;
       const sheet = this.workbook.getSheetBySheetId(link.sheetId);
+      const data = sheet?.getRange(link.row, link.column).getCellData();
+      const currentText = data?.v ?? (data?.p ? this.univerAPI.newRichTextValue(data.p).toPlainText() : '');
+      const rich = pending.richUpdates.get(link.nodeId);
+      if (rich) {
+        link.formulaEditable = false; link.formula = undefined; link.rawValue = undefined; link.valueType = 'string'; link.editable = true;
+        link.inlineRuns = structuredClone(rich);
+        link.richText = structuredClone(sheet?.getRange(link.row, link.column).getCellData()?.p);
+      }
       if (pending.convertedFormulaIds.has(link.nodeId)) {
         link.formulaEditable = false;
         link.editable = true;
         link.formula = undefined;
         const numberValue = pending.convertedNumberValues.get(link.nodeId);
-        link.text = numberValue ?? String(sheet?.getRange(link.row, link.column).getValue() ?? '');
+        link.text = numberValue ?? String(currentText);
         link.rawValue = numberValue === undefined ? undefined : Number(numberValue);
+        link.valueType = numberValue === undefined ? 'string' : 'number';
       } else if (pending.formulaUpdates.has(link.nodeId)) {
         link.formulaEditable = true;
         link.formulaEdited = true;
@@ -342,13 +465,15 @@ export class HcdUniverAdapter {
         link.formula = pending.formulaUpdates.get(link.nodeId);
         link.text = link.formula ?? '';
         link.rawValue = undefined;
+        link.valueType = undefined;
       } else if (link.formulaEditable) {
         link.formula = String(sheet?.getRange(link.row, link.column).getFormulas?.()[0]?.[0] ?? link.formula ?? '');
         link.text = link.formula;
       } else {
         const numberValue = pending.convertedNumberValues.get(link.nodeId);
-        link.text = numberValue ?? String(sheet?.getRange(link.row, link.column).getValue() ?? '');
+        link.text = numberValue ?? String(currentText);
         link.rawValue = numberValue === undefined ? undefined : Number(numberValue);
+        link.valueType = numberValue === undefined ? 'string' : 'number';
       }
     }
     this.client.manifest.revision = revision;
@@ -363,7 +488,7 @@ export class HcdUniverAdapter {
       pending.links.forEach((link, index) => {
         const range = this.workbook.getSheetBySheetId(link.sheetId)?.getRange(link.row, link.column);
         if (link.formulaEditable && link.formula) range?.setFormula(link.formula);
-        else range?.setValue(pending.previous[index]);
+        else range?.setValue(restoredLiteral(link, pending.previous[index]));
       });
       for (const { sheetId, row, column } of pending.blanks) {
         this.workbook.getSheetBySheetId(sheetId)?.getRange(row, column).setValue('');
@@ -371,6 +496,9 @@ export class HcdUniverAdapter {
     });
     this.pending.delete(patchId);
     this.onStatus(reason);
+    // Restoring the expression clears Univer's scalar cache. Reuse checked
+    // results for this revision so a rejected paste does not blank formulas.
+    void this.refreshFormulaResults();
   }
 
   hasPendingPatch(): boolean { return this.pending.size > 0; }
@@ -481,6 +609,7 @@ export class HcdUniverAdapter {
     }
     for (const key of [...this.blankCells]) if (key.startsWith(prefix)) this.blankCells.delete(key);
     for (const key of [...this.editInputs.keys()]) if (key.startsWith(prefix)) this.editInputs.delete(key);
+    for (const key of [...this.editDocuments.keys()]) if (key.startsWith(prefix)) this.editDocuments.delete(key);
     for (const key of [...this.loadedRowCeilings.keys()]) {
       if (key.startsWith(prefix)) this.loadedRowCeilings.delete(key);
     }
@@ -492,11 +621,6 @@ export class HcdUniverAdapter {
     if (this.hasPendingPatch()) return false;
     const activeSheet = this.workbook.getActiveSheet();
     const sheetId = activeSheet.getSheetId();
-    const activeRange = activeSheet.getActiveRange();
-    const selection = activeRange && {
-      row: activeRange.getRow(), column: activeRange.getColumn(),
-      height: activeRange.getHeight(), width: activeRange.getWidth(),
-    };
     this.rangeGeneration.set(sheetId, (this.rangeGeneration.get(sheetId) ?? 0) + 1);
     await this.client.open();
     this.rangeGeneration.set(sheetId, (this.rangeGeneration.get(sheetId) ?? 0) + 1);
@@ -537,9 +661,8 @@ export class HcdUniverAdapter {
     // Load the replacement window before retiring old chunks. Clearing the
     // whole grid first makes every collaborator update visibly jump.
     await this.ensureVisible(activeSheet);
-    if (selection) activeSheet.setActiveRange(activeSheet.getRange(
-      selection.row, selection.column, selection.height, selection.width,
-    ));
+    // Loading cells leaves the real selection in place. A pre-request snapshot
+    // would overwrite a newer mouse/keyboard selection made during this await.
     this.onStatus(`revision ${this.client.manifest.revision} · 已同步其他协作者的修改`);
     return true;
   }
@@ -578,6 +701,7 @@ export class HcdUniverAdapter {
       const chunk = await this.client.readChunk(descriptor);
       const parsed = parseGridChunk(chunk, href => this.client.resolve(href).toString(), this.styleCatalog);
       if (descriptor.grid?.kind !== 'cells') throw new Error('单元格分片无法局部同步');
+      const wasRich = new Set(old.cells.filter(cell => cell.link?.richText).map(cell => `${cell.row}:${cell.column}`));
       // Univer already holds the user's optimistic value. Writing it again can
       // emit SheetValueChanged later and create a second, reversing patch.
       for (const cell of old.cells) {
@@ -598,6 +722,18 @@ export class HcdUniverAdapter {
         if (cell.blank) this.blankCells.add(cellKey(old.sheetId, cell.row, cell.column));
         lastColumns.set(cell.row, Math.max(lastColumns.get(cell.row) ?? 0, cell.column + 1));
       }
+      // Text-only edits inherit the adjoining source run on the server. Apply
+      // that document to the changed cell only, retaining canvas and viewport.
+      const changed = new Set(changes.filter(change => change.sheetId === old.sheetId).map(change => `${change.row}:${change.column}`));
+      this.withApplying(() => {
+        const sheet = this.workbook.getSheetBySheetId(old.sheetId);
+        for (const cell of parsed.cells) {
+          const key = `${cell.row}:${cell.column}`;
+          if (changed.has(key) && (cell.data.p || wasRich.has(key))) {
+            sheet?.getRange(cell.row, cell.column).setValue({ ...cell.data, p: cell.data.p ?? null });
+          }
+        }
+      });
       for (const merge of parsed.merges) {
         lastColumns.set(merge.startRow, Math.max(lastColumns.get(merge.startRow) ?? 0, merge.endColumn + 1));
       }
@@ -911,6 +1047,9 @@ export class HcdUniverAdapter {
 
   private async captureChanges(ranges: Array<{ getSheetId(): string; getRow(): number; getColumn(): number; getHeight(): number; getWidth(): number; getValues(): unknown[][]; getFormulas?(): unknown[][] }>): Promise<void> {
     const operations: HcdTextSplice[] = [];
+    const richOperations: HcdXlsxRichTextSet[] = [];
+    const richCreations: HcdXlsxRichTextCreate[] = [];
+    let richConversion = false;
     const formulaOperations: HcdXlsxFormulaSet[] = [];
     const formulaConversions: HcdXlsxFormulaToValue[] = [];
     const numberConversions: HcdXlsxFormulaToNumber[] = [];
@@ -922,6 +1061,7 @@ export class HcdUniverAdapter {
     const seen = new Set<string>();
     const rejected: Array<{ sheetId: string; row: number; column: number; value: string | number; formula?: string }> = [];
     let rejectedUnsafeNumber = false;
+    let richError = '';
     const blankChanges: Array<{ sheetId: string; row: number; column: number; text: string }> = [];
     for (const range of ranges) {
       const values = range.getValues();
@@ -943,10 +1083,41 @@ export class HcdUniverAdapter {
           const rawValue = values[rowOffset]?.[columnOffset];
           const editInput = this.editInputs.get(key);
           this.editInputs.delete(key);
-          const next = String(rawValue ?? '');
+          const editedDocument = this.editDocuments.get(key)
+            ?? this.workbook.getSheetBySheetId(range.getSheetId())?.getRange(row, column).getCellData()?.p;
+          this.editDocuments.delete(key);
+          const richPlain = editedDocument ? this.univerAPI.newRichTextValue(editedDocument).toPlainText() : undefined;
+          const next = editInput ?? String(rawValue ?? richPlain ?? '');
           const formula = String(formulas?.[rowOffset]?.[columnOffset] ?? '');
           const entered = editInput ?? next;
           const enteredFormula = formula || (entered.startsWith('=') ? entered : '');
+          if (!enteredFormula && editedDocument && this.mode === 'editable'
+            && (link?.editable || link?.formulaEditable || (!link && this.canEditBlankCell(range.getSheetId(), row, column)))) {
+            try {
+              const runs = editedInlineRuns(next, editedDocument, link ?? { text: '' });
+              if (runs) {
+                if (link) {
+                  richConversion ||= !!link.formulaEditable || link.rawValue !== undefined || (!!link.valueType && link.valueType !== 'string');
+                  richOperations.push({ type: 'xlsx.richText.set', nodeId: link.nodeId, runs, precondition: { nodeHash: link.nodeHash } });
+                  changes.push({ sheetId: link.sheetId, row, column, oldText: link.formula ?? link.text, newText: next, nodeId: link.nodeId });
+                  links.push(link); previous.push(link.formula ?? link.rawValue ?? link.text);
+                } else {
+                  richCreations.push({ type: 'xlsx.richText.create', sheetId: range.getSheetId(), row: row + 1, column: column + 1, runs });
+                }
+                continue;
+              }
+            } catch (cause) {
+              richError = String(cause);
+              rejected.push({ sheetId: range.getSheetId(), row, column, value: link?.rawValue ?? link?.text ?? '', formula: link?.formula });
+              continue;
+            }
+          }
+          // Imported booleans have a numeric canvas scalar and a TRUE/FALSE
+          // source label. Delayed load events must not become text edits.
+          if (!enteredFormula && link?.valueType === 'boolean'
+            && (link.text === 'TRUE' || link.text === 'FALSE')
+            && next === (link.text === 'TRUE' ? '1' : '0')
+            && (editInput === undefined || editInput === next || editInput === link.text)) continue;
           // Formula recalculation emits value events after withApplying has
           // returned. An unchanged expression is not a user edit, including
           // in readonly mode: restoring it would trigger another calculation
@@ -1058,33 +1229,41 @@ export class HcdUniverAdapter {
         }
       }
     }
-    const operationCount = operations.length + blankChanges.length + formulaOperations.length
+    const operationCount = operations.length + richOperations.length + richCreations.length + blankChanges.length + formulaOperations.length
       + formulaCreations.length + formulaConversions.length + numberConversions.length + numberUpdates.length;
     if (rejected.length || operationCount > 10_000) {
+      rejected.push(...richCreations.map(({ sheetId, row, column }) => ({ sheetId, row: row - 1, column: column - 1, value: '' })));
       rejected.push(...blankChanges.map(({ sheetId, row, column }) => ({ sheetId, row, column, value: '' })));
       rejected.push(...formulaCreations.map(({ sheetId, row, column }) => ({ sheetId, row: row - 1, column: column - 1, value: '' })));
       rejected.push(...changes.map(({ sheetId, row, column, oldText }) => ({ sheetId, row, column,
         value: this.linksByCell.get(cellKey(sheetId, row, column))?.rawValue ?? oldText,
         formula: this.linksByCell.get(cellKey(sheetId, row, column))?.formula })));
       operations.length = 0;
+      richOperations.length = 0;
+      richCreations.length = 0;
       formulaOperations.length = 0;
       formulaCreations.length = 0;
       formulaConversions.length = 0;
       numberConversions.length = 0;
       numberUpdates.length = 0;
       blankChanges.length = 0;
-      this.onStatus(rejectedUnsafeNumber
+      const reason = richError || (rejectedUnsafeNumber
         ? '无法安全还原该数字，已恢复原公式；请直接编辑单元格输入原始数字'
         : '粘贴包含不可编辑单元格或超过 10000 个改动，已恢复原值');
+      this.onStatus(reason);
+      this.onError(reason);
     }
     if (rejected.length) {
       this.withApplying(() => rejected.forEach((cell) => {
         const range = this.workbook.getSheetBySheetId(cell.sheetId)?.getRange(cell.row, cell.column);
         if (cell.formula) range?.setFormula(cell.formula);
-        else range?.setValue(cell.value);
+        else {
+          const link = this.linksByCell.get(cellKey(cell.sheetId, cell.row, cell.column));
+          range?.setValue(link ? restoredLiteral(link, cell.value) : cell.value);
+        }
       }));
     }
-    if (!operations.length && !blankChanges.length && !formulaOperations.length
+    if (!operations.length && !richOperations.length && !richCreations.length && !blankChanges.length && !formulaOperations.length
       && !formulaCreations.length && !formulaConversions.length && !numberConversions.length && !numberUpdates.length) return;
     const patchId = crypto.randomUUID();
     const blankOperations: HcdXlsxCellSet[] = blankChanges.map(blank => ({
@@ -1092,7 +1271,7 @@ export class HcdUniverAdapter {
       row: blank.row + 1, column: blank.column + 1, text: blank.text,
     }));
     const patch: HcdPatchBatch = {
-      schemaVersion: numberConversions.length || numberUpdates.length ? 'hcd-patch/29' : formulaConversions.length ? 'hcd-patch/28'
+      schemaVersion: richCreations.length || richConversion || (richOperations.length > 0 && operationCount > richOperations.length + operations.length) ? 'hcd-patch/50' : richOperations.length ? 'hcd-patch/49' : numberConversions.length || numberUpdates.length ? 'hcd-patch/29' : formulaConversions.length ? 'hcd-patch/28'
         : (formulaCreations.length || formulaOperations.length) && operationCount > 1
         ? 'hcd-patch/22' : formulaCreations.length ? 'hcd-patch/21' : formulaOperations.length ? 'hcd-patch/20' : blankChanges.length
         ? operations.length + blankChanges.length === 1 ? 'hcd-patch/7' : 'hcd-patch/19'
@@ -1101,16 +1280,17 @@ export class HcdUniverAdapter {
       patchId,
       baseRevision: this.client.manifest.revision,
       actor: { client: 'officecli-hcd-univer-viewer' },
-      operations: [...operations, ...blankOperations, ...formulaOperations, ...formulaCreations, ...formulaConversions, ...numberConversions, ...numberUpdates],
+      operations: [...operations, ...richOperations, ...richCreations, ...blankOperations, ...formulaOperations, ...formulaCreations, ...formulaConversions, ...numberConversions, ...numberUpdates],
       metadata: { rootHash: this.client.manifest.rootHash },
     };
-    this.pending.set(patchId, { links, previous, blanks: [...blankChanges,
+    this.pending.set(patchId, { links, previous, blanks: [...blankChanges, ...richCreations.map(({ sheetId, row, column }) => ({ sheetId, row: row - 1, column: column - 1 })),
       ...formulaCreations.map(({ sheetId, row, column }) => ({ sheetId, row: row - 1, column: column - 1, text: '' }))],
       convertedFormulaIds: new Set([...formulaConversions, ...numberConversions].map(operation => operation.nodeId)),
       convertedNumberValues: new Map([...numberConversions, ...numberUpdates].map(operation => [operation.nodeId, operation.value])),
-      formulaUpdates: new Map(formulaOperations.map(operation => [operation.nodeId, operation.formula])) });
+      formulaUpdates: new Map(formulaOperations.map(operation => [operation.nodeId, operation.formula])),
+      richUpdates: new Map(richOperations.map(operation => [operation.nodeId, operation.runs])) });
     window.dispatchEvent(new CustomEvent<HcdPatchEventDetail>('hcd-patch', { detail: {
-      patch, changes: [...changes, ...blankChanges.map(blank => ({
+      patch, changes: [...changes, ...richCreations.map(({sheetId,row,column,runs}) => ({sheetId,row:row-1,column:column-1,oldText:'',newText:runs.map(run=>run.text).join('')})), ...blankChanges.map(blank => ({
         sheetId: blank.sheetId, row: blank.row, column: blank.column, oldText: '', newText: blank.text,
       })), ...formulaCreations.map(({ sheetId, row, column, formula }) => ({
         sheetId, row: row - 1, column: column - 1, oldText: '', newText: formula,

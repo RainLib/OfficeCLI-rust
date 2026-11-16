@@ -1692,7 +1692,7 @@ pub fn pin_document_theme(
 ) -> Result<crate::HcdManifest, HcdError> {
     require_sha256(theme_revision_id)?;
     let block = theme_document_css(catalog, theme_revision_id)?;
-    commit_document_theme(catalog, bundle, Some(theme_revision_id), &block)
+    commit_document_theme(catalog, bundle, Some(theme_revision_id), &block, None)
 }
 
 /// Drop the theme pinned on the document, as a content revision of its own.
@@ -1707,7 +1707,30 @@ pub fn unpin_document_theme(
     catalog: &DiskCatalog,
     bundle: &Bundle,
 ) -> Result<crate::HcdManifest, HcdError> {
-    commit_document_theme(catalog, bundle, None, "")
+    commit_document_theme(catalog, bundle, None, "", None)
+}
+
+/// Change a theme only if the document still has the revision the operator reviewed.
+/// The comparison and commit share the bundle write lock.
+pub fn set_document_theme_at_revision(
+    catalog: &DiskCatalog,
+    bundle: &Bundle,
+    theme_revision_id: Option<&str>,
+    expected_revision: u64,
+) -> Result<crate::HcdManifest, HcdError> {
+    let block = if let Some(id) = theme_revision_id {
+        require_sha256(id)?;
+        theme_document_css(catalog, id)?
+    } else {
+        String::new()
+    };
+    commit_document_theme(
+        catalog,
+        bundle,
+        theme_revision_id,
+        &block,
+        Some(expected_revision),
+    )
 }
 
 /// Writes `block` as the document's managed theme region and advances the head
@@ -1720,9 +1743,17 @@ fn commit_document_theme(
     bundle: &Bundle,
     theme_revision_id: Option<&str>,
     block: &str,
+    expected_revision: Option<u64>,
 ) -> Result<crate::HcdManifest, HcdError> {
     let _guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
+    if expected_revision.is_some_and(|expected| expected != manifest.revision) {
+        return Err(HcdError::RevisionConflict(format!(
+            "document revision changed: expected {}, current {}",
+            expected_revision.unwrap(),
+            manifest.revision
+        )));
+    }
     if manifest.state != "COMPLETE" {
         return Err(HcdError::InvalidBundle(if theme_revision_id.is_some() {
             "only a complete document can pin a theme".to_string()
@@ -2969,6 +3000,23 @@ mod tests {
             })
             .unwrap();
         Bundle::open(&root).unwrap()
+    }
+
+    #[test]
+    fn conditional_theme_change_preserves_a_newer_pin() {
+        let (_temp, catalog, _, theme_id) = install();
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = complete_bundle(&directory, "article { color: #123456; }");
+        let pinned = set_document_theme_at_revision(&catalog, &bundle, Some(&theme_id), 0).unwrap();
+        assert_eq!(pinned.revision, 1);
+        let stale = set_document_theme_at_revision(&catalog, &bundle, None, 0);
+        assert!(matches!(stale, Err(HcdError::RevisionConflict(_))));
+        assert_eq!(bundle.manifest().unwrap().theme_revision_id, Some(theme_id));
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        let cleared = set_document_theme_at_revision(&catalog, &bundle, None, 1).unwrap();
+        assert_eq!(cleared.revision, 2);
+        assert!(cleared.theme_revision_id.is_none());
+        assert!(bundle.revision(1).unwrap().theme_revision_id.is_some());
     }
 
     #[test]

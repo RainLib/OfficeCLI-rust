@@ -384,6 +384,10 @@ pub(crate) fn collect_dirty_nodes(
                         entry.node_id, entry.source.part
                     )));
                 }
+                if entry.source.node_kind == "image" && entry.source.created_in_hcd {
+                    found.insert(entry.node_id.clone());
+                    continue;
+                }
                 let text = html_nodes.get(&entry.node_id).ok_or_else(|| {
                     HcdError::InvalidBundle(format!(
                         "mapped node {} is missing from canonical HTML",
@@ -560,7 +564,9 @@ fn reject_image_source_export(
         for descriptor in page.chunks {
             let source_map = bundle.read_map(&descriptor)?;
             if let Some(entry) = source_map.entries.iter().find(|entry| {
-                dirty_nodes.contains(&entry.node_id) && entry.source.node_kind == "image"
+                dirty_nodes.contains(&entry.node_id)
+                    && entry.source.node_kind == "image"
+                    && !entry.source.created_in_hcd
             }) {
                 return Err(HcdError::Unsupported(format!(
                     "revision changes image node {}; source-backed {} image rewrite is not implemented and export was stopped before writing output; omit --source to use the pure-Rust semantic rebuild",

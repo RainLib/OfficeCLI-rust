@@ -1,6 +1,8 @@
 import {
   BooleanNumber,
+  BaselineOffset,
   BorderStyleTypes,
+  CellValueType,
   HorizontalAlign,
   type ICellData,
   type IStyleData,
@@ -8,17 +10,22 @@ import {
   WrapStrategy,
 } from '@univerjs/presets';
 import type { LoadedChunk, NodeMapEntry } from './hcd.ts';
+import type { XlsxInlineRun } from './rich-text.ts';
 
 export interface NodeLink {
   nodeId: string;
   nodeHash: string;
   chunkId: string;
   editable: boolean;
+  valueType?: string;
   rawValue?: number;
   formulaEditable?: boolean;
   formulaEdited?: boolean;
   formula?: string;
   text: string;
+  richText?: ICellData['p'];
+  inlineRuns?: XlsxInlineRun[];
+  baseStyle?: IStyleData;
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
@@ -230,6 +237,38 @@ export function parseStyleCatalog(css: string): Record<string, IStyleData> {
   return styles;
 }
 
+function richCellDocument(node: HTMLElement | null, nodeId: string | undefined, base: IStyleData): ICellData['p'] | undefined {
+  const runs = node ? [...node.querySelectorAll<HTMLElement>('[data-hcd-xlsx-run]')] : [];
+  if (!runs.length || !nodeId) return undefined;
+  let text = '';
+  const textRuns = runs.map(run => {
+    const st = text.length; // Univer uses UTF-16, not HCD scalar offsets.
+    text += run.textContent ?? '';
+    const declarations = parseDeclarations(run.getAttribute('style') ?? '');
+    const { ff, fs, cl } = toUniverStyle(declarations);
+    // Univer rich documents do not inherit every text property from the cell
+    // style. Materialize that base here; explicit run normal/false wins below.
+    const ts: IStyleData = { ff: base.ff, fs: base.fs, cl: base.cl, bl: base.bl,
+      it: base.it, ul: base.ul, st: base.st, va: base.va,
+      ...(ff ? { ff } : {}), ...(fs ? { fs } : {}), ...(cl ? { cl } : {}) };
+    const properties = JSON.parse(run.dataset.hcdXlsxRun ?? '{}') as Record<string, Record<string, string>>;
+    if (properties.u) ts.ul = { s: properties.u.val === 'none' ? BooleanNumber.FALSE : BooleanNumber.TRUE };
+    if (properties.strike) ts.st = { s: ['0', 'false', 'off'].includes(properties.strike.val) ? BooleanNumber.FALSE : BooleanNumber.TRUE };
+    const weight = declarations.get('font-weight');
+    if (weight && weight !== 'inherit') ts.bl = Number(weight) >= 600 ? BooleanNumber.TRUE : BooleanNumber.FALSE;
+    const italic = declarations.get('font-style');
+    if (italic && italic !== 'inherit') ts.it = italic === 'italic' ? BooleanNumber.TRUE : BooleanNumber.FALSE;
+    const baseline = declarations.get('vertical-align');
+    if (baseline === 'super') ts.va = BaselineOffset.SUPERSCRIPT;
+    if (baseline === 'sub') ts.va = BaselineOffset.SUBSCRIPT;
+    if (baseline === 'baseline') ts.va = BaselineOffset.NORMAL;
+    return { st, ed: text.length, ts };
+  });
+  if (text !== node?.textContent) throw new Error('单元格富文本与文字锚点不一致');
+  return { id: `hcd-rich-${nodeId}`, body: { dataStream: `${text}\r\n`, textRuns,
+    paragraphs: [{ startIndex: text.length }], sectionBreaks: [{ startIndex: text.length + 1 }] }, documentStyle: {} };
+}
+
 function parseCellReference(reference: string): { row: number; column: number } | undefined {
   const match = /^([A-Z]+)(\d+)$/.exec(reference.toUpperCase());
   if (!match) return undefined;
@@ -288,6 +327,7 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       ...(cell.dataset.hcdLayoutEdited === 'true' ? explicitLayoutStyle(cell) : {}),
     };
     const resolved = { ...catalogStyle, ...explicit };
+    const richText = richCellDocument(node, nodeId, resolved);
     const style = Object.keys(explicit).length
       ? { ...resolved, ...(pattern ? { n: { pattern } } : {}) }
       : pattern ? { ...catalogStyle, n: { pattern } } : styleKey;
@@ -296,11 +336,17 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
       nodeHash: entry.nodeHash,
       chunkId: chunk.descriptor.chunkId,
       editable: entry.source.editable,
+      valueType: cell.dataset.hcdValueType,
       rawValue: hasNumber ? numericValue : undefined,
       formulaEditable: cell.dataset.hcdFormulaEditable === 'true',
       formulaEdited: cell.dataset.hcdFormulaEdited === 'true',
       formula: cell.dataset.hcdFormulaExpression,
       text,
+      ...(richText ? { richText: structuredClone(richText) } : {}),
+      inlineRuns: node ? [...node.querySelectorAll<HTMLElement>('[data-hcd-xlsx-run]')].map(run => ({
+        text: run.textContent ?? '', properties: JSON.parse(run.dataset.hcdXlsxRun ?? '{}'),
+      })) : undefined,
+      baseStyle: structuredClone(resolved),
       bold: resolved.bl === BooleanNumber.TRUE,
       italic: resolved.it === BooleanNumber.TRUE,
       underline: resolved.ul?.s === BooleanNumber.TRUE,
@@ -318,8 +364,13 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
     } satisfies NodeLink : undefined;
     cells.push({
       ...position,
-      data: { v: hasNumber ? numericValue : text,
+      data: { v: cell.dataset.hcdValueType === 'blank' ? null
+          : cell.dataset.hcdValueType === 'boolean' ? (text === 'TRUE' ? 1 : text === 'FALSE' ? 0 : '#VALUE!')
+          : hasNumber ? numericValue : text,
+        t: cell.dataset.hcdValueType === 'boolean' && (text === 'TRUE' || text === 'FALSE') ? CellValueType.BOOLEAN
+          : hasNumber ? CellValueType.NUMBER : CellValueType.STRING,
         ...(cell.dataset.hcdFormulaExpression ? { f: cell.dataset.hcdFormulaExpression } : {}),
+        ...(richText ? { p: richText } : {}),
         ...(style ? { s: style } : {}) },
       link,
       formula: cell.dataset.hcdFormula === 'true',

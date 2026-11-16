@@ -1,0 +1,203 @@
+/* Pen reference: officecli-workspace-v2.pen / HRzgj and QGj0f.
+   Application colors remain separate from document colors. */
+.hcd-surface[data-theme] {
+  color-scheme:light;
+  --canvas:#eceff4; --surface:#fff; --stage:#f7f8fb; --ink:#272d3b;
+  --muted:#667287; --line:#e7eaf0; --accent:#5865c7; --accent-soft:#edf0fc;
+  --hover:#f0f2f6; --control:#e2e5ed; --on-accent:#fff; --surface-raised:#fff;
+  --success:#28735e; --success-soft:#f0f7f4; --warning:#99672c; --warning-soft:#fbf5eb;
+  --shadow:0 16px 56px #24304c1c,0 2px 8px #24304c08;
+  --paper:#fff; --paper-ink:#272d3b;
+  scrollbar-color:var(--line) transparent;
+}
+.hcd-surface[data-theme=dark] {
+  color-scheme:dark;
+  --canvas:#191a1e; --surface:#23252b; --stage:#1d1f24; --ink:#ececf1;
+  --muted:#a7a9b3; --line:#363840; --accent:#b1b6f8; --accent-soft:#33364b;
+  --hover:#2d2f37; --control:#292b33; --on-accent:#222438; --surface-raised:#292b32;
+  --success:#8ccfb4; --success-soft:#233c34; --warning:#e6bb81; --warning-soft:#3a3024;
+  --shadow:0 16px 56px #0005,0 2px 8px #0003;
+}
+.hcd-surface[data-theme] [hidden] { display:none!important; }
+.hcd-surface[data-theme] :is(input,select,textarea) { accent-color:var(--accent); }
+.hcd-surface[data-theme] :is(input,textarea)::placeholder { color:var(--muted); opacity:.8; }
+.hcd-surface[data-theme] .appearance-control { display:inline-flex; flex:none; align-items:center; gap:6px; border:0; border-radius:11px; padding:6px 8px; color:var(--muted); background:transparent; }
+.hcd-surface[data-theme] .appearance-control select { border:0; background:transparent; color:inherit; font:inherit; font-size:11px; padding:3px 0; cursor:pointer; max-width:95px; }
+.hcd-surface[data-theme] .appearance-control:hover { background:var(--hover); }
+.hcd-surface[data-theme] .appearance-panel>.appearance-control { display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--line); margin-bottom:8px; }
+.hcd-surface[data-theme] .mode-switch { background:var(--control); }
+.hcd-surface[data-theme] .export-control>summary { background:var(--ink); color:var(--surface); }
+.hcd-surface[data-theme] button.primary,.hcd-surface[data-theme] .export-popover>button { color:var(--on-accent); }
+.hcd-surface[data-theme] .workspace.semantic-workspace :is(.outline-panel,.workspace-sidebar) { box-shadow:none; overscroll-behavior:contain; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .outline-panel nav button { background:transparent; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .outline-panel nav button:hover { background:var(--accent-soft); }
+.hcd-surface[data-theme] .workspace.semantic-workspace :is(.document,.revision-paper) { background:var(--paper); color:var(--paper-ink); color-scheme:light; border-color:#e7eaf0; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .document .hcd-editor-body { color:var(--paper-ink); }
+.hcd-surface[data-theme] .document :is(input,textarea,select),.hcd-surface[data-theme] .fixed-inline-editor { color-scheme:light; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .ribbon button { background:transparent; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .ribbon .save-trigger { background:var(--accent-soft); }
+.hcd-surface[data-theme] :is(.toast,.hcd-dialog,.presence-menu,.bubble-menu,.floating-settings,.xlsx-formula-bar) { color:var(--ink); background:var(--surface); border-color:var(--line); }
+.hcd-surface[data-theme] :is(.manual-access,.document-search,.hcd-dialog) :is(input,textarea,select) { color:var(--ink); background:var(--stage); border-color:var(--line); }
+.hcd-surface[data-theme] .hcd-dialog p { color:var(--muted); }
+.hcd-surface[data-theme] .workspace.semantic-workspace :is(.revision-panel,.appearance-panel)>p { color:var(--muted); }
+.hcd-surface[data-theme] .workspace.semantic-workspace .revision-panel h3 { color:var(--ink); }
+.hcd-surface[data-theme] .xlsx-formula-bar input { color:var(--ink); background:var(--stage); border-color:var(--line); }
+.hcd-surface[data-theme] .epoch-draft-conflict { background:var(--warning-soft); }
+
+/* Quiet conversation surface with a separate, anchored composer. */
+.hcd-surface[data-theme] .workspace.semantic-workspace .agent-activity-panel.agent-activity-panel { width:360px; flex-basis:360px; display:flex; flex-direction:column; padding:0; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .agent-activity-panel .panel-head { padding:20px 20px 4px; margin:0; }
+.hcd-surface[data-theme] .agent-activity-panel .panel-head h2 { font-size:15px; letter-spacing:-.3px; }
+.hcd-surface[data-theme] .agent-activity-panel .panel-head h2>svg { color:var(--accent); }
+.hcd-surface[data-theme] .agent-header-context { border:0; padding:0; margin:0 0 0 4px; font-size:9px; }
+.hcd-surface[data-theme] .agent-panel-subtitle { flex:none; margin:2px 20px 18px; font-size:10px; color:var(--muted); line-height:1.6; }
+.hcd-surface[data-theme] .agent-studio-tabs { margin:0 18px 14px; padding:4px; gap:4px; background:var(--stage); border-radius:12px; }
+.hcd-surface[data-theme] .agent-studio-tabs button { padding:8px; color:var(--muted); background:transparent; border-radius:9px; font-size:11px; }
+.hcd-surface[data-theme] .agent-studio-tabs button[aria-pressed=true] { color:var(--ink); background:var(--surface); box-shadow:0 1px 5px #00000007; }
+.hcd-surface[data-theme] .agent-feed-content { padding:0 20px 22px; }
+.hcd-surface[data-theme] .agent-collaborators { margin-bottom:24px; }
+.hcd-surface[data-theme] .agent-collaborators>summary { padding:8px 0; }
+.hcd-surface[data-theme] .agent-welcome { padding-top:38px; }
+.hcd-surface[data-theme] .agent-welcome h3 { font-size:20px; line-height:1.5; }
+.hcd-surface[data-theme] .agent-starters button { border:0; background:var(--stage); border-radius:13px; line-height:1.6; }
+.hcd-surface[data-theme] .agent-starters button:hover { color:var(--accent); background:var(--accent-soft); }
+.hcd-surface[data-theme] .agent-task-run { padding-bottom:34px; }
+.hcd-surface[data-theme] .agent-tasks .agent-user-message { max-width:94%; padding:12px 15px; border-radius:17px 17px 5px 17px; background:var(--hover); font-size:12px; line-height:1.85; }
+.hcd-surface[data-theme] .agent-response-avatar { background:var(--accent-soft); color:var(--accent); border-radius:8px; }
+.hcd-surface[data-theme] .agent-response-head { margin-bottom:14px; }
+.hcd-surface[data-theme] .agent-run-status.status-completed { color:var(--success); }
+.hcd-surface[data-theme] :is(.agent-run-status.status-failed,.agent-operation-log li.step-rejected) { color:var(--warning); }
+.hcd-surface[data-theme] .agent-tasks .agent-rejection { background:var(--warning-soft); color:var(--warning); }
+.hcd-surface[data-theme] .agent-tasks .agent-recovered { background:var(--success-soft); color:var(--success); }
+.hcd-surface[data-theme] .agent-tasks .agent-operation-queue { background:var(--stage); border-color:var(--line); }
+.hcd-surface[data-theme] .agent-compose-area { padding:8px 14px 14px; }
+.hcd-surface[data-theme] .agent-tasks form { border:1px solid var(--line); background:var(--stage); border-radius:18px; box-shadow:none; padding:12px 13px; }
+.hcd-surface[data-theme] .agent-tasks form:focus-within { border-color:color-mix(in srgb,var(--accent) 50%,var(--line)); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 6%,transparent); }
+.hcd-surface[data-theme] .agent-task-feed { scrollbar-color:var(--line) transparent; }
+.hcd-surface[data-theme] .agent-compose-note { color:var(--muted); padding-top:10px; }
+.hcd-surface[data-theme] .agent-compose-note small { font-size:9px; }
+.hcd-surface[data-theme] .agent-team-settings select { color:var(--ink); background:var(--surface); }
+
+/* Match the reference drawer's light hierarchy and compact model/status rows. */
+.hcd-surface[data-theme] .agent-activity-panel .panel-head h2 { font-size:16px; font-weight:500; }
+.hcd-surface[data-theme] .agent-header-context { display:none; }
+.hcd-surface[data-theme] .agent-panel-subtitle { margin:8px 20px 18px; font-size:10px; }
+.hcd-surface[data-theme] .agent-studio-tabs { margin:0 20px 18px; padding:0; gap:20px; background:transparent; border-radius:0; border-bottom:1px solid var(--line); }
+.hcd-surface[data-theme] .agent-studio-tabs button { flex:none; padding:0 0 10px; border-radius:0; font-size:11px; }
+.hcd-surface[data-theme] .agent-studio-tabs button[aria-pressed=true] { background:transparent; color:var(--accent); box-shadow:0 1px 0 var(--accent); }
+.hcd-surface[data-theme] .agent-collaborators>summary { padding:11px 12px; border-radius:12px; background:var(--stage); color:var(--accent); font-size:10px; }
+.hcd-surface[data-theme] .agent-collaborators>.agent-cards { margin-top:12px; }
+
+/* Floating menus escape transformed and clipped canvases. */
+.hcd-surface.hcd-floating-layer { position:fixed; inset:0; width:0; height:0; min-width:0; min-height:0; background:transparent; z-index:1500; pointer-events:none; }
+.hcd-surface[data-theme] .hcd-context-menu { position:fixed; display:flex; flex-direction:column; width:290px; max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); box-sizing:border-box; border:1px solid var(--line); border-radius:20px; padding:8px; color:var(--ink); background:var(--surface); box-shadow:var(--shadow); pointer-events:auto; overflow:auto; overscroll-behavior:contain; animation:workspace-menu-in .12s ease-out; }
+.hcd-surface[data-theme] .context-menu-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 9px 12px; font-size:10px; color:var(--muted); }
+.hcd-surface[data-theme] .context-menu-heading>span { font-size:9px; opacity:.65; }
+.hcd-surface[data-theme] .context-menu-actions { display:flex; flex-direction:column; gap:3px; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; }
+.hcd-surface[data-theme] .hcd-context-menu button { display:flex; justify-content:flex-start; align-items:center; flex:none; width:100%; min-height:40px; padding:8px 10px; gap:10px; margin:0; border:0; border-radius:11px; color:var(--ink); background:transparent; font-size:12px; line-height:1.5; text-align:left; }
+.hcd-surface[data-theme] .hcd-context-menu .menu-icon { display:flex; align-items:center; justify-content:center; width:17px; height:18px; flex:none; color:var(--muted); }
+.hcd-surface[data-theme] .hcd-context-menu .menu-icon svg { width:16px; height:16px; stroke-width:1.6; }
+.hcd-surface[data-theme] .menu-label { flex:1; min-width:0; overflow-wrap:anywhere; }
+.hcd-surface[data-theme] .hcd-context-menu kbd { flex:none; color:var(--muted); font:inherit; font-size:10px; }
+.hcd-surface[data-theme] .hcd-context-menu button.separated { position:relative; margin-top:12px; border:0; border-radius:11px; padding-top:8px; }
+.hcd-surface[data-theme] .hcd-context-menu button.separated::before { content:''; position:absolute; top:-7px; left:3px; right:3px; height:1px; background:var(--line); }
+.hcd-surface[data-theme] .hcd-context-menu button.menu-accent { background:var(--accent-soft); color:var(--accent); }
+.hcd-surface[data-theme] .hcd-context-menu button.menu-accent .menu-icon { color:inherit; }
+.hcd-surface[data-theme] .hcd-context-menu button:is(:hover,:focus-visible) { color:var(--accent); background:var(--accent-soft); outline:0; box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 24%,transparent); }
+.hcd-surface[data-theme] .hcd-context-menu button:disabled { opacity:.4; color:var(--muted); cursor:default; background:transparent; box-shadow:none; }
+.hcd-surface[data-theme] .context-menu-footer { display:flex; justify-content:space-between; align-items:center; gap:12px; flex:none; margin-top:9px; padding:11px 9px 3px; border-top:1px solid var(--line); font-size:9px; color:var(--muted); }
+.hcd-surface[data-theme] .hcd-context-menu-count { color:var(--muted); padding:4px 10px 10px; font-size:11px; }
+.hcd-surface[data-theme] .hcd-context-menu-count input { border-color:var(--line); color:var(--ink); background:var(--stage); }
+.hcd-surface[data-theme] .command-search { color:var(--ink); background:var(--stage); border:0; border-radius:11px; padding:11px; margin:0 0 7px; flex:none; }
+.hcd-surface[data-theme] .command-footer { color:var(--muted); padding:9px 3px 2px; border-top:1px solid var(--line); }
+@keyframes workspace-menu-in { from { opacity:0; } to { opacity:1; } }
+
+/* Image tools follow chrome colors. Picture/slide colors are left intact. */
+.hcd-surface[data-theme] .image-studio { color:var(--ink); padding:6px 20px 20px; }
+.hcd-surface[data-theme] .image-studio :is(h3,.image-studio-intro) { color:var(--ink); }
+.hcd-surface[data-theme] .image-studio :is(label,small,summary,p) { color:var(--muted); }
+.hcd-surface[data-theme] .image-studio form,.hcd-surface[data-theme] .image-job-list article { background:var(--stage); }
+.hcd-surface[data-theme] .image-studio :is(input,select) { color:var(--ink); border-color:var(--line); background:var(--surface); }
+.hcd-surface[data-theme] .image-studio textarea { color:var(--ink); }
+.hcd-surface[data-theme] :is(.image-studio,.production-board) button { color:var(--accent); background:var(--accent-soft); }
+.hcd-surface[data-theme] .production-board { color:var(--ink); }
+.hcd-surface[data-theme] .production-board :is(header p,.production-eyebrow,.production-disclosure) { color:var(--muted); }
+.hcd-surface[data-theme] .production-pipeline li { color:var(--muted); background:var(--hover); }
+.hcd-surface[data-theme] .production-pipeline li[data-state=active] { color:var(--accent); background:var(--accent-soft); }
+.hcd-surface[data-theme] .production-pipeline li[data-state=done] { color:var(--success); }
+.hcd-surface[data-theme] .workspace-drawer-scrim { display:none; }
+@media(min-width:901px) and (max-width:1200px) {
+  .hcd-surface[data-theme] .workspace.semantic-workspace .agent-activity-panel.agent-activity-panel { width:344px; flex-basis:344px; }
+  .hcd-surface[data-theme] .header-actions>.appearance-control select { width:18px; color:transparent; }
+  .hcd-surface[data-theme] .header-actions>.appearance-control option { color:var(--ink); }
+}
+@media(max-width:900px) {
+  .hcd-surface[data-theme] .workspace.semantic-workspace .layout.editor-layout { position:relative; isolation:isolate; }
+  .hcd-surface[data-theme] .workspace-drawer-scrim { display:block; position:absolute; inset:0; width:100%; height:100%; z-index:41; border:0; border-radius:20px; background:#141b2c45; backdrop-filter:blur(3px); padding:0; cursor:default; }
+  .hcd-surface[data-theme] .workspace-drawer-scrim:hover { background:#141b2c45; }
+  .hcd-surface[data-theme] .workspace.semantic-workspace .agent-activity-panel.agent-activity-panel { width:min(360px,calc(100% - 28px)); flex-basis:auto; }
+  .hcd-surface[data-theme] .workspace.semantic-workspace :is(.outline-panel,.workspace-sidebar) { box-shadow:var(--shadow); }
+}
+@media(max-width:760px) {
+  .hcd-surface[data-theme] .header-actions>.appearance-control { width:28px; height:30px; padding:6px; position:relative; }
+  .hcd-surface[data-theme] .header-actions>.appearance-control select { position:absolute; inset:0; opacity:0; width:100%; max-width:none; }
+  .hcd-surface[data-theme] .library-topbar>.appearance-control { margin-left:auto; }
+  .hcd-surface[data-theme] .agent-panel-subtitle { margin-bottom:12px; }
+  .hcd-surface[data-theme] .agent-welcome { padding-top:18px; }
+  .hcd-surface[data-theme] .agent-welcome h3 { font-size:18px; }
+}
+@media(prefers-reduced-motion:reduce) { .hcd-surface[data-theme] .hcd-context-menu { animation:none; } }
+.hcd-surface[data-theme] .workspace.semantic-workspace .outline-panel>p,.hcd-surface[data-theme] .drawer-caption { color:var(--muted); }
+.hcd-surface[data-theme] .appearance-control:focus-within { outline:2px solid var(--accent); outline-offset:2px; }
+/* Scope native grid dark UI to this host. Univer's runtime dark toggle also
+   inverts source cell colors and changes the host page's html class. */
+.hcd-surface[data-theme] .hcd-univer-host { color-scheme:light; }
+.hcd-surface[data-theme=dark] .hcd-univer-host.univer-dark { color-scheme:dark; }
+/* The grid canvas is transparent where cells have no explicit fill. Keep its
+   paper underlay light so source black text does not disappear in dark chrome. */
+.hcd-surface[data-theme] .hcd-univer-host section:has(>canvas[id^="univer-sheet-main-canvas"]) { background:#fff!important; color-scheme:light; }
+.hcd-surface[data-theme] .xlsx-formula-bar :is(select,button) { background:var(--hover); color:var(--muted); }
+.hcd-surface[data-theme] .locale-switcher,.hcd-surface[data-theme] .locale-switcher select { color:var(--muted); }
+.hcd-surface[data-theme=dark] .document-art { background:var(--stage); color:var(--muted); }
+.hcd-surface[data-theme=dark] :is(.workspace-label>span,.workspace-avatar) { background:var(--accent-soft); }
+
+/* Collapsing drawers releases their entire width. Only drawers animate;
+   the document/canvas does not scale or remount. */
+.hcd-surface[data-theme] .workspace.semantic-workspace .panel-close { width:30px; height:30px; border-radius:9px; color:var(--muted); background:var(--stage); }
+.hcd-surface[data-theme] .workspace.semantic-workspace .panel-close:hover { color:var(--ink); background:var(--hover); }
+.hcd-surface[data-theme] .sidebar-toggle { background:var(--surface); color:var(--muted); }
+.hcd-surface[data-theme] .sidebar-toggle[aria-expanded=true] { color:var(--ink); }
+.hcd-surface[data-theme] .document-identity { gap:8px; min-width:0; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .outline-panel { animation:drawer-left-in .18s ease-out; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .workspace-sidebar { animation:drawer-right-in .18s ease-out; }
+@keyframes drawer-left-in { from { opacity:0; transform:translateX(-8px); } to { opacity:1; transform:translateX(0); } }
+@keyframes drawer-right-in { from { opacity:0; transform:translateX(8px); } to { opacity:1; transform:translateX(0); } }
+
+/* Digital text editing follows dark appearance. Source-backed Office/PDF pages
+   keep their document colors; no inversion is applied to native content. */
+.hcd-surface[data-theme=dark] .workspace:is([data-format=md],[data-format=txt]) .document { --paper:var(--surface); --paper-ink:var(--ink); border-color:var(--line); }
+.hcd-surface[data-theme=dark] .workspace:is([data-format=md],[data-format=txt]) .hcd-editor-body :is(h1,h2,h3,h4,h5,h6) { color:var(--ink); }
+.hcd-surface[data-theme=dark] .workspace:is([data-format=md],[data-format=txt]) .hcd-editor-body a { color:var(--accent); }
+.hcd-surface[data-theme=dark] .workspace:is([data-format=md],[data-format=txt]) .hcd-editor-body :is(code,pre,blockquote,th) { color:var(--ink); background:var(--stage); border-color:var(--line); }
+.hcd-surface[data-theme=dark] .workspace:is([data-format=md],[data-format=txt]) .hcd-editor-body :is(td,th,hr) { border-color:var(--line); }
+.hcd-surface[data-theme=dark] .export-control>summary { color:var(--on-accent); background:var(--accent); }
+.hcd-surface[data-theme=dark] .agent-compose-scope { color:var(--muted); }
+.hcd-surface[data-theme=dark] .agent-tasks .agent-user-message { background:var(--surface-raised); }
+.hcd-surface[data-theme=dark] .agent-task-result pre { background:var(--stage); border-color:var(--line); }
+.hcd-surface[data-theme=dark] .format-icon { background:var(--hover); }
+.hcd-surface[data-theme=dark] .agent-cursor>span { background:var(--surface); }
+.hcd-surface[data-theme=dark] :is(.document-search,.appearance-panel,.revision-panel,.export-popover,.presence-menu) :is(input,select,textarea) { color:var(--ink); background:var(--stage); border-color:var(--line); }
+@media(min-width:901px) and (max-width:1280px) {
+  .hcd-surface[data-theme] .header-actions .presence { display:none!important; }
+  .hcd-surface[data-theme] .header-actions>.appearance-control { width:30px; height:32px; padding:7px; position:relative; }
+  .hcd-surface[data-theme] .header-actions>.appearance-control select { position:absolute; inset:0; opacity:0; width:100%; max-width:none; }
+}
+@media(max-width:760px) {
+  .hcd-surface[data-theme] .workspace.semantic-workspace .header-actions { gap:3px; }
+  .hcd-surface[data-theme] .header-actions .sidebar-toggle { width:28px; height:30px; padding:5px; }
+  .hcd-surface[data-theme] .workspace.semantic-workspace .header-actions>.collaboration-trigger { width:30px; padding:0; font-size:0; }
+  .hcd-surface[data-theme] .header-actions .collaboration-trigger .count-badge { display:none; }
+}
+@media(prefers-reduced-motion:reduce) {
+  .hcd-surface[data-theme] .workspace.semantic-workspace :is(.outline-panel,.workspace-sidebar) { animation:none; }
+}

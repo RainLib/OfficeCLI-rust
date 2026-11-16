@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "officecli-integration/1",
+  "tenantId": "acme",
+  "appId": "document-workspace",
+  "providerUrl": "https://workspace.internal",
+  "keyId": "provider-1",
+  "providerSecretEnv": "HCD_PROVIDER_SECRET",
+  "serviceSecretEnv": "HCD_INTEGRATION_SERVICE_SECRET",
+  "transferOrigins": ["https://files.internal"],
+  "events": {
+    "url": "https://workspace.internal/officecli-events/v1/events",
+    "keyId": "event-1",
+    "secretEnv": "HCD_EVENT_SECRET"
+  }
+}

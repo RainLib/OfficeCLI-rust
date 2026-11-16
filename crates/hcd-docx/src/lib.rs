@@ -322,6 +322,275 @@ mod tests {
     }
 
     #[test]
+    fn editor_text_checkpoint_preserves_word_presentation_and_source_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let bundle_path = temp.path().join("document.hcd");
+        let exported = temp.path().join("edited.docx");
+        create_fixture(&source);
+        import_docx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("editor-save"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        hcd_core::project_editor(&bundle, 0).unwrap();
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let original = projection
+            .blocks
+            .iter()
+            .find(|block| {
+                !block.read_only
+                    && block
+                        .content
+                        .inlines
+                        .iter()
+                        .any(|inline| inline.text == "主题中文")
+            })
+            .unwrap();
+        let mut content = original.content.clone();
+        for inline in &mut content.inlines {
+            inline.node_id = None;
+            inline.text = inline.text.replace("主题中文", "主题中文（修订）");
+        }
+        hcd_core::apply_structure_patch(
+            &bundle,
+            &hcd_core::StructurePatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_4.to_string(),
+                document_id: projection.document_id,
+                patch_id: "editor-text".to_string(),
+                base_revision: 1,
+                operations: vec![hcd_core::StructureOperation::Replace {
+                    block_id: original.block_id.clone(),
+                    block: content,
+                    precondition: hcd_core::BlockPrecondition {
+                        block_hash: original.block_hash.clone(),
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let validation = hcd_core::validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        assert!(!bundle.revision(2).unwrap().structural_change);
+        let current = hcd_core::editor_projection(&bundle, None).unwrap();
+        let updated = current
+            .blocks
+            .iter()
+            .find(|block| block.block_id == original.block_id)
+            .unwrap();
+        let expected_html = original
+            .presentation_html
+            .as_ref()
+            .unwrap()
+            .replace("主题中文", "主题中文（修订）")
+            .replace(
+                &hcd_core::hash_bytes("主题中文".as_bytes()),
+                &hcd_core::hash_bytes("主题中文（修订）".as_bytes()),
+            );
+        assert_eq!(updated.presentation_html.as_ref().unwrap(), &expected_html);
+        export_docx(&bundle_path, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&exported, "word/document.xml").contains("主题中文（修订）"));
+        for part in [
+            "word/styles.xml",
+            "word/header1.xml",
+            "word/media/image1.png",
+        ] {
+            assert_eq!(
+                read_zip_bytes(&source, part),
+                read_zip_bytes(&exported, part)
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_inline_checkpoints_and_text_splices_roundtrip_without_losing_word_styles() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.docx");
+        let path = temp.path().join("document.hcd");
+        let output = temp.path().join("edited.docx");
+        create_fixture(&source);
+        import_docx(
+            &source,
+            &path,
+            &ImportOptions::new("rich-checkpoint"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        hcd_core::project_editor(&bundle, 0).unwrap();
+        let state = hcd_core::editor_projection(&bundle, None).unwrap();
+        let original = state
+            .blocks
+            .iter()
+            .find(|block| {
+                !block.read_only
+                    && block
+                        .content
+                        .inlines
+                        .iter()
+                        .any(|run| run.text == "主题中文")
+            })
+            .unwrap();
+        let id = original.content.inlines[0].node_id.clone().unwrap();
+        let original_html = original.presentation_html.clone().unwrap();
+        for (step, values) in [
+            vec![("主题中文", false, false), (" 新增😀", true, true)],
+            vec![
+                ("主题", true, false),
+                ("中文 新增😀", false, true),
+                (" 结尾", false, false),
+            ],
+            vec![("完整重写😀", true, true)],
+            vec![],
+            vec![("恢复文字", false, false), (" 加粗", true, false)],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = temp.path().join(format!("edited-{step}.docx"));
+            let state = hcd_core::editor_projection(&bundle, None).unwrap();
+            let block = state
+                .blocks
+                .iter()
+                .find(|block| block.block_id == original.block_id)
+                .unwrap();
+            let mut content = block.content.clone();
+            content.inlines = values
+                .iter()
+                .map(|(text, bold, italic)| hcd_core::EditorInline {
+                    text: text.to_string(),
+                    node_id: None,
+                    bold: *bold,
+                    italic: *italic,
+                    link: None,
+                })
+                .collect();
+            hcd_core::apply_structure_patch(
+                &bundle,
+                &hcd_core::StructurePatchBatch {
+                    schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_4.into(),
+                    document_id: state.document_id,
+                    patch_id: format!("rich-{step}"),
+                    base_revision: state.revision,
+                    operations: vec![hcd_core::StructureOperation::Replace {
+                        block_id: block.block_id.clone(),
+                        block: content,
+                        precondition: hcd_core::BlockPrecondition {
+                            block_hash: block.block_hash.clone(),
+                        },
+                    }],
+                },
+                state.revision,
+            )
+            .unwrap();
+            let report = hcd_core::validate_bundle(&bundle).unwrap();
+            assert!(report.valid, "{:?}", report.issues);
+            assert!(
+                !bundle
+                    .revision(state.revision + 1)
+                    .unwrap()
+                    .structural_change
+            );
+            let current = hcd_core::editor_projection(&bundle, None).unwrap();
+            let current = current
+                .blocks
+                .iter()
+                .find(|block| block.block_id == original.block_id)
+                .unwrap();
+            assert!(current
+                .content
+                .inlines
+                .iter()
+                .all(|inline| inline.node_id.as_deref() == Some(&id)));
+            assert_eq!(
+                current
+                    .presentation_html
+                    .as_ref()
+                    .unwrap()
+                    .split('>')
+                    .next(),
+                original_html.split('>').next()
+            );
+            export_docx(&path, &source, &output, &ExportOptions::default()).unwrap();
+            for part in [
+                "word/styles.xml",
+                "word/header1.xml",
+                "word/theme/custom-theme.xml",
+                "word/media/image1.png",
+            ] {
+                assert_eq!(read_zip_raw(&source, part), read_zip_raw(&output, part));
+            }
+            let reimport = temp.path().join(format!("reimport-{step}"));
+            import_docx(&output, &reimport, &ImportOptions::new("roundtrip"), |_| {
+                Ok(())
+            })
+            .unwrap();
+            let state =
+                hcd_core::editor_projection(&Bundle::open(&reimport).unwrap(), None).unwrap();
+            let xml = read_zip_entry(&output, "word/document.xml");
+            assert!(xml.contains("<w:lang w:val=\"en-US\" w:eastAsia=\"zh-CN\"/>"));
+            if !values.is_empty() {
+                let expected: String = values.iter().map(|value| value.0).collect();
+                let read = state
+                    .blocks
+                    .iter()
+                    .find(|block| {
+                        block
+                            .content
+                            .inlines
+                            .iter()
+                            .map(|run| run.text.as_str())
+                            .collect::<String>()
+                            == expected
+                    })
+                    .unwrap();
+                let actual: Vec<_> = read
+                    .content
+                    .inlines
+                    .iter()
+                    .flat_map(|run| run.text.chars().map(|c| (c, run.bold, run.italic)))
+                    .collect();
+                let expected: Vec<_> = values
+                    .iter()
+                    .flat_map(|(text, bold, italic)| text.chars().map(|c| (c, *bold, *italic)))
+                    .collect();
+                assert_eq!(actual, expected);
+            }
+        }
+        // A later node-level/CLI splice must retain the rich styles too.
+        let node = hcd_core::get_text_node(&bundle, &id).unwrap();
+        let revision = bundle.manifest().unwrap().revision;
+        hcd_core::apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: bundle.manifest().unwrap().document_id,
+                patch_id: "rich-splice".into(),
+                base_revision: revision,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: id,
+                    start: 4,
+                    delete_count: 0,
+                    insert_text: "😀".into(),
+                    precondition: NodePrecondition {
+                        node_hash: node.node.node_hash,
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            revision,
+        )
+        .unwrap();
+        export_docx(&path, &source, &output, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&output, "word/document.xml").contains("恢复文字😀"));
+    }
+
+    #[test]
     fn source_export_pins_a_patched_face_onto_its_run() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.docx");

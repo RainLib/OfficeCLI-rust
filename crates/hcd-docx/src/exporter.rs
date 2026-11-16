@@ -9,6 +9,7 @@ use quick_xml::{Reader, Writer};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+mod rich_text;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
@@ -127,7 +128,9 @@ fn reject_image_source_export(
         for descriptor in page.chunks {
             let source_map = bundle.read_map(&descriptor)?;
             if let Some(entry) = source_map.entries.iter().find(|entry| {
-                dirty_node_ids.contains(&entry.node_id) && entry.source.node_kind == "image"
+                dirty_node_ids.contains(&entry.node_id)
+                    && entry.source.node_kind == "image"
+                    && !entry.source.created_in_hcd
             }) {
                 return Err(HcdError::Unsupported(format!(
                     "revision changes image node {}; source-backed DOCX image rewrite is not implemented and export was stopped before writing output; omit --source to use the pure-Rust semantic rebuild",
@@ -191,6 +194,7 @@ fn dirty_state_through(
 struct TextUpdate {
     text: String,
     font: Option<HtmlFontNode>,
+    runs: Option<Vec<hcd_core::DocxInlineRun>>,
 }
 
 fn collect_text_by_part(
@@ -224,6 +228,7 @@ fn collect_text_by_part(
             let html = bundle.read_chunk(&descriptor)?;
             let html_nodes = extract_html_text_nodes(&html)?;
             let html_fonts = extract_html_font_nodes(&html)?;
+            let mut rich_runs = hcd_core::extract_docx_inline_runs(&html)?;
             for entry in source_map.entries {
                 if !dirty_node_ids.contains(&entry.node_id) {
                     continue;
@@ -233,6 +238,11 @@ fn collect_text_by_part(
                         "dirty node {} maps to source part {} that is absent from the revision dirty part set",
                         entry.node_id, entry.source.part
                     )));
+                }
+                if entry.source.node_kind == "image" && entry.source.created_in_hcd {
+                    found.insert(entry.node_id.clone());
+                    output.entry(entry.source.part.clone()).or_default();
+                    continue;
                 }
                 let text = html_nodes.get(&entry.node_id).ok_or_else(|| {
                     HcdError::InvalidBundle(format!(
@@ -249,7 +259,15 @@ fn collect_text_by_part(
                 }
                 let font = html_fonts.get(&entry.node_id).cloned();
                 found.insert(entry.node_id.clone());
-                insert_entry(&mut output, entry, text, font)?;
+                let runs = rich_runs.remove(&entry.node_id);
+                if runs.as_ref().is_some_and(|runs| {
+                    runs.iter().map(|run| run.text.as_str()).collect::<String>() != *text
+                }) {
+                    return Err(HcdError::InvalidBundle(
+                        "Word inline text does not match its source anchor".into(),
+                    ));
+                }
+                insert_entry(&mut output, entry, text, font, runs)?;
             }
         }
     }
@@ -279,10 +297,12 @@ fn insert_entry(
     entry: NodeMapEntry,
     text: &str,
     font: Option<HtmlFontNode>,
+    runs: Option<Vec<hcd_core::DocxInlineRun>>,
 ) -> Result<(), HcdError> {
     let update = TextUpdate {
         text: text.to_string(),
         font,
+        runs,
     };
     let part = output.entry(entry.source.part.clone()).or_default();
     if let Some(previous) = part.insert(entry.source.text_ordinal, update.clone()) {
@@ -357,6 +377,9 @@ fn rewrite_text_part(
     output: impl Write,
     replacements: &BTreeMap<u64, TextUpdate>,
 ) -> Result<(), HcdError> {
+    if replacements.values().any(|update| update.runs.is_some()) {
+        return rich_text::rewrite(source, output, replacements);
+    }
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
     let mut writer = Writer::new(output);
@@ -908,6 +931,7 @@ mod tests {
         TextUpdate {
             text: text.to_string(),
             font,
+            runs: None,
         }
     }
 

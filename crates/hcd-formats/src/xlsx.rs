@@ -1,3 +1,4 @@
+mod rich_text;
 use crate::common::{
     append_control_children, attribute, base_manifest, checked_attribute,
     checked_export_state_with_restores, collect_dirty_nodes, current_control_part,
@@ -16,6 +17,7 @@ use hcd_core::{
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
+use rich_text::{RichString, RichStringBuilder};
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
@@ -142,6 +144,7 @@ struct CellBuilder {
     shared_formula_index: Option<u32>,
     value: String,
     inline_text: String,
+    rich_text: Option<RichStringBuilder>,
     capture: Capture,
 }
 
@@ -792,8 +795,7 @@ impl SharedStringStore {
                 let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
                 reader.config_mut().check_end_names = true;
                 let mut buffer = Vec::with_capacity(64 * 1024);
-                let mut current: Option<String> = None;
-                let mut in_text = false;
+                let mut current: Option<RichStringBuilder> = None;
                 let mut budget = XmlBudget::default();
                 loop {
                     let event = reader.read_event_into(&mut buffer).map_err(|error| {
@@ -802,33 +804,29 @@ impl SharedStringStore {
                     budget
                         .observe(&event, "xl/sharedStrings.xml")
                         .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                    if let Some(builder) = &mut current {
+                        builder
+                            .observe(&event)
+                            .map_err(|e| PackageError::ReadPartError(e.to_string()))?;
+                    }
                     match event {
                         Event::Start(ref start) if local_name(start.name().as_ref()) == "si" => {
-                            current = Some(String::new());
+                            current = Some(RichStringBuilder::default());
                         }
-                        Event::Start(ref start) if local_name(start.name().as_ref()) == "t" => {
-                            in_text = current.is_some();
-                        }
-                        Event::Text(text) if in_text => {
-                            let decoded = text.unescape().map_err(|error| {
-                                PackageError::ReadPartError(format!("shared string text: {error}"))
-                            })?;
-                            let value = current.as_mut().expect("in_text requires a string");
-                            value.push_str(&decoded);
-                            if value.len() > MAX_CHUNK_BYTES {
-                                return Err(PackageError::ReadPartError(
-                                    "NODE_TOO_LARGE: shared string exceeds 2 MiB".to_string(),
-                                ));
-                            }
-                        }
-                        Event::End(ref end) if local_name(end.name().as_ref()) == "t" => {
-                            in_text = false;
+                        Event::Empty(ref start) if local_name(start.name().as_ref()) == "si" => {
+                            store
+                                .push_rich(&RichString::default())
+                                .map_err(|e| PackageError::ReadPartError(e.to_string()))?;
                         }
                         Event::End(ref end) if local_name(end.name().as_ref()) == "si" => {
-                            let value = current.take().unwrap_or_default();
+                            let value = current
+                                .take()
+                                .unwrap_or_default()
+                                .finish()
+                                .map_err(|e| PackageError::ReadPartError(e.to_string()))?;
                             store
-                                .push(&value)
-                                .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
+                                .push_rich(&value)
+                                .map_err(|e| PackageError::ReadPartError(e.to_string()))?;
                         }
                         Event::Eof => {
                             budget
@@ -846,7 +844,21 @@ impl SharedStringStore {
         Ok(store)
     }
 
+    #[cfg(test)]
     fn push(&mut self, value: &str) -> Result<(), HcdError> {
+        self.push_rich(&RichString {
+            text: value.to_string(),
+            runs: Vec::new(),
+        })
+    }
+
+    fn push_rich(&mut self, value: &RichString) -> Result<(), HcdError> {
+        let value = serde_json::to_string(value)?;
+        if value.len() > MAX_CHUNK_BYTES {
+            return Err(HcdError::ResourceLimit(
+                "NODE_TOO_LARGE: XLSX rich string record exceeds 2 MiB".into(),
+            ));
+        }
         let offset = self.values.seek(SeekFrom::End(0))?;
         self.offsets.write_all(&offset.to_le_bytes())?;
         self.values.write_all(&(value.len() as u64).to_le_bytes())?;
@@ -856,6 +868,10 @@ impl SharedStringStore {
     }
 
     fn get(&mut self, index: u64) -> Result<String, HcdError> {
+        Ok(self.get_rich(index)?.text)
+    }
+
+    fn get_rich(&mut self, index: u64) -> Result<RichString, HcdError> {
         if index >= self.count {
             return Err(HcdError::InvalidBundle(format!(
                 "shared string index {index} exceeds {} entries",
@@ -876,8 +892,8 @@ impl SharedStringStore {
         }
         let mut bytes = vec![0u8; length as usize];
         self.values.read_exact(&mut bytes)?;
-        String::from_utf8(bytes)
-            .map_err(|error| HcdError::InvalidBundle(format!("shared string UTF-8: {error}")))
+        serde_json::from_slice(&bytes)
+            .map_err(|error| HcdError::InvalidBundle(format!("shared string record: {error}")))
     }
 }
 
@@ -4137,6 +4153,9 @@ where
             HcdError::InvalidBundle(format!("worksheet {} XML: {error}", sheet.part))
         })?;
         budget.observe(&event, &sheet.part)?;
+        if let Some(builder) = cell.as_mut().and_then(|cell| cell.rich_text.as_mut()) {
+            builder.observe(&event)?;
+        }
         match event {
             Event::Start(ref start) if local_name(start.name().as_ref()) == "row" => {
                 row = Some(begin_worksheet_row(
@@ -4165,6 +4184,11 @@ where
                 if local_name(start.name().as_ref()) == "col" =>
             {
                 append_column_markup(&mut chunks.column_markup, start);
+            }
+            Event::Start(ref start)
+                if cell.is_some() && local_name(start.name().as_ref()) == "is" =>
+            {
+                cell.as_mut().expect("checked cell").rich_text = Some(RichStringBuilder::default());
             }
             Event::Start(ref start) if local_name(start.name().as_ref()) == "c" => {
                 cell = Some(CellBuilder {
@@ -4470,8 +4494,11 @@ fn append_finished_cell_if_visible(
             sheet.part
         )));
     };
-    let has_content =
-        !finished.value.is_empty() || !finished.inline_text.is_empty() || finished.formula;
+    let has_content = !finished.value.is_empty()
+        || !finished.inline_text.is_empty()
+        || finished.formula
+        // An empty string is occupied for COUNTA, unlike a missing/styled cell.
+        || matches!(finished.value_type.as_str(), "inlineStr" | "str" | "b" | "e");
     let is_merge_anchor = cell_coordinates(&finished.reference)
         .and_then(|(cell_row, cell_col)| merged_ranges.classify(cell_row, cell_col))
         .is_some_and(|position| matches!(position, MergePosition::Anchor(_)));
@@ -4507,14 +4534,37 @@ fn append_cell(
     format_stats: &mut XlsxFormatStats,
 ) -> Result<(), HcdError> {
     let is_numeric = matches!(cell.value_type.as_str(), "" | "n");
-    let raw_text = match cell.value_type.as_str() {
-        "s" => shared_strings.get(cell.value.parse().map_err(|_| {
+    let value_type = match cell.value_type.as_str() {
+        "" | "n" if cell.value.is_empty() => "blank",
+        "" | "n" => "number",
+        "s" | "inlineStr" | "str" => "string",
+        "b" => "boolean",
+        "e" => "error",
+        _ => "unsupported",
+    };
+    let rich_value = match cell.value_type.as_str() {
+        "s" => Some(shared_strings.get_rich(cell.value.parse().map_err(|_| {
             HcdError::InvalidBundle(format!("invalid shared string index in {}", cell.reference))
-        })?)?,
-        "inlineStr" => cell.inline_text,
+        })?)?),
+        "inlineStr" => Some(match cell.rich_text {
+            Some(builder) => builder.finish()?,
+            None => RichString {
+                text: cell.inline_text,
+                runs: Vec::new(),
+            },
+        }),
+        _ => None,
+    };
+    let rich_html = rich_value
+        .as_ref()
+        .filter(|value| !value.runs.is_empty())
+        .map(|value| hcd_core::render_xlsx_inline_runs(&value.runs))
+        .transpose()?;
+    let raw_text = match cell.value_type.as_str() {
+        "s" | "inlineStr" => rich_value.expect("rich string value").text,
         "b" => match cell.value.as_str() {
-            "1" => "TRUE".to_string(),
-            "0" => "FALSE".to_string(),
+            "1" | "true" => "TRUE".to_string(),
+            "0" | "false" => "FALSE".to_string(),
             _ => cell.value,
         },
         _ => cell.value,
@@ -4607,7 +4657,7 @@ fn append_cell(
         column: cell_col,
         span: column_span,
         html: format!(
-            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}{}{}{}><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
+            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}{}{}{} data-hcd-value-type=\"{value_type}\"><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
             cell.style_index
                 .map(|index| format!(" hcd-xs-{index}"))
                 .unwrap_or_default(),
@@ -4624,7 +4674,7 @@ fn append_cell(
             merge_attributes,
             node_id,
             node_hash,
-            escape_text(&formatted.text)
+            rich_html.unwrap_or_else(|| escape_text(&formatted.text))
         ),
     });
     row.entries.push(NodeMapEntry {
@@ -4765,6 +4815,9 @@ pub(crate) fn export_xlsx(
     } else {
         collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?
     };
+    let rich_edits = rich_text::collect_rich_cells(bundle, &manifest, &dirty_node_ids)?;
+    let rich_cells = rich_edits.original;
+    let rich_created = rich_edits.created;
     let numeric_node_values = collect_numeric_node_values(bundle, &manifest, &dirty_node_ids)?;
     let mut replacements: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut numeric_replacements: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -5172,6 +5225,8 @@ pub(crate) fn export_xlsx(
                 input,
                 BufWriter::new(output),
                 values,
+                rich_cells.get(part).unwrap_or(&BTreeMap::new()),
+                rich_created.get(part).unwrap_or(&BTreeMap::new()),
                 &numeric_original,
                 &formulas,
                 &inserted,
@@ -7414,6 +7469,8 @@ fn rewrite_worksheet(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<String, String>,
+    rich_cells: &BTreeMap<String, Vec<hcd_core::XlsxInlineRun>>,
+    rich_created: &BTreeMap<String, Vec<hcd_core::XlsxInlineRun>>,
     numeric_replacements: &BTreeSet<String>,
     formulas: &BTreeMap<String, String>,
     created_cells: &BTreeMap<String, String>,
@@ -8048,6 +8105,7 @@ fn rewrite_worksheet(
                     row_heights,
                     &mut seen_created,
                     cell_styles,
+                    rich_created,
                 )?;
                 last_source_row = source_row;
                 last_row = row;
@@ -8086,6 +8144,7 @@ fn rewrite_worksheet(
                     row_heights,
                     &mut seen_created,
                     cell_styles,
+                    rich_created,
                 )?;
                 last_source_row = source_row;
                 last_row = row;
@@ -8110,6 +8169,7 @@ fn rewrite_worksheet(
                         &row_cell_name,
                         &mut seen_created,
                         cell_styles,
+                        rich_created,
                     )?;
                     writer.write_event(Event::End(BytesEnd::new(name)))?;
                 }
@@ -8136,6 +8196,7 @@ fn rewrite_worksheet(
                             &row_cell_name,
                             &mut seen_created,
                             cell_styles,
+                            rich_created,
                         )?;
                         created_here = row_pending.remove(&current_column);
                     }
@@ -8150,6 +8211,9 @@ fn rewrite_worksheet(
                     }
                     if kind == 1 {
                         write_formula_cell(&mut writer, &shifted, &text)?;
+                    } else if let Some(runs) = rich_created.get(&created_ref).filter(|_| kind != 2)
+                    {
+                        rich_text::write_rich_cell(&mut writer, &shifted, runs)?;
                     } else {
                         write_literal_cell(&mut writer, &shifted, &text, kind == 2)?;
                     }
@@ -8160,12 +8224,19 @@ fn rewrite_worksheet(
                     seen_formulas.insert(reference);
                     skip_depth = 1;
                 } else if let Some(text) = replacements.get(&reference) {
-                    write_literal_cell(
-                        &mut writer,
-                        &shifted,
-                        text,
-                        numeric_replacements.contains(&reference),
-                    )?;
+                    if let Some(runs) = rich_cells
+                        .get(&reference)
+                        .filter(|_| !numeric_replacements.contains(&reference))
+                    {
+                        rich_text::write_rich_cell(&mut writer, &shifted, runs)?;
+                    } else {
+                        write_literal_cell(
+                            &mut writer,
+                            &shifted,
+                            text,
+                            numeric_replacements.contains(&reference),
+                        )?;
+                    }
                     seen_original.insert(reference);
                     skip_depth = 1;
                 } else {
@@ -8193,6 +8264,7 @@ fn rewrite_worksheet(
                             &row_cell_name,
                             &mut seen_created,
                             cell_styles,
+                            rich_created,
                         )?;
                         created_here = row_pending.remove(&current_column);
                     }
@@ -8207,6 +8279,9 @@ fn rewrite_worksheet(
                     }
                     if kind == 1 {
                         write_formula_cell(&mut writer, &shifted, &text)?;
+                    } else if let Some(runs) = rich_created.get(&created_ref).filter(|_| kind != 2)
+                    {
+                        rich_text::write_rich_cell(&mut writer, &shifted, runs)?;
                     } else {
                         write_literal_cell(&mut writer, &shifted, &text, kind == 2)?;
                     }
@@ -8215,12 +8290,19 @@ fn rewrite_worksheet(
                     write_formula_cell(&mut writer, &shifted, formula)?;
                     seen_formulas.insert(reference);
                 } else if let Some(text) = replacements.get(&reference) {
-                    write_literal_cell(
-                        &mut writer,
-                        &shifted,
-                        text,
-                        numeric_replacements.contains(&reference),
-                    )?;
+                    if let Some(runs) = rich_cells
+                        .get(&reference)
+                        .filter(|_| !numeric_replacements.contains(&reference))
+                    {
+                        rich_text::write_rich_cell(&mut writer, &shifted, runs)?;
+                    } else {
+                        write_literal_cell(
+                            &mut writer,
+                            &shifted,
+                            text,
+                            numeric_replacements.contains(&reference),
+                        )?;
+                    }
                     seen_original.insert(reference);
                 } else {
                     writer.write_event(Event::Empty(shifted))?;
@@ -8234,6 +8316,7 @@ fn rewrite_worksheet(
                     &row_cell_name,
                     &mut seen_created,
                     cell_styles,
+                    rich_created,
                 )?;
                 active_row = None;
                 writer.write_event(event.into_owned())?;
@@ -8265,6 +8348,7 @@ fn rewrite_worksheet(
                     row_heights,
                     &mut seen_created,
                     cell_styles,
+                    rich_created,
                 )?;
                 writer.write_event(Event::End(BytesEnd::new(qualified.as_str())))?;
                 if !merge_written {
@@ -8290,6 +8374,7 @@ fn rewrite_worksheet(
                     row_heights,
                     &mut seen_created,
                     cell_styles,
+                    rich_created,
                 )?;
                 let name = end.name().as_ref().to_vec();
                 writer.write_event(event.into_owned())?;
@@ -10722,6 +10807,7 @@ fn write_missing_xlsx_rows(
     row_heights: &BTreeMap<u32, f64>,
     seen: &mut BTreeSet<String>,
     cell_styles: &BTreeMap<String, u32>,
+    rich_created: &BTreeMap<String, Vec<hcd_core::XlsxInlineRun>>,
 ) -> Result<(), HcdError> {
     for &row in canonical_rows.range((last_row.saturating_add(1))..before_row) {
         let mut pending = replacement_rows.remove(&row).unwrap_or_default();
@@ -10737,7 +10823,15 @@ fn write_missing_xlsx_rows(
             writer.write_event(Event::Empty(element))?;
         } else {
             writer.write_event(Event::Start(element))?;
-            flush_new_xlsx_cells(writer, &mut pending, None, cell_name, seen, cell_styles)?;
+            flush_new_xlsx_cells(
+                writer,
+                &mut pending,
+                None,
+                cell_name,
+                seen,
+                cell_styles,
+                rich_created,
+            )?;
             writer.write_event(Event::End(BytesEnd::new(row_name)))?;
         }
     }
@@ -10899,6 +10993,7 @@ fn flush_new_xlsx_cells(
     cell_name: &str,
     seen: &mut BTreeSet<String>,
     cell_styles: &BTreeMap<String, u32>,
+    rich_created: &BTreeMap<String, Vec<hcd_core::XlsxInlineRun>>,
 ) -> Result<(), HcdError> {
     while let Some((&column, _)) = pending.first_key_value() {
         if before_column.is_some_and(|before| column >= before) {
@@ -10910,6 +11005,8 @@ fn flush_new_xlsx_cells(
         let cell = styled_cell(cell, &reference, cell_styles)?;
         if kind == 1 {
             write_formula_cell(writer, &cell, &text)?;
+        } else if let Some(runs) = rich_created.get(&reference).filter(|_| kind != 2) {
+            rich_text::write_rich_cell(writer, &cell, runs)?;
         } else {
             write_literal_cell(writer, &cell, &text, kind == 2)?;
         }
@@ -11136,6 +11233,459 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn rich_strings_keep_native_properties_through_text_and_whole_cell_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("seed.xlsx");
+        let source = temp.path().join("rich.xlsx");
+        let exported = temp.path().join("edited.xlsx");
+        create_shared_string_fixture(&seed);
+        let mut archive = zip::ZipArchive::new(File::open(&seed).unwrap()).unwrap();
+        let mut output = zip::ZipWriter::new(File::create(&source).unwrap());
+        for index in 0..archive.len() {
+            let mut part = archive.by_index(index).unwrap();
+            let name = part.name().to_string();
+            let mut bytes = Vec::new();
+            part.read_to_end(&mut bytes).unwrap();
+            if name == "xl/sharedStrings.xml" {
+                bytes = String::from_utf8(bytes).unwrap()
+                    .replace("<r><t>Shared </t></r>", "<r><rPr><rFont val=\"Arial\"/><b/><i val=\"0\"/><sz val=\"18\"/></rPr><t>Shared </t></r>")
+                    .replace("<r><t>Value 😀</t></r>", "<r><rPr><b val=\"0\"/><i/><color rgb=\"FFCC2244\"/><u val=\"double\"/><scheme val=\"minor\"/></rPr><t>Value 😀</t></r><rPh sb=\"0\" eb=\"1\"><t>phonetic</t></rPh>")
+                    .into_bytes();
+            } else if name == "xl/worksheets/sheet1.xml" {
+                bytes = String::from_utf8(bytes).unwrap().replace("<is><t>After merge</t></is>", "<is><r><rPr><b/></rPr><t>After </t></r><r><rPr><b val=\"0\"/></rPr><t>merge</t></r></is>").into_bytes();
+            }
+            output
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output.finish().unwrap();
+        let source_bytes = std::fs::read(&source).unwrap();
+        let root = temp.path().join("rich.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &root,
+            &ImportOptions::new("rich-cells"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let original_html = bundle.read_chunk(descriptor).unwrap();
+        let runs = hcd_core::extract_xlsx_inline_runs(&original_html).unwrap();
+        let nodes = extract_text_page(&bundle, None, 20).unwrap().entries;
+        let a1 = nodes
+            .iter()
+            .find(|n| n.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        let c3 = nodes
+            .iter()
+            .find(|n| n.source.paragraph_id.as_deref() == Some("C3"))
+            .unwrap();
+        assert_eq!(a1.text, "Shared Value 😀");
+        assert_eq!(runs[&a1.node_id][0].properties["sz"]["val"], "18");
+        assert_eq!(runs[&a1.node_id][1].properties["color"]["rgb"], "FFCC2244");
+        assert_eq!(runs[&c3.node_id][1].properties["b"]["val"], "0");
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: "rich-cells".into(),
+            patch_id: "rich-splice".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![
+                PatchOperation::TextSplice {
+                    node_id: a1.node_id.clone(),
+                    start: 7,
+                    delete_count: 5,
+                    insert_text: "Edited".into(),
+                    precondition: NodePrecondition {
+                        node_hash: a1.node_hash.clone(),
+                    },
+                },
+                PatchOperation::TextSplice {
+                    node_id: a1.node_id.clone(),
+                    start: 13,
+                    delete_count: 1,
+                    insert_text: "😀中文".into(),
+                    precondition: NodePrecondition {
+                        node_hash: a1.node_hash.clone(),
+                    },
+                },
+            ],
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        let validate = validate_bundle(&bundle).unwrap();
+        assert!(validate.valid, "{:?}", validate.issues);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("Edited 😀中文"), "{xml}");
+        assert!(xml.contains("<color rgb=\"FFCC2244\"/>"));
+        assert!(xml.contains("<u val=\"double\"/>"));
+        assert!(xml.contains("<scheme val=\"minor\"/>"));
+        assert_eq!(
+            read_zip_entry(&exported, "xl/sharedStrings.xml"),
+            read_zip_entry(&source, "xl/sharedStrings.xml")
+        );
+        let back_root = temp.path().join("back.hcd");
+        let back_manifest = import_xlsx(
+            &exported,
+            &back_root,
+            &ImportOptions::new("rich-back"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let back = Bundle::open(&back_root).unwrap();
+        let html = back
+            .read_chunk(&back.read_index_page(&back_manifest, 0).unwrap().chunks[0])
+            .unwrap();
+        let back_runs = hcd_core::extract_xlsx_inline_runs(&html).unwrap();
+        let node = extract_text_page(&back, None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|n| n.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        assert_eq!(node.text, "Shared Edited 😀中文");
+        assert_eq!(
+            back_runs[&node.node_id][0].properties,
+            runs[&a1.node_id][0].properties
+        );
+        assert_eq!(
+            back_runs[&node.node_id][1].properties,
+            runs[&a1.node_id][1].properties
+        );
+        let current = hcd_core::get_text_node(&bundle, &a1.node_id).unwrap();
+        let format = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_31.into(),
+            document_id: "rich-cells".into(),
+            patch_id: "whole-cell-style".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::XlsxCellFormat {
+                node_id: a1.node_id.clone(),
+                format: XlsxCellFormatPatch {
+                    bold: Some(false),
+                    font_size_pt: Some(20.0),
+                    ..Default::default()
+                },
+                precondition: NodePrecondition {
+                    node_hash: current.node.node_hash,
+                },
+            }],
+        };
+        hcd_core::apply_patch(&bundle, &format, 1).unwrap();
+        let exported = temp.path().join("formatted.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        let cell = xml
+            .split("r=\"A1\"")
+            .nth(1)
+            .unwrap()
+            .split("</c>")
+            .next()
+            .unwrap();
+        assert!(
+            !cell.contains("<b") && !cell.contains("<sz"),
+            "whole-cell properties must inherit the new cell font: {cell}"
+        );
+        assert!(cell.contains("FFCC2244") && cell.contains("<i"));
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn rich_text_set_saves_style_only_changes_and_rejects_stale_numeric_and_invalid_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        create_shared_string_fixture(&source);
+        let original = std::fs::read(&source).unwrap();
+        let root = temp.path().join("rich-edit.hcd");
+        import_xlsx(&source, &root, &ImportOptions::new("rich-editor"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let cell = |address: &str| {
+            entries
+                .iter()
+                .find(|node| node.source.paragraph_id.as_deref() == Some(address))
+                .unwrap()
+                .clone()
+        };
+        let a1 = cell("A1");
+        let c3 = cell("C3");
+        let d3 = cell("D3");
+        let runs: Vec<hcd_core::XlsxInlineRun> = serde_json::from_value(serde_json::json!([
+            {"text":"Shared ","properties":{"b":{"val":"0"},"color":{"rgb":"FF228844"},"scheme":{"val":"minor"}}},
+            {"text":"Value 😀","properties":{"i":{"val":"0"},"sz":{"val":"20"}}}
+        ])).unwrap();
+        let operation = |node: &hcd_core::TextExtractEntry| PatchOperation::XlsxRichTextSet {
+            node_id: node.node_id.clone(),
+            runs: runs.clone(),
+            precondition: NodePrecondition {
+                node_hash: node.node_hash.clone(),
+            },
+        };
+        let mut patch = PatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_49.into(),
+            document_id: "rich-editor".into(),
+            patch_id: "style-only".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![
+                operation(&a1),
+                PatchOperation::TextSplice {
+                    node_id: c3.node_id.clone(),
+                    start: 0,
+                    delete_count: 5,
+                    insert_text: "Before".into(),
+                    precondition: NodePrecondition {
+                        node_hash: c3.node_hash.clone(),
+                    },
+                },
+            ],
+        };
+        hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &a1.node_id)
+                .unwrap()
+                .node
+                .node_hash,
+            a1.node_hash
+        );
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &c3.node_id)
+                .unwrap()
+                .node
+                .text,
+            "Before merge"
+        );
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1,
+            "exact replay is idempotent"
+        );
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &a1.node_id)
+                .unwrap()
+                .xlsx_runs
+                .as_ref(),
+            Some(&runs)
+        );
+        patch.patch_id = "stale".into();
+        assert!(
+            hcd_core::apply_patch(&bundle, &patch, 1).is_err(),
+            "same-text formatting must still reject a stale revision"
+        );
+        patch.base_revision = 1;
+        patch.operations = vec![operation(&d3)];
+        patch.patch_id = "numeric".into();
+        assert!(hcd_core::apply_patch(&bundle, &patch, 1).is_err());
+        patch.operations = vec![operation(&a1), operation(&a1)];
+        patch.patch_id = "duplicate".into();
+        assert!(hcd_core::apply_patch(&bundle, &patch, 1).is_err());
+        patch.operations = vec![operation(&a1)];
+        if let PatchOperation::XlsxRichTextSet { runs, .. } = &mut patch.operations[0] {
+            runs[0].properties.insert("script".into(), BTreeMap::new());
+        }
+        patch.patch_id = "invalid".into();
+        assert!(hcd_core::apply_patch(&bundle, &patch, 1).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let output = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&output, "xl/worksheets/sheet1.xml");
+        assert!(xml.contains("FF228844") && xml.contains("minor") && xml.contains("val=\"20\""));
+        assert_eq!(
+            read_zip_entry(&output, "xl/styles.xml"),
+            read_zip_entry(&source, "xl/styles.xml")
+        );
+        let reimported = temp.path().join("readback.hcd");
+        let manifest = import_xlsx(
+            &output,
+            &reimported,
+            &ImportOptions::new("readback"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let readback = Bundle::open(&reimported).unwrap();
+        let a1_back = extract_text_page(&readback, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|node| node.source.paragraph_id.as_deref() == Some("A1"))
+            .unwrap();
+        let html = readback
+            .read_chunk(&readback.read_index_page(&manifest, 0).unwrap().chunks[0])
+            .unwrap();
+        assert_eq!(
+            hcd_core::extract_xlsx_inline_runs(&html).unwrap()[&a1_back.node_id],
+            runs
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+
+    #[test]
+    fn rich_content_batch_creates_and_converts_cells_atomically_with_native_readback() {
+        use serde_json::json;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        create_shared_string_fixture(&source);
+        let original = std::fs::read(&source).unwrap();
+        let root = temp.path().join("rich-batch.hcd");
+        let manifest = import_xlsx(
+            &source,
+            &root,
+            &ImportOptions::new("rich-batch"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let sheet = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let apply = |id: &str, revision: u64, operations| {
+            let patch: PatchBatch = serde_json::from_value(
+                json!({"schemaVersion":"hcd-patch/50", "documentId":"rich-batch",
+                "patchId":id,"baseRevision":revision,"operations":operations}),
+            )
+            .unwrap();
+            hcd_core::apply_patch(&bundle, &patch, revision)
+        };
+        apply("initial-formula",0,json!([{"op":"xlsx.formula.create","sheetId":sheet,"row":1,"column":4,"formula":"=1+1"}])).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let cell = |address: &str| {
+            entries
+                .iter()
+                .find(|n| n.source.paragraph_id.as_deref() == Some(address))
+                .unwrap()
+                .clone()
+        };
+        let runs = json!([{"text":"新😀","properties":{"b":{"val":"1"},"color":{"rgb":"FF2255AA"}}},
+            {"text":" normal","properties":{"b":{"val":"0"},"scheme":{"val":"minor"}}}]);
+        let rich_set = |address: &str| {
+            let n = cell(address);
+            json!({"op":"xlsx.richText.set","nodeId":n.node_id,"runs":runs,"precondition":{"nodeHash":n.node_hash}})
+        };
+        let e3 = cell("E3");
+        let c3 = cell("C3");
+        let ops = json!([rich_set("A1"),rich_set("D1"),rich_set("D3"),
+            {"op":"xlsx.richText.create","sheetId":sheet,"row":1,"column":3,"runs":runs},
+            {"op":"xlsx.number.set","sheetId":sheet,"nodeId":e3.node_id,"value":"8","precondition":{"nodeHash":e3.node_hash}},
+            {"op":"xlsx.formula.create","sheetId":sheet,"row":1,"column":6,"formula":"=SUM(E3,2)"},
+            {"op":"xlsx.cell.set","sheetId":sheet,"row":1,"column":7,"text":"plain"},
+            {"op":"text.splice","nodeId":c3.node_id,"start":0,"deleteCount":5,"insertText":"Before","precondition":{"nodeHash":c3.node_hash}}]);
+        let saved = apply("mixed", 1, ops.clone()).unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(
+            bundle.revision(2).unwrap().converted_formula_node_ids,
+            vec![cell("D1").node_id]
+        );
+        assert_eq!(
+            apply("mixed", 1, ops.clone()).unwrap().revision,
+            2,
+            "exact replay"
+        );
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let node = |address: &str| {
+            entries
+                .iter()
+                .find(|n| n.source.paragraph_id.as_deref() == Some(address))
+                .unwrap()
+        };
+        for address in ["A1", "C1", "D1", "D3"] {
+            let lookup = hcd_core::get_text_node(&bundle, &node(address).node_id).unwrap();
+            assert_eq!(lookup.node.text, "新😀 normal");
+            assert!(lookup.node.source.editable);
+            assert_eq!(
+                serde_json::to_value(lookup.xlsx_runs.unwrap()).unwrap(),
+                runs
+            );
+        }
+        assert!(node("C1").source.created_in_hcd);
+        assert_eq!(node("C3").text, "Before merge");
+        let head = bundle.manifest().unwrap().root_hash;
+        // A valid first edit cannot be committed when a later creation collides.
+        for (id, operations) in [
+            (
+                "rollback",
+                json!([{"op":"text.splice","nodeId":node("C3").node_id,"start":0,"deleteCount":0,"insertText":"BAD","precondition":{"nodeHash":node("C3").node_hash}},
+                {"op":"xlsx.richText.create","sheetId":sheet,"row":1,"column":3,"runs":runs}]),
+            ),
+            (
+                "duplicate-address",
+                json!([{"op":"xlsx.richText.create","sheetId":sheet,"row":2,"column":3,"runs":runs},
+                {"op":"xlsx.cell.set","sheetId":sheet,"row":2,"column":3,"text":"duplicate"}]),
+            ),
+            (
+                "duplicate-node",
+                json!([{"op":"xlsx.richText.set","nodeId":node("C3").node_id,"runs":runs,"precondition":{"nodeHash":node("C3").node_hash}},
+                {"op":"text.splice","nodeId":node("C3").node_id,"start":0,"deleteCount":0,"insertText":"BAD","precondition":{"nodeHash":node("C3").node_hash}}]),
+            ),
+            (
+                "invalid-property",
+                json!([{"op":"xlsx.richText.create","sheetId":sheet,"row":2,"column":3,"runs":[{"text":"bad","properties":{"script":{}}}]}]),
+            ),
+            (
+                "oversize-utf16",
+                json!([{"op":"xlsx.richText.create","sheetId":sheet,"row":2,"column":3,"runs":[{"text":"😀".repeat(16384),"properties":{}}]}]),
+            ),
+        ] {
+            assert!(apply(id, 2, operations).is_err(), "{id}");
+            assert_eq!(bundle.manifest().unwrap().revision, 2);
+            assert_eq!(bundle.manifest().unwrap().root_hash, head);
+        }
+        assert!(apply("stale", 1, ops).is_err());
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let output = temp.path().join("edited.xlsx");
+        export_xlsx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&output, "xl/worksheets/sheet1.xml");
+        for address in ["C1", "D1", "D3"] {
+            let start = xml.find(&format!("r=\"{address}\"")).unwrap();
+            let cell = &xml[start..start + xml[start..].find("</c>").unwrap()];
+            assert!(
+                cell.contains("<rPr>") && cell.contains("FF2255AA") && !cell.contains("<f"),
+                "{cell}"
+            );
+        }
+        assert_eq!(
+            read_zip_entry(&output, "xl/styles.xml"),
+            read_zip_entry(&source, "xl/styles.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&output, "xl/sharedStrings.xml"),
+            read_zip_entry(&source, "xl/sharedStrings.xml")
+        );
+        let reimport = temp.path().join("readback.hcd");
+        import_xlsx(&output, &reimport, &ImportOptions::new("rich-back"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let back = Bundle::open(reimport).unwrap();
+        for n in extract_text_page(&back, None, 100).unwrap().entries {
+            if matches!(n.source.paragraph_id.as_deref(), Some("C1" | "D1" | "D3")) {
+                assert_eq!(
+                    serde_json::to_value(
+                        hcd_core::get_text_node(&back, &n.node_id)
+                            .unwrap()
+                            .xlsx_runs
+                            .unwrap()
+                    )
+                    .unwrap(),
+                    runs
+                );
+            }
+        }
+        assert_eq!(std::fs::read(source).unwrap(), original);
+    }
 
     #[test]
     fn shared_formula_projection_shifts_only_relative_a1_references() {
@@ -12517,7 +13067,16 @@ mod tests {
         let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
         assert_eq!(report.level, FidelityLevel::High);
         let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
-        assert!(worksheet.contains("Masked Value 😀"));
+        let mut text_reader = Reader::from_str(&worksheet);
+        let mut text = String::new();
+        loop {
+            match text_reader.read_event().unwrap() {
+                Event::Text(value) => text.push_str(&value.unescape().unwrap()),
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        assert!(text.contains("Masked Value 😀"));
         assert!(worksheet.contains("mergeCell ref=\"A1:B2\""));
         assert!(worksheet.contains("s=\"1\""));
     }
@@ -17597,6 +18156,8 @@ mod tests {
             &mut source.as_slice(),
             &mut output,
             &replacements,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
             &created,

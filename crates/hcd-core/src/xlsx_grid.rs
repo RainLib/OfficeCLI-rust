@@ -64,7 +64,7 @@ impl XlsxSheetSection<'_> {
             .map(|height| format!(" data-hcd-default-row-height-points=\"{height:.2}\""))
             .unwrap_or_default();
         format!(
-            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\"{}{}{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody>{}</tbody></table></section>",
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\"{}{}{}{}><table class=\"hcd-grid\" data-hcd-literal-types=\"1\"><colgroup>{}</colgroup><tbody>{}</tbody></table></section>",
             escape_attribute(self.sheet_name),
             self.sheet_index,
             self.sheet_state,

@@ -6,9 +6,15 @@ import { localizeSource } from './sourceLocale.tsx'
 const clampZoom = (value: number) => Math.round(Math.max(0.25, Math.min(3, value)) * 100) / 100
 const ZoomContext = createContext<{ zoom: number; setZoom: Dispatch<SetStateAction<number>> } | null>(null)
 
-export function CanvasZoomProvider({ children }: { children: ReactNode }) {
-  const [zoom, update] = useState(1)
+export function CanvasZoomProvider({ children, storageKey }: { children: ReactNode; storageKey?: string }) {
+  const [zoom, update] = useState(() => {
+    try {
+      const value = storageKey ? Number(sessionStorage.getItem(`hcd-zoom-v1:${storageKey}`) || 1) : 1
+      return Number.isFinite(value) ? clampZoom(value) : 1
+    } catch { return 1 }
+  })
   const setZoom = useCallback<Dispatch<SetStateAction<number>>>(value => update(previous => clampZoom(typeof value === 'function' ? value(previous) : value)), [])
+  useEffect(() => { if (storageKey) { try { sessionStorage.setItem(`hcd-zoom-v1:${storageKey}`, String(zoom)) } catch { /* Storage is optional. */ } } }, [storageKey, zoom])
   return <ZoomContext.Provider value={{ zoom, setZoom }}>{children}</ZoomContext.Provider>
 }
 
