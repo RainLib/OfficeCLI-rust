@@ -1623,6 +1623,20 @@ fn theme_font_href(
     format!("/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}")
 }
 
+/// What a document pins, served to the surface that renders it.
+///
+/// The two halves of this path answer to different tokens on purpose: `PUT`
+/// accepts the operator token because a pin is a brand decision about the
+/// document rather than an edit of its text (see `authorize_theme`), while this
+/// `GET` takes only a token minted for this document, because whoever may read the
+/// document already needs to know which faces it reads with and nobody else does.
+/// The admin token is therefore refused here even though it is accepted two lines
+/// up the router — least privilege, ruled deliberately, and pinned by the test
+/// `theme_get_leaves_the_pin_to_its_own_reader`. Widening it would hand one
+/// credential a third document-level read path for no consumer: the console reads
+/// the pin off `GET /v1/documents` and the export check off `font-plan`, and no
+/// caller has asked for this one. If a surface ever needs it, the change is to
+/// widen this gate on purpose, not to tighten the pin.
 async fn document_theme(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -3594,6 +3608,93 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
+
+    /// One path, two tokens, and the split is the ruling rather than an oversight.
+    ///
+    /// Pinning takes the operator token because it is a management act the console
+    /// performs on documents it does not otherwise open; reading the pin stays with
+    /// the document's own reader because that is the surface which needs the theme to
+    /// render. The operator token is therefore refused by the `GET` on the same path
+    /// where its own `PUT` succeeds. Pinned so nobody "fixes" the asymmetry by
+    /// widening read access: the console reads the pin off `GET /v1/documents` and the
+    /// export check off `font-plan`, so no consumer asks for this, and the fix for a
+    /// future one is a deliberate widening here, not a stricter pin.
+    #[tokio::test]
+    async fn theme_get_leaves_the_pin_to_its_own_reader() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let id = "doc-a";
+        imported_bundle(
+            &temp.path().join(format!("{id}.hcd")),
+            id,
+            Some(theme.clone()),
+        );
+        let admin = bearer(secret, "*", "admin");
+
+        // The operator token cannot read what the document pins.
+        let error = document_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(ThemeQuery {
+                revision: None,
+                faces: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1, "token document or scope mismatch");
+
+        // The same token does change it: a re-pin of the theme already on the head
+        // answers with that pin, so the gate — not a revision bump — is on trial.
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.theme_revision_id, theme);
+
+        // And the same token reads the export check, which is the question an
+        // operator asks instead of the stylesheet a viewer asks.
+        let plan = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "pdf".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.0["themeRevisionId"].as_str(), Some(theme.as_str()));
+
+        // The document's own reader gets the answer the operator was refused.
+        let resolved = document_theme(
+            State(state),
+            Path(id.to_string()),
+            Query(ThemeQuery {
+                revision: None,
+                faces: None,
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.0.theme_revision_id, theme);
+        assert!(
+            resolved.0.theme.css.contains("@font-face{"),
+            "the reader still gets the managed stylesheet"
+        );
     }
 
     #[tokio::test]
