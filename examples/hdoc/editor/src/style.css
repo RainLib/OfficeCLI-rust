@@ -65,6 +65,7 @@
 .hcd-surface .export-control select{border:1px solid #d7ded8;border-radius:8px;background:#fff;color:#314539;padding:8px}
 .hcd-surface .export-control .download-ready{display:inline-flex;align-items:center;justify-content:center;padding:7px 10px;border-radius:8px;background:#176d48;color:#fff;text-decoration:none;font-weight:600}
 .hcd-surface .export-control .download-ready:hover{background:#125c3c}
+.hcd-surface .export-control .export-filename{display:block;max-width:100%;overflow-wrap:anywhere;color:var(--muted);font-size:11px}
 .hcd-surface .export-control .export-preview{color:#176d48;text-decoration:underline;font-weight:600;white-space:nowrap}
 .pdf-export-preview{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh;background:#e9ece9;color:#233128}
 .pdf-export-preview *{box-sizing:border-box}

@@ -3,7 +3,7 @@
 mod exporter;
 mod importer;
 
-pub use exporter::{export_docx, ExportOptions};
+pub use exporter::{export_docx, validate_source_export, ExportOptions};
 pub use importer::{import_docx, ImportOptions};
 
 #[cfg(test)]

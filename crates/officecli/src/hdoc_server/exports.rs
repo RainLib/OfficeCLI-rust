@@ -165,7 +165,9 @@ fn build_capabilities(
         }
         if format == "pdf" {
             warnings.push(
-                if source_format == "pdf" && manifest.profile == "fixed-layout" {
+                if source_format == "docx" {
+                    "word_preview_layout"
+                } else if source_format == "pdf" && manifest.profile == "fixed-layout" {
                     "pdf_visual_flattened"
                 } else {
                     "canonical_pagination"
@@ -177,6 +179,12 @@ fn build_capabilities(
             warnings.push("archive_history".into());
         }
         let mut modes = vec![ExportMode::new(mode_id, warnings)];
+        if format == "pdf"
+            && source_format == "docx"
+            && crate::commands::hdoc_word_pdf::browser().is_none()
+        {
+            modes[0].disable("layout_engine_unavailable","high-fidelity Word PDF export requires a Chromium renderer; configure OFFICECLI_PDF_BROWSER".into());
+        }
         if format == "hcd" && revision != head.revision {
             modes[0].disable(
                 "history_archive_unavailable",
@@ -227,13 +235,19 @@ fn build_capabilities(
         } else {
             "source"
         };
-        let recommended_mode = modes
-            .iter()
-            .find(|mode| mode.id == recommended && mode.available)
-            .or_else(|| modes.iter().find(|mode| mode.available))
-            .unwrap_or(&modes[0])
-            .id
-            .clone();
+        // A same-format Word download must never silently switch to the lossy
+        // semantic writer. Unsupported native edits stay explicit in the UI.
+        let recommended_mode = if format == "docx" && source_format == "docx" {
+            "source".into()
+        } else {
+            modes
+                .iter()
+                .find(|mode| mode.id == recommended && mode.available)
+                .or_else(|| modes.iter().find(|mode| mode.available))
+                .unwrap_or(&modes[0])
+                .id
+                .clone()
+        };
         formats.push(FormatCapability {
             format: format.into(),
             available: modes.iter().any(|mode| mode.available),
@@ -261,10 +275,73 @@ fn build_capabilities(
     })
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct ExportQuery {
     revision: Option<u64>,
     source: Option<bool>,
+    filename: Option<String>,
+}
+
+fn download_filename(name: Option<&str>, id: &str, format: &str, revision: u64) -> String {
+    let Some(name) = name.filter(|name| !name.trim().is_empty()) else {
+        return format!("{id}-r{revision}.{format}");
+    };
+    let name = name.trim();
+    let stem = name.rsplit_once('.').map_or(name, |(stem, extension)| {
+        if matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "docx"
+                | "xlsx"
+                | "pptx"
+                | "pdf"
+                | "html"
+                | "htm"
+                | "md"
+                | "markdown"
+                | "txt"
+                | "hcd"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "webp"
+        ) {
+            stem
+        } else {
+            name
+        }
+    });
+    let mut safe = String::new();
+    for character in stem.chars() {
+        let character = if character.is_control() || "<>:\"/\\|?*".contains(character) {
+            '_'
+        } else {
+            character
+        };
+        if safe.len() + character.len_utf8() > 200 {
+            break;
+        }
+        safe.push(character);
+    }
+    let stem = safe.trim_matches(|character: char| character.is_whitespace() || character == '.');
+    format!(
+        "{}.{format}",
+        if stem.is_empty() { "document" } else { stem }
+    )
+}
+
+fn download_disposition(filename: &str, format: &str, inline: bool) -> String {
+    let encoded: String = filename
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
+    let disposition = if inline { "inline" } else { "attachment" };
+    format!("{disposition}; filename=\"document.{format}\"; filename*=UTF-8''{encoded}")
 }
 
 const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
@@ -272,10 +349,10 @@ const MAX_DOWNLOAD_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(super) struct DownloadTicket {
-    pub(super) document_id: String,
     pub(super) format: String,
     pub(super) integration_session: Option<String>,
     pub(super) revision: u64,
+    filename: String,
     artifact: Arc<tempfile::NamedTempFile>,
     size: usize,
     expires_at: Instant,
@@ -324,6 +401,7 @@ async fn prepare_download_untracked(
     })?;
     let head = open(&state, &id)?.manifest().map_err(internal)?;
     let revision = query.revision.unwrap_or(head.revision);
+    let filename = download_filename(query.filename.as_deref(), &id, &format, revision);
     // Generate now, so a ready link always refers to a materialized immutable file.
     let response = tokio::time::timeout(
         Duration::from_secs(90),
@@ -361,17 +439,17 @@ async fn prepare_download_untracked(
     downloads.insert(
         ticket.clone(),
         DownloadTicket {
-            document_id: id.clone(),
             format: format.clone(),
             integration_session: claims(&state, &headers, &id)?.integration_session,
             revision,
+            filename: filename.clone(),
             artifact: Arc::new(artifact),
             size,
             expires_at: Instant::now() + Duration::from_secs(300),
         },
     );
     Ok(Json(json!({ "url": format!("/v1/downloads/{ticket}"),
-        "filename": format!("{id}-r{revision}.{format}"), "revision": revision, "bytes": size })))
+        "filename": filename, "revision": revision, "bytes": size })))
 }
 
 pub(super) async fn download_ticket(
@@ -412,13 +490,7 @@ async fn serve_ticket(
     let bytes = tokio::fs::read(download.artifact.path())
         .await
         .map_err(internal)?;
-    export_response(
-        &download.document_id,
-        &download.format,
-        download.revision,
-        bytes,
-        inline,
-    )
+    export_response(&download.filename, &download.format, bytes, inline)
 }
 
 pub(super) async fn export_document(
@@ -479,6 +551,7 @@ async fn export_document_inner(
     let bundle = open(&state, &id)?;
     let head = bundle.manifest().map_err(internal)?;
     let requested = query.revision.unwrap_or(head.revision);
+    let filename = download_filename(query.filename.as_deref(), &id, &format, requested);
     if requested > head.revision {
         return Err(bad("revision ahead of head"));
     }
@@ -506,23 +579,7 @@ async fn export_document_inner(
         .map_err(internal)?
         .map_err(hcd_error)?;
         let bytes = tokio::fs::read(output.path()).await.map_err(internal)?;
-        let mime = match format.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "webp" => "image/webp",
-            _ => "image/png",
-        };
-        return Ok((
-            [
-                (header::CONTENT_TYPE, mime.to_string()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{id}.{format}\""),
-                ),
-                (header::CACHE_CONTROL, "private, no-store".into()),
-            ],
-            bytes,
-        )
-            .into_response());
+        return export_response(&filename, &format, bytes, false);
     }
     if !matches!(
         format.as_str(),
@@ -634,13 +691,12 @@ async fn export_document_inner(
         }
         tokio::fs::read(output).await.map_err(internal)?
     };
-    export_response(&id, &format, requested, bytes, false)
+    export_response(&filename, &format, bytes, false)
 }
 
 fn export_response(
-    id: &str,
+    filename: &str,
     format: &str,
-    revision: u64,
     bytes: Vec<u8>,
     inline: bool,
 ) -> Result<Response, ApiError> {
@@ -649,6 +705,9 @@ fn export_response(
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
         "hcd" => "application/zip",
         "html" => "text/html; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
@@ -658,10 +717,9 @@ fn export_response(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, mime.parse().map_err(internal)?);
-    let disposition = if inline { "inline" } else { "attachment" };
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        format!("{disposition}; filename=\"{id}-r{revision}.{format}\"")
+        download_disposition(filename, format, inline)
             .parse()
             .map_err(internal)?,
     );
@@ -673,4 +731,42 @@ fn export_response(
         "no-referrer".parse().map_err(internal)?,
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod download_name_tests {
+    use super::*;
+
+    #[test]
+    fn names_keep_the_document_title_and_use_the_selected_format() {
+        assert_eq!(
+            download_filename(Some("170kV采购合同.docx"), "internal-id", "docx", 8),
+            "170kV采购合同.docx"
+        );
+        assert_eq!(
+            download_filename(Some("合同 #1.DOCX"), "internal-id", "pdf", 8),
+            "合同 #1.pdf"
+        );
+        assert_eq!(
+            download_filename(Some("方案.2026"), "internal-id", "xlsx", 8),
+            "方案.2026.xlsx"
+        );
+        assert_eq!(
+            download_filename(None, "document-id", "txt", 8),
+            "document-id-r8.txt"
+        );
+        let unsafe_name = download_filename(Some("../\"合同\r\nX-Test: bad.docx"), "id", "docx", 0);
+        assert!(!unsafe_name
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c)));
+        let long = download_filename(Some(&"文".repeat(500)), "id", "docx", 0);
+        assert!(long.len() <= 205);
+        assert!(long.ends_with(".docx"));
+    }
+
+    #[test]
+    fn download_headers_carry_a_safe_ascii_fallback_and_the_exact_utf8_name() {
+        assert_eq!(download_disposition("合同 #1.docx", "docx", false), "attachment; filename=\"document.docx\"; filename*=UTF-8''%E5%90%88%E5%90%8C%20%231.docx");
+        assert!(download_disposition("合同.pdf", "pdf", true).starts_with("inline;"));
+    }
 }

@@ -34,6 +34,7 @@ office_oxide = { workspace = true }
 tempfile = { workspace = true }
 ironpress = { version = "=1.6.0", default-features = false }
 unicode-segmentation = { workspace = true }
+unicode-normalization = "0.1"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 quick-xml = { workspace = true }
 zip = { workspace = true }

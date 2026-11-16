@@ -11,6 +11,7 @@ mod get;
 pub(crate) mod hdoc;
 pub(crate) mod hdoc_html;
 mod hdoc_raster_pdf;
+pub(crate) mod hdoc_word_pdf;
 mod help;
 mod html_convert;
 mod import;

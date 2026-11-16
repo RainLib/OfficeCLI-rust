@@ -14,9 +14,10 @@ function StandaloneContent() {
     document.documentElement.lang = locale
     document.title = t('appTitle')
   }, [locale, t])
+  if (validPreview) return <PdfExportPreview sourcePath={previewPath} />
   const businessFile = new URLSearchParams(location.search).get('workspaceFile')
   if (businessFile && /^[a-f0-9-]{36}$/.test(businessFile)) return <BusinessEditor fileId={businessFile} />
-  return validPreview ? <PdfExportPreview sourcePath={previewPath} /> : <App />
+  return <App />
 }
 
 createRoot(document.getElementById('root')!).render(<I18nProvider initialLocale={standaloneLocale()} persist><StandaloneContent /></I18nProvider>)

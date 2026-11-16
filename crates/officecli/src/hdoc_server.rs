@@ -4201,7 +4201,8 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap();
-        let query = || serde_json::from_value(json!({"revision":0})).unwrap();
+        let query =
+            || serde_json::from_value(json!({"revision":0,"filename":"合同 #1.docx"})).unwrap();
         let ready = exports::prepare_download(
             State(state.clone()),
             Path((id.into(), "html".into())),
@@ -4212,6 +4213,7 @@ mod tests {
         .unwrap()
         .0;
         assert!(ready["bytes"].as_u64().unwrap() > 0);
+        assert_eq!(ready["filename"], "合同 #1.html");
         let ticket = ready["url"].as_str().unwrap().rsplit('/').next().unwrap();
         let bundle = open(&state, id).unwrap();
         project_editor(&bundle, 0).unwrap();
@@ -4220,6 +4222,11 @@ mod tests {
         let download = exports::download_ticket(State(state.clone()), Path(ticket.into()))
             .await
             .unwrap();
+        assert_eq!(
+            download.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(download.headers()[header::CONTENT_DISPOSITION], "attachment; filename=\"document.html\"; filename*=UTF-8''%E5%90%88%E5%90%8C%20%231.html");
         let body = axum::body::to_bytes(download.into_body(), 1024 * 1024)
             .await
             .unwrap();

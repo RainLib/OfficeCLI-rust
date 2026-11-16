@@ -10,6 +10,33 @@ pub struct ScreenshotResult {
     pub output_path: String,
 }
 
+/// PDF printing requires Chromium; an unrelated Playwright CLI or Firefox on
+/// PATH must not hide an installed Chrome/Edge renderer.
+pub fn find_chromium_browser() -> Option<PathBuf> {
+    for name in [
+        "chromium",
+        "chromium-browser",
+        "chrome",
+        "google-chrome",
+        "msedge",
+    ] {
+        if let Ok(path) = which_binary(name) {
+            return Some(path);
+        }
+    }
+    for path in [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    ] {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    find_playwright_chromium()
+}
+
 /// Find an available headless browser binary.
 pub fn find_browser() -> Option<(String, PathBuf)> {
     // 1. Playwright CLI

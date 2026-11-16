@@ -20,6 +20,7 @@ const warningLabels: Record<string, string> = {
   pdf_no_ocr: '仅转换已识别内容，不会自动识别扫描图片中的文字或恢复原始表格。',
   pdf_visual_flattened: '按页面视觉生成 PDF，原始可选中文字和矢量结构将转为页面图像；修改位置和字体可能存在偏差。',
   canonical_pagination: '按当前预览内容重新分页，可能与源文件的打印分页不同。',
+  word_preview_layout: '与分页预览使用相同的字体、分节、表格、页眉页脚和分页规则。',
   source_pdf_approximate: '保留源 PDF；已修改文字的位置和字体可能存在偏差，请预览检查。',
   archive_history: '包含当前文档及完整历史，仅支持当前版本打包。',
 }
@@ -30,6 +31,7 @@ const reasonLabels: Record<string, string> = {
   source_unreadable: '原文件无法读取，请选择其他导出方式。',
   history_archive_unavailable: '历史版本无法单独打包 HCD，请返回当前版本。',
   theme_unavailable: '此版本的字体主题不可用，请修复字体配置后重试。',
+  layout_engine_unavailable: '高保真 PDF 排版服务不可用，请配置 Chromium 后重试。',
 }
 
 export function ExportControl({ session, revision, beforeExport }: {
@@ -91,10 +93,12 @@ export function ExportControl({ session, revision, beforeExport }: {
       setPlan(checked)
       const allowed = checked.formats.find(item => item.format === chosen.format)?.modes.find(item => item.id === chosen.mode)
       if (!allowed?.available) throw new Error(localizeSource(locale, reasonLabels[allowed?.reasonCode || ''] || '当前导出方式不可用，请重新选择。'))
-      const response = await api(session, `/downloads/${chosen.format}?revision=${savedRevision}${chosenMode.source ? '&source=true' : ''}`, { method: 'POST', signal: request.signal })
+      const filename = session.title || session.documentId
+      const response = await api(session, `/downloads/${chosen.format}?revision=${savedRevision}${chosenMode.source ? '&source=true' : ''}&filename=${encodeURIComponent(filename)}`, { method: 'POST', signal: request.signal })
       const ticket = await response.json() as { url: string; filename: string; revision: number }
       if (request.signal.aborted) return
       if (latestRevision.current !== savedRevision || ticket.revision !== savedRevision) throw new Error(localizeSource(locale, '文档已更新，请重新准备导出。'))
+      if (!ticket.filename?.toLowerCase().endsWith(`.${chosen.format}`)) throw new Error(localizeSource(locale, '下载文件名与所选格式不匹配，请重新准备导出。'))
       const base = new URL(session.apiUrl || '/v1/documents', window.location.href)
       const url = new URL(ticket.url, base.origin).href
       const previewUrl = new URL(window.location.href)
@@ -132,6 +136,7 @@ export function ExportControl({ session, revision, beforeExport }: {
       <button onClick={() => void prepare()} disabled={busy || loading || !!planError || !mode?.available || !format?.available}>{localizeSource(locale, busy ? '正在生成文件…' : visibleReady ? '重新准备' : '准备下载')}</button>
       {visibleReady?.previewUrl && <a className="export-preview" href={visibleReady.previewUrl}><LocalText source="预览导出 PDF" /></a>}
       {visibleReady && <a className="download-ready" href={visibleReady.url} download={visibleReady.filename} rel="noreferrer" aria-label={localizeDynamic(locale, `下载 ${visibleReady.filename}`)}><LocalText source="下载文件" /></a>}
+      {visibleReady && <span className="export-filename" title={visibleReady.filename}>{visibleReady.filename}</span>}
       {error && <span className="export-error" role="alert" title={localizeDynamic(locale, error)}>{localizeDynamic(locale, error)}</span>}
     </div>
   </details>

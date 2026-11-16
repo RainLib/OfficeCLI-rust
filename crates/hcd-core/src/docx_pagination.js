@@ -112,6 +112,14 @@
     content.style.height = `${Math.max(1, layout.height - layout.top - layout.bottom)}px`;
     page.append(content); body.append(page); pages.push(page); count = 0;
     running('header', layout.header); running('footer', layout.footer);
+    // Linked portrait footers can extend above a landscape section's smaller
+    // bottom margin. Reserve their measured height before splitting the body,
+    // otherwise the last table row can paint over the page number.
+    const footer = page.querySelector(':scope > .hcd-page-footer');
+    const footerDrawings = [...page.querySelectorAll(':scope > img[data-hcd-running-drawing="footer"]')]
+      .filter(image => image.dataset.hcdBehindDocument !== 'true');
+    const footerTop = Math.min(...[footer, ...footerDrawings].filter(Boolean).map(element => element.getBoundingClientRect().top));
+    if (Number.isFinite(footerTop)) content.style.height = `${Math.max(1, Math.min(length(content.style.height), footerTop-content.getBoundingClientRect().top-2))}px`;
   }
 
   const fits = () => content.scrollHeight <= length(content.style.height) + 1;
@@ -305,6 +313,18 @@
       while ((text=walker.nextNode())) {text.textContent = first ? String(number) : ''; first=false;}
       if (first) element.textContent=String(number);
     }
+    // Print the already-measured pages, using the same geometry and running
+    // regions as the preview. Named pages retain mixed portrait/landscape sizes.
+    const print = doc.createElement('style'); print.id='hcd-docx-print-pages';
+    const sizes = new Map();
+    for (const page of pages) {
+      const key=`${page.style.width} ${page.style.height}`;
+      if (!sizes.has(key)) sizes.set(key,`hcdWord${sizes.size}`);
+      page.style.page=sizes.get(key);
+    }
+    print.textContent = [...sizes].map(([size,name])=>`@page ${name}{size:${size};margin:0}`).join('\n') +
+      '@media print{html{margin:0!important;padding:0!important;background:#fff!important}body.hcd-docx-paginated{display:block!important;margin:0!important;padding:0!important;gap:0!important}body.hcd-docx-paginated>.hcd-virtual-page{margin:0!important;box-shadow:none!important;break-before:auto;break-after:page;break-inside:avoid;print-color-adjust:exact;-webkit-print-color-adjust:exact}body.hcd-docx-paginated>.hcd-virtual-page:last-child{break-after:auto}}';
+    doc.head.append(print);
     body.dataset.hcdPageCount=String(pages.length);
     body.dispatchEvent(new CustomEvent('hcd-pagination-ready', {bubbles:true}));
   }

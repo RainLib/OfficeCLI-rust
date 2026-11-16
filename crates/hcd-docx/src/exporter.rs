@@ -10,6 +10,36 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 mod rich_text;
+mod structure;
+
+/// Validate native body reconciliation without creating a target file.
+pub fn validate_source_export(
+    bundle: &Bundle,
+    source: &Path,
+    revision: Option<u64>,
+) -> Result<(), HcdError> {
+    let head = bundle.manifest()?;
+    if hash_file(source)? != head.source.sha256 {
+        return Err(HcdError::SourceMismatch(
+            "immutable DOCX source does not match the imported document".into(),
+        ));
+    }
+    let revision = revision.unwrap_or(head.revision);
+    let (_, nodes, structural) = dirty_state_through(bundle, revision)?;
+    let manifest = manifest_at_revision(bundle, &head, revision)?;
+    if structural {
+        structure::live_dirty(bundle, &manifest, &nodes)?;
+        let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+        let xml = archive
+            .read_control_part("word/document.xml", 64 * 1024 * 1024)
+            .map_err(package_error)?;
+        let xml = std::str::from_utf8(&xml).map_err(|e| HcdError::InvalidBundle(e.to_string()))?;
+        structure::document(bundle, revision, xml, &BTreeMap::new())?;
+    } else {
+        reject_image_source_export(bundle, &manifest, &nodes)?;
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
@@ -49,8 +79,13 @@ pub fn export_docx(
     }
 
     let revision_manifest = manifest_at_revision(&bundle, &head, revision)?;
-    let (dirty_parts, dirty_node_ids) = dirty_state_through(&bundle, revision)?;
-    reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
+    let (mut dirty_parts, mut dirty_node_ids, structural) = dirty_state_through(&bundle, revision)?;
+    if structural {
+        (dirty_parts, dirty_node_ids) =
+            structure::live_dirty(&bundle, &revision_manifest, &dirty_node_ids)?;
+    } else {
+        reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
+    }
     let updates_by_part =
         collect_text_by_part(&bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
     let pinned_faces = updates_by_part
@@ -71,14 +106,39 @@ pub fn export_docx(
             }
             let replacement_path = temp_dir.path().join(safe_temp_name(part));
             let output = std::fs::File::create(&replacement_path)?;
-            archive
-                .with_part(part, |reader| {
-                    rewrite_text_part(reader, BufWriter::new(output), replacements)
-                        .map_err(|error| PackageError::ReadPartError(error.to_string()))
-                })
-                .map_err(package_error)?;
+            if structural && part == "word/document.xml" {
+                let xml = archive
+                    .read_control_part(part, 64 * 1024 * 1024)
+                    .map_err(package_error)?;
+                let xml = std::str::from_utf8(&xml)
+                    .map_err(|e| HcdError::InvalidBundle(e.to_string()))?;
+                std::fs::write(
+                    &replacement_path,
+                    structure::document(&bundle, revision, xml, replacements)?,
+                )?;
+            } else {
+                archive
+                    .with_part(part, |reader| {
+                        rewrite_text_part(reader, BufWriter::new(output), replacements)
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    })
+                    .map_err(package_error)?;
+            }
             replacement_paths.insert(part.clone(), replacement_path);
         }
+    }
+    if structural && !replacement_paths.contains_key("word/document.xml") {
+        let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+        let xml = archive
+            .read_control_part("word/document.xml", 64 * 1024 * 1024)
+            .map_err(package_error)?;
+        let xml = std::str::from_utf8(&xml).map_err(|e| HcdError::InvalidBundle(e.to_string()))?;
+        let path = temp_dir.path().join("document.xml");
+        std::fs::write(
+            &path,
+            structure::document(&bundle, revision, xml, &BTreeMap::new())?,
+        )?;
+        replacement_paths.insert("word/document.xml".into(), path);
     }
 
     let changed =
@@ -98,6 +158,9 @@ pub fn export_docx(
                 "paragraph and run formatting".to_string(),
                 "relationships, media, numbering, headers and footers".to_string(),
             ];
+            if structural {
+                preserved.push("canonical table rows, columns, grid widths and merges reconciled into the original OOXML body".into());
+            }
             if pinned_faces > 0 {
                 preserved.push(format!(
                     "run fonts pinned by text.font on {pinned_faces} mapped node(s)"
@@ -171,21 +234,17 @@ fn manifest_at_revision(
 fn dirty_state_through(
     bundle: &Bundle,
     revision: u64,
-) -> Result<(HashSet<String>, HashSet<String>), HcdError> {
+) -> Result<(HashSet<String>, HashSet<String>, bool), HcdError> {
     let mut dirty_parts = HashSet::new();
     let mut dirty_nodes = HashSet::new();
+    let mut structural = false;
     for current in 1..=revision {
         let record = bundle.revision(current)?;
-        if record.structural_change {
-            return Err(HcdError::Unsupported(
-                "structural HCD revision requires source-free semantic DOCX rebuild; omit --source"
-                    .to_string(),
-            ));
-        }
+        structural |= record.structural_change;
         dirty_parts.extend(record.dirty_source_parts);
         dirty_nodes.extend(record.dirty_node_ids);
     }
-    Ok((dirty_parts, dirty_nodes))
+    Ok((dirty_parts, dirty_nodes, structural))
 }
 
 /// What a revision asks one mapped source text to become: new text, and the

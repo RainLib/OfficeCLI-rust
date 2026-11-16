@@ -134,7 +134,7 @@ pub fn validate_source_export(
             checked_export_state_with_restores(bundle, source, &options, RunFontSupport::Rewrites)?;
         }
         "docx" => {
-            checked_export_state(bundle, source, &options, RunFontSupport::Rewrites)?;
+            hcd_docx::validate_source_export(bundle, source, revision)?;
         }
         "html" | "md" | "txt" => {
             checked_export_state(bundle, source, &options, RunFontSupport::Rejects)?;

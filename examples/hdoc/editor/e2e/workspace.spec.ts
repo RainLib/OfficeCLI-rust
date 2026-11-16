@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { createHmac, randomBytes } from 'node:crypto'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync, createWriteStream } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, cpSync, readFileSync, rmSync, createWriteStream } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createServer } from 'node:net'
@@ -12,6 +12,7 @@ import * as Y from 'yjs'
 const repo = resolve(import.meta.dirname, '../../../..')
 const editorRoot = resolve(import.meta.dirname, '..')
 const binary = process.env.OFFICECLI_BIN || resolve(repo, 'target/debug/officecli')
+const fidelityId = process.env.HCD_FIDELITY_BUNDLE ? JSON.parse(readFileSync(resolve(process.env.HCD_FIDELITY_BUNDLE,'manifest.json'),'utf8')).documentId as string : 'fidelity-word'
 const secret = randomBytes(32).toString('hex')
 const children: ChildProcess[] = []
 const serviceLogs: string[] = []
@@ -126,6 +127,8 @@ test.beforeAll(async () => {
     'word-page-agents':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
     'word-local':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
     'word-view':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
+    'export-word':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
+    'fidelity-word':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
     'table-edit':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
     'table-appearance':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
     'table-conflict':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
@@ -214,6 +217,11 @@ with zipfile.ZipFile(path,'w') as archive:
     else copyFileSync(resolve(repo,file),source)
     const result = spawnSync(binary,['hdoc','import',source,'--output',resolve(service,`${id}.hcd`),'--document-id',id],{encoding:'utf8'})
     if (result.status !== 0) throw new Error(`fixture import failed: ${result.stderr}`)
+  }
+  if (process.env.HCD_FIDELITY_BUNDLE) {
+    if (!process.env.HCD_FIDELITY_SOURCE) throw new Error('HCD_FIDELITY_SOURCE is required for native Word fidelity verification')
+    cpSync(process.env.HCD_FIDELITY_BUNDLE,resolve(service,`${fidelityId}.hcd`),{recursive:true})
+    copyFileSync(process.env.HCD_FIDELITY_SOURCE,resolve(service,'sources',`${fidelityId}.docx`))
   }
   const apiPort = await freePort(), collabPort = await freePort(), uiPort = await freePort()
   apiUrl = `http://127.0.0.1:${apiPort}`; uiUrl = `http://127.0.0.1:${uiPort}`
@@ -2935,6 +2943,110 @@ test('export menus use source-aware methods and prepare real TXT, XLSX and PDF a
       await page.screenshot({path:info.outputPath('pdf-export-capabilities.png')})
     }
   }
+})
+
+test('Word export downloads use the document title and selected extension and contain readable DOCX files', async ({page},info) => {
+  const id = 'export-word', title = '合同附件 #1.docx'
+  await page.goto(`${uiUrl}/?locale=zh-CN`)
+  await page.evaluate(({id,title,credential}) => sessionStorage.setItem('hcd-editor-workspace-v1', JSON.stringify({
+    version:1,tabs:[{documentId:id,title,token:credential}],activeDocument:id,
+  })), {id,title,credential:token(id,'browser-user')})
+  await page.reload()
+  await expect(page.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','true')
+  await expect(page.locator('.document-title strong')).toHaveText(title)
+  await page.locator('.export-control summary').click()
+  await expect(page.getByLabel('导出格式',{exact:true})).toHaveValue('docx')
+  for (const mode of ['source','semantic']) {
+    await page.getByLabel('导出方式',{exact:true}).selectOption(mode)
+    await page.getByRole('button',{name:'准备下载',exact:true}).click()
+    const link = page.locator('.download-ready')
+    await expect(link).toHaveAttribute('download',title)
+    await expect(page.locator('.export-filename')).toHaveText(title)
+    const response = await page.request.get((await link.getAttribute('href'))!)
+    expect(response.status()).toBe(200)
+    expect(response.headers()['content-type']).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    expect(response.headers()['content-disposition']).toContain(`filename*=UTF-8''${encodeURIComponent(title).replace(/'/g,'%27')}`)
+    const event = page.waitForEvent('download'); await link.click(); const download = await event
+    expect(download.suggestedFilename()).toBe(title)
+    const output = info.outputPath(`${mode}.docx`); await download.saveAs(output)
+    const checked = spawnSync('python3',['-c','import sys,zipfile,xml.etree.ElementTree as E\nz=zipfile.ZipFile(sys.argv[1])\nassert z.testzip() is None\nassert {"[Content_Types].xml","word/document.xml"} <= set(z.namelist())\nfor p in z.namelist():\n if p.endswith((".xml",".rels")): E.fromstring(z.read(p))',output],{encoding:'utf8'})
+    expect(checked.status,checked.stderr).toBe(0)
+    const read = spawnSync(binary,['view',output,'text'],{encoding:'utf8'})
+    expect(read.status,read.stderr).toBe(0); expect(read.stdout).toContain('COVER TITLE')
+    await page.screenshot({path:info.outputPath(`word-export-${mode}.png`)})
+  }
+})
+
+test('Word high fidelity downloads preserve native parts and match every preview page and paper size', async ({page,context},info) => {
+  test.setTimeout(240_000)
+  const copied = !!process.env.HCD_FIDELITY_BUNDLE
+  await open(page,fidelityId,copied ? 'read' : 'write')
+  if (!copied) {
+    const frame = page.locator('.hcd-opaque-preview iframe').first().contentFrame(), tools = page.locator('[data-hcd-table-controls]').first()
+    await expect(frame.locator('[data-hcd-inline-table-text]').first()).toHaveAttribute('contenteditable','plaintext-only')
+    await frame.locator('tr').nth(5).locator('td').first().hover()
+    await tools.getByRole('button',{name:'在下方插入行',exact:true}).click(); await expect(frame.locator('tr')).toHaveCount(32)
+    await frame.locator('tr').nth(6).locator('[data-hcd-inline-table-text]').first().fill('FIDELITY TABLE 中文')
+    await frame.locator('tr').nth(6).locator('td').first().hover()
+    await tools.getByRole('button',{name:'在右侧插入列',exact:true}).click()
+    await expect(frame.locator('tr').nth(6).locator('td')).toHaveCount(3)
+    await page.getByRole('button',{name:'分页预览',exact:true}).click()
+  }
+  const word = page.locator('.word-page-preview iframe').contentFrame()
+  await expect(word.locator('body')).toHaveAttribute('data-hcd-page-count',/^[1-9]\d*$/)
+  const papers = await word.locator('.hcd-virtual-page').evaluateAll(pages=>pages.map(page=>({
+    width:(page as HTMLElement).style.width,height:(page as HTMLElement).style.height,
+    text:(page as HTMLElement).innerText,
+    paragraphs:[...page.querySelectorAll<HTMLElement>('.hcd-paragraph')].map(p=>p.innerText).filter(Boolean),
+    images:[...page.querySelectorAll<HTMLImageElement>('img')].map(image=>({width:image.naturalWidth,height:image.naturalHeight})),
+    bodyBottom:page.querySelector('.hcd-virtual-page-content')?.lastElementChild?.getBoundingClientRect().bottom,
+    footerTop:page.querySelector('.hcd-page-footer')?.getBoundingClientRect().top,
+  })))
+  expect(papers.length).toBeGreaterThan(1)
+  expect(papers.every(page=>page.images.every(image=>image.width>0&&image.height>0))).toBe(true)
+  for(const paper of papers) if(paper.bodyBottom!==undefined&&paper.footerTop!==undefined) expect(paper.bodyBottom).toBeLessThanOrEqual(paper.footerTop+1)
+  writeFileSync(info.outputPath('preview-pages.json'),JSON.stringify(papers,null,2))
+  await page.locator('.export-control summary').click()
+  await expect(page.getByLabel('导出方式',{exact:true})).toHaveValue('source')
+  await page.getByRole('button',{name:'准备下载',exact:true}).click()
+  await expect(page.locator('.download-ready')).toBeVisible()
+  const docxResponse=await page.request.get((await page.locator('.download-ready').getAttribute('href'))!)
+  expect(docxResponse.status()).toBe(200)
+  const docx=info.outputPath('native.docx');writeFileSync(docx,await docxResponse.body())
+  const source=resolve(root,'service','sources',`${fidelityId}.docx`)
+  const checked=spawnSync('python3',['-c','import sys,zipfile,xml.etree.ElementTree as E\na=zipfile.ZipFile(sys.argv[1]);b=zipfile.ZipFile(sys.argv[2])\nassert set(a.namelist())==set(b.namelist())\nfor p in a.namelist():\n if p!="word/document.xml": assert a.read(p)==b.read(p),p\nfor p in b.namelist():\n if p.endswith((".xml",".rels")): E.fromstring(b.read(p))',source,docx],{encoding:'utf8'})
+  expect(checked.status,checked.stderr).toBe(0)
+  if (!copied) {
+    const nativeText=spawnSync(binary,['view',docx,'text'],{encoding:'utf8'})
+    expect(nativeText.status,nativeText.stderr).toBe(0);expect(nativeText.stdout).toContain('FIDELITY TABLE 中文')
+  }
+  await page.getByLabel('导出格式',{exact:true}).selectOption('pdf')
+  await expect(page.locator('.export-guidance')).toContainText('分页预览')
+  await page.getByRole('button',{name:'准备下载',exact:true}).click()
+  await expect(page.locator('.download-ready').or(page.locator('.export-popover .export-error'))).toBeVisible({timeout:60_000})
+  expect(await page.locator('.export-popover .export-error').allTextContents()).toEqual([])
+  await expect(page.locator('.download-ready')).toBeVisible()
+  const pdfResponse=await page.request.get((await page.locator('.download-ready').getAttribute('href'))!)
+  expect(pdfResponse.status()).toBe(200)
+  const pdf=info.outputPath('preview.pdf');writeFileSync(pdf,await pdfResponse.body())
+  const stats=spawnSync(binary,['view',pdf,'stats','--json'],{encoding:'utf8'});expect(stats.status,stats.stderr).toBe(0);expect(JSON.parse(stats.stdout).data.pageCount).toBe(papers.length)
+  const extracted=spawnSync(binary,['view',pdf,'text'],{encoding:'utf8'});expect(extracted.status,extracted.stderr).toBe(0)
+  const normalize=(text:string)=>text.replace(/[\s\u00ad]/g,'')
+  const text=normalize(extracted.stdout)
+  for (const paper of papers) for (const paragraph of paper.paragraphs) expect(text.includes(normalize(paragraph)),`PDF dropped preview text: ${paragraph.slice(0,60)}`).toBe(true)
+  const previewUrl=new URL((await page.locator('.export-preview').getAttribute('href'))!)
+  // Business workspaces retain this parameter on their export-preview links.
+  // A PDF ticket must take precedence over opening another editing session.
+  previewUrl.searchParams.set('workspaceFile','00000000-0000-4000-8000-000000000001')
+  const preview=await context.newPage();await preview.goto(previewUrl.href)
+  for(let index=0;index<papers.length;index++){
+    const sheet=preview.locator('.pdf-export-preview-page');await expect(sheet).toHaveAttribute('data-pdf-rendered-page',String(index+1),{timeout:30_000});await expect(sheet).toHaveAttribute('aria-busy','false')
+    const size=await sheet.locator('canvas').boundingBox();const expected=parseFloat(papers[index].width)/parseFloat(papers[index].height)
+    expect(size!.width/size!.height).toBeCloseTo(expected,2)
+    await preview.screenshot({path:info.outputPath(`pdf-page-${String(index+1).padStart(2,'0')}.png`)})
+    if(index+1<papers.length) await preview.getByRole('button',{name:'下一页',exact:true}).click()
+  }
+  await preview.close()
 })
 
 test('missing workbook sources fall back explicitly to content conversion', async ({page},info) => {

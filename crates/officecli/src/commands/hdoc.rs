@@ -1274,6 +1274,42 @@ fn export(
             format!("Exported image to {}", command.output),
         );
     }
+    if target == "pdf" && head.source.format == "docx" {
+        if let Some(source) = command.source.as_ref() {
+            if hash_file(Path::new(source)).map_err(handler_error)? != head.source.sha256 {
+                return Err(handler_error(HcdError::SourceMismatch(
+                    "immutable Word source does not match the imported document".into(),
+                )));
+            }
+        }
+        let revision = command.revision.unwrap_or(head.revision);
+        let theme_stylesheet = command
+            .catalog
+            .as_ref()
+            .map(|path| {
+                hcd_core::DiskCatalog::open(path).and_then(|catalog| {
+                    hcd_core::theme_presentation_css(&catalog, &bundle, Some(revision))
+                })
+            })
+            .transpose()
+            .map_err(handler_error)?
+            .flatten();
+        let pages = super::hdoc_word_pdf::export(
+            &bundle,
+            revision,
+            theme_stylesheet,
+            Path::new(&command.output),
+        )?;
+        let report=FidelityReport{schema_version:HCD_SCHEMA_VERSION.into(),level:FidelityLevel::High,preserved:vec![format!("{pages} pages from the same Word paginator as the editor"),"source section geometry, running headers and footers, table widths, fonts, colors and embedded media".into(),"extractable text and vector PDF output".into()],flattened:vec!["Word-specific objects outside the canonical preview remain subject to the preview fidelity boundary".into()],dropped:vec![],warnings:vec![]};
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported {pages} preview pages to {}", command.output),
+        );
+    }
     if target == "html"
         && !(command.source.is_some() && normalize_format(&head.source.format) == "html")
     {

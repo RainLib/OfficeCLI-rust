@@ -18,6 +18,8 @@ node apps/workspace/scripts/build.mjs
 
 构建输出 `apps/workspace/dist/`，包含单页后台、编辑器及 worker/异步资源、独立打包的协作 sidecar 和当前平台的 OfficeCLI。设置 `OFFICECLI_BIN` 可选择发行二进制，设置 `OFFICECLI_WORKSPACE_DIST` 可指定构建目录。默认使用本次构建前已存在的 debug 二进制，脚本不会自动编译 Rust。
 
+Word 的原格式下载优先保留原 OOXML 包，并将支持的正文、表格行列和合并变化写回正文；不会自动改用有损语义重建。PDF 使用与编辑器分页预览相同的字体、分节和页眉页脚规则，并验证导出页数、每页纸张尺寸和文字；中文部首等字形别名的 Unicode 映射按预览正文校正，保持原有绘制内容。该 PDF 路径需要服务器安装 Chromium/Chrome/Edge，也可用 `OFFICECLI_PDF_BROWSER` 指定可执行文件；缺少排版引擎或一致性校验失败时会停止导出，不会返回替代版式。浏览器以临时独立配置运行，文档资源内联且不允许文档发起网络请求。
+
 初始化密码由环境变量提供，没有默认账号密码。先将 `OFFICECLI_BOOTSTRAP_PASSWORD` 注入当前终端，再执行：
 
 ```bash

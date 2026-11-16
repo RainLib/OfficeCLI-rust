@@ -9,6 +9,7 @@ export function PdfExportPreview({ sourcePath }: { sourcePath: string }) {
   const [pageNumber, setPageNumber] = useState(1)
   const [error, setError] = useState('')
   const [rendering, setRendering] = useState(true)
+  const [renderedPage, setRenderedPage] = useState(0)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const downloadPath = sourcePath.replace(/\/preview$/, '')
 
@@ -47,7 +48,7 @@ export function PdfExportPreview({ sourcePath }: { sourcePath: string }) {
       if (!context) throw new Error('浏览器无法创建 PDF 画布')
       renderTask = page.render({ canvas, canvasContext: context, viewport: page.getViewport({ scale: scale * ratio }) })
       return renderTask.promise
-    }).then(() => { if (active) setRendering(false) })
+    }).then(() => { if (active) { setRenderedPage(pageNumber); setRendering(false) } })
       .catch(cause => { if (active) setError(`第 ${pageNumber} 页渲染失败：${String(cause)}`) })
     return () => { active = false; renderTask?.cancel() }
   }, [document, pageNumber])
@@ -65,7 +66,7 @@ export function PdfExportPreview({ sourcePath }: { sourcePath: string }) {
       </div>
     </header>
     {error && <p role="alert" className="pdf-export-preview-error">{localizeDynamic(locale, error)}</p>}
-    <div className="pdf-export-preview-page" aria-busy={rendering}>
+    <div className="pdf-export-preview-page" aria-busy={rendering || renderedPage !== pageNumber} data-pdf-rendered-page={renderedPage || undefined}>
       <canvas ref={canvasRef} aria-label={localizeDynamic(locale, `导出 PDF 第 ${pageNumber} 页`)} />
     </div>
   </main>
