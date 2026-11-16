@@ -12,11 +12,11 @@
 npm ci --prefix examples/hdoc/admin-app
 npm ci --prefix examples/hdoc/editor
 npm ci --prefix examples/hdoc/xlsx-univer-viewer
-cargo build -p officecli --bin officecli
+cargo build --release -p officecli --bin officecli
 node apps/workspace/scripts/build.mjs
 ```
 
-构建输出 `apps/workspace/dist/`，包含单页后台、编辑器及 worker/异步资源、独立打包的协作 sidecar 和当前平台的 OfficeCLI。设置 `OFFICECLI_BIN` 可选择发行二进制，设置 `OFFICECLI_WORKSPACE_DIST` 可指定构建目录。默认使用本次构建前已存在的 debug 二进制，脚本不会自动编译 Rust。
+构建输出 `apps/workspace/dist/`，包含单页后台、编辑器及 worker/异步资源、独立打包的协作 sidecar 和当前平台的 OfficeCLI。设置 `OFFICECLI_BIN` 可选择发行二进制，设置 `OFFICECLI_WORKSPACE_DIST` 可指定构建目录。默认优先使用已构建的 release 二进制，缺少时才回退到 debug；脚本不会自动编译 Rust。日常使用和性能验证请构建 release，debug 保留完整调试开销。
 
 Word 的原格式下载优先保留原 OOXML 包，并将支持的正文、表格行列和合并变化写回正文；不会自动改用有损语义重建。PDF 使用与编辑器分页预览相同的字体、分节和页眉页脚规则，并验证导出页数、每页纸张尺寸和文字；中文部首等字形别名的 Unicode 映射按预览正文校正，保持原有绘制内容。该 PDF 路径需要服务器安装 Chromium/Chrome/Edge，也可用 `OFFICECLI_PDF_BROWSER` 指定可执行文件；缺少排版引擎或一致性校验失败时会停止导出，不会返回替代版式。浏览器以临时独立配置运行，文档资源内联且不允许文档发起网络请求。
 
@@ -75,6 +75,13 @@ cargo test -p officecli --bin officecli hdoc_server::integration:: --offline
 # 先完成上述构建。也可省略此环境变量，使用 Playwright 已安装的 Chromium。
 HCD_BROWSER_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
   npm run test:acceptance --prefix apps/workspace
+```
+
+长文档表格性能回归使用 release 引擎，测量点击新增行/列到新单元格重新可编辑的完整耗时，并检查操作全程的滚动位置和排版：
+
+```bash
+OFFICECLI_BIN="$PWD/target/release/officecli" HCD_TABLE_MAX_LATENCY_MS=1000 \
+  npm run test:workspace --prefix examples/hdoc/editor -- --grep 'long Word table insertion'
 ```
 
 验收启动隔离临时 root 与随机端口，使用随机密码和密钥，结束后停止自己创建的进程。临时 root 保留用于诊断，不作为可继续登录的业务工作区交付。结果与截图写入 `docs/acceptance/hcd-default-workspace-v1/`，可通过 `OFFICECLI_WORKSPACE_ARTIFACTS` 改写路径；`OFFICECLI_SKIP_BROWSER=1` 仅运行接口验证，报告会明确标识浏览器未验收。

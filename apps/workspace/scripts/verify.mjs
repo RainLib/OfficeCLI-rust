@@ -96,7 +96,8 @@ async function poll(check, timeout = 45000) {
 async function start() {
   supervisor = spawn(
     process.execPath,
-    [join(app, "cli.mjs"), "start", "--root", root],
+    [join(app, "cli.mjs"), "start", "--root", root,
+      ...(process.env.OFFICECLI_WORKSPACE_DIST ? ["--assets", resolve(process.env.OFFICECLI_WORKSPACE_DIST)] : [])],
     { cwd: repo, stdio: ["ignore", "pipe", "pipe"] },
   );
   supervisor.stdout.pipe(log, { end: false });

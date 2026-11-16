@@ -38,7 +38,10 @@ await build({
 cpSync(join(admin, "embed"), join(out, "admin"), { recursive: true });
 cpSync(join(editor, "dist"), join(out, "editor"), { recursive: true });
 const binary =
-  process.env.OFFICECLI_BIN || join(repo, "target/debug/officecli");
+  process.env.OFFICECLI_BIN ||
+  (existsSync(join(repo, "target/release/officecli"))
+    ? join(repo, "target/release/officecli")
+    : join(repo, "target/debug/officecli"));
 if (!existsSync(binary))
   throw new Error("请先 cargo build -p officecli --bin officecli");
 cpSync(binary, join(out, "officecli"));
