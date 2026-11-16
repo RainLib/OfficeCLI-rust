@@ -118,6 +118,16 @@ fn format_node_text(
     if let Some(text) = &node.text {
         result.push_str(&format!("Text: {}\n", text));
     }
+    if let Some(calculation) = node.format.get("calculation").and_then(Option::as_ref) {
+        if calculation["status"] == "unavailable" {
+            result.push_str(&format!(
+                "Calculation: unavailable ({}; text is a compatibility preview)\n",
+                calculation["error"].as_str().unwrap_or("unverified")
+            ));
+        } else {
+            result.push_str("Calculation: calculated from current formulas and native literals\n");
+        }
+    }
     if let Some(style) = &node.style {
         result.push_str(&format!("Style: {}\n", style));
     }

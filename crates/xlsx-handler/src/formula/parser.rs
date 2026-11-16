@@ -17,6 +17,12 @@ pub struct FormulaParser<'a> {
 /// Trait for resolving cell values during formula evaluation.
 /// Implemented by the caller to provide access to the workbook's cell data.
 pub trait CellResolver {
+    /// Evaluation failures (limits, invalid ranges, cycles) are distinct from
+    /// ordinary Excel error-valued cells that COUNT is allowed to ignore.
+    fn evaluation_failure(&self) -> Option<String> {
+        None
+    }
+
     /// Resolve a same-sheet cell reference (e.g. "A1") to a FormulaResult.
     fn resolve_cell(&self, cell_ref: &str) -> FormulaResult;
 
@@ -288,6 +294,8 @@ impl<'a> FormulaParser<'a> {
                 let inner = self.parse_expression();
                 if self.pos < self.tokens.len() && self.tokens[self.pos].tt == TokenType::RParen {
                     self.pos += 1;
+                } else {
+                    return None;
                 }
                 inner
             }
@@ -314,8 +322,21 @@ impl<'a> FormulaParser<'a> {
                 {
                     args.push(FormulaResult::Number(0.0));
                 } else {
+                    let start = self.pos;
                     let expr = self.parse_expression()?;
-                    args.push(expr);
+                    // Aggregate reference arguments ignore text and booleans,
+                    // unlike explicitly supplied scalar literals.
+                    if self.pos == start + 1
+                        && matches!(
+                            self.tokens[start].tt,
+                            TokenType::CellRef | TokenType::SheetCellRef
+                        )
+                        && matches!(name.as_str(), "SUM" | "AVERAGE" | "COUNT" | "MIN" | "MAX")
+                    {
+                        args.push(FormulaResult::Matrix(vec![vec![expr]]));
+                    } else {
+                        args.push(expr);
+                    }
                 }
                 if self.pos >= self.tokens.len() || self.tokens[self.pos].tt != TokenType::Comma {
                     break;
@@ -325,6 +346,8 @@ impl<'a> FormulaParser<'a> {
         }
         if self.pos < self.tokens.len() && self.tokens[self.pos].tt == TokenType::RParen {
             self.pos += 1;
+        } else {
+            return None;
         }
 
         // Dispatch to function implementation

@@ -19,6 +19,58 @@ pub fn eval_function(
         .strip_prefix("_XLFN__XLWS_")
         .or_else(|| name.strip_prefix("_XLFN_"))
         .unwrap_or(name);
+    // These scalar/aggregate functions cannot turn an input error into zero.
+    // COUNT/COUNTA/COUNTBLANK deliberately have their own error semantics.
+    if matches!(
+        name,
+        "SUM"
+            | "AVERAGE"
+            | "MIN"
+            | "MAX"
+            | "RANK"
+            | "RANK_EQ"
+            | "RANK_AVG"
+            | "ABS"
+            | "ROUND"
+            | "ROUNDUP"
+            | "ROUNDDOWN"
+            | "LEN"
+    ) {
+        if let Some(error) = first_error(args) {
+            return Some(error);
+        }
+        let valid_arity = match name {
+            "ABS" | "LEN" => args.len() == 1,
+            "ROUND" | "ROUNDUP" | "ROUNDDOWN" => args.len() == 2,
+            "RANK" | "RANK_EQ" | "RANK_AVG" => (2..=3).contains(&args.len()),
+            _ => !args.is_empty(),
+        };
+        if !valid_arity {
+            return Some(FormulaResult::Error("#VALUE!".into()));
+        }
+        let numeric_indices: &[usize] = match name {
+            "ABS" => &[0],
+            "ROUND" | "ROUNDUP" | "ROUNDDOWN" => &[0, 1],
+            "RANK" | "RANK_EQ" | "RANK_AVG" => {
+                if args.len() == 3 {
+                    &[0, 2]
+                } else {
+                    &[0]
+                }
+            }
+            _ => &[],
+        };
+        for &index in numeric_indices {
+            let value = args[index].as_string();
+            if matches!(args[index], FormulaResult::Str(_)) && value.trim().parse::<f64>().is_err()
+            {
+                return Some(FormulaResult::Error("#VALUE!".into()));
+            }
+            if !args[index].as_number().is_finite() {
+                return Some(FormulaResult::Error("#NUM!".into()));
+            }
+        }
+    }
     // Helper closures
     let nums = || flatten_numbers(args);
     let num = |i: usize| args.get(i).map(|a| a.as_number()).unwrap_or(0.0);
@@ -27,6 +79,30 @@ pub fn eval_function(
     match name {
         // ===== Math & Aggregation =====
         "SUM" => Some(FormulaResult::Number(nums().iter().sum())),
+        "RANK" | "RANK_EQ" | "RANK_AVG" => {
+            let values = args
+                .get(1)
+                .map(|v| flatten_numbers(std::slice::from_ref(v)))
+                .unwrap_or_default();
+            let target = num(0);
+            if !values.contains(&target) {
+                return Some(FormulaResult::Error("#N/A".into()));
+            }
+            let ascending = num(2) != 0.0;
+            let before = values
+                .iter()
+                .filter(|&&v| if ascending { v < target } else { v > target })
+                .count() as f64;
+            let ties = values.iter().filter(|&&v| v == target).count() as f64;
+            Some(FormulaResult::Number(
+                1.0 + before
+                    + if name == "RANK_AVG" {
+                        (ties - 1.0) / 2.0
+                    } else {
+                        0.0
+                    },
+            ))
+        }
         "AVERAGE" => {
             let n = nums();
             if n.is_empty() {
@@ -38,8 +114,16 @@ pub fn eval_function(
             }
         }
         "COUNT" => Some(FormulaResult::Number(nums().len() as f64)),
-        "COUNTA" => Some(FormulaResult::Number(args.len() as f64)),
-        "COUNTBLANK" => Some(FormulaResult::Number(0.0)),
+        "COUNTA" => Some(FormulaResult::Number(count_values(args, &|value| {
+            !matches!(value, FormulaResult::Blank)
+        }) as f64)),
+        "COUNTBLANK" if args.len() == 1 => {
+            Some(FormulaResult::Number(count_values(args, &|value| {
+                matches!(value, FormulaResult::Blank)
+                    || matches!(value, FormulaResult::Str(s) if s.is_empty())
+            }) as f64))
+        }
+        "COUNTBLANK" => Some(FormulaResult::Error("#VALUE!".into())),
         "MIN" => {
             let n = nums();
             n.iter().cloned().fold(f64::INFINITY, f64::min).pipe(|v| {
@@ -66,21 +150,15 @@ pub fn eval_function(
         "ABS" => Some(FormulaResult::Number(num(0).abs())),
         "ROUND" => {
             let v = num(0);
-            let d = num(1) as i32;
-            let factor = 10f64.powi(d);
-            Some(FormulaResult::Number((v * factor).round() / factor))
+            Some(FormulaResult::Number(round_decimal(v, num(1), 0)))
         }
         "ROUNDUP" => {
             let v = num(0);
-            let d = num(1) as i32;
-            let factor = 10f64.powi(d);
-            Some(FormulaResult::Number((v * factor).ceil() / factor))
+            Some(FormulaResult::Number(round_decimal(v, num(1), 1)))
         }
         "ROUNDDOWN" => {
             let v = num(0);
-            let d = num(1) as i32;
-            let factor = 10f64.powi(d);
-            Some(FormulaResult::Number((v * factor).floor() / factor))
+            Some(FormulaResult::Number(round_decimal(v, num(1), -1)))
         }
         "INT" => Some(FormulaResult::Number(num(0).floor())),
         "TRUNC" => {
@@ -256,7 +334,7 @@ pub fn eval_function(
             let end = (start + len).min(chars.len());
             Some(FormulaResult::Str(chars[start..end].iter().collect()))
         }
-        "LEN" => Some(FormulaResult::Number(str_arg(0).len() as f64)),
+        "LEN" => Some(FormulaResult::Number(str_arg(0).chars().count() as f64)),
         "TRIM" => {
             let s = str_arg(0);
             let trimmed = s.trim();
@@ -624,12 +702,12 @@ fn flatten_numbers(args: &[FormulaResult]) -> Vec<f64> {
     for a in args {
         match a {
             FormulaResult::Array(arr) => result.extend(arr.iter().filter(|v| !v.is_nan())),
-            FormulaResult::Matrix(rows) => result.extend(
-                rows.iter()
-                    .flatten()
-                    .map(FormulaResult::as_number)
-                    .filter(|value| !value.is_nan()),
-            ),
+            FormulaResult::Matrix(rows) => {
+                result.extend(rows.iter().flatten().filter_map(|value| match value {
+                    FormulaResult::Number(number) if !number.is_nan() => Some(*number),
+                    _ => None,
+                }))
+            }
             FormulaResult::Number(v) if !v.is_nan() => result.push(*v),
             FormulaResult::Bool(v) => result.push(if *v { 1.0 } else { 0.0 }),
             FormulaResult::Str(s) => {
@@ -641,6 +719,62 @@ fn flatten_numbers(args: &[FormulaResult]) -> Vec<f64> {
         }
     }
     result
+}
+
+fn first_error(values: &[FormulaResult]) -> Option<FormulaResult> {
+    values.iter().find_map(|value| match value {
+        FormulaResult::Error(_) => Some(value.clone()),
+        FormulaResult::Matrix(rows) => rows.iter().find_map(|row| first_error(row)),
+        _ => None,
+    })
+}
+
+fn count_values(values: &[FormulaResult], predicate: &dyn Fn(&FormulaResult) -> bool) -> usize {
+    values
+        .iter()
+        .map(|value| match value {
+            FormulaResult::Matrix(rows) => {
+                rows.iter().map(|row| count_values(row, predicate)).sum()
+            }
+            FormulaResult::Array(values) => values
+                .iter()
+                .filter(|number| predicate(&FormulaResult::Number(**number)))
+                .count(),
+            value => usize::from(predicate(value)),
+        })
+        .sum()
+}
+
+/// Excel rounds UP away from zero and DOWN towards zero, including negative
+/// decimal positions. Avoid introducing an extra unit from binary noise at an
+/// integral boundary (for example ROUNDUP(1.1, 2)).
+fn round_decimal(value: f64, digits: f64, direction: i8) -> f64 {
+    let digits = digits.trunc().clamp(-308.0, 308.0) as i32;
+    let factor = 10f64.powi(digits.abs());
+    let scaled = if digits >= 0 {
+        value * factor
+    } else {
+        value / factor
+    };
+    if !scaled.is_finite() {
+        return value;
+    }
+    let nearest = scaled.round();
+    let scaled = if (scaled - nearest).abs() <= scaled.abs() * f64::EPSILON * 4.0 {
+        nearest
+    } else {
+        scaled
+    };
+    let rounded = match direction {
+        1 => scaled.abs().ceil().copysign(scaled),
+        -1 => scaled.trunc(),
+        _ => scaled.round(),
+    };
+    if digits >= 0 {
+        rounded / factor
+    } else {
+        rounded * factor
+    }
 }
 
 fn eval_sequence(args: &[FormulaResult]) -> FormulaResult {

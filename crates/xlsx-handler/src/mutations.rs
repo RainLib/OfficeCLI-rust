@@ -1099,7 +1099,14 @@ pub fn set_cell_properties(
                 modified_xml =
                     set_cell_formula(&modified_xml, &cell_ref_str, &qualified, dynamic_cm, &p)?;
                 if formula::is_dynamic_array_formula(&qualified) {
-                    if let Some(result) = formula::evaluate_spill(&qualified, &model) {
+                    let sheet_index = model
+                        .sheets
+                        .iter()
+                        .position(|s| s.name == sheet_name)
+                        .unwrap();
+                    if let Some(result) =
+                        formula::evaluate_spill_in_sheet(&qualified, &model, sheet_index)
+                    {
                         ensure_dynamic_spill_targets_clear(
                             &modified_xml,
                             &cell_ref_str,

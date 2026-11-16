@@ -247,6 +247,29 @@ pub fn get_node_at_path(
                 cell_node =
                     cell_node.with_format("styleIndex", serde_json::Value::Number(si.into()));
             }
+            if let Some(formula) = &cell.formula {
+                let sheet = model
+                    .sheets
+                    .iter()
+                    .position(|s| s.name == sheet_name)
+                    .unwrap();
+                let calculation = match crate::formula::evaluate_checked_in_sheet(
+                    formula, &model, sheet,
+                ) {
+                    Ok(result) => {
+                        serde_json::json!({"status":"calculated","value":result.as_string(),"valueType":result.value_type(),"error":null})
+                    }
+                    Err(error) => {
+                        serde_json::json!({"status":"unavailable","value":null,"error":error})
+                    }
+                };
+                cell_node = cell_node
+                    .with_format("calculation", calculation)
+                    .with_format(
+                        "calculationContract",
+                        serde_json::json!(crate::formula::CALCULATION_CONTRACT),
+                    );
+            }
             if let Some(vm) = cell.value_metadata_index {
                 if let Some(image) = rich_value_image::read_image_info(package, vm) {
                     cell_node = cell_node

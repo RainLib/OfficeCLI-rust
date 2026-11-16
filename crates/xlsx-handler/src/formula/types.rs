@@ -17,6 +17,19 @@ pub enum FormulaResult {
 }
 
 impl FormulaResult {
+    /// Preserve scalar kinds when another renderer consumes a verified value.
+    /// A string such as "12" must not silently become the number 12.
+    pub fn value_type(&self) -> &'static str {
+        match self {
+            Self::Number(_) => "number",
+            Self::Str(_) => "string",
+            Self::Bool(_) => "boolean",
+            Self::Blank => "blank",
+            Self::Error(_) => "error",
+            Self::Array(_) | Self::Matrix(_) => "array",
+        }
+    }
+
     pub fn is_numeric(&self) -> bool {
         matches!(self, Self::Number(_))
     }

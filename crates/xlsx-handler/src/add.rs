@@ -1236,7 +1236,12 @@ fn add_cell(
         .as_deref()
         .filter(|formula| formula::is_dynamic_array_formula(formula))
     {
-        if let Some(result) = formula::evaluate_spill(formula, &model) {
+        let sheet_index = model
+            .sheets
+            .iter()
+            .position(|s| s.name == sheet_name)
+            .unwrap();
+        if let Some(result) = formula::evaluate_spill_in_sheet(formula, &model, sheet_index) {
             crate::mutations::ensure_dynamic_spill_targets_clear(&xml, ref_str, &result, "")?;
             modified_xml =
                 crate::mutations::persist_dynamic_spill(&modified_xml, ref_str, &result, "")?;
