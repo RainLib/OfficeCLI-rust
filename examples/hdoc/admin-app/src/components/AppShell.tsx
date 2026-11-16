@@ -1,100 +1,77 @@
 import * as React from "react";
 import {
-  Database,
-  FileText,
+  Activity,
+  AlertTriangle,
+  ArrowUpRight,
+  CheckCircle2,
+  ChevronsUpDown,
+  Files,
+  KeyRound,
   LayoutDashboard,
+  Menu,
+  Monitor,
   Moon,
   Palette,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelsTopLeft,
   RefreshCw,
   ScrollText,
+  Settings2,
+  Sparkles,
   Sun,
   Type,
-  Upload,
-  Eye,
-  AlertTriangle,
+  MoreHorizontal,
 } from "lucide-react";
-
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { TokenDialog } from "@/components/TokenDialog";
 import { useCatalog } from "@/state/CatalogProvider";
 import { tokenStore } from "@/lib/api";
+import { openEditor } from "@/lib/workspace";
+import { useToast } from "@/components/Toast";
+import { GlobalSearch } from "@/components/GlobalSearch";
 import { cn } from "@/lib/utils";
 
-export interface NavItem {
-  route: string;
-  label: string;
-  icon: React.ReactNode;
-  hint: string;
-}
-
-export interface NavGroup {
-  title: string;
-  items: NavItem[];
-}
-
-/**
- * Groups follow authority, not screen space: the catalog is managed here
- * (目录管理), the documents that pin it are content (内容), and what the
- * changes actually left behind is read-only trail (留痕).
- */
-export const NAV: NavGroup[] = [
+export const NAV = [
   {
-    title: "",
+    title: "工作空间",
     items: [
-      {
-        route: "overview",
-        label: "概览",
-        hint: "目录规模与风险",
-        icon: <LayoutDashboard />,
-      },
+      { route: "overview", label: "概览", icon: LayoutDashboard },
+      { route: "documents", label: "文档管理", icon: Files },
+      { route: "jobs", label: "导入与导出", icon: Activity },
+      { route: "agents", label: "AI 任务", icon: Sparkles },
     ],
   },
   {
-    title: "目录管理",
+    title: "品牌资源",
     items: [
-      { route: "fonts", label: "字体", hint: "修订与许可证", icon: <Type /> },
-      { route: "themes", label: "主题", hint: "槽位、退役、引用", icon: <Palette /> },
+      { route: "fonts", label: "字体目录", icon: Type },
+      { route: "themes", label: "主题与预览", icon: Palette },
     ],
   },
   {
-    title: "录入与校验",
+    title: "服务管理",
     items: [
-      { route: "upload", label: "上传登记", hint: "字库 → 字体修订", icon: <Upload /> },
-      { route: "preview", label: "主题预览", hint: "按许可证内联字面", icon: <Eye /> },
-    ],
-  },
-  {
-    title: "内容",
-    items: [
-      {
-        route: "documents",
-        label: "文档",
-        hint: "本服务文档的钉版状态",
-        icon: <FileText />,
-      },
-    ],
-  },
-  {
-    title: "留痕",
-    items: [
-      {
-        route: "audit",
-        label: "操作记录",
-        hint: "谁在什么时候改了什么",
-        icon: <ScrollText />,
-      },
+      { route: "tokens", label: "访问与令牌", icon: KeyRound },
+      { route: "audit", label: "操作记录", icon: ScrollText },
+      { route: "settings", label: "服务设置", icon: Settings2 },
     ],
   },
 ];
 
-const THEME_KEY = "hcdAdminTheme";
-
-function initialDark(): boolean {
-  const stored = localStorage.getItem(THEME_KEY);
-  if (stored) return stored === "dark";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+function initialDark() {
+  try {
+    return localStorage.getItem("hcdAdminTheme") === "dark";
+  } catch {
+    return false;
+  }
 }
-
 export function AppShell({
   route,
   onNavigate,
@@ -104,131 +81,254 @@ export function AppShell({
   onNavigate: (route: string) => void;
   children: React.ReactNode;
 }) {
-  const { refresh, busy, error, unauthorized, fonts, themes } = useCatalog();
+  const { refresh, busy, error, unauthorized, session, service } = useCatalog();
+  const toast = useToast();
   const [dark, setDark] = React.useState(initialDark);
-  const hasToken = Boolean(tokenStore.get());
+  const [collapsed, setCollapsed] = React.useState(false);
+  const [mobile, setMobile] = React.useState(false);
+  const search = React.useRef<HTMLInputElement>(null);
+  const path = route.split("?")[0].split("/")[0];
+  const selectedRoute =
+    path === "upload" ? "fonts" : path === "preview" ? "themes" : path;
   const active = NAV.flatMap((group) => group.items).find(
-    (item) => item.route === route,
+    (item) => item.route === selectedRoute,
   );
-
   React.useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
-    localStorage.setItem(THEME_KEY, dark ? "dark" : "light");
+    try {
+      localStorage.setItem("hcdAdminTheme", dark ? "dark" : "light");
+    } catch {
+      /* Optional storage. */
+    }
   }, [dark]);
-
-  // Re-render the token badge as soon as the dialog saves a new one.
-  const [, setTick] = React.useState(0);
-  React.useEffect(
-    () => tokenStore.subscribe(() => setTick((tick) => tick + 1)),
-    [],
-  );
-
-  return (
-    <div className="flex h-dvh flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b bg-card px-4">
-        <div className="flex items-center gap-2 font-semibold">
-          <Database className="size-4 text-muted-foreground" />
-          <span className="text-sm">HCD 字体目录管理台</span>
-        </div>
-        <span className="tabular hidden text-xs text-muted-foreground sm:inline">
-          {fonts.length} 个字体 · {themes.length} 个主题
+  React.useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        search.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+  const navigate = (next: string) => {
+    setMobile(false);
+    onNavigate(next);
+  };
+  const navigation = (
+    <>
+      <div className="flex h-[38px] items-center gap-2.5 px-0.5">
+        <PanelsTopLeft className="size-6 text-accent-foreground" />
+        <strong className="text-[19px] font-semibold">OfficeCLI</strong>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="ml-auto hidden lg:flex"
+          aria-label="收起导航"
+          onClick={() => setCollapsed(true)}
+        >
+          <PanelLeftClose className="size-4" />
+        </Button>
+      </div>
+      <div className="flex h-12 shrink-0 items-center gap-2.5 rounded-[13px] bg-secondary px-3 text-xs">
+        <Monitor className="size-4 text-muted-foreground" />
+        <span>本机工作空间</span>
+        <ChevronsUpDown className="ml-auto size-3.5 text-muted-foreground" />
+      </div>
+      <nav
+        aria-label="后台导航"
+        className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto py-1"
+      >
+        {NAV.map((group) => (
+          <div key={group.title} className="flex flex-col gap-1">
+            <p className="mb-1 text-[10px] text-muted-foreground">
+              {group.title}
+            </p>
+            {group.items.map((item) => (
+              <a
+                key={item.route}
+                href={`#/${item.route}`}
+                onClick={() => setMobile(false)}
+                aria-current={selectedRoute === item.route ? "page" : undefined}
+                className={cn(
+                  "flex h-[42px] shrink-0 items-center gap-3 rounded-[11px] px-2.5 text-xs transition-colors hover:bg-accent",
+                  selectedRoute === item.route
+                    ? "bg-accent font-medium text-accent-foreground"
+                    : "text-foreground",
+                )}
+              >
+                <item.icon className="size-[18px]" />
+                {item.label}
+              </a>
+            ))}
+          </div>
+        ))}
+      </nav>
+      <div className="space-y-2 rounded-[14px] bg-muted p-3">
+        <p className="flex items-center gap-1.5 text-[11px]">
+          {service && !unauthorized ? (
+            <CheckCircle2 className="size-3.5 text-success" />
+          ) : (
+            <AlertTriangle className="size-3.5 text-warning" />
+          )}
+          {service && !unauthorized ? "本机服务正常" : "等待连接服务"}
+        </p>
+        <p
+          className="truncate text-[10px] text-muted-foreground"
+          title={location.origin}
+        >
+          {location.host}
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={() => navigate("tokens")}
+        className="flex h-10 shrink-0 items-center gap-2.5 text-left"
+      >
+        <span className="flex size-8 items-center justify-center rounded-[10px] bg-accent text-xs font-medium text-accent-foreground">
+          {(session?.displayName || session?.userId || "O")
+            .slice(0, 1)
+            .toUpperCase()}
         </span>
-        <div className="ml-auto flex items-center gap-2">
-          <span
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs",
-              hasToken && !unauthorized
-                ? "bg-success/10 text-success"
-                : "bg-warning/10 text-warning",
-            )}
-          >
-            <span className="size-1.5 rounded-full bg-current" />
-            {hasToken ? (unauthorized ? "令牌被拒绝" : "管理令牌就绪") : "未设置令牌"}
+        <span className="min-w-0 flex-1 text-xs">
+          <span className="block truncate">
+            {session?.displayName || session?.userId || "管理会话"}
           </span>
-          <TokenDialog onSaved={() => void refresh()} />
+          <small className="text-[10px] text-muted-foreground">
+            {session ? "本机管理员" : "连接管理令牌"}
+          </small>
+        </span>
+        <MoreHorizontal className="size-4 text-muted-foreground" />
+      </button>
+    </>
+  );
+  return (
+    <div className="flex h-dvh gap-[14px] overflow-hidden bg-background p-3 lg:p-4">
+      {!collapsed && (
+        <aside className="hidden h-full w-56 shrink-0 flex-col gap-5 rounded-[28px] bg-card p-[18px] lg:flex">
+          {navigation}
+        </aside>
+      )}
+      <Dialog open={mobile} onOpenChange={setMobile}>
+        <DialogContent className="inset-y-3 left-3 top-3 flex h-[calc(100dvh-24px)] max-h-none w-[min(300px,calc(100vw-24px))] translate-x-0 translate-y-0 flex-col gap-5 rounded-[24px] border-0 p-[18px]">
+          <DialogTitle className="sr-only">工作空间导航</DialogTitle>
+          <DialogDescription className="sr-only">
+            选择后台管理页面
+          </DialogDescription>
+          {navigation}
+        </DialogContent>
+      </Dialog>
+      <div className="flex min-w-0 flex-1 flex-col gap-[14px] pb-[70px] lg:pb-0">
+        <header className="flex h-11 shrink-0 items-center gap-3 px-1 lg:h-14 lg:px-3">
           <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void refresh()}
-            disabled={busy}
-            title="重新拉取目录"
+            variant="ghost"
+            size="icon"
+            className={cn(!collapsed && "lg:hidden")}
+            aria-label={collapsed ? "展开导航" : "打开导航"}
+            onClick={() => {
+              if (matchMedia("(min-width: 1024px)").matches)
+                setCollapsed(false);
+              else setMobile(true);
+            }}
           >
-            <RefreshCw className={cn(busy && "animate-spin")} />
-            刷新
+            {collapsed ? <PanelLeftOpen /> : <Menu />}
+          </Button>
+          <span className="hidden truncate text-xs text-muted-foreground sm:block">
+            管理后台 <span className="px-2">/</span>{" "}
+            {active?.label || "工作空间"}
+          </span>
+          <strong className="text-base sm:hidden">OfficeCLI</strong>
+          <GlobalSearch inputRef={search} onNavigate={navigate} />
+          <Button
+            variant="ghost"
+            className="hidden sm:inline-flex"
+            onClick={() => void openEditor().catch(toast.err)}
+          >
+            <ArrowUpRight />
+            返回工作台
           </Button>
           <Button
             variant="ghost"
             size="icon"
-            aria-label="切换深浅色"
+            aria-label={dark ? "切换浅色" : "切换深色"}
             onClick={() => setDark((value) => !value)}
           >
             {dark ? <Sun /> : <Moon />}
           </Button>
-        </div>
-      </header>
-
-      <div className="flex min-h-0 flex-1">
-        <nav className="flex w-56 shrink-0 flex-col gap-4 overflow-y-auto border-r bg-muted/30 px-2 py-3">
-          {NAV.map((group, index) => (
-            <div key={group.title || `root-${index}`} className="flex flex-col gap-1">
-              {group.title ? (
-                <p className="px-2 pb-1 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
-                  {group.title}
-                </p>
-              ) : null}
-              {group.items.map((item) => {
-                const selected = item.route === route;
-                return (
-                  <button
-                    key={item.route}
-                    type="button"
-                    onClick={() => onNavigate(item.route)}
-                    aria-current={selected ? "page" : undefined}
-                    className={cn(
-                      "group flex items-start gap-2.5 rounded-md px-2 py-2 text-left text-sm transition-colors",
-                      selected
-                        ? "bg-primary text-primary-foreground"
-                        : "text-foreground/80 hover:bg-accent hover:text-accent-foreground",
-                    )}
-                  >
-                    {/* The hint sits under the label: the rail is a fixed width,
-                        so anything sharing the label's line truncates the label. */}
-                    <span className="mt-0.5 shrink-0 [&>svg]:size-4">{item.icon}</span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{item.label}</span>
-                      <span
-                        className={cn(
-                          "mt-0.5 block truncate text-[11px]",
-                          selected
-                            ? "text-primary-foreground/70"
-                            : "text-muted-foreground",
-                        )}
-                      >
-                        {item.hint}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
+        </header>
+        <main
+          id="admin-main"
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain rounded-[24px] bg-card p-5 lg:rounded-[28px] lg:p-8"
+        >
+          {(!tokenStore.get() || unauthorized) && (
+            <div
+              role="status"
+              className="mb-6 flex flex-wrap items-center gap-3 rounded-2xl bg-accent p-4 text-xs"
+            >
+              <KeyRound className="size-5 text-accent-foreground" />
+              <span className="min-w-0 flex-1">
+                {unauthorized
+                  ? "管理会话已过期或无权访问，请更换管理令牌。"
+                  : "连接管理令牌，查看本机文档与资源。"}
+              </span>
+              <TokenDialog onSaved={() => void refresh()} />
             </div>
-          ))}
-        </nav>
-
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {error ? (
-            <div className="flex shrink-0 items-start gap-2 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive">
-              <AlertTriangle className="mt-px size-4 shrink-0" />
-              <span className="min-w-0 break-words">{error}</span>
+          )}
+          {error && !unauthorized && (
+            <div
+              role="alert"
+              className="mb-6 flex items-start gap-3 rounded-2xl bg-destructive/10 p-4 text-xs text-destructive"
+            >
+              <AlertTriangle className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1 break-words">{error}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => void refresh()}
+              >
+                <RefreshCw />
+                重试
+              </Button>
             </div>
-          ) : null}
-          <div
-            key={active?.route ?? route}
-            className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4"
-          >
-            {children}
-          </div>
+          )}
+          <div className="flex min-w-0 flex-1 flex-col gap-6">{children}</div>
         </main>
       </div>
+      <nav
+        aria-label="手机底部导航"
+        className="fixed inset-x-3 bottom-3 z-30 flex h-[58px] items-center gap-1 rounded-[20px] bg-card p-1 shadow-sm lg:hidden"
+      >
+        {[
+          { route: "overview", label: "概览", icon: LayoutDashboard },
+          { route: "documents", label: "文档", icon: Files },
+          { route: "jobs", label: "任务", icon: Activity },
+        ].map((item) => (
+          <a
+            key={item.route}
+            href={`#/${item.route}`}
+            aria-current={selectedRoute === item.route ? "page" : undefined}
+            className={cn(
+              "flex h-full flex-1 flex-col items-center justify-center gap-1 rounded-xl text-[10px]",
+              selectedRoute === item.route
+                ? "text-accent-foreground"
+                : "text-muted-foreground",
+            )}
+          >
+            <item.icon className="size-[18px]" />
+            {item.label}
+          </a>
+        ))}
+        <button
+          type="button"
+          aria-label="更多导航"
+          className="flex h-full flex-1 flex-col items-center justify-center gap-1 text-[10px] text-muted-foreground"
+          onClick={() => setMobile(true)}
+        >
+          <MoreHorizontal className="size-[18px]" />
+          更多
+        </button>
+      </nav>
     </div>
   );
 }

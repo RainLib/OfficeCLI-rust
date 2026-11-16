@@ -80,6 +80,122 @@ export interface DocumentSummary {
   revision: number;
   state: string;
   themeRevisionId?: string;
+  title?: string;
+  updatedAtEpochMs?: number;
+  sizeBytes?: number;
+  authorName?: string;
+}
+
+export interface AdminSession {
+  scope: string;
+  documentId: string;
+  userId?: string;
+  displayName?: string;
+  expiresAt: number;
+}
+
+export interface WorkspaceJob {
+  jobId: string;
+  documentId: string;
+  kind: "import" | "export";
+  state: string;
+  format?: string;
+  revision?: number;
+  actor?: string;
+  filename?: string;
+  error?: string;
+  warnings?: string[];
+  createdAtEpochMs?: number;
+  updatedAtEpochMs: number;
+}
+
+export interface AgentRun {
+  runId: string;
+  documentId: string;
+  name: string;
+  task: string;
+  status: string;
+  model: string;
+  createdAtEpochMs: number;
+  updatedAtEpochMs: number;
+  events: Array<{
+    type?: string;
+    message?: string;
+    at?: number;
+    [key: string]: unknown;
+  }>;
+  result: string;
+  committedRevisions: number[];
+  agentCount: number;
+  team?: {
+    phase: string;
+    sharedContext: string;
+    nativeExportVerifiedRevision?: number;
+    units: Array<{
+      unitId: string;
+      title: string;
+      agentId: string;
+      status: string;
+      result: string;
+    }>;
+  };
+}
+
+export interface ServiceInfo {
+  startedAtEpochMs: number;
+  documentsRoot: string;
+  catalogRoot: string;
+  defaultThemeRevisionId?: string;
+  storage: string;
+  api: boolean;
+  mcp: boolean;
+  agentAvailable: boolean;
+  agentModel?: string;
+  collaboration: string;
+  exportConcurrency: number;
+  version: string;
+}
+
+export interface DocumentAccess {
+  documentId: string;
+  scope: "read" | "write";
+  userId?: string;
+  displayName?: string;
+  expiresAt: number;
+  collaborationEpoch: number;
+}
+
+export interface RevisionRecord {
+  revision: number;
+  parentRevision?: number;
+  patchId?: string;
+  authorId?: string;
+  authorName?: string;
+  createdAtEpochMs: number;
+  dirtyNodeIds: string[];
+  dirtyChunkIds: string[];
+  themeRevisionId?: string;
+}
+
+export interface ExportMode {
+  id: string;
+  source: boolean;
+  available: boolean;
+  reason?: string;
+  warnings: string[];
+  fontWarnings: string[];
+}
+
+export interface ExportCapabilities {
+  revision: number;
+  headRevision: number;
+  defaultFormat: string;
+  formats: Array<{
+    format: string;
+    available: boolean;
+    recommendedMode: string;
+    modes: ExportMode[];
+  }>;
 }
 
 export interface ResolvedFace {

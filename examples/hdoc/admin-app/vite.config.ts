@@ -8,10 +8,19 @@ import { fileURLToPath } from "node:url";
 // JSX comes from Vite's own esbuild pass (tsconfig jsx: react-jsx), which keeps
 // the Babel tree out of the install entirely; dev-time fast refresh is off.
 export default defineConfig({
+  server: {
+    proxy: {
+      "/workspace": process.env.HCD_WORKSPACE_API || "http://127.0.0.1:7400",
+      "/v1": process.env.HCD_ADMIN_API || "http://127.0.0.1:8766",
+      "/health": process.env.HCD_ADMIN_API || "http://127.0.0.1:8766",
+    },
+  },
   plugins: [tailwindcss(), viteSingleFile()],
   define: {
     // The overview page shows which build of the console is embedded.
-    __BUILD_AT__: JSON.stringify(new Date().toISOString().replace(/\.\d+Z$/, "Z")),
+    __BUILD_AT__: JSON.stringify(
+      new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+    ),
   },
   resolve: {
     alias: {

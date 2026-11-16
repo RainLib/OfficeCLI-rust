@@ -25,7 +25,11 @@ import { useCatalog } from "@/state/CatalogProvider";
 const MAX_FONT_BYTES = 32 * 1024 * 1024;
 const FONT_ID_PATTERN = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
 
-export function UploadView({ onNavigate }: { onNavigate: (route: string) => void }) {
+export function UploadView({
+  onNavigate,
+}: {
+  onNavigate: (route: string) => void;
+}) {
   const toast = useToast();
   const { refresh } = useCatalog();
   const [fontId, setFontId] = React.useState("");
@@ -90,17 +94,20 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
         const blob = await api.putBlob(fontId, face.format, face.bytes);
         stored.push(blob.sha256);
       }
-      const payloadFaces: FontFace[] = faces.map((face, index) => ({
-        family: family.trim(),
-        subfamily: face.subfamily.trim() || "Regular",
-        weight: face.weight,
-        style: face.style,
-        stretch: face.stretch,
-        scripts: face.scripts.length ? face.scripts : (["latin"] as FontScript[]),
-        format: face.format,
-        sha256: stored[index],
-        byteLength: face.bytes.length,
-      }));
+      const payloadFaces: Omit<FontFace, "family">[] = faces.map(
+        (face, index) => ({
+          subfamily: face.subfamily.trim() || "Regular",
+          weight: face.weight,
+          style: face.style,
+          stretch: face.stretch,
+          scripts: face.scripts.length
+            ? face.scripts
+            : (["latin"] as FontScript[]),
+          format: face.format,
+          sha256: stored[index],
+          byteLength: face.bytes.length,
+        }),
+      );
       const license = {
         name: licenseName.trim() || "未命名",
         webPreview: web,
@@ -149,7 +156,11 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
             <span className="text-xs text-muted-foreground">
               把这个 id 填进主题的槽位，或用于文档钉版。
             </span>
-            <Button size="sm" variant="outline" onClick={() => onNavigate("themes")}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onNavigate("themes")}
+            >
               去新建主题
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setSavedId(null)}>
@@ -173,7 +184,9 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
                   value={fontId}
                   onChange={(event) => setFontId(event.target.value.trim())}
                   placeholder="source-han-sans"
-                  aria-invalid={fontId.length > 0 && !FONT_ID_PATTERN.test(fontId)}
+                  aria-invalid={
+                    fontId.length > 0 && !FONT_ID_PATTERN.test(fontId)
+                  }
                 />
                 <p className="text-[11px] text-muted-foreground">
                   小写字母、数字、连字符；1–64 个字符，不以连字符开头或结尾。
@@ -224,9 +237,12 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
                     onChange={(event) => setWeb(event.target.checked)}
                   />
                   <span>
-                    <span className="font-medium text-foreground">网页预览</span>
+                    <span className="font-medium text-foreground">
+                      网页预览
+                    </span>
                     <span className="block text-muted-foreground">
-                      允许把字面内联给编辑页与预览（超过 8 MiB 的字面仍会跳过）。
+                      允许把字面内联给编辑页与预览（超过 8 MiB
+                      的字面仍会跳过）。
                     </span>
                   </span>
                 </label>
@@ -237,7 +253,9 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
                     onChange={(event) => setOoxml(event.target.checked)}
                   />
                   <span>
-                    <span className="font-medium text-foreground">OOXML 嵌入</span>
+                    <span className="font-medium text-foreground">
+                      OOXML 嵌入
+                    </span>
                     <span className="block text-muted-foreground">
                       docx / pptx 导出时才写入字库字节；关闭则只登记字体名。
                     </span>
@@ -250,7 +268,9 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
                     onChange={(event) => setPdf(event.target.checked)}
                   />
                   <span>
-                    <span className="font-medium text-foreground">PDF 嵌入</span>
+                    <span className="font-medium text-foreground">
+                      PDF 嵌入
+                    </span>
                     <span className="block text-muted-foreground">
                       PDF 导出注册该字面；关闭则导出报告写明未嵌入原因。
                     </span>
@@ -260,10 +280,14 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
                   <Checkbox
                     className="mt-0.5"
                     checked={redistribution}
-                    onChange={(event) => setRedistribution(event.target.checked)}
+                    onChange={(event) =>
+                      setRedistribution(event.target.checked)
+                    }
                   />
                   <span>
-                    <span className="font-medium text-foreground">允许再分发</span>
+                    <span className="font-medium text-foreground">
+                      允许再分发
+                    </span>
                     <span className="block text-muted-foreground">
                       记录用；托管或分发前据此判断能否带字库。
                     </span>
@@ -289,7 +313,8 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
             {faces.length === 0 ? (
               <p className="flex items-center gap-2 rounded-lg border border-dashed px-3 py-6 text-xs text-muted-foreground">
                 <UploadCloud className="size-4" />
-                还没有选择文件。woff2 只适合网页预览，OOXML / PDF 导出只嵌入 TTF / OTF。
+                还没有选择文件。woff2 只适合网页预览，OOXML / PDF 导出只嵌入 TTF
+                / OTF。
               </p>
             ) : null}
             {faces.map((face, index) => (
@@ -309,7 +334,9 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
       <div className="sticky bottom-0 -mx-5 -mb-4 flex flex-wrap items-center gap-3 border-t bg-card/95 px-5 py-3 backdrop-blur">
         <span className="text-xs text-muted-foreground">
           {faces.length} 个字面 ·{" "}
-          {formatBytes(faces.reduce((total, face) => total + face.bytes.length, 0))}
+          {formatBytes(
+            faces.reduce((total, face) => total + face.bytes.length, 0),
+          )}
         </span>
         {progress ? (
           <span className="tabular text-xs text-primary">{progress}</span>
@@ -326,7 +353,11 @@ export function UploadView({ onNavigate }: { onNavigate: (route: string) => void
           >
             清空
           </Button>
-          <Button size="sm" disabled={busy || invalid} onClick={() => void submit()}>
+          <Button
+            size="sm"
+            disabled={busy || invalid}
+            onClick={() => void submit()}
+          >
             <Upload />
             {busy ? "提交中…" : "上传并登记修订"}
           </Button>
@@ -373,7 +404,7 @@ function FaceEditor({
           <Label htmlFor={`subfam-${face.name}`}>字面名</Label>
           <Input
             id={`subfam-${face.name}`}
-            className="h-7 text-xs"
+            className="h-10 text-xs"
             value={face.subfamily}
             onChange={(event) => onPatch({ subfamily: event.target.value })}
           />
@@ -386,16 +417,18 @@ function FaceEditor({
             min={1}
             max={1000}
             step={100}
-            className="tabular h-7 text-xs"
+            className="tabular h-10 text-xs"
             value={face.weight}
-            onChange={(event) => onPatch({ weight: Number(event.target.value) || 400 })}
+            onChange={(event) =>
+              onPatch({ weight: Number(event.target.value) || 400 })
+            }
           />
         </div>
         <div className="grid gap-1">
           <Label htmlFor={`style-${face.name}`}>样式</Label>
           <Select
             id={`style-${face.name}`}
-            className="h-7 text-xs"
+            className="h-10 text-xs"
             value={face.style}
             onChange={(event) =>
               onPatch({ style: event.target.value as PendingFace["style"] })
@@ -410,7 +443,7 @@ function FaceEditor({
           <Label htmlFor={`stretch-${face.name}`}>宽度</Label>
           <Select
             id={`stretch-${face.name}`}
-            className="h-7 text-xs"
+            className="h-10 text-xs"
             value={face.stretch}
             onChange={(event) =>
               onPatch({ stretch: event.target.value as PendingFace["stretch"] })
@@ -423,7 +456,9 @@ function FaceEditor({
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-3">
-        <span className="text-xs font-medium text-muted-foreground">脚本槽位</span>
+        <span className="text-xs font-medium text-muted-foreground">
+          脚本槽位
+        </span>
         {SCRIPT_OPTIONS.map((script) => (
           <label key={script} className="flex items-center gap-1.5 text-xs">
             <Checkbox

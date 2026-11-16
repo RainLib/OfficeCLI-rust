@@ -7,7 +7,10 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
     <div data-slot="table-scroll" className="overflow-x-auto">
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom border-separate border-spacing-0 text-sm", className)}
+        className={cn(
+          "w-full caption-bottom border-separate border-spacing-y-1 text-xs",
+          className,
+        )}
         {...props}
       />
     </div>
@@ -49,7 +52,7 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
     <th
       data-slot="table-head"
       className={cn(
-        "sticky top-0 z-10 h-9 border-b bg-card px-3 text-left align-middle text-xs font-semibold whitespace-nowrap text-muted-foreground",
+        "sticky top-0 z-10 h-[42px] bg-muted px-3.5 text-left align-middle text-[11px] font-normal first:rounded-l-xl last:rounded-r-xl whitespace-nowrap text-muted-foreground",
         className,
       )}
       {...props}
@@ -62,7 +65,7 @@ function TableCell({ className, ...props }: React.ComponentProps<"td">) {
     <td
       data-slot="table-cell"
       className={cn(
-        "border-b px-3 py-2 align-top text-sm whitespace-nowrap",
+        "h-[64px] px-3.5 py-3 align-middle text-xs whitespace-nowrap first:rounded-l-xl last:rounded-r-xl",
         className,
       )}
       {...props}
@@ -70,11 +73,4 @@ function TableCell({ className, ...props }: React.ComponentProps<"td">) {
   );
 }
 
-export {
-  Table,
-  TableHeader,
-  TableBody,
-  TableRow,
-  TableHead,
-  TableCell,
-};
+export { Table, TableHeader, TableBody, TableRow, TableHead, TableCell };

@@ -1,0 +1,16 @@
+{
+  "name": "@officecli/workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.13.0"
+  },
+  "scripts": {
+    "init": "node cli.mjs init",
+    "start": "node cli.mjs start",
+    "build": "node scripts/build.mjs",
+    "test": "node --test src/*.test.mjs",
+    "test:acceptance": "node scripts/verify.mjs"
+  }
+}

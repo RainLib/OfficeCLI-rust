@@ -24,9 +24,13 @@ export function PageHeader({
       )}
     >
       <div className="min-w-0">
-        <h1 className="text-base font-semibold">{title}</h1>
+        <h1 className="text-[28px] font-semibold leading-tight tracking-[-0.5px]">
+          {title}
+        </h1>
         {description ? (
-          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+          <p className="mt-2 text-xs leading-6 text-muted-foreground">
+            {description}
+          </p>
         ) : null}
       </div>
       {actions ? (
@@ -45,12 +49,7 @@ export function Toolbar({
   className?: string;
 }) {
   return (
-    <div
-      className={cn(
-        "flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2 shadow-xs",
-        className,
-      )}
-    >
+    <div className={cn("flex flex-wrap items-center gap-3", className)}>
       {children}
     </div>
   );
@@ -58,7 +57,9 @@ export function Toolbar({
 
 export function FilterLabel({ children }: { children: React.ReactNode }) {
   return (
-    <span className="text-xs font-medium text-muted-foreground">{children}</span>
+    <span className="text-xs font-medium text-muted-foreground">
+      {children}
+    </span>
   );
 }
 

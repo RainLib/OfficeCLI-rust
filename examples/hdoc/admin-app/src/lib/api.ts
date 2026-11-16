@@ -12,6 +12,10 @@ import type {
   ThemeDocumentRef,
   ThemeFontSlots,
   ThemeRevision,
+  AdminSession,
+  AgentRun,
+  ServiceInfo,
+  WorkspaceJob,
 } from "./types";
 
 const TOKEN_KEY = "hcdAdminToken";
@@ -25,10 +29,16 @@ let token: string = (() => {
 })();
 
 const listeners = new Set<() => void>();
+let workspaceCsrf = "";
+const WORKSPACE_COOKIE = "workspace-cookie-session";
+export function setWorkspaceCredential(value: string) {
+  workspaceCsrf = value;
+  listeners.forEach(listener => listener());
+}
 
 export const tokenStore = {
   get(): string {
-    return token;
+    return workspaceCsrf ? WORKSPACE_COOKIE : token;
   },
   set(value: string) {
     token = value.trim();
@@ -57,24 +67,36 @@ export class ApiError extends Error {
   }
 }
 
-/** Every catalog call carries the pasted admin bearer token, same-origin. */
+/** Catalog calls use a legacy bearer or the built-in Workspace cookie/CSRF session. */
 export async function request(
   path: string,
   init: RequestInit = {},
+  credential: string = tokenStore.get(),
 ): Promise<Response> {
   const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${tokenStore.get()}`);
+  if (credential !== WORKSPACE_COOKIE) headers.set("Authorization", `Bearer ${credential}`);
+  else if (workspaceCsrf) headers.set("X-Workspace-CSRF", workspaceCsrf);
   const response = await fetch(path, { ...init, headers });
   if (response.ok) return response;
 
-  const body = (await response.json().catch(() => ({}))) as { error?: string };
+  const raw = await response.text();
+  let message = raw.slice(0, 2000);
+  try {
+    const body = JSON.parse(raw);
+    if (typeof body.error === "string") message = body.error;
+  } catch {
+    /* Axum validation errors are text. */
+  }
   if (response.status === 401 || response.status === 403) {
     throw new ApiError(
-      body.error ?? "需要管理令牌：用 `officecli hdoc issue-token --document-id '*' --scope admin` 签发后粘贴。",
+      message || "令牌已过期或权限范围不匹配，请重新连接对应令牌。",
       response.status,
     );
   }
-  throw new ApiError(body.error ?? `请求失败（${response.status}）`, response.status);
+  throw new ApiError(
+    message || `请求失败（${response.status}）`,
+    response.status,
+  );
 }
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
@@ -90,17 +112,21 @@ function postJson<T>(path: string, payload: unknown): Promise<T> {
   });
 }
 
-function putJson<T>(path: string, payload: unknown): Promise<T> {
-  return json<T>(path, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
 const encode = encodeURIComponent;
 
 export const api = {
+  session: () => json<AdminSession>("/v1/admin/session"),
+  service: () => json<ServiceInfo>("/v1/admin/service"),
+  workspace: () =>
+    json<{ documents: DocumentSummary[] }>("/v1/admin/workspace"),
+  jobs: () =>
+    json<{ jobs: WorkspaceJob[]; unreadable: number; truncated: boolean }>(
+      "/v1/admin/jobs",
+    ),
+  agentRuns: () =>
+    json<{ runs: AgentRun[]; truncated: boolean; persistence: string }>(
+      "/v1/admin/agent-runs",
+    ),
   fonts: () => json<CatalogFont[]>("/v1/catalog/fonts"),
   themes: () => json<ThemeRevision[]>("/v1/catalog/themes"),
   retiredThemes: () => json<string[]>("/v1/catalog/themes/retired"),
@@ -138,12 +164,21 @@ export const api = {
 
   createRevision: (
     fontId: string,
-    payload: { family: string; faces: FontFace[]; license: FontLicense },
+    payload: {
+      family: string;
+      faces: Omit<FontFace, "family">[];
+      license: FontLicense;
+    },
   ): Promise<FontRevision> =>
-    postJson<FontRevision>(`/v1/catalog/fonts/${encode(fontId)}/revisions`, payload),
+    postJson<FontRevision>(
+      `/v1/catalog/fonts/${encode(fontId)}/revisions`,
+      payload,
+    ),
 
   deleteFont: (fontId: string) =>
-    json<FontDeleteReport>(`/v1/catalog/fonts/${encode(fontId)}`, { method: "DELETE" }),
+    json<FontDeleteReport>(`/v1/catalog/fonts/${encode(fontId)}`, {
+      method: "DELETE",
+    }),
 
   deleteRevision: (fontId: string, fontRevisionId: string) =>
     json<FontDeleteReport>(
@@ -159,16 +194,24 @@ export const api = {
   }) => postJson<ThemeRevision>("/v1/catalog/themes", payload),
 
   retireTheme: (themeRevisionId: string) =>
-    request(`/v1/catalog/themes/${encode(themeRevisionId)}/retire`, { method: "POST" }),
+    request(`/v1/catalog/themes/${encode(themeRevisionId)}/retire`, {
+      method: "POST",
+    }),
 
   unretireTheme: (themeRevisionId: string) =>
-    request(`/v1/catalog/themes/${encode(themeRevisionId)}/retire`, { method: "DELETE" }),
+    request(`/v1/catalog/themes/${encode(themeRevisionId)}/retire`, {
+      method: "DELETE",
+    }),
 
   themeDocuments: (themeRevisionId: string) =>
-    json<ThemeDocumentRef[]>(`/v1/catalog/themes/${encode(themeRevisionId)}/documents`),
+    json<ThemeDocumentRef[]>(
+      `/v1/catalog/themes/${encode(themeRevisionId)}/documents`,
+    ),
 
   deleteTheme: (themeRevisionId: string) =>
-    request(`/v1/catalog/themes/${encode(themeRevisionId)}`, { method: "DELETE" }),
+    request(`/v1/catalog/themes/${encode(themeRevisionId)}`, {
+      method: "DELETE",
+    }),
 
   resolveTheme: (themeRevisionId: string) =>
     json<ResolvedTheme>(`/v1/themes/${encode(themeRevisionId)}`),
@@ -179,10 +222,23 @@ export const api = {
    * changes, the text does not. `themeRevisionId` must appear in the body, so the
    * clear is an explicit null and never an empty object.
    */
-  pinDocumentTheme: (documentId: string, themeRevisionId: string | null) =>
-    putJson<{ revision: number; themeRevisionId: string }>(
+  pinDocumentTheme: (
+    documentId: string,
+    themeRevisionId: string | null,
+    expectedRevision?: number,
+  ) =>
+    json<{ revision: number; themeRevisionId: string }>(
       `/v1/documents/${encode(documentId)}/theme`,
-      { themeRevisionId },
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...(expectedRevision === undefined
+            ? {}
+            : { "X-HCD-Expected-Revision": String(expectedRevision) }),
+        },
+        body: JSON.stringify({ themeRevisionId }),
+      },
     ),
 
   /**
@@ -202,7 +258,9 @@ export const api = {
   fontPlan: (documentId: string, kind: ExportKind, revision?: number) => {
     const params = new URLSearchParams({ kind });
     if (revision !== undefined) params.set("revision", String(revision));
-    return json<FontPlan>(`/v1/documents/${encode(documentId)}/font-plan?${params.toString()}`);
+    return json<FontPlan>(
+      `/v1/documents/${encode(documentId)}/font-plan?${params.toString()}`,
+    );
   },
 
   /** A web-preview face, fetched with the same token and turned into a blob URL. */

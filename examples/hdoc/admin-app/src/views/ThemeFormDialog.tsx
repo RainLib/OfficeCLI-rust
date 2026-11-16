@@ -18,7 +18,11 @@ import type { ThemeFontSlots } from "@/lib/types";
 import { slotOptions, useCatalog } from "@/state/CatalogProvider";
 import { useToast } from "@/components/Toast";
 
-const EMPTY_SLOTS: ThemeFontSlots = { latin: undefined, eastAsia: undefined, bidi: undefined };
+const EMPTY_SLOTS: ThemeFontSlots = {
+  latin: undefined,
+  eastAsia: undefined,
+  bidi: undefined,
+};
 
 /**
  * A theme is immutable: saving creates a new themeRevisionId, so this form only
@@ -37,7 +41,9 @@ export function ThemeFormDialog({
   const options = slotOptions(fonts);
   const [name, setName] = React.useState("");
   const [fallbacks, setFallbacks] = React.useState("");
-  const [slots, setSlots] = React.useState<Record<"major" | "minor", ThemeFontSlots>>({
+  const [slots, setSlots] = React.useState<
+    Record<"major" | "minor", ThemeFontSlots>
+  >({
     major: { ...EMPTY_SLOTS },
     minor: { ...EMPTY_SLOTS },
   });
@@ -49,13 +55,25 @@ export function ThemeFormDialog({
     return { fontId, fontRevisionId };
   };
 
-  const anySlot = SLOT_KEYS.some(
-    (key) => slots.major[key] || slots.minor[key],
-  );
+  const anySlot = SLOT_KEYS.some((key) => slots.major[key] || slots.minor[key]);
   const fallbackList = fallbacks
     .split(",")
     .map((family) => family.trim())
     .filter(Boolean);
+  const invalidFallbacks =
+    fallbackList.length > 4 ||
+    new Set(fallbackList).size !== fallbackList.length ||
+    fallbackList.some(
+      (family) =>
+        ![
+          "serif",
+          "sans-serif",
+          "monospace",
+          "cursive",
+          "fantasy",
+          "system-ui",
+        ].includes(family),
+    );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -79,7 +97,9 @@ export function ThemeFormDialog({
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="theme-fallback">回退字族（逗号分隔，最多 4 个）</Label>
+              <Label htmlFor="theme-fallback">
+                回退字族（逗号分隔，最多 4 个）
+              </Label>
               <Input
                 id="theme-fallback"
                 value={fallbacks}
@@ -109,7 +129,10 @@ export function ThemeFormDialog({
                       onChange={(event) =>
                         setSlots((current) => ({
                           ...current,
-                          [group]: { ...current[group], [key]: pick(event.target.value) },
+                          [group]: {
+                            ...current[group],
+                            [key]: pick(event.target.value),
+                          },
                         }))
                       }
                     >
@@ -134,14 +157,16 @@ export function ThemeFormDialog({
         </div>
 
         <DialogFooter>
-          {fallbackList.length > 4 ? (
-            <span className="mr-auto text-xs text-destructive">回退族最多 4 个</span>
+          {invalidFallbacks ? (
+            <span className="mr-auto text-xs text-destructive">
+              最多 4 个不重复的 CSS 通用字族，如 system-ui、sans-serif
+            </span>
           ) : null}
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             取消
           </Button>
           <Button
-            disabled={busy || !anySlot || fallbackList.length > 4}
+            disabled={busy || !anySlot || invalidFallbacks}
             onClick={async () => {
               setBusy(true);
               try {

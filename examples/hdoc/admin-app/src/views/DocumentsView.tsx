@@ -1,14 +1,30 @@
 import * as React from "react";
-import { FileText, Info, ScanSearch, ShieldOff } from "lucide-react";
-
-import { EmptyState, LoadState, PageHeader, Toolbar } from "@/components/Page";
-import { IdChip } from "@/components/IdChip";
-import { useConfirm } from "@/components/ConfirmDialog";
-import { useToast } from "@/components/Toast";
-import { Badge } from "@/components/ui/badge";
+import {
+  ArrowUpRight,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  LayoutGrid,
+  List,
+  Palette,
+  ScanSearch,
+  Search,
+  Upload,
+} from "lucide-react";
+import { EmptyState, LoadState, PageHeader } from "@/components/Page";
+import { FormatIcon, Notice, StatusBadge } from "@/components/Workspace";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -17,474 +33,525 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Select } from "@/components/ui/select";
-import { api } from "@/lib/api";
-import type { DocumentSummary } from "@/lib/types";
-import { FontPlanDialog } from "@/views/FontPlanDialog";
+import { useToast } from "@/components/Toast";
 import { useCatalog } from "@/state/CatalogProvider";
+import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { formatTime } from "@/lib/workspace";
+import { FontPlanDialog } from "./FontPlanDialog";
 
-type Filter = "all" | "pinned" | "unpinned";
-
-export function DocumentsView() {
-  const { documents, themes, retired, loaded, error, refresh } = useCatalog();
+export function DocumentsView({
+  search = "",
+  initialTheme = "",
+  onNavigate,
+}: {
+  search?: string;
+  initialTheme?: string;
+  onNavigate: (route: string) => void;
+}) {
+  const { documents, themes, retired, loaded, busy, refresh } = useCatalog();
   const toast = useToast();
-  const { confirm, node } = useConfirm();
-  const [query, setQuery] = React.useState("");
-  const [filter, setFilter] = React.useState<Filter>("all");
-  const [choice, setChoice] = React.useState<Record<string, string>>({});
-  const [busy, setBusy] = React.useState<string | null>(null);
-  // Which document's export font check is open, by id.
+  const [query, setQuery] = React.useState(search);
+  const [filter, setFilter] = React.useState("all");
+  const [format, setFormat] = React.useState("all");
+  const [theme, setTheme] = React.useState(initialTheme || "all");
+  const [sort, setSort] = React.useState("updated");
+  const [grid, setGrid] = React.useState(false);
+  const [page, setPage] = React.useState(1);
+  const [selection, setSelection] = React.useState<Set<string>>(new Set());
+  const [bulkOpen, setBulkOpen] = React.useState(false);
+  const [target, setTarget] = React.useState("");
+  const [applying, setApplying] = React.useState(false);
+  const [results, setResults] = React.useState<Record<string, string>>({});
   const [planFor, setPlanFor] = React.useState<string | null>(null);
-  const [bulkTarget, setBulkTarget] = React.useState("");
-  const [bulkRunning, setBulkRunning] = React.useState(false);
-  const [bulkResult, setBulkResult] = React.useState<{
-    themeRevisionId: string;
-    statuses: Record<string, string>;
-  } | null>(null);
-
-  const retiredSet = React.useMemo(() => new Set(retired), [retired]);
-
-  // A retired theme can no longer be pinned onto a document, so it never appears
-  // in the picker; the row still shows it if the document pinned it earlier.
-  const pinnable = React.useMemo(
-    () =>
-      themes
-        .filter((theme) => !retiredSet.has(theme.themeRevisionId))
-        .sort((left, right) => left.name.localeCompare(right.name, "zh-CN")),
-    [themes, retiredSet],
+  React.useEffect(() => setQuery(search), [search]);
+  React.useEffect(() => setPage(1), [query, filter, format, theme, sort]);
+  const rows = [...(documents || [])]
+    .filter(
+      (doc) =>
+        `${doc.title || ""} ${doc.documentId}`
+          .toLowerCase()
+          .includes(query.toLowerCase()) &&
+        (format === "all" || doc.format === format) &&
+        (theme === "all" || doc.themeRevisionId === theme) &&
+        (filter !== "recent" ||
+          Date.now() - (doc.updatedAtEpochMs || 0) <= 7 * 86400000) &&
+        (filter !== "unpinned" || !doc.themeRevisionId) &&
+        (filter !== "issues" || doc.state !== "COMPLETE"),
+    )
+    .sort((a, b) =>
+      sort === "name"
+        ? (a.title || a.documentId).localeCompare(
+            b.title || b.documentId,
+            "zh-CN",
+          )
+        : (b.updatedAtEpochMs || 0) - (a.updatedAtEpochMs || 0),
+    );
+  const pageCount = Math.max(1, Math.ceil(rows.length / 8));
+  const currentPage = Math.min(page, pageCount);
+  const visible = rows.slice((currentPage - 1) * 8, currentPage * 8);
+  const selected = rows.filter((doc) => selection.has(doc.documentId));
+  const eligible = selected.filter(
+    (doc) => !doc.themeRevisionId && doc.state === "COMPLETE",
   );
-
-  const themeNames = React.useMemo(
-    () => new Map(themes.map((theme) => [theme.themeRevisionId, theme.name])),
-    [themes],
+  const pinnable = themes.filter(
+    (item) => !retired.includes(item.themeRevisionId),
   );
-
-  const rows = React.useMemo(() => {
-    const list = documents ?? [];
-    const needle = query.trim().toLowerCase();
-    return list.filter((document) => {
-      if (needle && !document.documentId.toLowerCase().includes(needle)) return false;
-      if (filter === "pinned") return Boolean(document.themeRevisionId);
-      if (filter === "unpinned") return !document.themeRevisionId;
-      return true;
+  const themeName = (id?: string) =>
+    id
+      ? themes.find((item) => item.themeRevisionId === id)?.name ||
+        "目录外的主题"
+      : "未指定";
+  const toggle = (id: string) =>
+    setSelection((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
-  }, [documents, query, filter]);
-
-  const pinnedCount = (documents ?? []).filter((doc) => doc.themeRevisionId).length;
-
-  // Onboarding an existing pile of documents to a brand is the same pin repeated, so
-  // the batch follows the search and filter the operator is looking at. Only a
-  // complete bundle can take a pin, so anything still importing is reported instead
-  // of being pushed against a refusal the server is right to give.
-  const bulkTargets = React.useMemo(
-    () =>
-      rows.filter((document) => !document.themeRevisionId && document.state === "COMPLETE"),
-    [rows],
-  );
-  const bulkSkipped = React.useMemo(
-    () =>
-      rows.filter((document) => !document.themeRevisionId && document.state !== "COMPLETE"),
-    [rows],
-  );
-
-  const runBulk = () => {
-    const theme = pinnable.find((item) => item.themeRevisionId === bulkTarget);
-    if (!theme || bulkTargets.length === 0) return;
-    confirm({
-      title: "批量钉上主题",
-      confirmLabel: `把 ${bulkTargets.length} 个文档钉上 ${theme.name}`,
-      description: (
-        <p>
-          每个文档写一次自己的内容修订，正文和节点不变；已经钉着主题的文档不在名单里。
-          {bulkSkipped.length
-            ? `另有 ${bulkSkipped.length} 个文档还没导入完成，这一轮跳过。`
-            : ""}
-        </p>
-      ),
-      onConfirm: async () => {
-        setBulkRunning(true);
-        const statuses: Record<string, string> = {};
-        for (const document of bulkTargets) {
-          statuses[document.documentId] = "排队中";
-        }
-        setBulkResult({ themeRevisionId: theme.themeRevisionId, statuses: { ...statuses } });
-        let ok = 0;
-        for (const document of bulkTargets) {
+  const apply = async () => {
+    if (!target || applying || !eligible.length) return;
+    setApplying(true);
+    setResults({});
+    let completed = 0;
+    try {
+      const latest = (await api.workspace()).documents;
+      for (const item of selected) {
+        const live = latest.find((doc) => doc.documentId === item.documentId);
+        let result = "";
+        if (!live) result = "跳过 · 文档已不在目录中";
+        else if (live.themeRevisionId) result = "跳过 · 已有主题";
+        else if (live.state !== "COMPLETE") result = "跳过 · 导入未完成";
+        else {
           try {
-            const result = await api.pinDocumentTheme(document.documentId, theme.themeRevisionId);
-            ok += 1;
-            statuses[document.documentId] = `已钉上 r${result.revision}`;
+            const response = await api.pinDocumentTheme(
+              item.documentId,
+              target,
+              live.revision,
+            );
+            result = `已完成 · rev. ${response.revision}`;
+            completed++;
           } catch (cause) {
-            statuses[document.documentId] =
-              cause instanceof Error ? cause.message : "失败";
+            result = `失败 · ${cause instanceof Error ? cause.message : String(cause)}`;
           }
-          setBulkResult({
-            themeRevisionId: theme.themeRevisionId,
-            statuses: { ...statuses },
-          });
         }
-        setBulkRunning(false);
-        toast.push(
-          ok === bulkTargets.length
-            ? `${ok} 个文档已钉上 ${theme.name}`
-            : `${ok} / ${bulkTargets.length} 个文档钉成功，失败的点名在结果列里`,
-          ok === bulkTargets.length ? "ok" : "warn",
-        );
-        setBulkTarget("");
-        try {
-          await refresh();
-        } catch {
-          toast.push("批量钉版已完成，但重新扫描失败：点「重新扫描」再看一次。", "warn");
-        }
-      },
-    });
+        setResults((previous) => ({ ...previous, [item.documentId]: result }));
+      }
+      toast.push(
+        `批量处理结束：${completed} 份文档已指定主题，其他结果见清单。`,
+        completed ? "ok" : "warn",
+      );
+      await refresh();
+    } catch (cause) {
+      toast.err(cause);
+    } finally {
+      setApplying(false);
+    }
   };
-
-  const commitTheme = (
-    document: DocumentSummary,
-    themeRevisionId: string | null,
-    headline: string,
-  ) => {
-    const current = document.themeRevisionId
-      ? themeNames.get(document.themeRevisionId) ?? "目录外的主题"
-      : null;
-    const target = themeRevisionId ? themeNames.get(themeRevisionId) ?? themeRevisionId : null;
-    confirm({
-      title: headline,
-      destructive: themeRevisionId === null,
-      confirmLabel: headline,
-      description: (
-        <p>
-          {document.documentId}（当前 r{document.revision}）
-          {themeRevisionId ? (
-            <>
-              {current ? ` 现在钉的是 ${current}，` : " 现在没有钉主题，"}
-              改为钉 {target}。
-            </>
-          ) : (
-            <>现在钉的是 {current}，取消后回到文档自己的样式。</>
-          )}
-          <br />
-          这会写入该文档的托管样式区，产生一次内容修订；正文和节点 id 不变，历史修订仍指向当时的主题。
-        </p>
-      ),
-      onConfirm: async () => {
-        setBusy(document.documentId);
-        try {
-          const result = await api.pinDocumentTheme(document.documentId, themeRevisionId);
-          toast.push(
-            themeRevisionId
-              ? `已钉上 ${target}：${document.documentId} → r${result.revision}`
-              : `已取消钉版：${document.documentId} → r${result.revision}`,
-            "ok",
-          );
-          setChoice((previous) => ({ ...previous, [document.documentId]: "" }));
-          await refresh();
-        } catch (cause) {
-          toast.err(cause);
-        } finally {
-          setBusy(null);
-        }
-      },
-    });
-  };
-
   return (
     <>
       <PageHeader
-        title="文档"
-        description="内容侧的钉版状态：只列这台机器上本服务文档目录里的 bundle，可以直接钉版、换主题或取消钉版。"
+        title="文档管理"
+        description="集中查看所有格式的文档，继续编辑或检查交付状态。"
         actions={
-          <Button size="sm" variant="outline" onClick={() => void refresh()}>
-            重新扫描
+          <Button onClick={() => onNavigate("jobs?import=1")}>
+            <Upload />
+            导入文档
           </Button>
         }
       />
-
-      <Toolbar>
-        <Input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="搜索 documentId"
-          className="h-7 w-64 text-xs"
-        />
-        <Select
-          aria-label="钉版状态"
-          value={filter}
-          onChange={(event) => setFilter(event.target.value as Filter)}
-          className="h-7 w-36 text-xs"
+      <div className="flex flex-wrap items-center gap-2">
+        {[
+          ["all", `全部文档  ${documents?.length ?? "—"}`],
+          ["recent", "最近编辑"],
+          [
+            "unpinned",
+            `主题未指定  ${(documents || []).filter((doc) => !doc.themeRevisionId).length}`,
+          ],
+          ["issues", "需要处理"],
+        ].map(([key, label]) => (
+          <Button
+            key={key}
+            variant="ghost"
+            className={cn(filter === key && "bg-accent text-accent-foreground")}
+            onClick={() => setFilter(key)}
+          >
+            {label}
+          </Button>
+        ))}
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="列表视图"
+            aria-pressed={!grid}
+            onClick={() => setGrid(false)}
+          >
+            <List />
+          </Button>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="缩略图视图"
+            aria-pressed={grid}
+            onClick={() => setGrid(true)}
+          >
+            <LayoutGrid />
+          </Button>
+        </div>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            setBulkOpen(true);
+            setResults({});
+          }}
         >
-          <option value="all">全部文档</option>
-          <option value="pinned">已钉主题</option>
-          <option value="unpinned">未钉主题</option>
+          <Palette />
+          批量指定主题
+        </Button>
+      </div>
+      <div className="flex flex-wrap gap-3">
+        <div className="relative min-w-40 flex-1">
+          <Search className="absolute left-3 top-3.5 size-4 text-muted-foreground" />
+          <Input
+            aria-label="搜索文档"
+            placeholder="搜索文档名称或 ID"
+            className="pl-10"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+        <Select
+          className="w-32"
+          aria-label="文档格式"
+          value={format}
+          onChange={(event) => setFormat(event.target.value)}
+        >
+          <option value="all">所有格式</option>
+          {[...new Set((documents || []).map((doc) => doc.format))]
+            .sort()
+            .map((f) => (
+              <option key={f} value={f}>
+                {f.toUpperCase()}
+              </option>
+            ))}
         </Select>
         <Select
-          aria-label="批量钉上的主题"
-          value={bulkTarget}
-          disabled={bulkRunning || pinnable.length === 0}
-          onChange={(event) => setBulkTarget(event.target.value)}
-          className="h-7 w-44 text-xs"
+          className="w-40"
+          aria-label="文档主题"
+          value={theme}
+          onChange={(event) => setTheme(event.target.value)}
         >
-          <option value="" disabled>
-            {pinnable.length ? "批量钉上的主题" : "没有可钉的主题"}
-          </option>
-          {pinnable.map((theme) => (
-            <option key={theme.themeRevisionId} value={theme.themeRevisionId}>
-              {theme.name}
+          <option value="all">所有主题</option>
+          {themes.map((item) => (
+            <option key={item.themeRevisionId} value={item.themeRevisionId}>
+              {item.name}
             </option>
           ))}
         </Select>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={bulkRunning || bulkTarget === "" || bulkTargets.length === 0}
-          title={
-            bulkSkipped.length
-              ? `${bulkSkipped.length} 个文档还没导入完成，这一轮跳过`
-              : "把当前列表里没有钉主题的文档逐个钉上"
-          }
-          onClick={runBulk}
+        <Select
+          className="w-32"
+          aria-label="文档排序"
+          value={sort}
+          onChange={(event) => setSort(event.target.value)}
         >
-          {bulkRunning ? "批量钉版中…" : `钉上 ${bulkTargets.length} 个未钉文档`}
-        </Button>
-        <span className="tabular ml-auto text-xs text-muted-foreground">
-          {loaded
-            ? documents === null
-              ? "该服务未提供文档列表"
-              : `${rows.length} / ${documents.length} 个文档 · ${pinnedCount} 个已钉主题`
-            : "加载中…"}
-        </span>
-      </Toolbar>
-
-      {documents === null ? (
-        <Card className="border-warning/40">
-          <CardHeader>
-            <CardTitle>
-              <span className="inline-flex items-center gap-2">
-                <Info className="size-4" />
-                这份 hdoc serve 还没有文档列表接口
-              </span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">
-            升级到这个仓库的构建后，<code className="font-mono">GET /v1/documents</code>{" "}
-            会列出文档目录里每个 bundle 的钉版情况。
-          </CardContent>
-        </Card>
-      ) : null}
-
-      {!loaded && !error ? <LoadState text="正在扫描文档目录…" /> : null}
-
-      {loaded && documents !== null && rows.length === 0 ? (
-        <div className="rounded-xl border bg-card shadow-xs">
-          <EmptyState
-            icon={FileText}
-            title={documents.length ? "没有符合条件的文档" : "文档目录里还没有文档"}
-            description={
-              documents.length
-                ? "换个筛选条件，或清空 documentId 搜索。"
-                : "用 POST /v1/import 导入一个文档；服务配了 --default-theme 的话会自动钉上主题。"
-            }
-          />
-        </div>
-      ) : null}
-
-      {rows.length > 0 ? (
-        <div className="min-h-0 flex-1 overflow-auto rounded-xl border bg-card shadow-xs">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>documentId</TableHead>
-                <TableHead>格式</TableHead>
-                <TableHead>profile</TableHead>
-                <TableHead className="text-right">head 修订</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>钉住的主题</TableHead>
-                {bulkResult ? <TableHead>批量结果</TableHead> : null}
-                <TableHead className="text-right">钉版操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((document) => {
-                const selected = choice[document.documentId] ?? "";
-                const sameAsCurrent =
-                  selected !== "" && selected === document.themeRevisionId;
-                return (
-                  <TableRow key={document.documentId}>
+          <option value="updated">最近修改</option>
+          <option value="name">名称排序</option>
+        </Select>
+      </div>
+      {!loaded && busy && <LoadState text="正在读取文档目录…" />}
+      {loaded && !rows.length && (
+        <EmptyState
+          title={documents?.length ? "没有符合条件的文档" : "还没有文档"}
+          description="导入文档，或调整搜索与筛选条件。"
+          action={{
+            label: "导入文档",
+            onClick: () => onNavigate("jobs?import=1"),
+          }}
+        />
+      )}
+      {rows.length > 0 && (
+        <>
+          <div className={cn("hidden", !grid && "md:block")}>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10">
+                    <Checkbox
+                      aria-label="选择本页文档"
+                      checked={
+                        visible.length > 0 &&
+                        visible.every((doc) => selection.has(doc.documentId))
+                      }
+                      onChange={(event) =>
+                        setSelection((previous) => {
+                          const next = new Set(previous);
+                          visible.forEach((doc) =>
+                            event.target.checked
+                              ? next.add(doc.documentId)
+                              : next.delete(doc.documentId),
+                          );
+                          return next;
+                        })
+                      }
+                    />
+                  </TableHead>
+                  <TableHead>文档名称</TableHead>
+                  <TableHead>格式</TableHead>
+                  <TableHead>当前修订</TableHead>
+                  <TableHead>主题</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visible.map((doc) => (
+                  <TableRow
+                    key={doc.documentId}
+                    className={selection.has(doc.documentId) ? "bg-accent" : ""}
+                  >
                     <TableCell>
-                      <div className="flex items-center gap-2">
-                        <FileText className="size-4 shrink-0 text-muted-foreground" />
-                        <code className="text-xs">{document.documentId}</code>
-                      </div>
+                      <Checkbox
+                        aria-label={`选择 ${doc.title || doc.documentId}`}
+                        checked={selection.has(doc.documentId)}
+                        onChange={() => toggle(doc.documentId)}
+                      />
                     </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{document.format}</Badge>
-                    </TableCell>
-                    <TableCell className="text-xs">{document.profile}</TableCell>
-                    <TableCell className="tabular text-right">
-                      r{document.revision}
-                    </TableCell>
-                    <TableCell>
-                      {/* The bundle manifest answers COMPLETE / IMPORTING, not a
-                          normalized word, so the badge reads the state as stored. */}
-                      <Badge
-                        variant={document.state === "COMPLETE" ? "success" : "muted"}
-                        title={
-                          document.state === "COMPLETE"
-                            ? "导入完成，可以钉版"
-                            : "还没导入完成，钉版会被服务端拒绝"
+                    <TableCell className="max-w-72">
+                      <button
+                        className="flex w-full items-center gap-3 text-left"
+                        onClick={() =>
+                          onNavigate(
+                            `documents/${encodeURIComponent(doc.documentId)}`,
+                          )
                         }
                       >
-                        {document.state}
-                      </Badge>
+                        <FormatIcon format={doc.format} />
+                        <span className="min-w-0">
+                          <strong className="block truncate text-xs font-medium">
+                            {doc.title || doc.documentId}
+                          </strong>
+                          <small className="mt-1 block truncate text-[10px] text-muted-foreground">
+                            {formatTime(doc.updatedAtEpochMs)}
+                          </small>
+                        </span>
+                      </button>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {doc.format.toUpperCase()}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      rev. {doc.revision}
+                    </TableCell>
+                    <TableCell
+                      className="max-w-48 truncate text-muted-foreground"
+                      title={themeName(doc.themeRevisionId)}
+                    >
+                      {themeName(doc.themeRevisionId)}
                     </TableCell>
                     <TableCell>
-                      {document.themeRevisionId ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <IdChip value={document.themeRevisionId} keep={10} />
-                          <span className="text-xs text-muted-foreground">
-                            {themeNames.get(document.themeRevisionId) ?? "目录外的主题"}
-                            {retiredSet.has(document.themeRevisionId) ? " · 已退役" : ""}
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">未钉主题</span>
-                      )}
+                      <StatusBadge state={doc.state} />
                     </TableCell>
-                    {bulkResult ? (
-                      <TableCell className="whitespace-normal text-xs">
-                        {bulkResult.statuses[document.documentId] ?? "—"}
-                      </TableCell>
-                    ) : null}
                     <TableCell>
-                      <div className="flex items-center justify-end gap-1">
+                      <div className="flex items-center gap-1">
                         <Button
+                          variant="link"
                           size="sm"
-                          variant="ghost"
-                          title="问一遍这个文档导出时每个字体怎么落地，不用真的导出"
-                          onClick={() => setPlanFor(document.documentId)}
-                        >
-                          <ScanSearch />
-                          体检
-                        </Button>
-                        <Select
-                          aria-label={`给 ${document.documentId} 选主题`}
-                          value={selected}
-                          disabled={busy === document.documentId || pinnable.length === 0}
-                          onChange={(event) =>
-                            setChoice((previous) => ({
-                              ...previous,
-                              [document.documentId]: event.target.value,
-                            }))
-                          }
-                          className="h-7 w-40 text-xs"
-                        >
-                          <option value="" disabled>
-                            {pinnable.length ? "选择主题" : "没有可钉的主题"}
-                          </option>
-                          {pinnable.map((theme) => (
-                            <option key={theme.themeRevisionId} value={theme.themeRevisionId}>
-                              {theme.name}
-                            </option>
-                          ))}
-                        </Select>
-                        <Button
-                          size="sm"
-                          disabled={
-                            busy === document.documentId || selected === "" || sameAsCurrent
-                          }
-                          title={
-                            sameAsCurrent
-                              ? "该主题已经钉在这个文档上"
-                              : document.themeRevisionId
-                                ? "换成选中的主题"
-                                : "把选中的主题钉到这个文档上"
-                          }
                           onClick={() =>
-                            commitTheme(
-                              document,
-                              selected,
-                              document.themeRevisionId ? "换主题" : "钉上主题",
+                            onNavigate(
+                              `documents/${encodeURIComponent(doc.documentId)}`,
                             )
                           }
                         >
-                          {document.themeRevisionId ? "换到" : "钉上"}
+                          详情
+                          <ArrowUpRight />
                         </Button>
-                        {document.themeRevisionId ? (
+                        {["docx", "pptx", "xlsx", "pdf"].includes(
+                          doc.format,
+                        ) && (
                           <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={busy === document.documentId}
-                            title="取消钉版，文档回到自己的样式"
-                            onClick={() =>
-                              commitTheme(document, null, "取消钉版")
-                            }
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`检查 ${doc.documentId} 导出字体`}
+                            onClick={() => setPlanFor(doc.documentId)}
                           >
-                            <ShieldOff />
-                            取消钉版
+                            <ScanSearch />
                           </Button>
-                        ) : null}
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      ) : null}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>钉版是一次文档修订</CardTitle>
-        </CardHeader>
-        <CardContent className="grid gap-2 text-xs text-muted-foreground">
-          <p>
-            <code className="font-mono">PUT /v1/documents/&lt;documentId&gt;/theme</code>{" "}
-            接受管理令牌，也接受该文档的写令牌；页面右上角粘贴的令牌就能直接钉版。取消钉版把{" "}
-            <code className="font-mono">themeRevisionId</code> 显式写成 null（缺字段会被拒绝，避免一次空请求悄悄取消钉版）：
-          </p>
-          <pre className="tabular overflow-x-auto rounded-lg bg-muted px-3 py-2 font-mono text-[11px]">
-{`officecli hdoc issue-token --document-id <documentId> --scope write --ttl-seconds 3600
-curl -X PUT "http://127.0.0.1:8791/v1/documents/<documentId>/theme" \\
-  -H "Authorization: Bearer <写令牌>" -H 'Content-Type: application/json' \\
-  -d '{"themeRevisionId":"<themeRevisionId>"}'
-curl -X PUT ".../theme" -H "Authorization: Bearer <管理令牌>" \\
-  -H 'Content-Type: application/json' -d '{"themeRevisionId":null}'`}
-          </pre>
-          <p>
-            钉版和取消钉版都会把托管样式区写进 <code className="font-mono">styles/rev-NNNN.css</code>，
-            因此推进 head 修订号（补丁记录形如 <code className="font-mono">{"theme-{rev}"}</code> /{" "}
-            <code className="font-mono">{"theme-clear-{rev}"}</code>）；正文、节点 id 与内容哈希不变，
-            历史修订仍指向当时钉的主题。已退役的主题不能再钉上，但已钉住它的文档仍可正常解析。
-          </p>
-          <p>
-            「体检」读 <code className="font-mono">GET /v1/documents/&lt;documentId&gt;/font-plan?kind=docx|pptx|pdf|xlsx</code>，
-            答案来自目录记录和许可证，不读字库字节：导出前就能看清哪些字面会把字节写进文件、哪些只登记字体名，
-            填上修订号还能问历史修订——手上那份文件出自哪一次导出，就按那一次问。文档自己的读令牌也能读它。
-          </p>
-          <p>
-            「批量钉上」只碰当前搜索和筛选里<span className="text-foreground">还没钉主题</span>的文档，
-            一个一个写；已经钉着主题的不会被覆盖，那要在行上单独换。还在导入的文档会被跳过，
-            因为服务端本来就拒绝给未完成的 bundle 钉版。
-          </p>
-        </CardContent>
-      </Card>
-
-      {planFor ? (
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <div
+            className={cn(
+              "grid gap-4",
+              grid ? "sm:grid-cols-2 xl:grid-cols-3" : "md:hidden",
+            )}
+          >
+            {visible.map((doc) => (
+              <article
+                key={doc.documentId}
+                className="space-y-3 rounded-2xl bg-muted p-4"
+              >
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    aria-label={`选择 ${doc.title || doc.documentId}`}
+                    checked={selection.has(doc.documentId)}
+                    onChange={() => toggle(doc.documentId)}
+                  />
+                  <FormatIcon format={doc.format} />
+                  <strong className="min-w-0 flex-1 truncate text-xs">
+                    {doc.title || doc.documentId}
+                  </strong>
+                </div>
+                <p className="truncate text-[10px] text-muted-foreground">
+                  {doc.format.toUpperCase()} · rev. {doc.revision} ·{" "}
+                  {themeName(doc.themeRevisionId)}
+                </p>
+                <div className="flex items-center justify-between">
+                  <StatusBadge state={doc.state} />
+                  <Button
+                    size="sm"
+                    variant="link"
+                    onClick={() =>
+                      onNavigate(
+                        `documents/${encodeURIComponent(doc.documentId)}`,
+                      )
+                    }
+                  >
+                    打开
+                    <ArrowUpRight />
+                  </Button>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-4 text-[11px] text-muted-foreground">
+            <span>
+              共 {rows.length} 份文档 · 已选 {selected.length} 份
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={currentPage === 1}
+                onClick={() => setPage(currentPage - 1)}
+              >
+                <ChevronLeft />
+                上一页
+              </Button>
+              <span>
+                {currentPage} / {pageCount}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={currentPage === pageCount}
+                onClick={() => setPage(currentPage + 1)}
+              >
+                下一页
+                <ChevronRight />
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
+      <Dialog
+        open={bulkOpen}
+        onOpenChange={(next) => {
+          if (!applying) setBulkOpen(next);
+        }}
+      >
+        <DialogContent className="w-[min(820px,calc(100vw-2rem))]">
+          <DialogHeader>
+            <DialogTitle>批量指定文档主题</DialogTitle>
+            <DialogDescription>
+              只处理当前筛选范围中选定、未指定主题且已导入完成的文档。
+            </DialogDescription>
+          </DialogHeader>
+          <Select
+            aria-label="批量目标主题"
+            value={target}
+            disabled={applying}
+            onChange={(event) => setTarget(event.target.value)}
+          >
+            <option value="">选择目标主题</option>
+            {pinnable.map((item) => (
+              <option key={item.themeRevisionId} value={item.themeRevisionId}>
+                {item.name}
+              </option>
+            ))}
+          </Select>
+          <Notice
+            title={`已选择 ${selected.length} 份 · 可处理 ${eligible.length} 份`}
+          >
+            已有主题或导入未完成的文档将跳过。管理员可指定主题；每次成功写入创建新的文档修订。
+          </Notice>
+          {!selected.length && (
+            <p className="text-xs text-muted-foreground">
+              请先在文档列表勾选要处理的文档。
+            </p>
+          )}
+          <div className="max-h-64 space-y-2 overflow-auto">
+            {selected.map((doc) => (
+              <div
+                key={doc.documentId}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-muted p-3 text-xs"
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  {doc.title || doc.documentId}
+                </span>
+                <span className="max-w-80 break-words text-[11px] text-muted-foreground">
+                  {results[doc.documentId] ||
+                    (doc.themeRevisionId
+                      ? "跳过 · 已有主题"
+                      : doc.state !== "COMPLETE"
+                        ? "跳过 · 导入中"
+                        : "可以指定主题")}
+                </span>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              disabled={applying}
+              onClick={() => setBulkOpen(false)}
+            >
+              关闭
+            </Button>
+            <Button
+              disabled={
+                applying ||
+                !target ||
+                !eligible.length ||
+                Object.keys(results).length > 0
+              }
+              onClick={() => void apply()}
+            >
+              <Check />
+              {applying
+                ? "逐份处理中…"
+                : `为 ${eligible.length} 份文档指定主题`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {planFor && (
         <FontPlanDialog
-          open
-          onOpenChange={(next) => {
-            if (!next) setPlanFor(null);
-          }}
           documentId={planFor}
           headRevision={
-            (documents ?? []).find((item) => item.documentId === planFor)?.revision ?? 0
+            documents?.find((doc) => doc.documentId === planFor)?.revision ?? 0
           }
+          open={true}
+          onOpenChange={(open) => {
+            if (!open) setPlanFor(null);
+          }}
         />
-      ) : null}
-
-      {node}
+      )}
     </>
   );
 }

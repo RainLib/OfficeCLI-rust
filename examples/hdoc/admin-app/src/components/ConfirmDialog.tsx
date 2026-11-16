@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useToast } from "@/components/Toast";
 
 import {
   Dialog,
@@ -32,6 +33,7 @@ export function ConfirmDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const toast = useToast();
   const [busy, setBusy] = React.useState(false);
 
   return (
@@ -49,7 +51,11 @@ export function ConfirmDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => onOpenChange(false)}
+          >
             取消
           </Button>
           <Button
@@ -61,6 +67,8 @@ export function ConfirmDialog({
               try {
                 await request.onConfirm();
                 onOpenChange(false);
+              } catch (error) {
+                toast.err(error);
               } finally {
                 setBusy(false);
               }

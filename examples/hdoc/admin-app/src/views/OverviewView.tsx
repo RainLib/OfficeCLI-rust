@@ -1,373 +1,314 @@
 import * as React from "react";
 import {
-  AlertTriangle,
-  CheckCircle2,
-  FileText,
+  Activity,
+  ArrowUpRight,
+  CircleAlert,
+  Files,
   Palette,
-  Type,
   Upload,
 } from "lucide-react";
-
-import { PageHeader } from "@/components/Page";
-import { Badge } from "@/components/ui/badge";
+import { PageHeader, EmptyState, LoadState } from "@/components/Page";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import {
-  LICENSE_WARN_WINDOW_DAYS,
-  LICENSE_WINDOWS,
-  formatDate,
-  formatBytes,
-  licenseDaysLeft,
-  licenseExpired,
-} from "@/lib/format";
-import { tokenStore } from "@/lib/api";
-import { unreferencedFonts } from "@/state/catalogSelectors";
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  FormatIcon,
+  Notice,
+  SectionHeading,
+  StatusBadge,
+} from "@/components/Workspace";
 import { useCatalog } from "@/state/CatalogProvider";
-
-function Stat({
-  label,
-  value,
-  hint,
-  tone = "default",
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: "default" | "warn";
-}) {
-  return (
-    <div className="flex min-w-0 flex-1 flex-col gap-1 rounded-lg border bg-card px-3 py-2.5 shadow-xs">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span
-        className={
-          tone === "warn"
-            ? "tabular text-xl font-semibold text-warning"
-            : "tabular text-xl font-semibold"
-        }
-      >
-        {value}
-      </span>
-      {hint ? (
-        <span className="truncate text-[11px] text-muted-foreground">{hint}</span>
-      ) : null}
-    </div>
-  );
-}
+import { licenseDaysLeft } from "@/lib/format";
+import { activeStates, formatTime } from "@/lib/workspace";
 
 export function OverviewView({
   onNavigate,
 }: {
   onNavigate: (route: string) => void;
 }) {
-  const { fonts, themes, retired, documents, loaded } = useCatalog();
-  // How far ahead "about to expire" reaches. The exporter warns on 30, so that
-  // is where the picker starts; the wider windows are for planning a renewal
-  // before the warning ever fires.
-  const [windowDays, setWindowDays] = React.useState(LICENSE_WARN_WINDOW_DAYS);
-
-  const totals = React.useMemo(() => {
-    let revisions = 0;
-    let faces = 0;
-    let bytes = 0;
-    const expired: string[] = [];
-    const due: string[] = [];
-    for (const font of fonts) {
-      revisions += font.revisions.length;
-      for (const revision of font.revisions) {
-        faces += revision.faces.length;
-        for (const face of revision.faces) bytes += face.byteLength;
-        if (licenseExpired(revision.license)) {
-          expired.push(
-            `${font.fontId} · ${revision.fontRevisionId.slice(0, 10)}…（${
-              revision.license.name
-            }）`,
-          );
-          continue;
-        }
-        const left = licenseDaysLeft(revision.license);
-        const expires = revision.license.expiresAtEpochMs;
-        if (left !== null && expires !== undefined && left <= windowDays) {
-          due.push(
-            `${font.fontId} · ${revision.family}（${
-              revision.license.name
-            } · ${formatDate(expires)} · 还有 ${left} 天）`,
-          );
-        }
-      }
-    }
-    due.sort((left, right) => left.localeCompare(right, "zh-CN"));
-    return { revisions, faces, bytes, expired, due };
-  }, [fonts, windowDays]);
-
-  const unreferenced = unreferencedFonts(fonts, themes);
-  const unpinned = (documents ?? []).filter((doc) => !doc.themeRevisionId);
-  const hasRisks =
-    totals.expired.length > 0 ||
-    totals.due.length > 0 ||
-    unreferenced.length > 0 ||
-    unpinned.length > 0 ||
-    retired.length > 0;
-
+  const { fonts, themes, documents, jobs, runs, loaded, busy, taskWarning } =
+    useCatalog();
+  const [days, setDays] = React.useState(30);
+  const licenses = fonts
+    .flatMap((font) =>
+      font.revisions.map((revision) => ({
+        font,
+        revision,
+        left: licenseDaysLeft(revision.license),
+      })),
+    )
+    .filter((item) => item.left !== null && item.left <= days);
+  const failed = jobs.filter((job) =>
+    ["failed", "interrupted"].includes(job.state),
+  );
+  const conflicts = runs.filter((run) =>
+    ["failed", "conflict"].includes(run.status),
+  );
+  const activeJobs = jobs.filter((job) => activeStates.has(job.state));
+  const activeRuns = runs.filter((run) => activeStates.has(run.status));
+  const recent = [...(documents || [])]
+    .sort((a, b) => (b.updatedAtEpochMs || 0) - (a.updatedAtEpochMs || 0))
+    .slice(0, 3);
+  const tasks = [
+    ...activeJobs.map((job) => ({
+      id: job.jobId,
+      title:
+        job.kind === "import"
+          ? "导入文档"
+          : `导出 ${job.format?.toUpperCase() || "文件"}`,
+      documentId: job.documentId,
+      state: job.state,
+      at: job.updatedAtEpochMs,
+      actor: job.actor || "—",
+      route: "jobs",
+    })),
+    ...activeRuns.map((run) => ({
+      id: run.runId,
+      title: run.task,
+      documentId: run.documentId,
+      state: run.status,
+      at: run.updatedAtEpochMs,
+      actor: run.name,
+      route: "agents",
+    })),
+  ].sort((a, b) => b.at - a.at);
+  const name = (id: string) =>
+    documents?.find((doc) => doc.documentId === id)?.title || id;
   return (
     <>
       <PageHeader
-        title="概览"
-        description="这台机器上的字体目录规模、钉版覆盖，以及需要先处理的许可证与引用问题。"
+        title="工作空间概览"
+        description="查看文档、资源和正在进行的工作。"
         actions={
-          <>
-            <Button size="sm" variant="outline" onClick={() => onNavigate("themes")}>
-              <Palette />
-              主题
-            </Button>
-            <Button size="sm" onClick={() => onNavigate("upload")}>
-              <Upload />
-              上传登记
-            </Button>
-          </>
+          <Button onClick={() => onNavigate("jobs?import=1")}>
+            <Upload />
+            导入文档
+          </Button>
         }
       />
-
-      <div className="flex flex-wrap gap-3">
-        <Stat label="字体" value={String(fonts.length)} hint={`${totals.revisions} 个修订`} />
-        <Stat label="字面" value={String(totals.faces)} hint={formatBytes(totals.bytes)} />
-        <Stat
-          label="主题"
-          value={String(themes.length)}
-          hint={retired.length ? `${retired.length} 个已退役` : "全部在用"}
-          tone={retired.length ? "warn" : "default"}
-        />
-        <Stat
-          label="文档"
-          value={documents === null ? "—" : String(documents.length)}
-          hint={
-            documents === null
-              ? "本服务未提供文档列表"
-              : `${unpinned.length} 个未钉主题`
-          }
-          tone={documents === null || unpinned.length ? "warn" : "default"}
-        />
-      </div>
-
-      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>要处理的事</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
-              许可证到期提醒的窗口
-              <Select
-                aria-label="许可证到期提醒的窗口"
-                value={String(windowDays)}
-                onChange={(event) => setWindowDays(Number(event.target.value))}
-                className="h-7 w-28 text-xs"
-              >
-                {LICENSE_WINDOWS.map((days) => (
-                  <option key={days} value={String(days)}>
-                    {days} 天内
-                  </option>
-                ))}
-              </Select>
-            </label>
-            {!loaded ? (
-              <p className="text-xs text-muted-foreground">目录还在加载…</p>
-            ) : null}
-            {loaded && !hasRisks ? (
-              <p className="flex items-center gap-2 text-xs text-success">
-                <CheckCircle2 className="size-4" />
-                没有过期或即将到期的许可证、没有孤立字体、文档都已钉主题。
-              </p>
-            ) : null}
-            {totals.due.length ? (
-              <Risk
-                tone="warning"
-                title={`${totals.due.length} 个修订的许可证将在 ${windowDays} 天内到期`}
-                detail="到期后预览和导出都不再写入字面，只登记字体名。趁现在续许可证或换字面；文档「体检」里那句提醒来自导出自己。"
-                items={totals.due}
-                action={() => onNavigate("fonts")}
-                actionLabel="查看字体"
-              />
-            ) : null}
-            {totals.expired.length ? (
-              <Risk
-                tone="destructive"
-                title={`${totals.expired.length} 个修订的许可证已过期`}
-                detail="到期后预览与导出都不再写入字面，只登记字体名。"
-                items={totals.expired}
-                action={() => onNavigate("fonts")}
-                actionLabel="查看字体"
-              />
-            ) : null}
-            {unreferenced.length ? (
-              <Risk
-                tone="warning"
-                title={`${unreferenced.length} 个字体没有被任何主题引用`}
-                detail="它们仍可被引用；确认不再需要时可以在字体页删除，被引用的删除会被服务端拒绝。"
-                items={unreferenced}
-                action={() => onNavigate("fonts")}
-                actionLabel="查看字体"
-              />
-            ) : null}
-            {unpinned.length ? (
-              <Risk
-                tone="warning"
-                title={`${unpinned.length} 个文档没有钉主题`}
-                detail="未钉版的文档继续用文档包里自带的样式；服务配了 --default-theme 时新导入会自动钉。"
-                items={unpinned.map((doc) => `${doc.documentId}（r${doc.revision}）`)}
-                action={() => onNavigate("documents")}
-                actionLabel="查看文档"
-              />
-            ) : null}
-            {retired.length ? (
-              <Risk
-                tone="muted"
-                title={`${retired.length} 个主题已退役`}
-                detail="退役只挡新钉版；已钉文档与历史修订仍可解析。"
-                items={retired.map((id) => `${id.slice(0, 16)}…`)}
-                action={() => onNavigate("themes")}
-                actionLabel="查看主题"
-              />
-            ) : null}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>这一页能做什么</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-2 text-xs">
-            <Entry
-              icon={<Type />}
-              title="字体"
-              detail="按主题引用情况筛选修订，删除前会先让服务端做引用检查。"
-              onClick={() => onNavigate("fonts")}
-            />
-            <Entry
-              icon={<Palette />}
-              title="主题"
-              detail="六个槽位（标题/正文 × 西文/东亚/双向）、回退族、退役与彻底删除。"
-              onClick={() => onNavigate("themes")}
-            />
-            <Entry
-              icon={<Upload />}
-              title="上传登记"
-              detail="字库 → blob → 字体修订，许可证决定预览与嵌入。"
-              onClick={() => onNavigate("upload")}
-            />
-            <Entry
-              icon={<FileText />}
-              title="文档"
-              description="内容侧核对：每个 bundle 的 head 修订与钉住的主题。"
-              onClick={() => onNavigate("documents")}
-            />
-            <Separator />
-            <div className="grid gap-1 text-[11px] text-muted-foreground">
-              <p>
-                目录接口：
-                <code className="ml-1 font-mono">/v1/catalog/fonts</code>
-                <code className="ml-1 font-mono">/v1/catalog/themes</code>
-              </p>
-              <p>
-                令牌：
-                {tokenStore.get()
-                  ? "已设置（仅存在本页 sessionStorage）"
-                  : "未设置 — 点右上角「管理令牌」粘贴 --scope admin 的 JWT"}
-              </p>
-              <p>
-                上限：单库 32 MiB，预览内联 8 MiB · 页面构建 {__BUILD_AT__}
-              </p>
+      {!loaded && busy && <LoadState text="正在读取工作空间…" />}
+      <section
+        aria-label="工作空间指标"
+        className="grid grid-cols-2 gap-y-6 py-2 lg:grid-cols-4"
+      >
+        {[
+          {
+            label: "文档总数",
+            value: documents?.length ?? "—",
+            hint: "DOCX / XLSX / PPTX / PDF 等",
+            icon: Files,
+          },
+          {
+            label: "进行中的任务",
+            value: tasks.length,
+            hint: `${activeJobs.length} 项导入导出 · ${activeRuns.length} 项 AI 任务`,
+            icon: Activity,
+          },
+          {
+            label: "品牌资源",
+            value: fonts.length + themes.length,
+            hint: `${fonts.length} 个字体家族 · ${themes.length} 套主题`,
+            icon: Palette,
+          },
+          {
+            label: "需要处理",
+            value: licenses.length + failed.length + conflicts.length,
+            hint: "许可证、导出与修订问题",
+            icon: CircleAlert,
+          },
+        ].map((item) => (
+          <div key={item.label} className="min-w-0 border-r px-5 last:border-0">
+            <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+              <span>{item.label}</span>
+              <item.icon className="size-[18px] text-accent-foreground" />
             </div>
-          </CardContent>
-        </Card>
-      </div>
-    </>
-  );
-}
-
-function Risk({
-  tone,
-  title,
-  detail,
-  items,
-  action,
-  actionLabel,
-}: {
-  tone: "destructive" | "warning" | "muted";
-  title: string;
-  detail: string;
-  items: string[];
-  action: () => void;
-  actionLabel: string;
-}) {
-  return (
-    <div className="grid gap-1.5 rounded-lg border p-3">
-      <p className="flex items-center gap-2 text-xs font-medium">
-        <AlertTriangle
-          className={
-            tone === "destructive"
-              ? "size-4 text-destructive"
-              : tone === "warning"
-                ? "size-4 text-warning"
-                : "size-4 text-muted-foreground"
-          }
-        />
-        {title}
-      </p>
-      <p className="text-[11px] text-muted-foreground">{detail}</p>
-      <ul className="grid gap-0.5">
-        {items.slice(0, 5).map((item) => (
-          <li key={item} className="tabular truncate font-mono text-[11px]">
-            {item}
-          </li>
+            <strong className="tabular my-3 block text-[32px] font-semibold tracking-tight">
+              {item.value}
+            </strong>
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              {item.hint}
+            </p>
+          </div>
         ))}
-        {items.length > 5 ? (
-          <li className="text-[11px] text-muted-foreground">
-            还有 {items.length - 5} 项…
-          </li>
-        ) : null}
-      </ul>
-      <div>
-        <Button size="sm" variant="outline" onClick={action}>
-          {actionLabel}
-        </Button>
+      </section>
+      <div className="grid gap-6 py-1 xl:grid-cols-[minmax(0,1fr)_386px]">
+        <section className="min-w-0 space-y-4">
+          <SectionHeading
+            title="继续处理文档"
+            action={
+              <Button variant="ghost" onClick={() => onNavigate("documents")}>
+                <ArrowUpRight />
+                全部文档
+              </Button>
+            }
+          />
+          {recent.length ? (
+            recent.map((doc) => (
+              <button
+                key={doc.documentId}
+                onClick={() =>
+                  onNavigate(`documents/${encodeURIComponent(doc.documentId)}`)
+                }
+                className="flex w-full items-center gap-3 rounded-xl py-2 text-left hover:bg-muted"
+              >
+                <FormatIcon format={doc.format} />
+                <span className="min-w-0 flex-1">
+                  <strong className="block truncate text-[13px] font-medium">
+                    {doc.title || doc.documentId}
+                  </strong>
+                  <small className="mt-1.5 block text-[11px] text-muted-foreground">
+                    {formatTime(doc.updatedAtEpochMs)} · rev. {doc.revision}
+                  </small>
+                </span>
+                <span className="flex shrink-0 items-center gap-1 text-xs">
+                  <ArrowUpRight className="size-4" />
+                  打开
+                </span>
+              </button>
+            ))
+          ) : (
+            <EmptyState
+              title="还没有文档"
+              description="导入第一份文档，开始你的工作。"
+              action={{
+                label: "导入文档",
+                onClick: () => onNavigate("jobs?import=1"),
+              }}
+            />
+          )}
+        </section>
+        <aside className="space-y-4 rounded-[20px] bg-muted p-5">
+          <SectionHeading title="需要你留意" />
+          <label className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
+            授权到期提醒
+            <Select
+              aria-label="授权提醒天数"
+              className="h-8 w-28"
+              value={days}
+              onChange={(event) => setDays(Number(event.target.value))}
+            >
+              <option value={30}>30 天内</option>
+              <option value={60}>60 天内</option>
+              <option value={90}>90 天内</option>
+            </Select>
+          </label>
+          {licenses.slice(0, 2).map((item) => (
+            <button
+              key={item.revision.fontRevisionId}
+              onClick={() =>
+                onNavigate(
+                  `fonts?search=${encodeURIComponent(item.font.fontId)}`,
+                )
+              }
+              className="flex w-full items-start gap-2.5 text-left"
+            >
+              <CircleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
+              <span className="min-w-0">
+                <strong className="block text-xs font-medium">
+                  {item.font.family} 授权
+                  {item.left! <= 0 ? "已到期" : "即将到期"}
+                </strong>
+                <small className="mt-1.5 block text-[10px] text-muted-foreground">
+                  {item.left! <= 0 ? "请检查授权范围" : `还有 ${item.left} 天`}
+                </small>
+              </span>
+            </button>
+          ))}
+          {failed.length > 0 && (
+            <button
+              onClick={() => onNavigate("jobs?state=failed")}
+              className="flex w-full gap-2.5 text-left text-xs"
+            >
+              <CircleAlert className="size-4 shrink-0 text-destructive" />
+              <span>{failed.length} 项导入导出需要处理</span>
+            </button>
+          )}
+          {conflicts.length > 0 && (
+            <button
+              onClick={() => onNavigate("agents?state=failed")}
+              className="flex w-full gap-2.5 text-left text-xs"
+            >
+              <CircleAlert className="size-4 shrink-0 text-warning" />
+              <span>{conflicts.length} 项 AI 任务需要检查</span>
+            </button>
+          )}
+          {!licenses.length && !failed.length && !conflicts.length && (
+            <p className="py-3 text-xs leading-6 text-muted-foreground">
+              当前没有需要处理的事项。
+            </p>
+          )}
+        </aside>
       </div>
-    </div>
-  );
-}
-
-function Entry({
-  icon,
-  title,
-  detail,
-  description,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  detail?: string;
-  description?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex items-start gap-2 rounded-lg border px-3 py-2 text-left transition-colors hover:bg-accent"
-    >
-      <span className="mt-0.5 shrink-0 text-muted-foreground [&>svg]:size-4">
-        {icon}
-      </span>
-      <span className="min-w-0">
-        <span className="flex items-center gap-2 text-sm font-medium">
-          {title}
-          <Badge variant="muted">打开</Badge>
-        </span>
-        <span className="block text-[11px] text-muted-foreground">
-          {detail ?? description}
-        </span>
-      </span>
-    </button>
+      <hr className="my-1" />
+      <SectionHeading
+        title="当前任务"
+        action={
+          <Button variant="ghost" onClick={() => onNavigate("jobs")}>
+            <ArrowUpRight />
+            任务中心
+          </Button>
+        }
+      />
+      {taskWarning && (
+        <Notice title="部分任务数据未能完整读取" warning>
+          {taskWarning}
+        </Notice>
+      )}
+      {tasks.length ? (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>任务</TableHead>
+              <TableHead>文档</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>发起人</TableHead>
+              <TableHead>操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {tasks.slice(0, 5).map((task) => (
+              <TableRow key={task.id}>
+                <TableCell className="max-w-60">
+                  <span className="block truncate font-medium">
+                    {task.title}
+                  </span>
+                  <small className="mt-1 block text-[10px] text-muted-foreground">
+                    {formatTime(task.at)}
+                  </small>
+                </TableCell>
+                <TableCell className="max-w-60 truncate text-muted-foreground">
+                  {name(task.documentId)}
+                </TableCell>
+                <TableCell>
+                  <StatusBadge state={task.state} />
+                </TableCell>
+                <TableCell>{task.actor}</TableCell>
+                <TableCell>
+                  <Button
+                    size="sm"
+                    variant="link"
+                    onClick={() => onNavigate(task.route)}
+                  >
+                    查看
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ) : (
+        <EmptyState
+          title="当前没有进行中的任务"
+          description="导入、导出或 AI 处理开始后，状态会显示在这里。"
+        />
+      )}
+    </>
   );
 }
