@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/hcd_core-b859ab656d5bb602)
+
+running 14 tests
+test patch::tests::pptx_slide_copy_needs_the_page_and_the_version_it_addresses ... ok
+test patch::tests::pptx_slide_reorder_needs_the_page_direction_and_version_it_addresses ... ok
+test patch::tests::pptx_slide_deletion_needs_the_page_version_it_addresses ... ok
+test patch::tests::pptx_slide_reorder_swaps_two_pages_without_rewriting_a_chunk ... ok
+test patch::tests::pptx_slide_deletion_drops_the_page_from_the_index_and_records_the_part ... ok
+test patch::tests::pptx_slide_reorder_moves_every_chunk_of_a_page_that_spans_two ... ok
+test patch::tests::pptx_slide_copy_copies_every_chunk_of_a_page_that_spans_two ... ok
+test patch::tests::pptx_slide_copy_duplicates_a_page_right_behind_the_original ... ok
+test patch::tests::pptx_slide_copy_twice_names_each_copy_by_its_own_part ... ok
+test patch::tests::pptx_slide_reorder_refuses_a_page_with_no_neighbour ... ok
+test patch::tests::pptx_slide_deletion_refuses_to_empty_a_deck_or_name_a_page_it_cannot_find ... ok
+test patch::tests::pptx_slide_drag_reorders_nonadjacent_pages_in_one_revision ... ok
+test patch::tests::pptx_slide_copy_refuses_a_page_hcd_created_or_hcd_rewrote ... ok
+test patch::tests::pptx_slide_deletion_empties_the_last_index_page_it_leaves_behind ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 115 filtered out; finished in 2.16s

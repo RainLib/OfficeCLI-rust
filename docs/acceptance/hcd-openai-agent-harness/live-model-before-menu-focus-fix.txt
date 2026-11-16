@@ -1,0 +1,64 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts --grep OpenAI harness edits|two model agents|right-click --output /tmp/officecli-agent-final-model-results
+
+
+Running 9 tests using 1 worker
+
+(node:91500) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:142:69 › OpenAI harness edits and verifies txt (14.8s)
+  ✓  2 e2e/agent-harness.spec.ts:142:69 › OpenAI harness edits and verifies md (20.8s)
+  ✓  3 e2e/agent-harness.spec.ts:142:69 › OpenAI harness edits and verifies html (15.8s)
+  ✓  4 e2e/agent-harness.spec.ts:142:69 › OpenAI harness edits and verifies docx (22.0s)
+  ✓  5 e2e/agent-harness.spec.ts:142:69 › OpenAI harness edits and verifies xlsx (37.0s)
+  ✓  6 e2e/agent-harness.spec.ts:142:69 › OpenAI harness edits and verifies pptx (12.8s)
+  ✓  7 e2e/agent-harness.spec.ts:142:69 › OpenAI harness edits and verifies pdf (31.1s)
+  ✓  8 e2e/agent-harness.spec.ts:155:1 › two model agents preserve successive edits after a real revision conflict (20.8s)
+  ✘  9 e2e/agent-harness.spec.ts:242:1 › right-click and slash commands target real content and launch a visible Agent task (20.7s)
+
+
+  1) e2e/agent-harness.spec.ts:242:1 › right-click and slash commands target real content and launch a visible Agent task
+
+    Error: expect(locator).toContainText(expected) failed
+
+    Locator: locator('.hcd-editor-body').locator('h2')
+    Expected substring: "Command heading"
+    Received string:    ""
+    Timeout: 20000ms
+
+    Call log:
+      - Expect "toContainText" locator('.hcd-editor-body').locator('h2') with timeout 20000ms
+      - waiting for locator('.hcd-editor-body').locator('h2')
+        44 × locator resolved to <h2>…</h2>
+           - unexpected value ""
+
+
+      246 |   const commands=page.getByRole('dialog',{name:'斜杠命令'})
+      247 |   await expect(commands).toBeVisible();await commands.getByRole('textbox',{name:'搜索命令'}).fill('二级标题');await page.keyboard.press('Enter')
+    > 248 |   await expect(commands).toHaveCount(0);await page.keyboard.insertText('Command heading');await expect(body.locator('h2')).toContainText('Command heading')
+          |                                                                                                                            ^
+      249 |   await body.locator('h2').click({button:'right'});await expect(page.getByRole('menu')).toBeVisible()
+      250 |   await page.screenshot({path:info.outputPath('context-menu.png')})
+      251 |   await page.getByRole('menuitem',{name:'用 Agent 修改…',exact:true}).click()
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/agent-harness.spec.ts:248:124
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-final-model-results/agent-harness-right-click--2e47e-launch-a-visible-Agent-task/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-final-model-results/agent-harness-right-click--2e47e-launch-a-visible-Agent-task/error-context.md
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-final-model-results/agent-harness-right-click--2e47e-launch-a-visible-Agent-task/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-final-model-results/agent-harness-right-click--2e47e-launch-a-visible-Agent-task/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../../../../../tmp/officecli-agent-final-model-results/agent-harness-right-click--2e47e-launch-a-visible-Agent-task/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    e2e/agent-harness.spec.ts:242:1 › right-click and slash commands target real content and launch a visible Agent task
+  8 passed (3.4m)

@@ -273,6 +273,61 @@ DOCX、XLSX、PPTX、PDF 中可定位的图片进入 source-map，使用稳定 `
 4. PDF：当前已做到 lopdf 前置 `/ObjStm`/`/XRef` 有界预检、压缩对象图保留、逐页 content/字体 stream 有界解码、纯 Rust 完整页面合成视觉层以及透明 nodeId 文本交互层；下一步仍需替换整包 lopdf/Hayro 对象图，按 xref/page 真正随机读取，并以独立受限 worker 或缩放源图解码把 RSS 压到 512 MiB 内。扫描 PDF 需要独立 OCR 能力，dirty 文本页需要重新合成视觉层。
 5. 普通 HTML/HCD revision→Office/PDF：DOCX/XLSX/PPTX 的无源纯 Rust `SEMANTIC` 重建与 PDF 的 canonical HTML/CSS `HIGH` 排版均已覆盖；HCD 内容寻址栅格图片、宽高、直接 PPTX picture 坐标、原生表格窗口、HTML-source 结构化 source-map，以及跨 fragment 大表均已安全映射。下一步完善 Office 裁剪/相对锚点和表格内图片；PDF 继续扩展 CSS 覆盖面，但不把 canonical HTML 排版等级误写成源格式物理布局 `EXACT`。
 
+## 参考编辑器中的 Word 排版
+
+DOCX 导入只把通过 `w:default` 显式声明为默认的样式作为默认样式；空段落单独使用段落标记的字体尺寸。参考编辑器把 canonical 段落和 run 的排版解析到隔离的 iframe，再以 ProseMirror decoration 呈现对齐、段距、字体、字号、颜色和源页面宽度、边距。样式不进入可写 snapshot，也不影响其他文档标签或应用界面。历史预览按所选 revision 解析同一份排版。
+
+正文段落只修改文字，且块类型、可编辑标记（粗体、斜体、链接）和块字体保持不变时，保存复用原 run 的 nodeId、source anchor 和 HTML 格式。相邻 run 被编辑器合并时仍保留原 run 边界，仅重写变化的文本节点，不把该修订标记为结构重建。实际更改结构、标记或块字体等不符合此条件的修改仍走语义重建路径；这里不保证所有编辑都支持 source-backed 导出。编辑器也不再自动在尾部表格后增加空段落。
+
+已有 bundle 的样式是导入时的不可变数据。受旧默认样式判断影响的文档需要从原 DOCX 导入为新的 bundle，不应覆盖其历史。编辑模式和历史对比使用连续视图；DOCX 的预览模式使用下面的浏览器分页。字体替代和复杂浮动布局仍不承诺与 Word/WPS 完全一致。
+
+可复现的排版、保存、导出和历史对比回归使用仓库内公开样例，不依赖私人文档：
+
+```bash
+cargo test -p hcd-core -p hcd-docx --lib
+cargo build -p officecli
+cd examples/hdoc/editor
+OFFICECLI_BIN="$PWD/../../../target/debug/officecli" npm run test:workspace -- --grep 'Word typography'
+```
+
+浏览器测试检查封面居中、24 pt 字号、原始蓝色文字、页面宽度和边距，完成文字保存、DOCX 源格式下载、重新打开及 r0 对比，并生成 `word-presentation-comparison.png`。Rust 回归另外检查非默认样式隔离、空段落字体、Unicode 跨 run 替换和未修改 ZIP part 保持不变。
+
+## DOCX 浏览器分页预览
+
+独立 HTML 展示和参考编辑器的 DOCX 预览共用分页器。导入按 `sectPr` 的实际归属记录各章节纸张、方向、边距、页眉页脚关联、首页与奇偶页设置、页码起始值；不再用最后一个章节覆盖整篇文档。显式分页符、段前分页、普通长段落和长表格参与分页，跨页表格重复源文件声明的表头，连接的纵向合并单元格不会被拆开。页眉页脚按章节重复，常见锚定图片退出行内流，PAGE/NUMPAGES 显示当前预览计算的十进制页码。
+
+`GET /v1/documents/{id}/presentation?revision=N` 提供鉴权且固定 revision 的只读 DOCX 展示 HTML；读取不创建修订。参考编辑器把本地未保存草稿叠加到该 revision 的展示副本，再在仅允许运行分页器的 CSP iframe 中排版。切换预览不会强制保存，返回编辑时保留原协作会话和草稿。Ctrl/⌘ + 滚轮在预览 iframe 内仍只缩放文档画布。Agent 光标只查找当前可见的编辑面或分页 iframe；定位跨页内容时按画布缩放换算滚动位置，避免跳到后台隐藏编辑区或整篇 iframe 的中间。
+
+章节行网格 `docGrid` 的 `lines`/`linesAndChars` 与 `linePitch` 已进入展示元数据。独立 HTML 和编辑器共用网格测量：按实际字体包围盒选取网格行高，支持段落／继承样式的 `snapToGrid` 关闭与恢复、固定行距跳过网格、最小行距、大字号及空段落；表格使用独立行布局，显式启用时才吸附网格。`linesAndChars` 的字符网格尚未实现。楷体、仿宋、黑体和微软雅黑分别提供对应的平台字体回退；源字体和主题字体仍优先，字体文件不一致时不承诺字形完全相同。
+
+纯图片段落按实际绘图内容识别，不再套用空段落标记字体。页眉中相对页边距定位且 `layoutInCell` 开启的负向锚点受其锚定行约束，避免链接到横向章节后裁掉信笺标志。所有调整只修改派生展示 DOM，源坐标和文件部件仍保留。
+
+这属于浏览器派生布局，不是 Word/WPS 的排版引擎：页数可能与原 PDF 不同；多栏／分栏符暂按分页处理，脚注尾注作为补充内容展示，不支持逐页脚注排布；正文复杂浮动对象、绕排、多种页码格式和严格的孤行控制仍待完善。超过单页高度且无法拆分的行合并组或绘图标记 `data-hcd-page-overflow` 并扩展页面，避免静默裁切。此 JavaScript 分页器不参与纯 Rust PDF 导出，不能据此声明导出 PDF 已与 DOCX 分页一致。
+
+可复现验证使用公开、可重新生成的微型样例，私人合同不进入仓库：
+
+```bash
+python3 examples/hdoc/editor/e2e/fixtures/word-page-layout.py
+python3 examples/hdoc/editor/e2e/fixtures/word-grid-layout.py
+cargo test -p hcd-core -p hcd-docx --lib
+cargo test -p officecli --bin officecli word_pages_are_authorized
+cargo build -p officecli
+cd examples/hdoc/editor
+OFFICECLI_BIN="$PWD/../../../target/debug/officecli" npm run test:workspace -- --grep 'Word source grids|Word pagination|Word agents|all seven|canvas zoom'
+```
+
+浏览器回归检查纵横向页面、显式分页、首页／奇偶页页眉、动态页码、长段落 Unicode 字符无损、31 行表格与纵向合并完整、本地草稿预览及重新打开、源格式导出、画布缩放以及两个 MCP Agent 的跨页定位与光标移动，并生成 `word-paginated-cover.png`。服务端回归检查跨文档权限、历史 revision、非 DOCX 拒绝和读取不改 head。
+
+## Word 表格文字编辑与 Agent 协同
+
+复杂表格外层仍为 opaque，保护原版式与结构；文字节点成为同一 Y.Doc 中的 `hcdOpaqueRun` 子节点。DOCX、HTML、Markdown 的已有可写表格文字可直接点击输入，不再通过弹窗编辑。普通输入只更新目标文字节点，NodeView 保留 iframe、单元格与滚动位置；中文输入法组合期间暂缓更新当前段落，将远端事务映射后再合并输入。
+
+投影通过 `editableTextNodeIds` 声明表格可写文字。checkpoint 保留所有源 run（含空 run）的 nodeId、顺序、marks、font 与 source anchor，只准修改声明可写的文字；表格与正文变更在同一次提交中校验，任一非法操作使整批失败。预览、历史版本及只读令牌不能输入。旧协同房间在 sidecar 加载时迁移一次，保留原共享草稿。
+
+保存点通过 sidecar checkpoint 保存共享编辑并清除 pending 标记。MCP Agent 继续使用 `hcd_read node` 核对 `source.editable`、nodeHash、revision、epoch，再通过 node 模式 `text.splice` 提交；未保存草稿和旧 epoch 仍会被拦截。外部提交切换 Y.Doc 绑定时保留编辑器与表格 DOM。已保存内容比较会归并同样 marks 的分段，避免把源 run 边界误判为未保存草稿。
+
+尚未开放行列增删、合并拆分、在完全没有可写源 run 的空白单元格中新建文字、只读字段与表格图片/样式编辑。DOCX 源格式导出验证目标文字以外的 ZIP 部件不变；HTML/Markdown 导出验证编辑结果和表格语义，不承诺原文件字节一致。详细步骤见 [表格文字编辑验收](acceptance/hcd-word-table-text-edit.zh.md)。
+
 ## 验证
 
 日常闭环测试：

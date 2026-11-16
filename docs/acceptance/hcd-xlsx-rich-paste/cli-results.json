@@ -1,0 +1,20 @@
+{
+  "publicCapabilities": true,
+  "mixedAtomicRevision": true,
+  "richBlankCreation": true,
+  "nativeCreationShapes": [
+    "absentCell",
+    "emptyRow",
+    "styledEmptyCell",
+    "absentRow"
+  ],
+  "nativeNumericAndFormulaTypes": true,
+  "numericFormulaToRichText": true,
+  "idempotentReplay": true,
+  "lateCollisionRollsBack": true,
+  "staleRejected": true,
+  "nativeReadback": true,
+  "untouchedPartsPreserved": true,
+  "sourceUnchanged": true,
+  "sameSourceOfficeVisualReference": false
+}

@@ -1,0 +1,53 @@
+{
+  "local": {
+    "paintCount": 533,
+    "boldRedChinese": true,
+    "blueEditedText": true,
+    "italicSuffix": true,
+    "samples": [
+      {
+        "text": "中",
+        "font": "bold 24px Arial, \"Helvetica Neue\", Helvetica, Arial, \"PingFang SC\", \"Hiragino Sans GB\", \"Heiti SC\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", sans-serif",
+        "color": "#cc2244"
+      },
+      {
+        "text": "n",
+        "font": "14.6667px Arial, \"Helvetica Neue\", Helvetica, Arial, \"PingFang SC\", \"Hiragino Sans GB\", \"Heiti SC\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", sans-serif",
+        "color": "#2255aa"
+      },
+      {
+        "text": "斜",
+        "font": "italic 14.6667px Arial, \"Helvetica Neue\", Helvetica, Arial, \"PingFang SC\", \"Hiragino Sans GB\", \"Heiti SC\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", sans-serif",
+        "color": "#000000"
+      }
+    ]
+  },
+  "peer": {
+    "paintCount": 562,
+    "boldRedChinese": true,
+    "blueEditedText": true,
+    "italicSuffix": true,
+    "samples": [
+      {
+        "text": "中",
+        "font": "bold 24px Arial, \"Helvetica Neue\", Helvetica, Arial, \"PingFang SC\", \"Hiragino Sans GB\", \"Heiti SC\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", sans-serif",
+        "color": "#cc2244"
+      },
+      {
+        "text": "n",
+        "font": "14.6667px Arial, \"Helvetica Neue\", Helvetica, Arial, \"PingFang SC\", \"Hiragino Sans GB\", \"Heiti SC\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", sans-serif",
+        "color": "#2255aa"
+      },
+      {
+        "text": "斜",
+        "font": "italic 14.6667px Arial, \"Helvetica Neue\", Helvetica, Arial, \"PingFang SC\", \"Hiragino Sans GB\", \"Heiti SC\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", sans-serif",
+        "color": "#000000"
+      }
+    ]
+  },
+  "wholeCellColorAndUndoRedo": true,
+  "greenAfterRedo": true,
+  "nativeReadback": "Native rich runs, explicit normal, fonts, colour and Agent suffix verified.",
+  "realModelCalled": false,
+  "canvasIdentityPreserved": true
+}

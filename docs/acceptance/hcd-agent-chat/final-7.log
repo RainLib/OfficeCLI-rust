@@ -1,0 +1,18 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts agent-run-status.spec.ts --grep Codex-style|chat composer|chat preserves|a peer commit|fresh reads|focus parameter|permission, ownership --output /tmp/officecli-agent-chat-review/final
+
+
+Running 7 tests using 1 worker
+
+(node:78561) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:884:1 › Codex-style chat renders safe markdown and keeps details and settings collapsible (2.6s)
+  ✓  2 e2e/agent-harness.spec.ts:920:1 › chat composer handles Enter, Shift Enter, IME and selected team settings (1.1s)
+  ✓  3 e2e/agent-harness.spec.ts:945:1 › chat preserves history while polling, returns to latest, shows partial failure and stops a live task (3.3s)
+  ✓  4 e2e/agent-run-status.spec.ts:6:1 › a peer commit cannot hide another members unresolved conflict (0ms)
+  ✓  5 e2e/agent-run-status.spec.ts:13:1 › fresh reads alone do not mean a failed mutation has recovered (0ms)
+  ✓  6 e2e/agent-run-status.spec.ts:17:1 › focus parameter errors remain distinct from an incomplete document change (0ms)
+  ✓  7 e2e/agent-run-status.spec.ts:23:1 › permission, ownership and pending human edits have separate explanations (0ms)
+
+  7 passed (10.7s)

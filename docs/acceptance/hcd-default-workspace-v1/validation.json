@@ -1,0 +1,23 @@
+{
+  "status": "passed",
+  "scope": "default-workspace-phase-b",
+  "checks": [
+    "explicit bootstrap and repeated init never overwrite existing accounts or signing identity",
+    "HttpOnly login, CSRF/origin checks and last administrator protection",
+    "private files and global administration stay isolated from ungranted members",
+    "same Provider enforces per-operation ACL and durable idempotent document session exchanges",
+    "real HCD patch, immutable source, CAS business versions and repeated commit return one durable receipt",
+    "logout revokes previously issued document JWTs through live business authorization",
+    "application restart preserves browser sessions, ACL, exact versions, receipts and deduplicated events",
+    "history restore creates a new HCD revision without replacing a confirmed business version",
+    "cookie session registers licensed local fonts and creates immutable themes without pasted tokens",
+    "browser creates accounts and business files, grants ACL, opens editor without pasted tokens, edits and publishes",
+    "session renewal preserves the same mounted editor and unsaved draft",
+    "V2 desktop/mobile/dark management pages use local assets without public requests",
+    "member login lists only shared files and opens a real read-only editor"
+  ],
+  "browserVerified": true,
+  "storage": "production SQLite/immutable-object Provider",
+  "defaultAccounts": false,
+  "offlineReleaseVerified": false
+}

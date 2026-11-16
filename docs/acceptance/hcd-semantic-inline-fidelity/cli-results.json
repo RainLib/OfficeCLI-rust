@@ -1,0 +1,56 @@
+{
+  "fixture": "docs/acceptance/hcd-semantic-inline-fidelity/fixture.html",
+  "route": "direct HTML conversion + part-aware raster attachment -> native DOCX -> HCD -> source-free targets",
+  "temporaryArtifacts": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/hcd-semantic-inline-be501ihl",
+  "results": [
+    {
+      "format": "docx",
+      "nativeInlineRunsVerified": true,
+      "readbackValidated": true,
+      "readbackTextVerified": true,
+      "htmlGenerated": true,
+      "bytes": 3415,
+      "fidelity": "SEMANTIC",
+      "fullLayoutEquivalenceCertified": false,
+      "imageOutsideTableAndNativeLinkVerified": true
+    },
+    {
+      "format": "xlsx",
+      "nativeInlineRunsVerified": true,
+      "readbackValidated": true,
+      "readbackTextVerified": true,
+      "htmlGenerated": true,
+      "bytes": 4677,
+      "fidelity": "SEMANTIC",
+      "fullLayoutEquivalenceCertified": false
+    },
+    {
+      "format": "pptx",
+      "nativeInlineRunsVerified": true,
+      "readbackValidated": true,
+      "readbackTextVerified": true,
+      "htmlGenerated": true,
+      "bytes": 4532,
+      "fidelity": "SEMANTIC",
+      "fullLayoutEquivalenceCertified": false
+    },
+    {
+      "format": "md",
+      "nativeInlineRunsVerified": false,
+      "readbackValidated": true,
+      "readbackTextVerified": true,
+      "htmlGenerated": true,
+      "bytes": 635,
+      "fidelity": "SEMANTIC",
+      "fullLayoutEquivalenceCertified": false,
+      "markdownToNativeDocxStylesVerified": true
+    }
+  ],
+  "boundaries": [
+    "Native run formatting and readback text checked independently.",
+    "No same-source Word/WPS visual reference or pixel equivalence.",
+    "XLSX HCD preview flattens inline rich runs.",
+    "HTML HCD import flattens several inline tags; this probe seeds DOCX through direct conversion.",
+    "No real provider, service restart or production data used."
+  ]
+}

@@ -1,0 +1,152 @@
+{
+  "design": "../officecli-workspace-v2.pen",
+  "chapter": "文档的背后，也有井然有序的工作空间。",
+  "status": "implemented",
+  "edition": "OfficeCLI V2 / Soft Canvas · Administration",
+  "screens": [
+    {
+      "node": "Ma16N",
+      "number": "49",
+      "name": "工作空间概览",
+      "file": "previews/49-overview.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "MlWJZ",
+      "number": "50",
+      "name": "文档管理",
+      "file": "previews/50-documents.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "HJEQO",
+      "number": "51",
+      "name": "文档详情与修订",
+      "file": "previews/51-document-revisions.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "zioxt",
+      "number": "52",
+      "name": "导入与导出",
+      "file": "previews/52-import-export.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "s2ddt",
+      "number": "53",
+      "name": "AI 任务",
+      "file": "previews/53-agent-tasks.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "mxE5Q",
+      "number": "54",
+      "name": "字体目录",
+      "file": "previews/54-fonts.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "gUuO3",
+      "number": "55",
+      "name": "上传与登记字体",
+      "file": "previews/55-font-register.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "yMiiy",
+      "number": "56",
+      "name": "主题与预览",
+      "file": "previews/56-themes.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "J9Wkb",
+      "number": "57",
+      "name": "主题预览与导出检查",
+      "file": "previews/57-theme-font-plan.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "UpmDM",
+      "number": "58",
+      "name": "访问与令牌",
+      "file": "previews/58-access-tokens.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "x66Cz",
+      "number": "59",
+      "name": "操作记录",
+      "file": "previews/59-audit.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "CuKrm",
+      "number": "60",
+      "name": "服务设置",
+      "file": "previews/60-service-settings.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "tKtqH",
+      "number": "61",
+      "name": "文档管理 · 深色",
+      "file": "previews/61-documents-dark.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "TlRei",
+      "number": "62",
+      "name": "手机端文档管理",
+      "file": "previews/62-documents-mobile.png",
+      "width": 390,
+      "height": 844
+    },
+    {
+      "node": "hL7qB",
+      "number": "63",
+      "name": "反馈状态规范",
+      "file": "previews/63-feedback-states.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "mPnb0",
+      "number": "64",
+      "name": "恢复修订确认",
+      "file": "previews/64-restore-revision.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "r5tPA",
+      "number": "65",
+      "name": "批量指定文档主题",
+      "file": "previews/65-bulk-theme.png",
+      "width": 1600,
+      "height": 1040
+    }
+  ],
+  "implementation": {
+    "source": "../../../examples/hdoc/admin-app",
+    "validation": "../../acceptance/hcd-admin-workspace/validation.json",
+    "browsers": {
+      "desktop": "N9Uhm",
+      "mobile": "dLIpx"
+    }
+  }
+}

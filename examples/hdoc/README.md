@@ -2,6 +2,8 @@
 
 本目录用于直接查看 OfficeCLI 的分片 HCD、稳定 `nodeId`、文本 patch、source-backed HTML 回写，以及纯 Rust HTML/HCD → DOCX/XLSX/PPTX/PDF 的实际效果。
 
+正式 Workspace、宿主用户/权限/文件接入与完全离线部署的后续边界，见[产品化设计与 Provider 契约](../../docs/hcd-product-integration-v1.zh.md)。宿主手动回写闭环已实现，启动方式见文末运行时验收；正式默认 Provider 与免手填 token 的业务入口已位于 [`apps/workspace`](../../apps/workspace/README.zh.md)，完整离线发行仍待建设。
+
 仓库内全部现存 DOCX 样例的批量 HCD 文件测试位于 [`docx-suite/`](docx-suite/README.md)。它会为每个文件生成源预览、HCD 预览、稳定 nodeId 对比、revision 0 无修改回写、nodeId patch 和 revision 1 DOCX 回写产物。
 
 仓库内全部现存 PPTX 样例的批量 HCD 闭环测试位于 [`pptx-suite/`](pptx-suite/README.md)。它会生成 PPTX/HCD HTML、整套幻灯片截图、revision 0 精确回写、nodeId patch、revision 1 回写和重新导入对比报告。
@@ -74,3 +76,7 @@ open examples/hdoc/output/previews/hcd-revision-1-pdf.html
 ## 保真边界
 
 `output/source-backed/patched-source.html` 是基于不可变原 HTML 的范围回写；除 dirty 文本外，源字节保持不变。`output/direct` 和 `output/semantic` 使用进程内 Rust handler：DOCX/XLSX/PPTX 为 `SEMANTIC` 结构映射，PDF 为 canonical HTML/CSS 的 `HIGH` 分页排版。PDF 会保留常见 CSS、表格、代码块、链接和 Unicode 文本层，但不代表 Chromium/WebKit 专属 CSS 或原 Office 物理分页能像素级一致。
+
+## 宿主接入建设进度
+
+外部 Provider 会话、权限、精确版本导入、手动业务回写与提交事件已接入现有 V2 编辑链路。[启动配置、复现命令与真实验收](../../docs/acceptance/hcd-provider-integration-v1.zh.md)。正式默认业务 Provider 与当前业务入口见 [`apps/workspace`](../../apps/workspace/README.zh.md) 和[默认应用验收](../../docs/acceptance/hcd-default-workspace-v1.zh.md)。完整断网发行包仍待建设；外部接入 fixture 不作为默认应用。

@@ -1,0 +1,56 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts --output /tmp/officecli-team-columns-regression-results
+
+
+Running 35 tests using 1 worker
+
+(node:66040) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/agent-harness.spec.ts:227:69 › OpenAI harness edits and verifies txt (232ms)
+  ✓   2 e2e/agent-harness.spec.ts:227:69 › OpenAI harness edits and verifies md (236ms)
+  ✓   3 e2e/agent-harness.spec.ts:227:69 › OpenAI harness edits and verifies html (211ms)
+  ✓   4 e2e/agent-harness.spec.ts:227:69 › OpenAI harness edits and verifies docx (832ms)
+  ✓   5 e2e/agent-harness.spec.ts:227:69 › OpenAI harness edits and verifies xlsx (264ms)
+  ✓   6 e2e/agent-harness.spec.ts:227:69 › OpenAI harness edits and verifies pptx (235ms)
+  ✓   7 e2e/agent-harness.spec.ts:227:69 › OpenAI harness edits and verifies pdf (360ms)
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+  ✓   8 e2e/agent-harness.spec.ts:240:1 › two model agents preserve successive edits after a real revision conflict (715ms)
+  ✓   9 e2e/agent-harness.spec.ts:254:1 › full PPT rebuild uses the configured team, replaces every old page and exports native content (6.0s)
+  ✓  10 e2e/agent-harness.spec.ts:298:1 › slide workers repair invalid content using validator feedback before any deck commit (3.7s)
+  ✓  11 e2e/agent-harness.spec.ts:309:51 › full PPT rebuild rejects TITLE_ONLY without touching old pages (2.7s)
+  ✓  12 e2e/agent-harness.spec.ts:309:51 › full PPT rebuild rejects OMIT_PRICE without touching old pages (1.7s)
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+  ✓  13 e2e/agent-harness.spec.ts:318:1 › team workers share facts and commit separate assigned blocks (713ms)
+scripted model tool rejection: hcd_patch revision conflict: expected head 0, actual 1
+scripted model tool rejection: hcd_patch revision conflict: expected head 0, actual 1
+scripted model tool rejection: hcd_patch revision conflict: expected head 1, actual 2
+  ✓  14 e2e/agent-harness.spec.ts:329:1 › four-worker spreadsheet team repairs its plan and edits HW1 HW2 Rank exactly once (3.6s)
+  ✓  15 e2e/agent-harness.spec.ts:382:1 › persistently invalid spreadsheet team plan stops before editing and does not show 0/0 (2.4s)
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_a4d45d774d316f283b99892648b08d1d"]；请按分工重新读取并规划。
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_a4d45d774d316f283b99892648b08d1d"]；请按分工重新读取并规划。
+  ✓  16 e2e/agent-harness.spec.ts:399:1 › team workers cannot escape their assigned region (708ms)
+  ✓  17 e2e/agent-harness.spec.ts:407:1 › a human edit during team drafting prevents the stale deck replacement (5.7s)
+  ✓  18 e2e/agent-harness.spec.ts:420:1 › team cancellation releases all claims and another principal cannot cancel it (4.6s)
+  ✓  19 e2e/agent-harness.spec.ts:432:1 › automatic full remake ignores an obsolete title selection (3.7s)
+  ✓  20 e2e/agent-harness.spec.ts:441:1 › native export preflight refuses an unsupported replacement before any live document mutation (1.7s)
+  ✓  21 e2e/agent-harness.spec.ts:451:1 › HTTP and stdio MCP can configure, inspect and cancel harness teams with owner isolation (1.9s)
+  ✓  22 e2e/agent-harness.spec.ts:472:1 › MCP Streamable HTTP negotiates, isolates sessions and rejects stale or read-only edits (83ms)
+  ✓  23 e2e/agent-harness.spec.ts:498:45 › two MCP agents collaborate on xlsx while the preview stays synchronized (2.1s)
+  ✓  24 e2e/agent-harness.spec.ts:498:45 › two MCP agents collaborate on pptx while the preview stays synchronized (1.5s)
+  ✓  25 e2e/agent-harness.spec.ts:498:45 › two MCP agents collaborate on pdf while the preview stays synchronized (1.5s)
+  ✓  26 e2e/agent-harness.spec.ts:545:1 › right-click and slash commands target real content and launch a visible Agent task (1.5s)
+scripted model tool rejection: hcd_patch collaborators have unsaved edits; wait for a checkpoint, reread and replan
+scripted model tool rejection: hcd_patch collaborators have unsaved edits; wait for a checkpoint, reread and replan
+  ✓  27 e2e/agent-harness.spec.ts:563:1 › human pending drafts block Agent writes and read-only users cannot start tasks (1.1s)
+  ✓  28 e2e/agent-harness.spec.ts:575:1 › task cancellation preserves commits and cannot be used by another principal (212ms)
+  ✓  29 e2e/agent-harness.spec.ts:584:1 › offline human edits survive a newer Agent epoch and can be downloaded for comparison (1.7s)
+  ✓  30 e2e/agent-harness.spec.ts:607:1 › Rank formulas double, total recalculates, and automatic canvas cursors survive model latency (36.0s)
+  ✓  31 e2e/agent-harness.spec.ts:687:38 › Agent pointers follow a continuous path and preserve the pptx canvas (4.4s)
+  ✓  32 e2e/agent-harness.spec.ts:687:38 › Agent pointers follow a continuous path and preserve the xlsx canvas (4.9s)
+  ✓  33 e2e/agent-harness.spec.ts:756:43 › Agent operation queue and borderless animated areas on md (5.1s)
+  ✓  34 e2e/agent-harness.spec.ts:756:43 › Agent operation queue and borderless animated areas on docx (6.9s)
+  ✓  35 e2e/agent-harness.spec.ts:756:43 › Agent operation queue and borderless animated areas on xlsx (7.5s)
+
+  35 passed (2.0m)

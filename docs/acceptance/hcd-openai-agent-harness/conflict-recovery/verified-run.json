@@ -1,0 +1,116 @@
+{
+  "task": "HW1 数值全部 +1。HW2 仅偶数值 +5。Rank 保留原公式并 ×2。",
+  "status": "completed",
+  "model": "gpt-5.4-mini",
+  "agentCount": 4,
+  "committedRevisions": [
+    1,
+    2,
+    3
+  ],
+  "result": "协作任务已完成；各 Agent 已提交并回读各自负责的区域。",
+  "units": [
+    {
+      "title": "HW1 全部数值 +1",
+      "status": "completed",
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-1",
+      "leaseReleased": true
+    },
+    {
+      "title": "HW2 偶数值 +5",
+      "status": "completed",
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-2",
+      "leaseReleased": true
+    },
+    {
+      "title": "Rank 公式结果 ×2",
+      "status": "completed",
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-3",
+      "leaseReleased": true
+    }
+  ],
+  "planCorrections": [],
+  "recoveryEvents": [
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-1",
+      "at": 1794708628170,
+      "reason": "collaboration_conflict",
+      "type": "replan"
+    },
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-3",
+      "at": 1794708631453,
+      "reason": "collaboration_conflict",
+      "type": "replan"
+    },
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-3",
+      "at": 1794708640711,
+      "reason": "collaboration_conflict",
+      "type": "replan"
+    }
+  ],
+  "toolErrors": [
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-1",
+      "at": 1794708618777,
+      "error": "invalid activity target; use a read nodeId, blockId or chunkSequence",
+      "formulas": null,
+      "name": "hcd_activity",
+      "ok": false,
+      "status": 400,
+      "type": "tool_result"
+    },
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-2",
+      "at": 1794708619547,
+      "error": "invalid HCD patch: nodeId \"READ_NODE_ID\" must match n_[0-9a-f]{32}",
+      "formulas": null,
+      "name": "hcd_activity",
+      "ok": false,
+      "status": 400,
+      "type": "tool_result"
+    },
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-3",
+      "at": 1794708619706,
+      "error": "invalid HCD patch: nodeId \"READ_NODE_ID\" must match n_[0-9a-f]{32}",
+      "formulas": null,
+      "name": "hcd_activity",
+      "ok": false,
+      "status": 400,
+      "type": "tool_result"
+    },
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-1",
+      "at": 1794708628170,
+      "error": "revision conflict: expected head 0, actual 1",
+      "formulas": null,
+      "name": "hcd_patch",
+      "ok": false,
+      "status": 409,
+      "type": "tool_result"
+    },
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-3",
+      "at": 1794708631453,
+      "error": "revision conflict: expected head 0, actual 1",
+      "formulas": null,
+      "name": "hcd_patch",
+      "ok": false,
+      "status": 409,
+      "type": "tool_result"
+    },
+    {
+      "agentId": "agent-1f113dfd-c8f3-4a52-8934-cd27c3310585-3",
+      "at": 1794708640711,
+      "error": "revision conflict: expected head 1, actual 2",
+      "formulas": null,
+      "name": "hcd_patch",
+      "ok": false,
+      "status": 409,
+      "type": "tool_result"
+    }
+  ],
+  "validation": "Fresh isolated public gradebook. Every HW1 value +1, only even HW2 values +5, original Rank formulas multiplied by 2, unrelated cells unchanged, numeric types and formulas verified in native XLSX export."
+}

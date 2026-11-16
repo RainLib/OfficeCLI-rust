@@ -1,0 +1,106 @@
+{
+  "metrics": {
+    "html": [
+      {
+        "text": "同名😀 EDIT中文😀",
+        "weight": "700",
+        "style": "normal"
+      },
+      {
+        "text": " tail",
+        "weight": "400",
+        "style": "italic"
+      },
+      {
+        "text": " plain",
+        "weight": "400",
+        "style": "normal"
+      },
+      {
+        "text": "同名😀",
+        "weight": "400",
+        "style": "italic"
+      },
+      {
+        "text": " tail plain",
+        "weight": "400",
+        "style": "normal"
+      }
+    ],
+    "docx": [
+      {
+        "text": "同名😀 EDIT中文😀",
+        "weight": "700",
+        "style": "normal"
+      },
+      {
+        "text": " tail",
+        "weight": "400",
+        "style": "italic"
+      },
+      {
+        "text": " plain",
+        "weight": "400",
+        "style": "normal"
+      },
+      {
+        "text": "同名😀",
+        "weight": "400",
+        "style": "italic"
+      },
+      {
+        "text": " tail plain",
+        "weight": "400",
+        "style": "normal"
+      }
+    ],
+    "md": [
+      {
+        "text": "同名😀 EDIT中文😀",
+        "weight": "700",
+        "style": "normal"
+      },
+      {
+        "text": " tail",
+        "weight": "400",
+        "style": "italic"
+      },
+      {
+        "text": " plain",
+        "weight": "400",
+        "style": "normal"
+      },
+      {
+        "text": "同名😀",
+        "weight": "400",
+        "style": "italic"
+      },
+      {
+        "text": " tail plain",
+        "weight": "400",
+        "style": "normal"
+      }
+    ]
+  },
+  "images": {
+    "html": {
+      "width": 64,
+      "height": 64,
+      "codeWrapper": false
+    },
+    "docx": {
+      "width": 64,
+      "height": 64,
+      "codeWrapper": false
+    },
+    "md": {
+      "width": 64,
+      "height": 64,
+      "codeWrapper": false
+    }
+  },
+  "inlineWeightsAndStylesVerified": true,
+  "boldTableCellVerified": true,
+  "rasterLoaded": true,
+  "sameSourceOfficeVisualReference": false
+}

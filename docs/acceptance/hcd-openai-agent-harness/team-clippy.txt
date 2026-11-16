@@ -1,0 +1,2 @@
+    Checking officecli v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/officecli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.84s

@@ -1,0 +1,15 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test e2e/agent-harness.spec.ts -g slide workers repair|full PPT rebuild rejects|full PPT rebuild uses --output=/tmp/officecli-team-repair-regression
+
+
+Running 4 tests using 1 worker
+
+(node:54040) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:224:1 › full PPT rebuild uses the configured team, replaces every old page and exports native content (7.2s)
+  ✓  2 e2e/agent-harness.spec.ts:268:1 › slide workers repair invalid content using validator feedback before any deck commit (3.7s)
+  ✓  3 e2e/agent-harness.spec.ts:279:51 › full PPT rebuild rejects TITLE_ONLY without touching old pages (2.7s)
+  ✓  4 e2e/agent-harness.spec.ts:279:51 › full PPT rebuild rejects OMIT_PRICE without touching old pages (1.7s)
+
+  4 passed (18.5s)

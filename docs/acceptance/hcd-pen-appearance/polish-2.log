@@ -1,0 +1,13 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test e2e/workspace.spec.ts --grep appearance follows|dark table dialog --output /tmp/hcd-pen-ui-polish
+
+
+Running 2 tests using 1 worker
+
+(node:12433) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/workspace.spec.ts:1145:1 › appearance follows the system, persists overrides and preserves the live editor (1.3s)
+  ✓  2 e2e/workspace.spec.ts:1256:1 › dark table dialog keeps its controls themed and the source table readable (2.7s)
+
+  2 passed (7.9s)

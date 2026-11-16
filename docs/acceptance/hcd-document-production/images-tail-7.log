@@ -1,0 +1,18 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts --grep generated images|production pipeline --output /tmp/officecli-production-e2e-tail-final
+
+
+Running 7 tests using 1 worker
+
+(node:1252) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:991:1 › production pipeline repairs a four-page plan into ten illustrated pronunciation slides (19.0s)
+  ✓  2 e2e/agent-harness.spec.ts:1047:63 › generated images insert and export natively in md (4.8s)
+  ✓  3 e2e/agent-harness.spec.ts:1047:63 › generated images insert and export natively in html (4.0s)
+  ✓  4 e2e/agent-harness.spec.ts:1047:63 › generated images insert and export natively in docx (4.3s)
+  ✓  5 e2e/agent-harness.spec.ts:1047:63 › generated images insert and export natively in pdf (6.0s)
+  ✓  6 e2e/agent-harness.spec.ts:1047:63 › generated images insert and export natively in xlsx (4.3s)
+  ✓  7 e2e/agent-harness.spec.ts:1047:63 › generated images insert and export natively in pptx (4.2s)
+
+  7 passed (54.4s)

@@ -1,0 +1,16 @@
+{
+  "status": "passed",
+  "screens": 17,
+  "pdfPages": 17,
+  "checkedNodesIncludingComponents": 2141,
+  "checks": [
+    "native screen IDs and sequential numbers",
+    "native and PNG dimensions",
+    "node names, component targets, variables and completion flags",
+    "admin top-level frames do not overlap existing artboards",
+    "review gallery, specification, overview and PDF exist",
+    "PDF signature and page count"
+  ],
+  "visualReview": "All 17 PNGs reviewed in contact sheet; detailed pages reviewed at native resolution. Pixel layout is reviewed visually, not asserted by this script.",
+  "errors": []
+}

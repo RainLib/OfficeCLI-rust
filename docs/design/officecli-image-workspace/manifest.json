@@ -1,0 +1,116 @@
+{
+  "design": "../officecli-workspace-v2.pen",
+  "chapter": "图片，也是一份可协作的文档。",
+  "status": "design-only",
+  "screens": [
+    {
+      "node": "hW95J",
+      "name": "原图预览",
+      "file": "previews/34-image-preview.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "nYS3e",
+      "name": "裁剪与旋转",
+      "file": "previews/35-image-crop.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "E0A3Pk",
+      "name": "光线与色彩",
+      "file": "previews/41-image-adjust.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "i2RoxJ",
+      "name": "AI 会话与修图方案",
+      "file": "previews/42-image-ai-chat.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "F8u2IF",
+      "name": "多 Agent 局部修图",
+      "file": "previews/36-image-ai-progress.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "ugFR5",
+      "name": "原图与候选对比",
+      "file": "previews/37-image-compare.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "NmgWP",
+      "name": "深色专注模式",
+      "file": "previews/38-image-focus-dark.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "VJL0F",
+      "name": "WebP 格式感知导出",
+      "file": "previews/40-image-export-webp.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "wX3d2",
+      "name": "JPEG 透明背景处理",
+      "file": "previews/43-image-export-jpeg.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "GtVTY",
+      "name": "移动端编辑抽屉",
+      "file": "previews/39-image-mobile.png",
+      "width": 390,
+      "height": 844
+    },
+    {
+      "node": "EFr4S",
+      "name": "格式转换与输出选项",
+      "file": "previews/44-image-convert.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "u4hzWK",
+      "name": "转换完成与打开副本",
+      "file": "previews/45-image-convert-complete.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "F3un1",
+      "name": "涂抹区域与重绘提示词",
+      "file": "previews/46-image-inpaint-mask.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "uv6s1",
+      "name": "局部生成与 Agent 协作",
+      "file": "previews/47-image-inpaint-progress.png",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "node": "A47Y3",
+      "name": "只修改蒙版区域的对比",
+      "file": "previews/48-image-inpaint-compare.png",
+      "width": 1600,
+      "height": 1040
+    }
+  ],
+  "chapters": [
+    "图片，也是一份可协作的文档。",
+    "换格式，或只重绘你选中的部分。"
+  ]
+}

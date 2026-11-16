@@ -1,0 +1,12 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test e2e/workspace.spec.ts --grep shared side panels --output /tmp/hcd-panel-shells-geometry-final
+
+
+Running 1 test using 1 worker
+
+(node:71756) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/workspace.spec.ts:1664:1 › shared side panels match the latest Pen components across document formats (10.8s)
+
+  1 passed (15.5s)

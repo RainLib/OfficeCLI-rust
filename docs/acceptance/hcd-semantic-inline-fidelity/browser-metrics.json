@@ -1,0 +1,79 @@
+{
+  "metrics": {
+    "docx": [
+      {
+        "text": "同名😀",
+        "weight": "700",
+        "style": "normal",
+        "size": "16px"
+      },
+      {
+        "text": " tail",
+        "weight": "400",
+        "style": "italic",
+        "size": "16px"
+      },
+      {
+        "text": " plain",
+        "weight": "400",
+        "style": "normal",
+        "size": "16px"
+      },
+      {
+        "text": "同名😀",
+        "weight": "400",
+        "style": "italic",
+        "size": "16px"
+      },
+      {
+        "text": " tail plain",
+        "weight": "400",
+        "style": "normal",
+        "size": "16px"
+      }
+    ],
+    "md": [
+      {
+        "text": "同名😀",
+        "weight": "700",
+        "style": "normal",
+        "size": "16px"
+      },
+      {
+        "text": " tail",
+        "weight": "400",
+        "style": "italic",
+        "size": "16px"
+      },
+      {
+        "text": " plain",
+        "weight": "400",
+        "style": "normal",
+        "size": "16px"
+      },
+      {
+        "text": "同名😀",
+        "weight": "400",
+        "style": "italic",
+        "size": "16px"
+      },
+      {
+        "text": " tail plain",
+        "weight": "400",
+        "style": "normal",
+        "size": "16px"
+      }
+    ]
+  },
+  "inlineWeightsAndStylesVerified": true,
+  "boldTableCellVerified": true,
+  "embeddedRasterLoaded": true,
+  "observedGaps": {
+    "xlsxRichCell": {
+      "text": "同名😀 tail plain",
+      "weight": "400",
+      "style": "normal"
+    }
+  },
+  "sameSourceOfficeVisualReference": false
+}

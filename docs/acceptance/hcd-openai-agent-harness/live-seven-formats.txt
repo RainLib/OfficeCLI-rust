@@ -1,0 +1,18 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts --grep OpenAI harness edits --output /tmp/officecli-agent-seven-final-live-results
+
+
+Running 7 tests using 1 worker
+
+(node:87613) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:141:69 › OpenAI harness edits and verifies txt (13.8s)
+  ✓  2 e2e/agent-harness.spec.ts:141:69 › OpenAI harness edits and verifies md (13.8s)
+  ✓  3 e2e/agent-harness.spec.ts:141:69 › OpenAI harness edits and verifies html (15.8s)
+  ✓  4 e2e/agent-harness.spec.ts:141:69 › OpenAI harness edits and verifies docx (14.9s)
+  ✓  5 e2e/agent-harness.spec.ts:141:69 › OpenAI harness edits and verifies xlsx (18.8s)
+  ✓  6 e2e/agent-harness.spec.ts:141:69 › OpenAI harness edits and verifies pptx (17.8s)
+  ✓  7 e2e/agent-harness.spec.ts:141:69 › OpenAI harness edits and verifies pdf (14.9s)
+
+  7 passed (1.9m)

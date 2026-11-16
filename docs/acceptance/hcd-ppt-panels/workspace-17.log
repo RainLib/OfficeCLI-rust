@@ -1,0 +1,28 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test e2e/workspace.spec.ts --grep PPT thumbnail drag|PPT shape properties|collapsed sidebars|appearance follows|dark workspace|context menu uses|mobile drawers dismiss|workspace drawers,|phone workspace|all seven formats|canvas zoom|workbook preview|document tabs retain|workspace reload restores|fixed history saves|history uses the selected|dark table dialog|agent commits preserve preview --output /tmp/hcd-ppt-panels-acceptance
+
+
+Running 17 tests using 1 worker
+
+(node:61810) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/workspace.spec.ts:121:1 › document tabs retain independent unsaved text and collaboration sessions (1.1s)
+  ✓   2 e2e/workspace.spec.ts:143:1 › workspace reload restores multiple tabs, active document, preview and independent canvas zoom (1.6s)
+  ✓   3 e2e/workspace.spec.ts:770:1 › workspace drawers, focus mode and preview preserve document state (1.4s)
+  ✓   4 e2e/workspace.spec.ts:809:1 › workbook preview keeps its canvas and refuses to discard an unapplied formula (1.5s)
+  ✓   5 e2e/workspace.spec.ts:828:1 › all seven formats use the content shell and enforce read-only preview (6.6s)
+  ✓   6 e2e/workspace.spec.ts:849:1 › phone workspace provides reachable drawers without page overflow (1.3s)
+  ✓   7 e2e/workspace.spec.ts:966:1 › canvas zoom handles all formats and frames without scaling the page (5.4s)
+  ✓   8 e2e/workspace.spec.ts:1011:1 › agent commits preserve preview, focus, zoom and the selected historical comparison (3.4s)
+  ✓   9 e2e/workspace.spec.ts:1054:1 › history uses the selected outline and closes the mobile drawer after selection (1.1s)
+  ✓  10 e2e/workspace.spec.ts:1099:1 › fixed history saves drafts, pins even the latest revision read-only and restores the live deck (2.4s)
+  ✓  11 e2e/workspace.spec.ts:1312:1 › appearance follows the system, persists overrides and preserves the live editor (1.1s)
+  ✓  12 e2e/workspace.spec.ts:1347:1 › dark workspace keeps all seven document surfaces and native canvas instances (6.6s)
+  ✓  13 e2e/workspace.spec.ts:1371:1 › context menu uses a themed viewport portal with keyboard navigation and focus return (783ms)
+  ✓  14 e2e/workspace.spec.ts:1398:1 › mobile drawers dismiss with Escape and a scrim while retaining the composer draft (1.0s)
+  ✓  15 e2e/workspace.spec.ts:1461:1 › collapsed sidebars release their entire width and the right toggle follows export (7.5s)
+  ✓  16 e2e/workspace.spec.ts:1553:1 › PPT thumbnail drag saves the complete order in one revision with hover actions and undo (2.9s)
+  ✓  17 e2e/workspace.spec.ts:1611:1 › PPT shape properties follow the design and commit real typography and geometry (1.7s)
+
+  17 passed (52.6s)

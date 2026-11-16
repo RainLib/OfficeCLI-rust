@@ -1,0 +1,22 @@
+{
+  "oneRevision": true,
+  "mixedOperations": [
+    "text.splice",
+    "xlsx.richText.set",
+    "xlsx.richText.create",
+    "xlsx.formula.set",
+    "xlsx.formula.create",
+    "xlsx.number.set"
+  ],
+  "blankRichText": true,
+  "peerSync": true,
+  "undoRedo": true,
+  "canvasIdentityPreserved": true,
+  "native": "Native rich runs, numeric literal and formula expressions verified.",
+  "blankCellDraft": {
+    "serverRevisionBeforeExplicitApply": 0,
+    "revisionAfterApply": 1,
+    "nativeBoldRun": true,
+    "clearedAfterReload": true
+  }
+}

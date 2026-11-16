@@ -1,0 +1,47 @@
+   Compiling officecli v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/officecli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.73s
+     Running unittests src/main.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/officecli-d5bcb9841ed0ef12)
+
+running 40 tests
+test hdoc_server::tests::admin_console_is_served_same_origin ... ok
+test hdoc_server::tests::catalog_routes_require_an_admin_token ... ok
+test hdoc_server::tests::catalog_retire_validates_id_and_requires_admin ... ok
+test hdoc_server::tests::catalog_theme_reachability_and_delete_require_admin ... ok
+test hdoc_server::tests::catalog_write_rejects_missing_blobs_and_unknown_fonts ... ok
+test hdoc_server::tests::configured_default_theme_requires_a_theme_revision_digest ... ok
+test hdoc_server::tests::admin_uploads_font_then_saves_and_lists_a_theme ... ok
+test hdoc_server::tests::font_faces_only_keeps_face_lines_and_drops_the_rest ... ok
+test hdoc_server::tests::audit_route_reads_a_utc_day_window_and_refuses_bounds_that_are_not_days ... ok
+test hdoc_server::tests::audit_route_is_admin_only_and_answers_newest_first ... ok
+test hdoc_server::tests::catalog_retire_lists_and_lifts_theme_retirement ... ok
+test hdoc_server::tests::catalog_delete_refuses_referenced_fonts_and_removes_loose_ones ... ok
+test hdoc_server::tests::a_reimported_archive_keeps_its_own_theme_pin ... ok
+test hdoc_server::tests::catalog_documents_needs_admin_and_refuses_a_broken_bundle ... ok
+test hdoc_server::tests::catalog_delete_theme_refuses_then_removes_an_unpinned_theme ... ok
+test hdoc_server::tests::a_pinned_document_gets_theme_bytes_not_a_second_copy_of_its_rules ... ok
+test hdoc_server::tests::default_theme_pins_a_freshly_imported_document ... ok
+test hdoc_server::tests::catalog_theme_documents_name_the_pinning_documents ... ok
+test hdoc_server::tests::catalog_documents_lists_the_root_with_its_head_pins ... ok
+test hdoc_server::tests::an_import_auto_pin_is_recorded_against_the_uploader ... ok
+test hdoc_server::tests::a_stale_or_retired_default_theme_warns_instead_of_failing_the_import ... ok
+test hdoc_server::tests::agents_are_isolated_and_concurrent_edits_conflict_without_overwriting ... ok
+test hdoc_server::tests::theme_read_routes_accept_document_and_admin_tokens_only ... ok
+test hdoc_server::tests::font_plan_route_says_when_the_stored_source_cannot_be_read ... ok
+test hdoc_server::tests::font_plan_route_names_a_license_that_is_about_to_expire ... ok
+test hdoc_server::tests::every_finished_catalog_change_appends_a_line_and_a_refusal_none ... ok
+test hdoc_server::tests::importing_a_document_that_already_exists_does_not_repin_it ... ok
+test hdoc_server::tests::historical_manifest_and_styles_use_the_requested_snapshot ... ok
+test hdoc_server::tests::font_plan_route_answers_what_each_export_would_carry ... ok
+test hdoc_server::tests::export_capabilities_apply_pdf_revision_restrictions_before_ticket_creation ... ok
+test hdoc_server::tests::export_capabilities_detect_missing_and_mismatched_sources ... ok
+test hdoc_server::tests::prepared_exports_are_immutable_and_failed_generation_never_issues_a_ticket ... ok
+test hdoc_server::tests::theme_faces_only_query_serves_font_bytes_alone ... ok
+test hdoc_server::tests::without_a_configured_default_theme_imports_stay_unpinned ... ok
+test hdoc_server::tests::pin_theme_route_records_a_content_revision ... ok
+test hdoc_server::tests::font_plan_route_forecasts_nothing_to_move_when_no_face_will_embed ... ok
+test hdoc_server::tests::word_pages_are_authorized_revision_pinned_and_do_not_mutate_head ... ok
+test hdoc_server::tests::semantic_table_node_edits_preserve_source_and_guard_collaborators ... ok
+test hdoc_server::tests::semantic_node_edits_round_trip_html_markdown_and_text ... ok
+test hdoc_server::tests::font_plan_route_forecasts_the_pdf_text_a_pin_would_touch ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out; finished in 2.48s

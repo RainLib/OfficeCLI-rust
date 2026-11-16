@@ -1,0 +1,106 @@
+name: HCD regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hcd-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build -p officecli
+      - name: Verify native formula results through the CLI
+        run: python3 docs/acceptance/hcd-capability-audit-2026-11-15/probe_formulas.py
+      - name: Verify source-free inline styles through native Office readback
+        run: python3 docs/acceptance/hcd-semantic-inline-fidelity/probe_semantic_inline.py
+      - name: Verify HTML import and source/native export roundtrips
+        run: python3 docs/acceptance/hcd-html-inline-fidelity/probe_html_inline.py
+      - name: Verify native XLSX rich strings through editing and source export readback
+        run: python3 docs/acceptance/hcd-xlsx-rich-text/probe_rich_text.py
+      - name: Verify public XLSX rich-text editing, stale guards and native readback
+        run: python3 docs/acceptance/hcd-xlsx-rich-edit/probe_rich_edit.py
+      - name: Verify atomic mixed XLSX rich creation, types and rollback
+        run: python3 docs/acceptance/hcd-xlsx-rich-paste/probe_rich_paste.py
+
+  editor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            examples/hdoc/editor/package-lock.json
+            examples/hdoc/xlsx-univer-viewer/package-lock.json
+      - name: Install fonts and PDF renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk poppler-utils
+      - run: cargo build -p officecli
+      - run: npm ci --prefix examples/hdoc/xlsx-univer-viewer
+      - run: npm ci --prefix examples/hdoc/editor
+      - name: Build standalone and embedded editors
+        working-directory: examples/hdoc/editor
+        run: npm run build
+      - name: Unit regressions
+        working-directory: examples/hdoc/editor
+        run: |
+          npx tsx --test src/*.test.ts
+          node scripts/probe-proxy-connections.mjs
+      - name: Install Chromium
+        working-directory: examples/hdoc/editor
+        run: npx playwright install --with-deps chromium
+      - name: Verify rendered HTML, DOCX and Markdown inline styles and image sizes
+        run: |
+          python3 docs/acceptance/hcd-html-inline-fidelity/probe_html_inline.py --output docs/acceptance/hcd-html-inline-fidelity/cli-results.json
+          node docs/acceptance/hcd-html-inline-fidelity/probe_preview.mjs
+      - name: Real service, MCP, calculation, table, history and preview regressions
+        working-directory: examples/hdoc/editor
+        run: >-
+          npx playwright test e2e/workspace.spec.ts e2e/agent-harness.spec.ts e2e/agent-run-status.spec.ts
+          --grep 'input journal|calculation contract|verified grid caches|native literal types|protocol preflight|protocol fingerprint|collaboration room identities|offline content journal|killed browser process|quarantines an older|browser storage failures|failed journal write|rebuilt collaboration room|journal maintenance|unreadable local journal|offline journals stay|table hover controls|insert ribbon creates|editor deletion supports|all seven formats|document tabs retain|workbook preview keeps|API SIGKILL|Agent continuation|PPT continuation|cross-document workflow|HTTP and stdio MCP|OpenAI harness edits|team workers share facts|four-worker spreadsheet team|two model agents preserve|Word mixed inline edits|HTML inline fidelity|XLSX rich strings|XLSX native text selections|XLSX rich input journal|XLSX rich clipboard|XLSX rich blank-cell|XLSX batch input journal|XLSX canvas mouse|a grid agent highlights|grid input journal|Word table edits share|peer commit cannot|fresh reads alone|focus parameter errors|permission, ownership|restored interrupted task|authorized continuation'
+          --reporter=line
+      - name: Image editing, recovery and candidate checkpoint regressions
+        working-directory: examples/hdoc/editor
+        run: npx playwright test e2e/image-workspace.spec.ts --reporter=line
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: hcd-browser-failure
+          path: |
+            examples/hdoc/editor/test-results
+            docs/acceptance/hcd-html-inline-fidelity/*.png
+            docs/acceptance/hcd-html-inline-fidelity/*.json
+            docs/acceptance/hcd-xlsx-rich-text/*.png
+            docs/acceptance/hcd-xlsx-rich-text/*.json
+            docs/acceptance/hcd-xlsx-rich-edit/*.png
+            docs/acceptance/hcd-xlsx-rich-edit/*.json
+            docs/acceptance/hcd-xlsx-rich-paste/*.png
+            docs/acceptance/hcd-xlsx-rich-paste/*.json
+            docs/acceptance/hcd-grid-batch-recovery/*.png
+            docs/acceptance/hcd-grid-batch-recovery/*.json
+          retention-days: 7

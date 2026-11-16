@@ -1,0 +1,20 @@
+{
+  "date": "2026-11-16",
+  "scope": "first full 31-case run; final verification is recorded separately",
+  "passed": 29,
+  "failed": 2,
+  "duration": "3.4m",
+  "failures": [
+    {
+      "test": "HTML inline fidelity survives human undo, peer sync, MCP edits and canonical export",
+      "observation": "MCP node read did not return expected text; original assertion omitted MCP error payload",
+      "offlineBundleRead": "same stable node ID and expected saved text independently verified through CLI",
+      "rootCause": "unconfirmed; explicit MCP error assertion added for recheck"
+    },
+    {
+      "test": "HTML and Markdown source tables edit inline and preserve their source format",
+      "observation": "initial editor did not mount; trace records Chromium net::ERR_ADDRESS_INVALID for module and WebSocket requests",
+      "rootCause": "unconfirmed; no application runtime fix claimed"
+    }
+  ]
+}

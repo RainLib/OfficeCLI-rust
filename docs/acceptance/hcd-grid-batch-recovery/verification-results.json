@@ -1,0 +1,89 @@
+{
+  "date": "2026-11-16",
+  "branch": "feature/hcd-font-format-integration",
+  "head": "ccb5fd5",
+  "scope": "commit-prepared local workspace; source base ccb5fd5",
+  "rust": {
+    "passed": 1074,
+    "failed": 0,
+    "ignored": 0,
+    "resultGroups": 25,
+    "reusedFromPreviousPhase": true
+  },
+  "rustChecks": {
+    "clippy": true,
+    "format": true,
+    "debugBuild": true,
+    "reusedFromPreviousPhase": true
+  },
+  "frontendUnit": {
+    "passed": 24,
+    "failed": 0
+  },
+  "editorBuild": {
+    "standalone": true,
+    "embedded": true
+  },
+  "browser": {
+    "passed": 40,
+    "failed": 0,
+    "duration": "3.0m",
+    "total": 40,
+    "allPassed": true
+  },
+  "initialRecoveryCases": {
+    "passed": 5,
+    "failed": 0,
+    "duration": "44.0s"
+  },
+  "deterministicInFlightSelection": {
+    "beforeFix": {
+      "passed": 0,
+      "failed": 1
+    },
+    "afterFixRepeated": {
+      "passed": 4,
+      "failed": 0,
+      "duration": "27.8s"
+    }
+  },
+  "nativeFormulaProbes": {
+    "passed": 5,
+    "mismatches": 0
+  },
+  "nativeMixedContentProbe": true,
+  "unresolved": [
+    "Local system address allocation pressure can still prevent loopback connections. EADDRNOTAVAIL and a high predominantly non-loopback TIME_WAIT count were observed; proxy keep-alive reduces this project connection use but does not control other processes.",
+    "Full format fidelity, all Excel formulas, cross-device recovery and reliable natural-language cross-document workflows remain incomplete."
+  ],
+  "dailyServicesRestarted": false,
+  "realModelCalls": false,
+  "sameSourceOfficeVisualReference": false,
+  "remoteCiVerified": false,
+  "cleanCheckoutVerified": false,
+  "entireProductComplete": false,
+  "navigationRecoveryFocused": {
+    "passed": 3,
+    "failed": 0,
+    "duration": "15.6s"
+  },
+  "mouseNavigation": {
+    "diagnosticBeforeFix": {
+      "passed": 12,
+      "failed": 4,
+      "total": 16
+    },
+    "rootCause": "Univer counts canvas pointer releases across intervening external toolbar clicks as a double click; the arrow key then edits text.",
+    "guard": "Confirm mouse double clicks with the browser mousedown click count during pointerup dispatch.",
+    "nativeDoubleClickVerified": true,
+    "canvasPreserved": true
+  },
+  "proxyConnections": {
+    "requests": 20,
+    "beforeUpstreamConnections": 20,
+    "afterUpstreamConnections": 1,
+    "passed": true
+  },
+  "commitStatusNote": "Validated working-tree state is identified by the containing Git commit; no remote push is part of this submission.",
+  "rawBrowserTraces": "Retained locally, excluded from Git; text diagnostics and screenshots are versioned."
+}

@@ -1,0 +1,12 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts --grep four-worker spreadsheet --output /tmp/officecli-team-columns-live-results
+
+
+Running 1 test using 1 worker
+
+(node:65190) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:329:1 › four-worker spreadsheet team repairs its plan and edits HW1 HW2 Rank exactly once (43.1s)
+
+  1 passed (50.4s)

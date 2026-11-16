@@ -1,0 +1,10 @@
+{
+  "formatOnlyEdit": true,
+  "peerSync": true,
+  "undoRedo": true,
+  "mcpReadRuns": true,
+  "mcpWriteRuns": true,
+  "canvasIdentityPreserved": true,
+  "native": "UI format-only edit, Agent color and untouched native scheme verified.",
+  "revision": 4
+}

@@ -2,6 +2,8 @@
 
 日期：2026-11-14。分支：`feature/hcd-font-format-integration`；基础合并提交：`60207d8`。本报告对应其后的工作区改动。
 
+后续工作区已加入 [DOCX 浏览器分页](../hcd-docx-v1.zh.md#docx-浏览器分页预览)、[表格文字与语义 node 编辑](hcd-word-table-text-edit.zh.md)和[刷新恢复多文档标签](hcd-workspace-restore.zh.md)。下文保留该轮验收的历史数字与边界；持续进度见[主要缺口跟踪](hcd-major-gaps-progress.zh.md)。
+
 已落地可供外部 AI Agent 使用的 HCD MCP 工具、多文档标签，以及预览中的 Agent 定位、移动、提交和冲突反馈。复杂 Word 块展示 canonical HTML；资源索引、HTML 导出与幻灯片 PDF 页尺寸的已知一致性问题已修复。当前仍不能宣称任意 Office/WPS 文件都能逐像素预览、任意对象编辑或无损跨格式转换。
 
 ## 已实现行为

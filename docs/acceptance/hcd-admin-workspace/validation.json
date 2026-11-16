@@ -1,0 +1,73 @@
+{
+  "passed": true,
+  "checkedAt": "2026-11-15T10:02:52.391Z",
+  "checks": [
+    "binary serves the rebuilt single-file admin",
+    "real file import, persistent task outcome and all document formats",
+    "font upload, immutable registration and separate license permissions",
+    "admin metadata/content scope isolation and atomic theme conflict guard",
+    "V2 desktop geometry, document cards, light and dark themes",
+    "batch theme assignment skips pinned documents and prevents repeat submission",
+    "readonly preview, write-only restore, conflict feedback and preserved history",
+    "actual selected-revision download and durable export completion",
+    "Word presentation preview is read-only and sandboxed",
+    "global document/font/theme search, audit, real service settings and token commands",
+    "AI task aggregation, actual result/commits and owner-authorized cancellation using a local model stub",
+    "editor authenticates document through nonce/source/origin-checked handshake",
+    "390px mobile layout, drawer keyboard dismissal, navigation and session clearing"
+  ],
+  "browserErrors": [],
+  "viewports": [
+    [
+      1600,
+      1040
+    ],
+    [
+      390,
+      844
+    ]
+  ],
+  "rustChecks": [
+    {
+      "command": "cargo test -p hcd-core catalog::tests",
+      "passed": 41
+    },
+    {
+      "command": "cargo test -p officecli --bin officecli hdoc_server::admin::tests",
+      "passed": 7
+    }
+  ],
+  "buildChecks": [
+    "npm run build (admin-app)",
+    "npm run build (editor)",
+    "cargo build -p officecli",
+    "git diff --check"
+  ],
+  "designCheck": "python3 docs/design/officecli-admin-workspace/validate.py",
+  "screenshots": [
+    "access.png",
+    "agents-completed.png",
+    "agents-empty.png",
+    "agents-stopped.png",
+    "audit.png",
+    "bulk-theme.png",
+    "dark-documents.png",
+    "desktop-documents.png",
+    "document-detail.png",
+    "fonts.png",
+    "jobs.png",
+    "mobile-documents.png",
+    "mobile-settings.png",
+    "readonly-revision.png",
+    "restore-confirm.png",
+    "revision-conflict.png",
+    "session-cleared.png",
+    "settings.png",
+    "themes.png",
+    "word-preview.png"
+  ],
+  "notes": [
+    "AI task orchestration uses a deterministic loopback model stub; no external model calls are made by the verification script.",
+    "AI task history is process-local; import/export job history is persisted on disk."
+  ]
+}

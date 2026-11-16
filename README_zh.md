@@ -36,6 +36,10 @@ Rust 版共享相同的 **CLI 理念** — 基于路径的 DOM 操作、JSON 输
 | PowerPoint (.pptx) | ✅ | ✅ | ✅ | ✅ | ✅ .ppt → .pptx |
 | PDF (.pdf) | ✅ | ✅（文本替换、删除页面） | ✅ | ✅ | — |
 
+## OfficeCLI Workspace 管理后台
+
+默认业务应用现已提供 V2 管理台、账号登录、文件版本库、逐文件权限、字体主题、编辑器与业务回写，无需手填文档令牌。查看[构建与启动说明](apps/workspace/README.zh.md)及[真实验收截图](docs/acceptance/hcd-default-workspace-v1.zh.md)。源文档与最终版本由业务 Provider 保存，OfficeCLI 持久保存 HCD 和协作数据；完整断网发行与内网 AI 委托仍待完成。
+
 ## 新功能：HCD — 分片、可编辑的 HTML 文档中间层
 
 HCD 将 **HTML 作为跨文档格式唯一的可编辑正文**。`officecli hdoc import` 不再构造一个

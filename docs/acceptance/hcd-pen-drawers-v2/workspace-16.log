@@ -1,0 +1,27 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test e2e/workspace.spec.ts --grep both sidebar rails|appearance follows|dark workspace|context menu uses|mobile drawers dismiss|workspace drawers,|phone workspace|all seven formats|canvas zoom|workbook preview|document tabs retain|workspace reload restores|fixed history saves|history uses the selected|dark table dialog|agent commits preserve preview --output /tmp/hcd-drawers-v2-final
+
+
+Running 16 tests using 1 worker
+
+(node:23244) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/workspace.spec.ts:113:1 › document tabs retain independent unsaved text and collaboration sessions (1.1s)
+  ✓   2 e2e/workspace.spec.ts:135:1 › workspace reload restores multiple tabs, active document, preview and independent canvas zoom (1.5s)
+  ✓   3 e2e/workspace.spec.ts:668:1 › workspace drawers, focus mode and preview preserve document state (1.4s)
+  ✓   4 e2e/workspace.spec.ts:706:1 › workbook preview keeps its canvas and refuses to discard an unapplied formula (2.1s)
+  ✓   5 e2e/workspace.spec.ts:725:1 › all seven formats use the content shell and enforce read-only preview (6.7s)
+  ✓   6 e2e/workspace.spec.ts:746:1 › phone workspace provides reachable drawers without page overflow (1.3s)
+  ✓   7 e2e/workspace.spec.ts:863:1 › canvas zoom handles all formats and frames without scaling the page (6.1s)
+  ✓   8 e2e/workspace.spec.ts:908:1 › agent commits preserve preview, focus, zoom and the selected historical comparison (2.2s)
+  ✓   9 e2e/workspace.spec.ts:951:1 › history uses the selected outline and closes the mobile drawer after selection (1.1s)
+  ✓  10 e2e/workspace.spec.ts:996:1 › fixed history saves drafts, pins even the latest revision read-only and restores the live deck (2.4s)
+  ✓  11 e2e/workspace.spec.ts:1209:1 › appearance follows the system, persists overrides and preserves the live editor (1.1s)
+  ✓  12 e2e/workspace.spec.ts:1244:1 › dark workspace keeps all seven document surfaces and native canvas instances (7.1s)
+  ✓  13 e2e/workspace.spec.ts:1268:1 › context menu uses a themed viewport portal with keyboard navigation and focus return (811ms)
+  ✓  14 e2e/workspace.spec.ts:1295:1 › mobile drawers dismiss with Escape and a scrim while retaining the composer draft (1.1s)
+  ✓  15 e2e/workspace.spec.ts:1320:1 › dark table dialog keeps its controls themed and the source table readable (827ms)
+  ✓  16 e2e/workspace.spec.ts:1337:1 › both sidebar rails stay full height and closing AI never resurrects settings or history (7.3s)
+
+  16 passed (48.6s)

@@ -1,0 +1,52 @@
+{
+  "date": "2026-11-15",
+  "rust": {
+    "passed": 142,
+    "failed": 0,
+    "evidence": "team-rust.txt"
+  },
+  "browserFullSuiteBeforeDraftCorrection": {
+    "passed": 65,
+    "failed": 0,
+    "evidence": "team-browser-suite.txt"
+  },
+  "browserDraftCorrectionRegression": {
+    "passed": 4,
+    "failed": 0,
+    "evidence": "team-draft-repair-browser.txt",
+    "cases": [
+      "complete remake",
+      "repair three invalid drafts with specific validator feedback",
+      "persistent title-only rejection",
+      "price omission rejection"
+    ]
+  },
+  "realOpenAI": {
+    "model": "gpt-5.4-mini",
+    "workers": 3,
+    "passed": 1,
+    "failed": 0,
+    "evidence": "team-real-model.txt",
+    "artifact": "sushi-rebuilt.pptx",
+    "slides": 3,
+    "price": "280",
+    "checks": [
+      "all original pages replaced",
+      "three independent worker identities",
+      "all leases released",
+      "native editable DrawingML on all slides",
+      "native export verified before live replacement"
+    ]
+  },
+  "checks": {
+    "clippy": "passed",
+    "rustfmt": "passed",
+    "diffWhitespace": "passed",
+    "typeScript": "passed"
+  },
+  "limits": [
+    "Single-process in-memory work leases and task state",
+    "No durable task restart or generic cross-document team orchestration",
+    "Full-remake mode currently PPTX; sample uses a consistent text layout, not arbitrary visual design"
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "route": "HTML -> HCD -> text checkpoint -> source HTML / native Office / Markdown -> HCD",
+  "fixture": "docs/acceptance/hcd-semantic-inline-fidelity/fixture.html",
+  "temporaryArtifacts": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/hcd-html-inline-vuse86hw",
+  "modelsCalled": false,
+  "sourceUnmodified": true,
+  "stableSourceAnchor": true,
+  "textOnlyRevision": true,
+  "sourceMarkupPreserved": true,
+  "sourceExportFidelity": "HIGH",
+  "docxImageOutsideTableAndLinkChecked": true,
+  "markdownNativeRoundtripChecked": true,
+  "docxImageDimensionsChecked": true,
+  "results": [
+    {
+      "format": "docx",
+      "nativeRunsChecked": true,
+      "readbackValidated": true,
+      "readbackTextChecked": true,
+      "fidelity": "SEMANTIC",
+      "bytes": 3498
+    },
+    {
+      "format": "xlsx",
+      "nativeRunsChecked": true,
+      "readbackValidated": true,
+      "readbackTextChecked": true,
+      "fidelity": "SEMANTIC",
+      "bytes": 4749
+    },
+    {
+      "format": "pptx",
+      "nativeRunsChecked": true,
+      "readbackValidated": true,
+      "readbackTextChecked": true,
+      "fidelity": "SEMANTIC",
+      "bytes": 4601
+    },
+    {
+      "format": "md",
+      "nativeRunsChecked": false,
+      "readbackValidated": true,
+      "readbackTextChecked": true,
+      "fidelity": "SEMANTIC",
+      "bytes": 691
+    }
+  ],
+  "boundaries": [
+    "No same-source Office/WPS physical layout certification.",
+    "XLSX native rich runs do not certify grid rich-text readback.",
+    "Stylesheets, other inline CSS and arbitrary HTML remain simplified."
+  ]
+}

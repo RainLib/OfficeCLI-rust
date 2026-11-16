@@ -1,0 +1,19 @@
+   Compiling hcd-core v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-core)
+   Compiling hcd-docx v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-docx)
+   Compiling hcd-formats v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-formats)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.57s
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/hcd_formats-02e4f7f7c9fa8abb)
+
+running 10 tests
+test textual::tests::bounded_line_rejects_a_node_larger_than_the_hard_limit ... ok
+test textual::tests::markdown_rasters_never_enable_active_html_or_remote_fetches ... ok
+test textual::tests::txt_hcd_patch_preserves_bom_and_crlf ... ok
+test textual::tests::flow_image_insertion_requires_the_tail_chunk_for_native_consistency ... ok
+test textual::tests::html_hcd_patch_preserves_markup_and_escapes_replacement ... ok
+test textual::tests::embedded_raster_images_reopen_with_dimensions_and_safe_assets ... ok
+test textual::tests::markdown_hcd_renders_semantics_and_source_backed_patch_preserves_other_bytes ... ok
+test textual::tests::large_markdown_table_is_stably_split_into_row_groups ... ok
+test textual::tests::markdown_hcd_covers_commonmark_gfm_and_safe_extensions ... ok
+test textual::tests::large_html_table_is_stably_split_into_contiguous_fragments ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 179 filtered out; finished in 0.68s

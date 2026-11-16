@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-15",
+  "fullBrowserSuiteBeforeFinalGuards": {
+    "passed": 64,
+    "failed": 4,
+    "evidence": "motion-full-browser.txt",
+    "failures": [
+      "Excel popup viewport stale after horizontal scrolling",
+      "Three pointer selectors ambiguous after separating target regions from pointer elements"
+    ]
+  },
+  "finalTargetedRegression": {
+    "passed": 7,
+    "failed": 0,
+    "evidence": "motion-final-guards.txt",
+    "coversEveryPriorFailure": true,
+    "cases": [
+      "Rank formulas, heartbeat, frozen panes and horizontal scrolling",
+      "PPTX continuous path and stable iframe/Document after real commit",
+      "XLSX continuous path and stable pointer element",
+      "XLSX native anchor identity across all playback steps",
+      "Two MCP agents, cursor motion and guarded commits",
+      "Word table Agent targeting",
+      "Word paginated Agent targeting"
+    ]
+  },
+  "build": {
+    "typescript": "passed",
+    "application": "passed",
+    "embed": "passed",
+    "evidence": "motion-production-build.txt"
+  },
+  "diffWhitespace": "passed",
+  "liveWorkspace": {
+    "url": "http://127.0.0.1:58402/?locale=zh-CN",
+    "previewLoaded": true,
+    "agentTeamControlsVisible": true,
+    "browserErrors": []
+  },
+  "scope": "Frontend animation and canvas stability; real signed MCP and browser tests, no new live model invocation required"
+}

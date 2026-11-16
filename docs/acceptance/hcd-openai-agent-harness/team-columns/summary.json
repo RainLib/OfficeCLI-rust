@@ -1,0 +1,344 @@
+{
+  "fixture": "assets/showcase/gradebook.xlsx",
+  "task": "修改 HW1 列+1 和HW2 偶数+5 Rank 要进行*2。HW2 按值是否为偶数判断，保留表头、奇数、其他内容及格式。",
+  "model": "gpt-5.4-mini",
+  "status": "completed",
+  "requestedAgents": 4,
+  "actualWorkers": 3,
+  "committedRevisions": [
+    1,
+    2,
+    3
+  ],
+  "units": [
+    {
+      "title": "HW1 列 +1",
+      "resources": [
+        "sheet-column:s_18eb773546518bd8a2967a39136eca11:3"
+      ],
+      "status": "completed",
+      "leaseReleased": true
+    },
+    {
+      "title": "HW2 偶数 +5",
+      "resources": [
+        "sheet-column:s_18eb773546518bd8a2967a39136eca11:4"
+      ],
+      "status": "completed",
+      "leaseReleased": true
+    },
+    {
+      "title": "Rank ×2",
+      "resources": [
+        "sheet-column:s_18eb773546518bd8a2967a39136eca11:11"
+      ],
+      "status": "completed",
+      "leaseReleased": true
+    }
+  ],
+  "recoveredToolRejections": [
+    {
+      "name": "hcd_activity",
+      "status": 400,
+      "error": "invalid activity target; use a read nodeId, blockId or chunkSequence"
+    },
+    {
+      "name": "hcd_patch",
+      "status": 400,
+      "error": "unknown field `nodeHash`, expected one of `nodeId`, `sheetId`, `value`, `precondition`"
+    },
+    {
+      "name": "hcd_patch",
+      "status": 409,
+      "error": "revision conflict: expected head 0, actual 1"
+    },
+    {
+      "name": "hcd_patch",
+      "status": 409,
+      "error": "revision conflict: expected head 0, actual 1"
+    },
+    {
+      "name": "hcd_patch",
+      "status": 409,
+      "error": "revision conflict: expected head 1, actual 2"
+    }
+  ],
+  "nativeChangedCells": [
+    {
+      "address": "C4",
+      "oldValue": "92",
+      "value": "93",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D4",
+      "oldValue": "88",
+      "value": "93",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K4",
+      "oldValue": "4",
+      "value": "",
+      "oldFormula": "RANK(I4,$I$4:$I$18)",
+      "formula": "RANK(I4,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C5",
+      "oldValue": "78",
+      "value": "79",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D5",
+      "oldValue": "82",
+      "value": "87",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K5",
+      "oldValue": "11",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I5,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C6",
+      "oldValue": "95",
+      "value": "96",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K6",
+      "oldValue": "1",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I6,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C7",
+      "oldValue": "65",
+      "value": "66",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D7",
+      "oldValue": "70",
+      "value": "75",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K7",
+      "oldValue": "14",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I7,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C8",
+      "oldValue": "88",
+      "value": "89",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K8",
+      "oldValue": "7",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I8,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C9",
+      "oldValue": "73",
+      "value": "74",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D9",
+      "oldValue": "68",
+      "value": "73",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K9",
+      "oldValue": "12",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I9,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C10",
+      "oldValue": "84",
+      "value": "85",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K10",
+      "oldValue": "5",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I10,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C11",
+      "oldValue": "60",
+      "value": "61",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K11",
+      "oldValue": "15",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I11,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C12",
+      "oldValue": "91",
+      "value": "92",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K12",
+      "oldValue": "3",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I12,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C13",
+      "oldValue": "76",
+      "value": "77",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K13",
+      "oldValue": "10",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I13,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C14",
+      "oldValue": "83",
+      "value": "84",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D14",
+      "oldValue": "86",
+      "value": "91",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K14",
+      "oldValue": "8",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I14,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C15",
+      "oldValue": "70",
+      "value": "71",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D15",
+      "oldValue": "74",
+      "value": "79",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K15",
+      "oldValue": "13",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I15,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C16",
+      "oldValue": "97",
+      "value": "98",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D16",
+      "oldValue": "94",
+      "value": "99",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K16",
+      "oldValue": "2",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I16,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C17",
+      "oldValue": "81",
+      "value": "82",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K17",
+      "oldValue": "9",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I17,$I$4:$I$18)*2"
+    },
+    {
+      "address": "C18",
+      "oldValue": "87",
+      "value": "88",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "D18",
+      "oldValue": "90",
+      "value": "95",
+      "oldFormula": null,
+      "formula": null
+    },
+    {
+      "address": "K18",
+      "oldValue": "6",
+      "value": "",
+      "oldFormula": "",
+      "formula": "RANK(I18,$I$4:$I$18)*2"
+    }
+  ],
+  "cellStyleIdsPreserved": true,
+  "checks": {
+    "rustTests": 143,
+    "scriptedBrowserTests": 35,
+    "realModelTests": 1,
+    "fmt": true,
+    "clippy": true,
+    "appAndEmbedBuild": true
+  },
+  "scope": "Verifies planning, column ownership, exact-once numerical edits, formula preservation, fresh-sheet calculation availability and native XLSX export. Not a complete certification of every document format or formula engine."
+}
