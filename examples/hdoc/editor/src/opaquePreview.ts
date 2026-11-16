@@ -1,6 +1,6 @@
-import { HcdOpaque, type Projection } from './schema.ts'
+import { HcdOpaque } from './schema.ts'
 import { api, type Session } from './api.ts'
-import { loadThemeCss } from './themeCss.ts'
+import { createSemanticResources, type SemanticResources } from './semanticResources.ts'
 import { localizeSource } from './sourceLocale.tsx'
 import type { EditorLocale } from './i18n.tsx'
 import { applyWordGrid } from '../../../../crates/hcd-core/src/docx_layout.js'
@@ -10,22 +10,7 @@ import { patchPreviewDom } from './patchPreviewDom.ts'
 
 /** Display canonical complex blocks without flattening them into editable text.
  * The iframe has no scripts, network access, forms or navigation controls. */
-export function opaquePreviewExtension(session: Session, locale: EditorLocale = 'zh-CN') {
-  const resources = new Map<number | null, Promise<{ projection: Projection; styles: string }>>()
-  const load = (revision: number | null) => {
-    let promise = resources.get(revision)
-    if (!promise) {
-      const query = revision === null ? '' : `?revision=${revision}`
-      promise = Promise.all([
-        api(session, `/editor${query}`).then(response => response.json() as Promise<Projection>),
-        api(session, `/styles${query}`).then(response => response.text()),
-        loadThemeCss(session, revision),
-      ]).then(([projection, css, theme]) => ({ projection, styles: `${css}\n${theme}` }))
-      resources.set(revision, promise)
-      promise.catch(() => resources.delete(revision))
-    }
-    return promise
-  }
+export function opaquePreviewExtension(session: Session, locale: EditorLocale = 'zh-CN', resources: SemanticResources = createSemanticResources(()=>session)) {
   return HcdOpaque.extend({
     addNodeView() {
       return ({ node: initialNode, editor, getPos }) => {
@@ -49,15 +34,19 @@ export function opaquePreviewExtension(session: Session, locale: EditorLocale = 
         dom.append(frame)
         let controls: ReturnType<typeof tableStructureControls> | undefined
         let ready = false, generation = 0
+        let installed: { hash: string; styles: string } | undefined
         const assets = new Map<string, Promise<string>>()
         const refresh = async () => {
           const ticket = ++generation
           const revision = Number.isSafeInteger(node.attrs.previewRevision) ? node.attrs.previewRevision as number : null
           try {
-            const { projection, styles } = await load(revision)
+            const { projection, styles } = await resources.load(revision)
             if (disposed || ticket !== generation) return
             const block = projection.blocks.find(block => block.blockId === node.attrs.hcdBlockId)
             if (!block?.readOnlyHtml) throw new Error('未找到复杂内容预览')
+            if (installed?.hash === block.blockHash && installed.styles === styles) {
+              table?.sync(); dom.setAttribute('aria-busy', 'false'); return
+            }
             let html = block.readOnlyHtml
             const hashes = [...new Set([...html.matchAll(/asset:\/\/sha256\/([0-9a-f]{64})/g)].map(match => match[1]))]
             if (hashes.length > 64) throw new Error('复杂内容资产过多，请使用导出预览')
@@ -94,6 +83,7 @@ export function opaquePreviewExtension(session: Session, locale: EditorLocale = 
             })
             if (session.format === 'docx') applyWordGrid(doc)
             measure(); dom.setAttribute('aria-busy', 'false')
+            installed = { hash: block.blockHash, styles }
             void doc.fonts.ready.then(() => { if (disposed || ticket !== generation) return; if (session.format === 'docx') applyWordGrid(doc); measure() })
             dom.querySelector('[role="alert"]')?.remove()
           } catch (cause) {

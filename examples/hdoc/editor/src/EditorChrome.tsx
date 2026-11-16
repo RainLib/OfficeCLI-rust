@@ -26,8 +26,8 @@ export function EditorHeader({ session, revision, status, onTab, onClose, onSett
   return <header className="editor-header">
     <div className="document-identity"><button className="icon-button sidebar-toggle left-sidebar-toggle" aria-label={localizeSource(locale, outlineOpen ? '收起左侧栏' : '展开左侧栏')} title={localizeSource(locale, outlineOpen ? '收起左侧栏' : '展开左侧栏')} aria-expanded={outlineOpen} onClick={onToggleOutline}>{outlineOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button><button className="icon-button back-library" aria-label={localizeSource(locale, '返回文档库')} title={localizeSource(locale, '返回文档库')} onClick={onClose}><ArrowLeft size={18} /></button><div className="document-title"><strong title={session.documentId}>{session.title || session.documentId}</strong><small><LocalText source="工作空间" /> / {session.format.toUpperCase()} · r{revision ?? '…'}</small></div><span className="status" role="status"><Check size={13} />{localizeDynamic(locale, status)}</span></div>
     <nav className="mode-switch" aria-label={localizeSource(locale, '文档模式')}>
-      <button aria-pressed={!readOnly} disabled={session.scope === 'read'} onClick={() => onReadOnly(false)}><Pencil size={14} /><LocalText source="编辑" /></button>
-      <button aria-pressed={readOnly} onClick={() => onReadOnly(true)}><Eye size={14} /><LocalText source="预览" /></button>
+      <button aria-pressed={!readOnly} disabled={session.scope === 'read'} onClick={() => onReadOnly(false)} title={localizeSource(locale, session.format === 'docx' ? '在连续长页中编辑文档' : '编辑文档')}><Pencil size={14} /><LocalText source={session.format === 'docx' ? '连续编辑' : '编辑'} /></button>
+      <button aria-pressed={readOnly} onClick={() => onReadOnly(true)} title={localizeSource(locale, session.format === 'docx' ? '按页面查看页眉、页脚和打印排版（只读）' : '只读预览')}><Eye size={14} /><LocalText source={session.format === 'docx' ? '分页预览' : '预览'} /></button>
     </nav>
     <div className="header-actions">{presence}<AppearanceSelect />
       <HostPublicationControl session={session} revision={revision} beforeSave={beforeExport} />

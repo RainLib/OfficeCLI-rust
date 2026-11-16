@@ -29,6 +29,8 @@ import { opaquePreviewExtension } from './opaquePreview.ts'
 import { InsertTable } from './InsertTable.tsx'
 import type { TableActionDetail } from './tableStructureControls.ts'
 import { loadWordPresentation, wordPresentation } from './wordPresentation.ts'
+import { WordRunningMargin } from './WordRunningMargin.tsx'
+import { createSemanticResources } from './semanticResources.ts'
 import { WordPagePreview } from './WordPagePreview.tsx'
 import { collaborationCheckpoint } from './collaborationCheckpoint.ts'
 import { rebindCollaboration } from './rebindCollaboration.ts'
@@ -253,12 +255,15 @@ function EpochWorkspace({ session, onClose, onEpochChange, onOpenDocument, embed
 
 function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded: boolean }) {
   const { locale } = useI18n()
+  const resourceSession = useRef(session); resourceSession.current = session
+  const resources = useMemo(()=>createSemanticResources(()=>resourceSession.current), [session.documentId])
   const { preview, setPreview: setReadOnly, focused, setFocused, wrapText, setWrapText, selectedRevision, setSelectedRevision, comparing, setComparing, rightPanel, setRightPanel, activeTab, setActiveTab } = useDocumentViewState()
   const [editorSynced, setEditorSynced] = useState(false)
   const [editorReady, setEditorReady] = useState(false)
   const [tableTextFocused, setTableTextFocused] = useState(false)
   const [tableBusy, setTableBusy] = useState(false)
   const tableBusyRef = useRef(false), activeTableBlock = useRef<string | null>(null)
+  const pendingTableFocus = useRef(false)
   const tableAction = useRef<(detail: TableActionDetail) => void>(() => {})
   const tableHistory = useRef<{ past: TableHistoryStep[]; future: TableHistoryStep[] }>({ past: [], future: [] })
   const [, refreshHistory] = useState(0)
@@ -343,7 +348,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const readOnly = session.scope === 'read' || preview || !editorSynced || !draftProtection.ready || epochDraft !== null || tableBusy
   const wordPreview = session.format === 'docx' && (session.scope === 'read' || preview) && editorReady
   const editor = useEditor({
-    extensions: [...schemaExtensions.map(extension => extension.name === 'hcdOpaque' ? opaquePreviewExtension(session, locale) : extension), wordPresentation, boundedCollaboration({ can: direction => historyBridge.current.can(direction), travel: direction => historyBridge.current.travel(direction), edited: () => historyBridge.current.edited() }).configure({ document: ydoc }),
+    extensions: [...schemaExtensions.map(extension => extension.name === 'hcdOpaque' ? opaquePreviewExtension(session, locale, resources) : extension), wordPresentation, boundedCollaboration({ can: direction => historyBridge.current.can(direction), travel: direction => historyBridge.current.travel(direction), edited: () => historyBridge.current.edited() }).configure({ document: ydoc }),
       CollaborationCaret.configure({ provider, user: localUser, render: user => {
         const cursor = document.createElement('span')
         const samePerson = user.id === localUser.id
@@ -404,13 +409,17 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   useEffect(() => {
     if (!editor || revision === null || session.format !== 'docx') return
     const request = new AbortController()
-    void loadWordPresentation(editor, session, revision, request.signal)
+    void loadWordPresentation(editor, session, revision, request.signal, resources)
       .catch(cause => { if (!request.signal.aborted) setError(`Word 排版加载失败：${String(cause)}`) })
     return () => request.abort()
-  }, [editor, session, revision])
+  }, [editor, session, revision, resources])
   useEffect(() => {
     editor?.setEditable(!readOnly && !historyActive)
-  }, [editor, readOnly, historyActive])
+    if (editor && !readOnly && !historyActive && boundDocument.current === ydoc && pendingTableFocus.current) {
+      pendingTableFocus.current = false
+      editor.view.dom.focus({ preventScroll: true })
+    }
+  }, [editor, readOnly, historyActive, ydoc, editorSynced])
   useEffect(() => {
     let active = true
     const connection = ({ status: next }: { status: string }) => setStatus(next === 'connected' ? '已连接' : '连接中')
@@ -435,8 +444,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         // if no local transaction happened during that read.
         const version = localEdits.current
         const draftVersion = draftProtection.version()
-        const savedQuery = Number.isSafeInteger(message.revision) ? `?revision=${message.revision}` : ''
-        if (editor) void api(session, `/editor${savedQuery}`).then(response => response.json() as Promise<Projection>).then(projection => {
+        if (editor) void resources.projection(Number.isSafeInteger(message.revision) ? message.revision! : null).then(projection => {
           // Epoch rebinding resets counters. A response from a detached room
           // must never acknowledge a later room that reused the same number.
           if (!active) return
@@ -466,7 +474,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       setStatus('已同步')
       // Creating the semantic projection can advance the imported revision while
       // the first collaboration room is loading. Wait for that baseline on save.
-      const head = api(session, '/editor').then(response => response.json()).then((projection: Projection) => {
+      const head = resources.projection().then((projection: Projection) => {
         if (active) setRevision(previous => Math.max(previous ?? 0, projection.revision))
         return projection.revision
       })
@@ -561,6 +569,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         }
       }), 'hcd-canonical-ids')
       setRevision(saved.revision)
+      resources.remember(saved.projection)
       if (localVersion === localEdits.current) checkpointedEdits.current = localVersion
       setStatus('已保存')
       return saved.revision
@@ -588,12 +597,12 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   }
   async function mutateTable(detail: TableActionDetail | { rows: number; columns: number } | TableHistoryRequest) {
     if (!editor || readOnly || historyActive || tableBusyRef.current) return
-    tableBusyRef.current = true; setTableBusy(true); setError(''); setStatus('保存中')
+    tableBusyRef.current = true; pendingTableFocus.current = true; setTableBusy(true); setError(''); setStatus('保存中')
     try {
       const version = localEdits.current
-      await collaborationCheckpoint(provider)
+      const checkpoint = await collaborationCheckpoint(provider)
       if (version === localEdits.current) checkpointedEdits.current = version
-      const current = await (await api(session, '/editor')).json() as Projection
+      const current = await resources.projection(checkpoint)
       const body = current.blocks.filter(block => block.region === 'body')
       let operation: Record<string, unknown>
       let restored: TableHistoryStep | undefined
@@ -612,19 +621,28 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       } else if ('action' in detail) {
         const block = body.find(block => block.blockId === detail.blockId)
         if (!block) throw new Error('表格已变化，请重新定位后操作。')
-        operation = { op: 'table.edit', ...detail, precondition: { blockHash: block.blockHash } }
+        if (detail.action === 'deleteTable') {
+          const tables = new DOMParser().parseFromString(block.readOnlyHtml || '', 'text/html').querySelectorAll('table')
+          if (detail.tableIndex !== 0 || [...tables].filter(table => !table.parentElement?.closest('table')).length !== 1) throw new Error('请通过外层表格操作删除整表。')
+          operation = { op: 'table.delete', blockId: block.blockId, precondition: { blockHash: block.blockHash } }
+        } else operation = { op: 'table.edit', ...detail, precondition: { blockHash: block.blockHash } }
       } else {
         const target = insertionBlock.current
         const afterBlockId = target.id || (target.index >= 0 ? body[target.index]?.blockId : null)
         if (target.index >= 0 && !afterBlockId) throw new Error('插入位置已变化，请重新选择。')
         operation = { op: 'table.insert', afterBlockId: afterBlockId ?? null, rows: detail.rows, columns: detail.columns }
       }
+      // Keep an editable paragraph when removing a document's only body block.
+      const operations = operation.op === 'table.delete' && body.length === 1
+        ? [{ op: 'insert', afterBlockId: operation.blockId, block: { kind: 'paragraph', inlines: [] } }, operation] : [operation]
       const result = await (await api(session, '/patch', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-HCD-Collaboration-Epoch': String(session.collaborationEpoch ?? 0) },
-        body: JSON.stringify({ schemaVersion: 'hcd-patch/4', documentId: session.documentId, patchId: `table-${crypto.randomUUID()}`, baseRevision: current.revision, operations: [operation] }),
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/4', documentId: session.documentId, patchId: `table-${crypto.randomUUID()}`, baseRevision: current.revision, operations }),
       })).json() as { revision: number }
-      const saved = await (await api(session, `/editor?revision=${result.revision}`)).json() as Projection
-      const access = await (await api(session, '/auth')).json() as { collaborationEpoch: number }
+      const [saved, access] = await Promise.all([
+        resources.projection(result.revision),
+        api(session, '/auth').then(response=>response.json() as Promise<{ collaborationEpoch: number }>),
+      ])
       if ('historyDirection' in detail && restored) {
         const history = tableHistory.current
         if (detail.historyDirection === 'undo') { history.past.pop(); history.future = keepHistory([...history.future, restored]) }
@@ -632,10 +650,12 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       } else {
         const old = 'action' in detail ? body.find(block => block.blockId === detail.blockId) : undefined
         const changed = saved.blocks.find(block => old ? block.blockId === old.blockId : !body.some(previous => previous.blockId === block.blockId) && block.region === 'body')
-        if (changed) {
-          const index = saved.blocks.findIndex(block => block.blockId === changed.blockId)
-          const step = { blockId: changed.blockId, afterBlockId: index > 0 ? saved.blocks[index - 1].blockId : null,
-            beforeRevision: current.revision, beforeHash: old?.blockHash ?? null, afterRevision: result.revision, afterHash: changed.blockHash }
+        if (changed || old && 'action' in detail && detail.action === 'deleteTable') {
+          const blocks = changed ? saved.blocks.filter(block => block.region === 'body') : body
+          const blockId = changed?.blockId ?? old!.blockId
+          const index = blocks.findIndex(block => block.blockId === blockId)
+          const step = { blockId, afterBlockId: index > 0 ? blocks[index - 1].blockId : null,
+            beforeRevision: current.revision, beforeHash: old?.blockHash ?? null, afterRevision: result.revision, afterHash: changed?.blockHash ?? null }
           tableHistory.current = { past: keepHistory([...tableHistory.current.past, step]), future: [] }
         }
       }
@@ -886,7 +906,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       {session.format !== 'txt' && activeTab === 'home' && <><div className="tool-group"><button onClick={() => editor?.commands.undo()} disabled={readOnly || !editor?.can().undo()}><LocalText source={"↶ 撤销"} /></button><button onClick={() => editor?.commands.redo()} disabled={readOnly || !editor?.can().redo()}><LocalText source={"↷ 重做"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().setParagraph().run()} disabled={readOnly || tableTextFocused}><LocalText source={"正文"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly || tableTextFocused}><LocalText source={"标题"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly || tableTextFocused}><LocalText source={"𝐁 加粗"} /></button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly || tableTextFocused}><LocalText source={"𝑰 斜体"} /></button><button onClick={openLink} disabled={readOnly || tableTextFocused}><LocalText source={"链接"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly || tableTextFocused}><LocalText source={"项目符号"} /></button><button onClick={() => editor?.chain().focus().toggleOrderedList().run()} disabled={readOnly || tableTextFocused}><LocalText source={"编号"} /></button></div><div className="tool-group"><button onClick={() => moveBlock(-1)} disabled={readOnly || tableTextFocused}><LocalText source={"段落上移"} /></button><button onClick={() => moveBlock(1)} disabled={readOnly || tableTextFocused}><LocalText source={"段落下移"} /></button></div></>}
       {!['txt', 'md'].includes(session.format) && activeTab === 'home' && <BlockFontPicker editor={editor} faces={themeFaces} disabled={readOnly || tableTextFocused || historical !== null} />}
       {session.format !== 'txt' && activeTab === 'insert' && <><div className="tool-group"><button disabled={readOnly || !editor?.can().undo()} onClick={() => editor?.commands.undo()}><LocalText source="↶ 撤销" /></button><button disabled={readOnly || !editor?.can().redo()} onClick={() => editor?.commands.redo()}><LocalText source="↷ 重做" /></button></div><div className="tool-group"><button onClick={insertEmptyParagraph} disabled={readOnly}><LocalText source={"＋ 新增段落"} /></button><InsertTable disabled={readOnly} onPrepare={() => { insertionBlock.current = selectedBlock() }} onInsert={(rows, columns) => void mutateTable({ rows, columns })} /><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly || tableTextFocused}><LocalText source={"插入标题"} /></button><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly || tableTextFocused}><LocalText source={"插入列表"} /></button></div><div className="tool-group"><button onClick={openLink} disabled={readOnly || tableTextFocused}><LocalText source={"插入链接"} /></button><button onClick={deleteCurrentBlock} disabled={readOnly || tableTextFocused}><LocalText source={"删除段落"} /></button></div></>}
-      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示大纲"} /></label><label className="mode"><input type="checkbox" checked={readOnly} disabled={tableBusy || !editorSynced} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => showRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
+      {activeTab === 'view' && <>{session.format === 'docx' ? <><label className="document-view-picker"><LocalText source="文档视图" /><select aria-label={localizeSource(locale, '文档视图')} value={preview ? 'pages' : 'continuous'} disabled={tableBusy || !editorSynced} onChange={event => setReadOnly(event.target.value === 'pages')}><option value="continuous">{localizeSource(locale, '连续编辑')}</option><option value="pages">{localizeSource(locale, '分页预览（只读）')}</option></select></label><span className="ribbon-note"><LocalText source="分页查看打印排版，返回连续编辑可继续修改。" /></span></> : <label className="mode"><input type="checkbox" checked={readOnly} disabled={tableBusy || !editorSynced} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label>}<label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示大纲"} /></label><button onClick={() => showRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => void save()} disabled={readOnly}><LocalText source={"创建保存点"} /></button><button onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{revision ?? '…'}</span></>}
       {session.format === 'txt' && <div className="tool-group"><button disabled={readOnly || !editor?.can().undo()} onClick={() => editor?.commands.undo()}><LocalText source="↶ 撤销" /></button><button disabled={readOnly || !editor?.can().redo()} onClick={() => editor?.commands.redo()}><LocalText source="↷ 重做" /></button><button aria-pressed={wrapText} onClick={() => setWrapText(value => !value)}><LocalText source="自动换行" /></button><span className="ribbon-note"><LocalText source="纯文本 · 等宽显示" /></span></div>}
       {activeTab !== 'revisions' && <button className="primary save-trigger" onClick={() => void save()} disabled={readOnly}><LocalText source={"保存点"} /></button>}
@@ -902,7 +922,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
           if (point && !selectedText) editor.commands.setTextSelection(point.pos)
         }
         setMenu({ x: event.clientX, y: event.clientY, selectedText })
-      }}>{themeCss && <style>{themeCss}</style>}<EditorContent editor={editor} />{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => session.format !== 'txt' && !historyActive && !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main>{wordPreview && editor && revision !== null && <WordPagePreview session={session} revision={revision} editor={editor} />}</CanvasViewport>
+      }}>{themeCss && <style>{themeCss}</style>}{session.format === 'docx' && editor && <WordRunningMargin editor={editor} session={session} kind="header" />}<EditorContent editor={editor} />{session.format === 'docx' && editor && <WordRunningMargin editor={editor} session={session} kind="footer" />}{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => session.format !== 'txt' && !historyActive && !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main>{wordPreview && editor && revision !== null && <WordPagePreview session={session} revision={revision} editor={editor} />}</CanvasViewport>
       {historyActive && <RevisionWorkspace session={session} selected={selectedRevision} historical={historical} current={comparisonCurrent} comparing={comparing} loading={historyLoading || (comparing && !editorSynced)} error={historyError} metadata={revisionMetadata} canRestore={session.scope === 'write' && selectedRevision < (revision ?? 0)} restoring={restoring} onCompare={setComparing} onReturn={returnToCurrent} onRetry={() => void showRevision(selectedRevision)} onRestore={() => void restoreHistorical()} />}
       </section>
       <AgentPanel beforeRun={async () => {

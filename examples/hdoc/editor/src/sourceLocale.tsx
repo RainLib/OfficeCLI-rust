@@ -93,6 +93,14 @@ const sourceEn: Record<string, string> = {
   '正在保存协同草稿并加载表格…': 'Saving shared drafts and loading the table…',
   '表格加载失败，请关闭后重试。': 'Could not load the table. Close and try again.',
   '表格有未提交的修改': 'Table changes have not been saved', '原表格结构保持不变': 'The original table structure is preserved',
+  '页眉': 'Header', '页脚': 'Footer',
+  '连续编辑': 'Continuous editing', '分页预览': 'Page preview', '分页预览（只读）': 'Page preview (read-only)',
+  '文档视图': 'Document view', '在连续长页中编辑文档': 'Edit the document in a continuous canvas',
+  '编辑文档': 'Edit document', '按页面查看页眉、页脚和打印排版（只读）': 'View headers, footers and print layout by page (read-only)',
+  '分页查看打印排版，返回连续编辑可继续修改。': 'Check the print layout by page. Return to continuous editing to make changes.',
+  '表格操作': 'Table actions', '行操作': 'Row actions', '列操作': 'Column actions', '删除表格': 'Delete table',
+  '在上方插入行': 'Insert row above', '在下方插入行': 'Insert row below', '删除当前行': 'Delete current row', '删除当前列': 'Delete current column',
+  '保留最后一行或一列；可通过表格操作删除整表。': 'Keep at least one row and column. Use Table actions to delete the whole table.',
   '保存表格修改': 'Save table changes', '正在提交…': 'Saving…', '放弃尚未提交的表格修改？': 'Discard unsaved table changes?',
   '文档有其他修改，未覆盖任何内容；你的表格草稿仍保留。请复制草稿后重新打开并核对。': 'The document changed. Nothing was overwritten and your table draft is still here. Copy your draft, then reopen the table and review the latest text.',
   '协同连接未同步，请恢复连接后重试。': 'Collaboration is not synchronized. Reconnect and try again.',
@@ -341,6 +349,13 @@ const sourceEn: Record<string, string> = {
 }
 
 const sourceTw: Record<string, string> = {
+  '连续编辑': '連續編輯', '分页预览': '分頁預覽', '分页预览（只读）': '分頁預覽（唯讀）',
+  '文档视图': '文件檢視', '在连续长页中编辑文档': '在連續長頁中編輯文件',
+  '编辑文档': '編輯文件', '按页面查看页眉、页脚和打印排版（只读）': '按頁面檢視頁首、頁尾和列印排版（唯讀）',
+  '分页查看打印排版，返回连续编辑可继续修改。': '分頁檢視列印排版，返回連續編輯可繼續修改。',
+  '表格操作': '表格操作', '行操作': '列操作', '列操作': '欄操作', '删除表格': '刪除表格',
+  '在上方插入行': '在上方插入列', '在下方插入行': '在下方插入列', '删除当前行': '刪除目前列', '删除当前列': '刪除目前欄',
+  '保留最后一行或一列；可通过表格操作删除整表。': '保留最後一列或一欄；可透過表格操作刪除整表。',
   "本地验收文档": "本地驗收文件",
   "选择真实文件验收预览、编辑、修订与下载。": "選擇真實檔案驗收預覽、編輯、修訂與下載。",
   "重新打开单文件 HCD。上传令牌用于导入，文档访问令牌用于打开。": "重新開啟單檔案 HCD。上傳令牌用於匯入，文件訪問令牌用於開啟。",

@@ -439,6 +439,8 @@ struct OpenBlock {
     ordered: bool,
 }
 
+type SourceEntries<'a> = HashMap<&'a str, (usize, &'a NodeMapEntry)>;
+
 fn scan_chunk(
     html: &str,
     map: &ChunkSourceMap,
@@ -449,6 +451,17 @@ fn scan_chunk(
         return Err(HcdError::InvalidBundle(
             "chunk source map id mismatch".to_string(),
         ));
+    }
+    let mut entries = SourceEntries::with_capacity(map.entries.len());
+    for (index, entry) in map.entries.iter().enumerate() {
+        if entries
+            .insert(entry.node_id.as_str(), (index, entry))
+            .is_some()
+        {
+            return Err(HcdError::InvalidBundle(
+                "duplicate editor source map node ID".to_string(),
+            ));
+        }
     }
     let mut reader = Reader::from_str(html);
     reader.config_mut().check_end_names = true;
@@ -489,7 +502,7 @@ fn scan_chunk(
                     blocks.push(block_from_raw(
                         &html[before..after],
                         &candidate,
-                        map,
+                        &entries,
                         descriptor,
                         document_id,
                     )?);
@@ -510,7 +523,7 @@ fn scan_chunk(
                     blocks.push(block_from_raw(
                         &html[candidate.start..after],
                         &candidate,
-                        map,
+                        &entries,
                         descriptor,
                         document_id,
                     )?);
@@ -571,19 +584,23 @@ fn scan_chunk(
 fn block_from_raw(
     raw: &str,
     open: &OpenBlock,
-    map: &ChunkSourceMap,
+    source_entries: &SourceEntries<'_>,
     descriptor: &ChunkDescriptor,
     document_id: &str,
 ) -> Result<Block, HcdError> {
     let nodes = extract_html_text_nodes(raw)?;
     let marks = extract_marks(raw)?;
     let rich_runs = crate::extract_docx_inline_runs(raw)?;
-    let entries: Vec<NodeMapEntry> = map
-        .entries
-        .iter()
-        .filter(|entry| raw.contains(&format!("data-hcd-id=\"{}\"", entry.node_id)))
-        .cloned()
+    // Each canonical node is parsed once. Searching the entire block's HTML
+    // for every chunk-map entry makes large tables and repeated projections
+    // quadratic in source size. Preserve map order without scanning unrelated
+    // entries for every paragraph or table.
+    let mut matches: Vec<_> = nodes
+        .keys()
+        .filter_map(|id| source_entries.get(id.as_str()))
         .collect();
+    matches.sort_unstable_by_key(|(index, _)| index);
+    let entries: Vec<NodeMapEntry> = matches.iter().map(|(_, entry)| (*entry).clone()).collect();
     let inlines: Vec<EditorInline> = entries
         .iter()
         .flat_map(|entry| {
@@ -1897,6 +1914,41 @@ fn filter_annotations(
 mod tests {
     use super::*;
     use crate::{BundleWriter, HcdCapabilities, SourceDescriptor, StorageCodec};
+
+    #[test]
+    fn editor_source_lookup_preserves_map_order_and_accepts_xml_attribute_quoting() {
+        let map = hand_map(&["first", "second", "third"]);
+        let html = format!(
+            "<section><p>{}{}</p><p>{}</p></section>",
+            hand_span(1, "second", ""),
+            hand_span(0, "first", ""),
+            hand_span(2, "third", "")
+        );
+        let double = scan_chunk(&html, &map, &hand_descriptor(), "document").unwrap();
+        let single = scan_chunk(
+            &html.replace('"', "'"),
+            &map,
+            &hand_descriptor(),
+            "document",
+        )
+        .unwrap();
+        assert_eq!(double.len(), 2);
+        assert_eq!(double[0].entries, map.entries[..2]);
+        assert_eq!(double[1].entries, map.entries[2..]);
+        assert_eq!(double[0].content, single[0].content);
+        assert_eq!(double[1].content, single[1].content);
+    }
+
+    #[test]
+    fn editor_source_lookup_rejects_duplicate_map_identities() {
+        let mut map = hand_map(&["first"]);
+        map.entries.push(map.entries[0].clone());
+        let html = format!("<section><p>{}</p></section>", hand_span(0, "first", ""));
+        assert!(matches!(
+            scan_chunk(&html, &map, &hand_descriptor(), "document"),
+            Err(HcdError::InvalidBundle(message)) if message.contains("duplicate")
+        ));
+    }
 
     #[test]
     fn table_structure_batches_validate_and_reject_stale_or_partial_updates() {

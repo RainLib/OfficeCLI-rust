@@ -5,6 +5,6 @@ export const keepHistory = <T,>(items: T[]): T[] => items.slice(-EDIT_HISTORY_LI
 export type TableHistoryStep = {
   blockId: string; afterBlockId: string | null;
   beforeRevision: number; beforeHash: string | null;
-  afterRevision: number; afterHash: string;
+  afterRevision: number; afterHash: string | null;
 }
 export type TableHistoryRequest = { historyDirection: 'undo' | 'redo' }

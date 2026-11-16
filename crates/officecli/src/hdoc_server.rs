@@ -1438,7 +1438,14 @@ async fn editor(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    let projection = editor_projection(&open(&state, &id)?, query.revision).map_err(bad)?;
+    let bundle = open(&state, &id)?;
+    // Large source documents must not occupy the async worker while their
+    // immutable editor projection is parsed and verified.
+    let projection =
+        tokio::task::spawn_blocking(move || editor_projection(&bundle, query.revision))
+            .await
+            .map_err(internal)?
+            .map_err(bad)?;
     Ok(Json(serde_json::to_value(projection).map_err(internal)?))
 }
 

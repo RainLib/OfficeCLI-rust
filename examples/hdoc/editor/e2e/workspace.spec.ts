@@ -121,15 +121,19 @@ test.beforeAll(async () => {
     'complex-word':'assets/showcase/project-proposal.docx',
     'word-presentation':'assets/showcase/project-proposal.docx',
     'word-pages':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
+    'word-margins':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
     'word-grid':'examples/hdoc/editor/e2e/fixtures/word-grid-layout.docx',
     'word-page-agents':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
     'word-local':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
+    'word-view':'examples/hdoc/editor/e2e/fixtures/word-page-layout.docx',
     'table-edit':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
     'table-appearance':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
     'table-conflict':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
     'table-keyboard':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
     'table-md':'md', 'table-html':'html', 'inline-html':'html',
     'table-structure':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
+    'table-only':'examples/hdoc/editor/e2e/fixtures/table-only.html',
+    'table-long':'docx-long',
     'table-insert':'examples/hdoc/editor/e2e/fixtures/word-table-edit.docx',
     'table-structure-html':'html', 'table-structure-md':'md', 'history-bounded':'html',
     'agents-grid':'assets/showcase/gradebook.xlsx',
@@ -137,9 +141,16 @@ test.beforeAll(async () => {
     'ui-markdown':'md', 'ui-html':'html', 'ui-pdf':'examples/test.pdf',
   }
   for (const [id,file] of Object.entries(fixtures)) {
-    const format = file.startsWith('xlsx-') ? 'xlsx' : ['txt', 'md', 'html'].includes(file) ? file : file.split('.').at(-1)!
+    const format = file === 'docx-long' ? 'docx' : file.startsWith('xlsx-') ? 'xlsx' : ['txt', 'md', 'html'].includes(file) ? file : file.split('.').at(-1)!
     const source = resolve(service,'sources',`${id}.${format}`)
-    if (file === 'xlsx-rich') {
+    if (file === 'docx-long') {
+      if (process.env.HCD_TABLE_REGRESSION_DOCX) copyFileSync(process.env.HCD_TABLE_REGRESSION_DOCX, source)
+      else {
+        const generated = spawnSync('python3', [resolve(editorRoot, 'e2e/fixtures/word-table-long.py'), source], { encoding: 'utf8' })
+        if (generated.status !== 0) throw new Error(`long table fixture failed: ${generated.stderr}`)
+      }
+    }
+    else if (file === 'xlsx-rich') {
       const generated = spawnSync('python3', [resolve(repo, 'docs/acceptance/hcd-xlsx-rich-text/make_fixture.py'), source], { encoding: 'utf8' })
       if (generated.status !== 0) throw new Error(`rich fixture generation failed: ${generated.stderr}`)
     }
@@ -950,7 +961,7 @@ test('verified grid caches follow local and remote dependencies without extra wr
   expect(remote.ok(), await remote.text()).toBe(true)
   await copy(9, 0, '8')
   await copy(10, 0, '16')
-  await page.getByRole('button', { name: '预览', exact: true }).click()
+  await page.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
   await copy(9, 0, '8')
   expect(await canvas.evaluate(element => (window as unknown as { formulaCanvas: Element }).formulaCanvas === element)).toBe(true)
   expect(writes).toBe(1)
@@ -1484,7 +1495,7 @@ test('workspace reload restores multiple tabs, active document, preview and inde
   await expect(page.locator('.hcd-editor-body')).toContainText('restore-text')
   await page.getByRole('button',{name:'放大文档',exact:true}).click()
   await expect(page.locator('.canvas-zoom-value')).toHaveText('110%')
-  await page.getByRole('button',{name:'预览',exact:true}).click()
+  await page.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
   await page.getByRole('button',{name:'打开其他文档',exact:true}).click()
   await page.getByPlaceholder('doc-…').fill('restore-pdf')
   await page.getByPlaceholder('粘贴短期令牌',{exact:true}).fill(token('restore-pdf','browser-user'))
@@ -1500,7 +1511,7 @@ test('workspace reload restores multiple tabs, active document, preview and inde
   await expect(active.locator('.canvas-zoom-value')).toHaveText(pdfZoom)
   await page.locator('.document-tab').filter({hasText:'restore-text'}).locator('button').first().click()
   await expect(active.locator('.canvas-zoom-value')).toHaveText('110%')
-  await expect(active.getByRole('button',{name:'预览',exact:true})).toHaveAttribute('aria-pressed','true')
+  await expect(active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true})).toHaveAttribute('aria-pressed','true')
   await expect(active.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','false')
   page.once('dialog', dialog => dialog.accept())
   await page.getByRole('button',{name:'关闭 restore-pdf',exact:true}).click()
@@ -1522,7 +1533,7 @@ test('workspace restoration reauthenticates every tab and isolates expired acces
   await expect(page.locator('.document-tab')).toHaveCount(1)
   const active = page.locator('.document-tab-panel:not([hidden])')
   await expect(active.locator('.workspace')).toHaveAttribute('data-format','txt')
-  await expect(active.getByRole('button',{name:'编辑',exact:true})).toBeDisabled()
+  await expect(active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true})).toBeDisabled()
   await expect(active.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','false')
   await page.getByRole('button',{name:'文档工作台',exact:true}).click()
   const unavailable = page.getByRole('region',{name:'待恢复的文档'})
@@ -1663,7 +1674,7 @@ test('Word table text editing checkpoints shared drafts and preserves source run
   await expect(table.locator('td').first()).toHaveText('ROW 中文🙂00')
   await expect(peer.locator('.hcd-opaque-preview iframe').first().contentFrame().locator('td').first()).toHaveText('ROW 中文🙂00')
   await expect(peer.locator('.hcd-editor-body')).toContainText('HUMAN_DRAFT')
-  await page.getByRole('button', {name:'预览',exact:true}).click()
+  await page.getByRole('button', {name:/^(预览|分页预览)$/,exact:true}).click()
   await expect(page.locator('.word-page-preview iframe').contentFrame().locator('body')).toContainText('ROW 中文🙂00')
   const auth = {Authorization:`Bearer ${token(id,'browser-user')}`}
   const response = await fetch(`${apiUrl}/v1/documents/${id}/export/docx?source=true`, {headers:auth})
@@ -1935,7 +1946,7 @@ test('Word pagination preserves sections, running regions, table rows and unsave
   // Capture a baseline after the collaboration projection is established.
   const before = await get()
   await title.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' DRAFT 🙂 <script>window.injected=true</script>')
-  await active.getByRole('button',{name:'预览',exact:true}).click()
+  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
   const iframe = active.locator('.word-page-preview iframe'), body = iframe.contentFrame().locator('body')
   await expect(body).toHaveAttribute('data-hcd-page-count', /^\d+$/)
   const pages = body.locator('.hcd-virtual-page')
@@ -1974,13 +1985,13 @@ test('Word pagination preserves sections, running regions, table rows and unsave
   await expect(body).toContainText('DRAFT 🙂 <script>window.injected=true</script>')
   expect((await get()).revision).toBe(before.revision)
   await page.screenshot({path:info.outputPath('word-paginated-cover.png')})
-  await active.getByRole('button',{name:'编辑',exact:true}).click()
+  await active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true}).click()
   await expect(title).toContainText('DRAFT 🙂')
   await active.getByRole('button',{name:'保存点',exact:true}).click()
   await expect.poll(async()=> (await get('/editor')).blocks[0].content.inlines.map((run:{text:string})=>run.text).join('')).toContain('DRAFT 🙂')
   await open(page,id)
   await expect(title).toContainText('DRAFT 🙂')
-  await active.getByRole('button',{name:'预览',exact:true}).click()
+  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
   await expect(body).toHaveAttribute('data-hcd-page-count', /^\d+$/)
   await expect(body.locator('.hcd-page-header').first()).toHaveText('FIRST HEADER')
   const download = await page.request.get(`${apiUrl}/v1/documents/${id}/export/docx?source=true`,{headers})
@@ -1993,7 +2004,13 @@ test('Word source grids preserve font metrics, opt-outs, fixed lines and header 
   const editing = active.locator('main.document .hcd-editor-body > p').filter({hasText:'GRID SINGLE'})
   await expect(editing).toHaveAttribute('data-word-presentation','true')
   await expect(editing).toHaveCSS('line-height','27.2px')
-  await active.getByRole('button',{name:'预览',exact:true}).click()
+  const running = active.locator('.word-running-header iframe').contentFrame()
+  const runningImage = running.locator('img[data-hcd-running-drawing="header"]')
+  await expect(runningImage).toHaveAttribute('data-hcd-anchor-constrained','true')
+  await expect.poll(()=>runningImage.evaluate(image=>(image as HTMLImageElement).naturalWidth)).toBe(64)
+  const ink = await runningImage.evaluate(image=>{const page=image.closest('.word-running-page')!.getBoundingClientRect(),rect=image.getBoundingClientRect();return{top:rect.top-page.top+16,bottom:rect.top-page.top+48,left:rect.left-page.left}})
+  expect(ink.left).toBe(0); expect(ink.top).toBeGreaterThanOrEqual(0); expect(ink.bottom).toBeLessThan(60)
+  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
   const body = active.locator('.word-page-preview iframe').contentFrame().locator('body')
   await expect(body).toHaveAttribute('data-hcd-page-count','3')
   const paragraph = (text:string) => body.locator('.hcd-virtual-page-content p').filter({hasText:new RegExp(`^${text}$`)})
@@ -2205,7 +2222,7 @@ test('workspace drawers, focus mode and preview preserve document state', async 
   await active.getByRole('button', { name: '展开左侧栏', exact: true }).click()
   await expect(active.locator('.outline-panel')).toBeVisible()
   await body.click(); await page.keyboard.press('ControlOrMeta+End'); await page.keyboard.insertText(' PREVIEW_PRESERVED')
-  await active.getByRole('button', { name: '预览', exact: true }).click()
+  await active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
   await expect(body).toHaveAttribute('contenteditable', 'false')
   await expect(body).toContainText('PREVIEW_PRESERVED')
   await active.locator('.export-control summary').click()
@@ -2217,8 +2234,8 @@ test('workspace drawers, focus mode and preview preserve document state', async 
   expect(await exported.text()).toContain('PREVIEW_PRESERVED')
   await active.locator('.export-control summary').click()
   await expect(active.locator('.ribbon')).toHaveCount(0)
-  await expect(active.getByRole('button', { name: '预览', exact: true })).toHaveAttribute('aria-pressed', 'true')
-  await active.getByRole('button', { name: '编辑', exact: true }).click()
+  await expect(active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true })).toHaveAttribute('aria-pressed', 'true')
+  await active.getByRole('button', { name:/^(编辑|连续编辑)$/,exact:true }).click()
   await expect(body).toHaveAttribute('contenteditable', 'true')
   await expect(active.getByRole('button', { name: '展开工具栏', exact: true })).toBeVisible()
   await page.screenshot({ path: info.outputPath('restored-workspace.png') })
@@ -2231,13 +2248,13 @@ test('workbook preview keeps its canvas and refuses to discard an unapplied form
   await expect(canvas).toBeVisible()
   await canvas.evaluate(element => { (window as unknown as { originalGrid: Element }).originalGrid = element })
   const address = await active.locator('.xlsx-formula-address').innerText()
-  await active.getByRole('button', { name: '预览', exact: true }).click()
+  await active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
   await expect(active.locator('.xlsx-formula-bar input')).toBeDisabled()
   expect(await canvas.evaluate(element => (window as unknown as { originalGrid: Element }).originalGrid === element)).toBe(true)
   await expect(active.locator('.xlsx-formula-address')).toHaveText(address)
-  await active.getByRole('button', { name: '编辑', exact: true }).click()
+  await active.getByRole('button', { name:/^(编辑|连续编辑)$/,exact:true }).click()
   await active.locator('.xlsx-formula-bar input').fill('UNAPPLIED_FORMULA_DRAFT')
-  await active.getByRole('button', { name: '预览', exact: true }).click()
+  await active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
   await expect(active.locator('.xlsx-formula-bar input')).toBeEnabled()
   await expect(active.locator('.xlsx-formula-bar input')).toHaveValue('UNAPPLIED_FORMULA_DRAFT')
   await expect(active.locator('.toast.error')).toContainText('请先应用当前公式并等待保存完成')
@@ -2253,8 +2270,8 @@ test('all seven formats use the content shell and enforce read-only preview', as
     await open(page, id, 'read')
     const active = page.locator('.document-tab-panel:not([hidden])')
     await expect(active.locator(content).first()).toBeVisible()
-    await expect(active.getByRole('button', { name: '编辑', exact: true })).toBeDisabled()
-    await expect(active.getByRole('button', { name: '预览', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await expect(active.getByRole('button', { name:/^(编辑|连续编辑)$/,exact:true })).toBeDisabled()
+    await expect(active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true })).toHaveAttribute('aria-pressed', 'true')
     await expect(active.locator('.ribbon')).toHaveCount(0)
     const shell = await active.locator('.content-shell').boundingBox()
     expect(shell!.height).toBeGreaterThan(400)
@@ -2434,7 +2451,7 @@ test('agent commits preserve preview, focus, zoom and the selected historical co
   const client=await agent(id,'View State Agent')
   try {
     const initial=(await call(client,'hcd_read',{document_id:id,resource:'editor'})).data
-    await active.getByRole('button',{name:'预览',exact:true}).click()
+    await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
     await active.getByRole('button',{name:'放大文档',exact:true}).click({clickCount:3})
     await expect(active.locator('.canvas-viewport')).toHaveAttribute('data-canvas-zoom','1.3')
     await active.getByRole('button',{name:'专注模式',exact:true}).click()
@@ -2450,7 +2467,7 @@ test('agent commits preserve preview, focus, zoom and the selected historical co
     await expect(active.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','false')
     await expect(active.locator('.workspace')).toHaveClass(/focus-mode/)
     await expect(active.locator('.canvas-viewport')).toHaveAttribute('data-canvas-zoom','1.3')
-    await expect(active.locator('.mode-switch').getByRole('button',{name:'预览',exact:true})).toHaveAttribute('aria-pressed','true')
+    await expect(active.locator('.mode-switch').getByRole('button',{name:/^(预览|分页预览)$/,exact:true})).toHaveAttribute('aria-pressed','true')
     await active.getByRole('button',{name:'退出专注模式',exact:true}).click()
     await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
     await active.locator(`.history button[data-revision="${initial.revision}"]`).click()
@@ -2827,7 +2844,7 @@ test('fixed history saves drafts, pins even the latest revision read-only and re
   await expect(active.locator('.fixed-page-hitbox')).toHaveCount(0)
   await expect(active.locator('.ribbon')).toHaveCount(0)
   await expect(active.locator('.revision-preview-title')).toContainText('browser-user')
-  await active.getByRole('button',{name:'编辑',exact:true}).click()
+  await active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true}).click()
   await expect(active.locator('.revision-preview-bar')).toHaveCount(0)
   await active.getByRole('button',{name:'插入',exact:true}).click()
   const before=await active.locator('.slide-card').count()
@@ -2885,7 +2902,7 @@ test('fixed snapshot failures can retry and delayed requests cannot replace the 
   await expect(pdf.locator('.workspace')).toHaveAttribute('data-hcd-history','true')
   await expect(pdf.locator('.fixed-pages iframe').first()).toBeVisible()
   await expect(pdf.locator('.fixed-page-hitbox')).toHaveCount(0)
-  await expect(pdf.getByRole('button',{name:'编辑',exact:true})).toBeDisabled()
+  await expect(pdf.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true})).toBeDisabled()
   await page.screenshot({path:info.outputPath('pdf-history-preview.png')})
 })
 
@@ -3155,9 +3172,9 @@ test('inline tables keep canonical appearance in dark mode and reject structural
   expect(unchanged).toEqual(projection)
   // Edit/view switching changes permissions in place, retaining the iframe.
   await field.evaluate(element=>{(window as unknown as {originalInline:Element}).originalInline=element})
-  await active.getByRole('button',{name:'预览',exact:true}).click()
+  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
   await expect(field).toHaveAttribute('contenteditable','false')
-  await active.getByRole('button',{name:'编辑',exact:true}).click()
+  await active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true}).click()
   await expect(field).toHaveAttribute('contenteditable','plaintext-only')
   expect(await field.evaluate(element=>(window as unknown as {originalInline:Element}).originalInline===element)).toBe(true)
   await page.screenshot({animations:'disabled',path:info.outputPath('table-inline-dark.png')})
@@ -3440,6 +3457,127 @@ test('shared side panels match the latest Pen components across document formats
   }
 })
 
+test('long Word table insertion preserves typography and viewport throughout an epoch change', async ({page}, info) => {
+  await open(page, 'table-long')
+  const frames = page.locator('.hcd-opaque-preview iframe')
+  await expect(frames).toHaveCount(process.env.HCD_TABLE_REGRESSION_DOCX ? 5 : 4)
+  const target = frames.nth(3), frame = target.contentFrame()
+  await expect(frame.locator('[data-hcd-inline-table-text]').first()).toHaveAttribute('contenteditable','plaintext-only')
+  await expect(page.locator('[data-word-presentation]').first()).toBeVisible()
+  if (process.env.HCD_TABLE_REGRESSION_DOCX) for (const kind of ['header','footer']) {
+    const image = page.locator(`.word-running-${kind} iframe`).contentFrame().locator(`img[data-hcd-running-drawing="${kind}"]`)
+    await expect(image).toHaveCount(1)
+    await expect.poll(()=>image.evaluate(image=>(image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
+    const bounds = await image.evaluate(image=>{const page=image.closest('.word-running-page')!.getBoundingClientRect(),rect=image.getBoundingClientRect();return{top:rect.top-page.top,bottom:rect.bottom-page.top,height:page.height}})
+    expect(bounds.top).toBeLessThan(bounds.height); expect(bounds.bottom).toBeGreaterThan(0)
+  }
+  const host = page.locator('.hcd-opaque-preview').nth(3), tools = host.locator('[data-hcd-table-controls]')
+  for (const action of ['在下方插入行', '在右侧插入列']) {
+    const cell = frame.locator('tr').first().locator('td,th').first()
+    await cell.scrollIntoViewIfNeeded(); await cell.click()
+    await expect(tools.getByRole('button',{name:action,exact:true})).toBeVisible()
+    const beforeRows = await frame.locator('tr').count(), beforeColumns = await frame.locator('tr').first().locator('td,th').count()
+    await page.evaluate(() => {
+      const viewport = document.querySelector('.canvas-viewport')!, body = document.querySelector('.hcd-editor-body')!
+      const frames = [...body.querySelectorAll<HTMLIFrameElement>('.hcd-opaque-preview iframe')]
+      const anchor = frames[3]
+      const paragraphs = () => [...body.querySelectorAll<HTMLElement>(':scope > p')].map(element=>({id:element.dataset.hcdBlockId,height:element.getBoundingClientRect().height,style:element.getAttribute('style'),line:getComputedStyle(element).lineHeight}))
+      const reference = { top: viewport.scrollTop, anchorTop: anchor.getBoundingClientRect().top, count: body.querySelectorAll('[data-word-presentation]').length, spans:body.querySelectorAll('span').length, paragraphs:paragraphs() }
+      const samples: Array<{ top: number; anchorTop: number; count: number; heights: number[] }> = []
+      const probe = { reference, samples, frames, paragraphs, stopped: false }
+      ;(window as any).__tableLayoutProbe = probe
+      const sample = () => {
+        samples.push({ top: viewport.scrollTop, anchorTop: anchor.getBoundingClientRect().top, count: body.querySelectorAll('[data-word-presentation]').length, heights: frames.map(frame=>frame.getBoundingClientRect().height) })
+        if (!probe.stopped) requestAnimationFrame(sample)
+      }
+      requestAnimationFrame(sample)
+    })
+    const started = Date.now()
+    await tools.getByRole('button',{name:action,exact:true}).click()
+    await expect(frame.locator('tr')).toHaveCount(beforeRows + (action === '在下方插入行' ? 1 : 0))
+    await expect(frame.locator('tr').first().locator('td,th')).toHaveCount(beforeColumns + (action === '在右侧插入列' ? 1 : 0))
+    await expect(frame.locator('[data-hcd-inline-table-text]').first()).toHaveAttribute('contenteditable','plaintext-only')
+    const duration = Date.now()-started
+    await page.screenshot({path:info.outputPath(action === '在下方插入行' ? 'long-table-row.png' : 'long-table-column.png')})
+    const result = await page.evaluate(() => {
+      const probe = (window as any).__tableLayoutProbe
+      probe.stopped = true
+      return { reference: probe.reference, samples: probe.samples, paragraphs:probe.paragraphs(), spans:document.querySelectorAll('.hcd-editor-body span').length, framesPreserved: probe.frames.every((frame: HTMLIFrameElement)=>frame.isConnected) }
+    })
+    const requests = await page.evaluate(()=>performance.getEntriesByType('resource').filter(entry=>entry.name.includes('/v1/')).slice(-30).map(entry=>({path:new URL(entry.name).pathname,duration:entry.duration})))
+    writeFileSync(info.outputPath(action === '在下方插入行' ? 'row-layout.json' : 'column-layout.json'), JSON.stringify({...result,duration,requests},null,2))
+    expect(duration, `${action} must finish within the table interaction budget`).toBeLessThan(Number(process.env.HCD_TABLE_MAX_LATENCY_MS || 3000))
+    expect(result.framesPreserved).toBe(true)
+    expect(result.spans).toBeLessThan(result.reference.spans+20)
+    expect(result.reference.top).toBeGreaterThan(5000)
+    expect(Math.max(...result.samples.map((sample:any)=>Math.abs(sample.top-result.reference.top)))).toBeLessThan(4)
+    expect(Math.max(...result.samples.map((sample:any)=>Math.abs(sample.anchorTop-result.reference.anchorTop)))).toBeLessThan(4)
+    expect(Math.min(...result.samples.map((sample:any)=>sample.count))).toBe(result.reference.count)
+    for (let index=0; index<3; index++) expect(Math.max(...result.samples.map((sample:any)=>sample.heights[index])) - Math.min(...result.samples.map((sample:any)=>sample.heights[index]))).toBeLessThan(2)
+  }
+})
+
+test('long Word local undo and redo remain local and keep the selected cell visible', async ({page, context}, info) => {
+  await open(page, 'table-long')
+  const target = page.locator('.hcd-opaque-preview iframe').nth(3), frame = target.contentFrame()
+  const field = frame.locator('[data-hcd-inline-table-text]').nth(20)
+  await expect(field).toHaveAttribute('contenteditable','plaintext-only')
+  await expect(page.locator('[data-word-presentation]').first()).toBeVisible()
+  await field.scrollIntoViewIfNeeded(); await field.click()
+  const before = await field.innerText()
+  const spanCount = await page.locator('.hcd-editor-body span').count()
+  const profiler = await context.newCDPSession(page)
+  await profiler.send('Profiler.enable'); await profiler.send('Profiler.start')
+  const recording = new Promise<void>(resolve=>setTimeout(async()=>{
+    const {profile} = await profiler.send('Profiler.stop')
+    writeFileSync(info.outputPath('undo-profile.json'), JSON.stringify(profile))
+    resolve()
+  },6000))
+  const writes: string[] = []
+  page.on('request', request=>{ if (request.method()==='POST' && request.url().includes('/patch')) writes.push(request.url()) })
+  await field.press('End'); await field.pressSequentially(' UNDO PROBE')
+  await expect(field).toContainText('UNDO PROBE')
+  const viewport = page.locator('.canvas-viewport'), top = await viewport.evaluate(element=>element.scrollTop)
+  const timings: number[] = []
+  for (let index=0;index<3;index++) {
+    const started = Date.now()
+    await field.press('ControlOrMeta+z')
+    await expect(field).toHaveText(before)
+    timings.push(Date.now()-started)
+    await field.press('ControlOrMeta+Shift+z')
+    await expect(field).toContainText('UNDO PROBE')
+  }
+  await recording
+  writeFileSync(info.outputPath('undo-timings.json'), JSON.stringify({timings,writes,scrollDelta:await viewport.evaluate(element=>element.scrollTop)-top}))
+  expect(writes).toEqual([])
+  expect(Math.max(...timings)).toBeLessThan(1000)
+  expect(await page.locator('.hcd-editor-body span').count()).toBeLessThan(spanCount + 20)
+  expect(Math.abs(await viewport.evaluate(element=>element.scrollTop)-top)).toBeLessThan(4)
+  await page.screenshot({path:info.outputPath('long-table-undo.png')})
+})
+
+test('Word continuous editing displays protected running margins without adding them to checkpoints', async ({page}, info) => {
+  await open(page, 'word-margins')
+  const header = page.locator('.word-running-header iframe').contentFrame(), footer = page.locator('.word-running-footer iframe').contentFrame()
+  await expect(header.locator('body')).toContainText('FIRST HEADER')
+  await expect(header.locator('body')).not.toContainText('EVEN HEADER')
+  await expect(footer.locator('body')).toContainText('Page')
+  await expect(footer.locator('body')).not.toContainText('999')
+  await expect(header.locator('[contenteditable="true"],[contenteditable="plaintext-only"]')).toHaveCount(0)
+  const paragraph = page.locator('.hcd-editor-body > p').filter({hasText:'COVER TITLE'}).first()
+  await paragraph.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' BODY EDIT')
+  const pending = page.waitForRequest(request=>request.method()==='POST' && request.url().endsWith('/checkpoints'))
+  await page.getByRole('button',{name:'保存点',exact:true}).click()
+  const blocks = (await pending).postDataJSON().blocks
+  expect(JSON.stringify(blocks)).not.toContain('FIRST HEADER')
+  expect(JSON.stringify(blocks)).not.toContain('DEFAULT HEADER')
+  await expect(header.locator('body')).toContainText('FIRST HEADER')
+  await header.locator('.word-running-content').scrollIntoViewIfNeeded()
+  await page.screenshot({path:info.outputPath('continuous-word-header.png')})
+  await footer.locator('.word-running-content').scrollIntoViewIfNeeded()
+  await page.screenshot({path:info.outputPath('continuous-word-footer.png')})
+})
+
 test('table hover controls edit rows and columns with merges and retain canvas nodes and scroll', async ({page, context}, info) => {
   const id = 'table-structure'
   await open(page, id)
@@ -3479,7 +3617,7 @@ test('table hover controls edit rows and columns with merges and retain canvas n
     expect(Math.abs(first.row.x - next.row.x)).toBeLessThan(1)
     expect(Math.abs(first.column.y - next.column.y)).toBeLessThan(1)
     expect(next.column.x).toBeGreaterThan(first.column.x)
-    await expect(tools.locator(':scope > button')).toHaveCount(3)
+    await expect(tools.locator(':scope > button')).toHaveCount(5)
     await expect(frame.locator('td button,th button')).toHaveCount(0)
   }
   // A user can pause in the empty gutter while moving from the table to a
@@ -3507,7 +3645,7 @@ test('table hover controls edit rows and columns with merges and retain canvas n
   await expect(menu).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(menu).toBeHidden()
-  await page.mouse.move(20,20)
+  await page.mouse.click(20,20)
   await expect(tools).toBeHidden({timeout:3000})
   await frame.locator('tr').first().locator('td').nth(1).hover()
   await page.screenshot({path:info.outputPath('table-header-left-controls.png')})
@@ -3538,13 +3676,18 @@ test('table hover controls edit rows and columns with merges and retain canvas n
   expect(await frame.locator('td[rowspan]').evaluateAll(cells => cells.filter(cell => (cell as HTMLTableCellElement).rowSpan === 2).length)).toBe(1)
   await expect(frame.locator('tr').nth(26)).toContainText('新增行中文🙂')
   await frame.locator('tr').nth(26).locator('td').nth(1).hover()
-  await tools.getByRole('button',{name:'表格操作',exact:true}).click()
-  await tools.getByRole('button',{name:'删除当前列',exact:true}).click()
+  await tools.getByRole('button',{name:'列操作',exact:true}).click()
+  await expect(tools.getByRole('menuitem')).toHaveCount(3)
+  await tools.getByRole('menuitem',{name:'删除当前列',exact:true}).click()
   await expect(frame.locator('tr').nth(26).locator('td')).toHaveCount(2)
   await expect(frame.locator('tr').nth(26)).toContainText('新增行中文🙂')
   await frame.locator('tr').nth(26).locator('td').first().hover()
-  await tools.getByRole('button',{name:'表格操作',exact:true}).click()
-  await tools.getByRole('button',{name:'删除当前行',exact:true}).click()
+  const beforeMenuScroll = await page.locator('.canvas-viewport').evaluate(element => element.scrollTop)
+  await tools.getByRole('button',{name:'行操作',exact:true}).click()
+  await expect(tools.getByRole('menuitem')).toHaveCount(3)
+  expect(Math.abs(await page.locator('.canvas-viewport').evaluate(element => element.scrollTop) - beforeMenuScroll)).toBeLessThan(4)
+  await page.screenshot({path:info.outputPath('table-row-delete-menu.png')})
+  await tools.getByRole('menuitem',{name:'删除当前行',exact:true}).click()
   await expect(frame.locator('tr')).toHaveCount(31)
   await expect(frame.locator('table')).not.toContainText('新增行中文🙂')
   await expect(peerFrame.locator('tr')).toHaveCount(31,{timeout:30_000})
@@ -3557,7 +3700,77 @@ test('table hover controls edit rows and columns with merges and retain canvas n
   await expect(frame.locator('table')).not.toContainText('新增行中文🙂')
   await page.reload()
   await expect(page.locator('.hcd-opaque-preview iframe').first().contentFrame().locator('tr')).toHaveCount(31)
+  const headers = {Authorization:`Bearer ${token(id,'browser-user')}`}
+  const beforeDelete = await (await fetch(`${apiUrl}/v1/documents/${id}/editor`,{headers})).json()
+  const original = beforeDelete.blocks.find((block:any) => block.readOnlyHtml?.includes('<table'))
+  await frame.locator('tr').nth(25).locator('td').first().hover()
+  const deleteTop = await page.locator('.canvas-viewport').evaluate(element => element.scrollTop)
+  await tools.getByRole('button',{name:'表格操作',exact:true}).click()
+  expect(Math.abs(await page.locator('.canvas-viewport').evaluate(element => element.scrollTop) - deleteTop)).toBeLessThan(4)
+  await tools.getByRole('menuitem',{name:'删除表格',exact:true}).click()
+  await expect(page.locator('.hcd-opaque-preview iframe')).toHaveCount(0)
+  await expect(peer.locator('.hcd-opaque-preview iframe')).toHaveCount(0,{timeout:30_000})
+  await expect(page.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','true')
+  await expect(page.locator('.hcd-editor-body')).toBeFocused()
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect(frame.locator('tr')).toHaveCount(31)
+  await expect(peerFrame.locator('tr')).toHaveCount(31,{timeout:30_000})
+  const restored = await (await fetch(`${apiUrl}/v1/documents/${id}/editor`,{headers})).json()
+  expect(restored.blocks.find((block:any) => block.blockId === original.blockId)?.blockHash).toBe(original.blockHash)
+  await page.getByRole('button',{name:'↷ 重做',exact:true}).click()
+  await expect(page.locator('.hcd-opaque-preview iframe')).toHaveCount(0)
+  await page.reload()
+  await expect(page.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','true')
+  await expect(page.locator('.hcd-opaque-preview iframe')).toHaveCount(0)
   await peer.close()
+})
+
+test('single cell table menus preserve the last row and column and whole-table deletion stays editable and undoable', async ({page}) => {
+  await open(page,'table-only')
+  const body = page.locator('.hcd-editor-body'), frame = body.locator('iframe').contentFrame()
+  const tools = body.locator('[data-hcd-table-controls]')
+  await expect(frame.locator('td')).toHaveCount(1)
+  await frame.locator('td').hover()
+  await tools.getByRole('button',{name:'行操作',exact:true}).click()
+  await expect(tools.getByRole('menuitem',{name:'删除当前行',exact:true})).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(tools.getByRole('button',{name:'行操作',exact:true})).toBeFocused()
+  await tools.getByRole('button',{name:'列操作',exact:true}).click()
+  await expect(tools.getByRole('menuitem',{name:'删除当前列',exact:true})).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await tools.getByRole('button',{name:'表格操作',exact:true}).click()
+  await page.keyboard.press('End')
+  await expect(tools.getByRole('menuitem',{name:'删除表格',exact:true})).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(body.locator('iframe')).toHaveCount(0)
+  await expect(body).toHaveAttribute('contenteditable','true')
+  await expect(body.locator(':scope > p')).toHaveCount(1)
+  await page.getByRole('button',{name:'↶ 撤销',exact:true}).click()
+  await expect(frame.locator('td')).toHaveText('仅有的单元格')
+  await page.getByRole('button',{name:'↷ 重做',exact:true}).click()
+  await expect(body.locator('iframe')).toHaveCount(0)
+  await body.locator('p').click(); await page.keyboard.insertText('删除后继续编辑')
+  await expect(body).toContainText('删除后继续编辑')
+})
+
+test('Word view controls expose continuous editing and paginated preview while preserving local edits', async ({page}, info) => {
+  await open(page,'word-view')
+  const body = page.locator('.hcd-editor-body'), modes = page.locator('.mode-switch')
+  await expect(body).toHaveAttribute('contenteditable','true')
+  await expect(modes.getByRole('button',{name:'连续编辑',exact:true})).toHaveAttribute('aria-pressed','true')
+  const paragraph = body.locator(':scope > p').filter({hasText:'COVER TITLE'}).first()
+  const paragraphId = await paragraph.getAttribute('data-hcd-block-id')
+  await paragraph.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' · 本地分页切换')
+  await page.getByRole('button',{name:'视图',exact:true}).click()
+  await expect(page.getByLabel('文档视图',{exact:true})).toHaveValue('continuous')
+  await page.screenshot({path:info.outputPath('word-view-controls.png')})
+  await page.getByLabel('文档视图',{exact:true}).selectOption('pages')
+  await expect(modes.getByRole('button',{name:'分页预览',exact:true})).toHaveAttribute('aria-pressed','true')
+  await expect(page.locator('.word-page-preview iframe').contentFrame().locator('body')).toContainText('本地分页切换')
+  await expect(body).toHaveAttribute('contenteditable','false')
+  await modes.getByRole('button',{name:'连续编辑',exact:true}).click()
+  await expect(body).toHaveAttribute('contenteditable','true')
+  await expect(body.locator(`[data-hcd-block-id="${paragraphId}"]`)).toContainText('本地分页切换')
 })
 
 test('insert ribbon creates blank paragraphs and editable tables that survive collaboration and DOCX export', async ({page, context}, info) => {
@@ -3604,7 +3817,7 @@ test('insert ribbon creates blank paragraphs and editable tables that survive co
   await expect(reloaded.locator('td')).toHaveCount(12); await expect(reloaded.locator('table')).toContainText('新建表格内容')
   await expect(page.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','true')
   await page.screenshot({animations:'disabled',path:info.outputPath('inserted-table-edit.png')})
-  await page.getByRole('button',{name:'预览',exact:true}).click()
+  await page.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
   await expect(page.locator('.word-page-preview iframe').contentFrame().locator('body')).toContainText('新建表格内容')
   await peer.close()
 })
@@ -3637,7 +3850,7 @@ test('HTML and Markdown tables insert through guarded structure patches and hide
     await expect(frame.locator('tr')).toHaveCount(3)
     const tools = active.locator('[data-hcd-table-controls]')
     await field.hover(); await expect(tools.getByRole('button',{name:'表格操作',exact:true})).toBeVisible()
-    await active.getByRole('button',{name:'预览',exact:true}).click()
+    await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
     await expect(tools).toBeHidden()
     await expect(field).toHaveAttribute('contenteditable','false')
   }

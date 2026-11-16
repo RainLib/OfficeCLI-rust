@@ -35,6 +35,14 @@ async function request(documentId: string, route: string, init: RequestInit = {}
   })
 }
 
+async function currentRevision(documentId: string): Promise<number> {
+  const response = await request(documentId, '')
+  if (!response.ok) throw new Error(`HCD manifest failed: ${response.status}`)
+  const { revision } = await response.json() as { revision: number }
+  if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Invalid HCD revision')
+  return revision
+}
+
 async function currentProjection(documentId: string): Promise<Projection> {
   // Metadata changes (for example assigning a theme before the first edit)
   // can advance the revision without creating a structural editor projection.
@@ -156,7 +164,10 @@ function checkpoint(documentId: string): Promise<number> {
 
 async function storeCheckpoint(documentId: string): Promise<number> {
   const item = pending.get(documentId)
-  if (!item) return (await currentProjection(room(documentId).documentId)).revision
+  // Checkpoint coordination only needs the current revision. Reading and
+  // transferring the complete semantic document here slows every clean table
+  // action and every autosave; room initialization already created projection.
+  if (!item) return currentRevision(room(documentId).documentId)
   item.saving = true
   if (item.timer) clearTimeout(item.timer)
   item.timer = null
@@ -164,13 +175,13 @@ async function storeCheckpoint(documentId: string): Promise<number> {
   const version = item.version
   try {
     const selected = room(documentId)
-    const projection = await currentProjection(selected.documentId)
+    const revision = await currentRevision(selected.documentId)
     const json = TiptapTransformer.fromYdoc(item.document, 'default')
     const blocks = jsonToSnapshot(json)
     const response = await request(selected.documentId, '/checkpoints', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expectedRevision: projection.revision, blocks }),
+      body: JSON.stringify({ expectedRevision: revision, blocks }),
     }, selected.epoch)
     if (response.status === 409) {
       pending.delete(documentId)

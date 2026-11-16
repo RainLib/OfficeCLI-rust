@@ -249,6 +249,8 @@
 .hcd-surface .semantic-workspace .ribbon .save-trigger{margin-left:auto;background:#1667e8;color:#fff;border-color:#1667e8;align-self:center}
 .hcd-surface .semantic-workspace .ribbon .mode{margin:0 12px 0 0;align-self:center;color:#304b7a}
 .hcd-surface .ribbon-note{align-self:center;color:#687b9b;font-size:13px}
+.hcd-surface .document-view-picker{display:flex;align-items:center;gap:9px;font-size:12px;white-space:nowrap}
+.hcd-surface .document-view-picker select{padding:6px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink);font:inherit}
 .hcd-surface .semantic-workspace .editor-layout{max-width:none;display:grid;grid-template-columns:230px minmax(0,1fr) 280px;gap:0;padding:0;margin:0;min-height:calc(100vh - 175px)}
 .hcd-surface .semantic-workspace.outline-hidden .editor-layout{grid-template-columns:minmax(0,1fr) 280px}
 .hcd-surface .semantic-workspace .outline-panel,.hcd-surface .semantic-workspace .workspace-sidebar{border:0;border-radius:0;box-shadow:none;max-height:none;height:100%;padding:22px 16px;background:#fff}
@@ -359,6 +361,11 @@
 
 /* Word page measurements belong to this document surface, never the app shell. */
 .hcd-surface .workspace.semantic-workspace .document[data-word-page="true"],.hcd-surface .revision-workspace .revision-paper[data-word-page="true"]{box-sizing:border-box;width:var(--word-page-width);max-width:none;min-height:var(--word-page-min-height);padding:var(--word-page-padding-top) var(--word-page-padding-right) var(--word-page-padding-bottom) var(--word-page-padding-left)}
+.hcd-surface .document[data-word-page="true"]{position:relative}
+.hcd-surface .word-running-margin{position:absolute;left:0;right:0;color:#000;pointer-events:none}
+.hcd-surface .word-running-header{top:0}
+.hcd-surface .word-running-footer{bottom:0}
+.hcd-surface .word-running-margin iframe{display:block;width:100%;border:0;background:transparent}
 
 .hcd-surface .word-page-preview{width:max-content;min-width:100%;padding:0 0 24px}
 .hcd-surface .word-page-preview iframe{display:block;width:900px;min-height:500px;margin:0 auto;border:0;background:transparent}
