@@ -26,6 +26,38 @@ impl PdfHandler {
         })
     }
 
+    /// Keep the requested original pages, then save through the usual PDF handler.
+    pub fn retain_page_range(
+        &self,
+        pages: std::ops::RangeInclusive<usize>,
+    ) -> Result<(), HandlerError> {
+        if !self.editable {
+            return Err(HandlerError::SaveError(
+                "PDF opened in read-only mode".to_string(),
+            ));
+        }
+        let mut reader = self.reader.borrow_mut();
+        crate::page_subset::retain_page_range(reader.document_mut(), pages)?;
+        reader.recount_pages();
+        Ok(())
+    }
+
+    pub fn organize_pages(
+        &self,
+        layout: &[crate::PdfPageSelection],
+        extract: bool,
+    ) -> Result<(), HandlerError> {
+        if !self.editable {
+            return Err(HandlerError::SaveError(
+                "PDF opened in read-only mode".into(),
+            ));
+        }
+        let mut reader = self.reader.borrow_mut();
+        crate::page_subset::organize_pages(reader.document_mut(), layout, extract)?;
+        reader.recount_pages();
+        Ok(())
+    }
+
     pub fn ensure_font_for_chars(
         &self,
         page_num: usize,

@@ -1,6 +1,6 @@
-import type { FUniver, ICellData, IObjectMatrixPrimitiveType, IStyleData } from '@univerjs/presets';
+import { CellValueType, type FUniver, type ICellData, type IObjectMatrixPrimitiveType, type IStyleData } from '@univerjs/presets';
 import type { FWorkbook, FWorksheet } from '@univerjs/preset-sheets-core';
-import { HcdBundleClient, type ChunkDescriptor } from './hcd.ts';
+import { HcdBundleClient, type ChunkDescriptor, type LoadedChunk } from './hcd.ts';
 import { parseGridChunk, type NodeLink, type ParsedGridChunk, type ParsedVisual } from './hcd-parser.ts';
 
 export interface HcdTextSplice {
@@ -165,7 +165,9 @@ export class HcdUniverAdapter {
   private readonly dimensions = new Map<string, SheetDimensions>();
   private readonly recalculatedFormulas = new Set<string>();
   private readonly editInputs = new Map<string, string>();
+  private readonly delimitedFields: boolean;
   private applying = 0;
+  private cellWritesLocked = false;
 
   constructor(
     readonly client: HcdBundleClient,
@@ -175,6 +177,8 @@ export class HcdUniverAdapter {
     private readonly onStatus: (message: string) => void,
     private readonly styleCatalog: Record<string, IStyleData> = {},
   ) {
+    const sourceFormat = client.manifest.source?.format;
+    this.delimitedFields = sourceFormat === 'csv' || sourceFormat === 'tsv';
     for (const sheet of client.sheets()) {
       const defaults = client.sheetDefaults(sheet.sheetId);
       this.dimensions.set(sheet.sheetId, {
@@ -196,7 +200,7 @@ export class HcdUniverAdapter {
       this.scheduleVisible(activeSheet);
     });
     this.univerAPI.addEvent(this.univerAPI.Event.BeforeSheetEditStart, (event) => {
-      if (this.mode === 'readonly') {
+      if (this.mode === 'readonly' || this.cellWritesLocked) {
         event.cancel = true;
         return;
       }
@@ -215,16 +219,22 @@ export class HcdUniverAdapter {
       else this.editInputs.delete(key);
     });
     this.univerAPI.addEvent(this.univerAPI.Event.BeforeCommandExecute, (event) => {
+      // Formula calculation is also dispatched as mutations. Cancelling its
+      // notifications leaves the formula engine waiting for its own result.
+      const calculation = event.id.startsWith('formula.mutation.')
+        || event.options?.fromFormula === true
+        || event.options?.applyFormulaCalculationResult === true;
       if (
-        this.mode === 'readonly'
+        (this.mode === 'readonly' || this.cellWritesLocked)
         && !this.applying
+        && !calculation
         && event.type === this.univerAPI.Enum.CommandType.MUTATION
       ) {
         event.cancel = true;
       }
     });
     this.univerAPI.addEvent(this.univerAPI.Event.SheetValueChanged, (event) => {
-      if (this.applying) return;
+      if (this.applying || this.mode === 'readonly' || this.cellWritesLocked) return;
       void this.captureChanges(event.effectedRanges);
     });
     await this.ensureVisible(this.workbook.getActiveSheet());
@@ -234,8 +244,12 @@ export class HcdUniverAdapter {
     return this.linksByCell.get(cellKey(sheetId, row, column));
   }
 
+  private parseChunk(chunk: LoadedChunk): ParsedGridChunk {
+    return parseGridChunk(chunk, href => this.client.resolve(href).toString(), this.styleCatalog, this.delimitedFields);
+  }
+
   applyCellInput(sheetId: string, row: number, column: number, input: string): void {
-    if (this.mode !== 'editable' || this.hasPendingPatch()) {
+    if (this.mode !== 'editable' || this.cellWritesLocked || this.hasPendingPatch()) {
       throw new Error('当前单元格不可编辑或仍在保存');
     }
     const sheet = this.workbook.getSheetBySheetId(sheetId);
@@ -253,6 +267,11 @@ export class HcdUniverAdapter {
       return;
     }
     if (!existingFormula && String(range.getValue() ?? '') === input) return;
+    if (this.delimitedFields && !link?.formulaEditable && link?.rawValue === undefined) {
+      this.editInputs.set(cellKey(sheetId, row, column), input);
+      range.setValue({ v: input, t: CellValueType.FORCE_STRING });
+      return;
+    }
     const literal = numericLiteral(input);
     const formatted = (link?.rawValue !== undefined || link?.formulaEditable)
       ? displayedNumber(input) : undefined;
@@ -362,6 +381,100 @@ export class HcdUniverAdapter {
 
   hasPendingPatch(): boolean { return this.pending.size > 0; }
 
+  lockCellWrites(locked: boolean): void { this.cellWritesLocked = locked; }
+
+  private rowFilter?: { sheet: FWorksheet; hiddenRuns: Array<{ start: number; count: number }> };
+
+  async filterRows(sheetId: string, startRow: number, endRow: number, criteria: readonly { column: number; query: string }[]): Promise<{ matched: number; total: number }> {
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    const needles = new Map(criteria.map(({ column, query }) => [column, query.trim().toLowerCase()]));
+    if (!sheet || startRow > endRow || endRow - startRow >= 500 || !needles.size
+      || needles.size !== criteria.length || [...needles.values()].some(needle => !needle)) {
+      throw new Error('请在最多 500 行的选区中填写筛选关键词');
+    }
+    const revision = this.client.manifest.revision;
+    const descriptors = this.client.cellWindows(sheetId, startRow + 1, endRow + 1);
+    if (descriptors.reduce((bytes, descriptor) => bytes + descriptor.byteLength, 0) > 32 * 1024 * 1024) {
+      throw new Error('筛选范围内的数据过多，请缩小选区');
+    }
+    const originalHidden = new Set<number>();
+    const matches = new Map<number, Set<number>>();
+    for (const descriptor of descriptors) {
+      const parsed = this.parseChunk(await this.client.readChunk(descriptor));
+      for (const row of parsed.rowHeights) if (row.hidden) originalHidden.add(row.row);
+      for (const { row, column: cellColumn, link } of parsed.cells) {
+        const needle = needles.get(cellColumn);
+        if (row < startRow || row > endRow || !needle || !link?.text.toLowerCase().includes(needle)) continue;
+        const columns = matches.get(row) ?? new Set<number>();
+        columns.add(cellColumn);
+        matches.set(row, columns);
+      }
+    }
+    if (revision !== this.client.manifest.revision || this.hasPendingPatch()
+      || this.workbook.getActiveSheet().getSheetId() !== sheetId) {
+      throw new Error('工作表已变化，请重新筛选');
+    }
+    this.clearRowFilter();
+    const hiddenRows: number[] = [];
+    let total = 0;
+    let matched = 0;
+    for (let row = startRow; row <= endRow; row += 1) {
+      if (originalHidden.has(row) || !sheet.getSheet().getRowVisible(row)) continue;
+      total += 1;
+      if (matches.get(row)?.size === needles.size) { matched += 1; continue; }
+      hiddenRows.push(row);
+    }
+    this.hideFilteredRows(sheet, hiddenRows);
+    return { matched, total };
+  }
+
+  applySavedFilter(sheetId: string, hiddenRows: number[]): void {
+    const sheet = this.workbook.getActiveSheet();
+    if (sheet.getSheetId() !== sheetId) return;
+    this.clearRowFilter();
+    this.hideFilteredRows(sheet, hiddenRows.map(row => row - 1));
+  }
+
+  private hideFilteredRows(sheet: FWorksheet, hiddenRows: number[]): void {
+    const selection = sheet.getActiveRange();
+    const hiddenRuns: Array<{ start: number; count: number }> = [];
+    for (const row of hiddenRows) {
+      if (!sheet.getSheet().getRowVisible(row)) continue;
+      const last = hiddenRuns.at(-1);
+      if (last && last.start + last.count === row) last.count += 1;
+      else hiddenRuns.push({ start: row, count: 1 });
+    }
+    this.withApplying(() => {
+      for (const { start, count } of hiddenRuns) sheet.hideRows(start, count);
+      if (!selection || selection.getSheetId() !== sheet.getSheetId() || !hiddenRuns.length) return;
+      const row = selection.getRow();
+      if (sheet.getSheet().getRowVisible(row)) {
+        sheet.setActiveRange(sheet.getRange(row, selection.getColumn(), selection.getHeight(), selection.getWidth()));
+        return;
+      }
+      const visibleRows = sheet.getSheet().getVisibleRows();
+      const next = visibleRows.find(range => range.endRow >= row);
+      const visibleRow = next ? Math.max(row, next.startRow) : visibleRows.at(-1)?.endRow;
+      if (visibleRow !== undefined) sheet.setActiveRange(sheet.getRange(visibleRow, selection.getColumn()));
+    });
+    this.rowFilter = { sheet, hiddenRuns };
+  }
+
+  clearRowFilter(): void {
+    const filter = this.rowFilter;
+    if (!filter) return;
+    this.rowFilter = undefined;
+    const selection = filter.sheet.getActiveRange();
+    this.withApplying(() => {
+      for (const { start, count } of filter.hiddenRuns) filter.sheet.showRows(start, count);
+      if (selection && selection.getSheetId() === filter.sheet.getSheetId() && filter.hiddenRuns.length
+        && this.workbook.getActiveSheet().getSheetId() === filter.sheet.getSheetId()) {
+        filter.sheet.setActiveRange(filter.sheet.getRange(selection.getRow(), selection.getColumn(),
+          selection.getHeight(), selection.getWidth()));
+      }
+    });
+  }
+
   invalidateColumnWidths(sheetId: string): void {
     for (const key of this.appliedDimensions) {
       if (key.startsWith(`${sheetId}:column:`)) this.appliedDimensions.delete(key);
@@ -377,6 +490,7 @@ export class HcdUniverAdapter {
   /** Reload the visible HCD windows after another editor commits a revision. */
   async refreshFromServer(): Promise<boolean> {
     if (this.hasPendingPatch()) return false;
+    this.clearRowFilter();
     const activeSheet = this.workbook.getActiveSheet();
     const sheetId = activeSheet.getSheetId();
     const activeRange = activeSheet.getActiveRange();
@@ -394,7 +508,7 @@ export class HcdUniverAdapter {
     const nextRowHeights = new Map<number, number>();
     for (const descriptor of this.client.cellWindows(sheetId, startRow + 1, endRow + 1)) {
       const chunk = await this.client.readChunk(descriptor);
-      const parsed = parseGridChunk(chunk, href => this.client.resolve(href).toString(), this.styleCatalog);
+      const parsed = this.parseChunk(chunk);
       for (const merge of parsed.merges) {
         nextMerges.add(`${sheetId}:merge:${merge.startRow}:${merge.startColumn}:${merge.endRow}:${merge.endColumn}`);
       }
@@ -434,6 +548,7 @@ export class HcdUniverAdapter {
   /** Reconcile an acknowledged local cell patch without clearing the visible grid. */
   async refreshChangedCells(changes: HcdPatchEventDetail['changes']): Promise<void> {
     if (this.hasPendingPatch()) throw new Error('仍有未保存的单元格修改');
+    this.clearRowFilter();
     // A scroll/selection change may have scheduled a load using the old index.
     // Prevent that load from evicting the newly reconciled chunk afterwards.
     const changedSheets = new Set(changes.map(change => change.sheetId));
@@ -463,7 +578,7 @@ export class HcdUniverAdapter {
         continue;
       }
       const chunk = await this.client.readChunk(descriptor);
-      const parsed = parseGridChunk(chunk, href => this.client.resolve(href).toString(), this.styleCatalog);
+      const parsed = this.parseChunk(chunk);
       if (descriptor.grid?.kind !== 'cells') throw new Error('单元格分片无法局部同步');
       // Univer already holds the user's optimistic value. Writing it again can
       // emit SheetValueChanged later and create a second, reversing patch.
@@ -542,7 +657,7 @@ export class HcdUniverAdapter {
       // A newer revision can arrive while the old object is being fetched.
       const current = this.client.descriptors.find(item => item.sequence === descriptor.sequence);
       if (!current || this.descriptorVersion(current) !== version) return;
-      const parsed = parseGridChunk(chunk, (href) => this.client.resolve(href).toString(), this.styleCatalog);
+      const parsed = this.parseChunk(chunk);
       const sheet = this.workbook.getSheetBySheetId(descriptor.grid!.sheetId);
       if (!sheet) throw new Error(`工作表不存在: ${descriptor.grid!.sheetName}`);
       const previous = this.runtimes.get(descriptor.chunkId);
@@ -830,7 +945,7 @@ export class HcdUniverAdapter {
           const rawValue = values[rowOffset]?.[columnOffset];
           const editInput = this.editInputs.get(key);
           this.editInputs.delete(key);
-          const next = String(rawValue ?? '');
+          const next = this.delimitedFields && link?.rawValue === undefined ? editInput ?? String(rawValue ?? '') : String(rawValue ?? '');
           const formula = String(formulas?.[rowOffset]?.[columnOffset] ?? '');
           const entered = editInput ?? next;
           const enteredFormula = formula || (entered.startsWith('=') ? entered : '');

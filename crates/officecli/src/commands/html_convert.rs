@@ -152,6 +152,7 @@ struct SemanticHtml {
     table_links: Vec<SemanticTableLink>,
     merges: Vec<SemanticMerge>,
     table_row_heights: HashMap<usize, HashMap<usize, f64>>,
+    word_block_ids: HashMap<usize, String>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
 }
@@ -218,6 +219,7 @@ struct PendingBlock {
     kind: PendingKind,
     text: String,
     links: Vec<PendingLink>,
+    word_block_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +245,7 @@ struct TableBuilder {
     links: Vec<TablePendingLink>,
     fragment: Option<HcdTableFragment>,
     hcd_grid: bool,
+    grid_row_offset: usize,
     row_open: bool,
     cell_column: Option<usize>,
     merges: Vec<SemanticMerge>,
@@ -293,6 +296,8 @@ struct HtmlParser {
     pending: Option<PendingBlock>,
     table: Option<TableBuilder>,
     logical_table: Option<LogicalTableBuilder>,
+    previous_grid_window: Option<(usize, usize)>,
+    grid_row_offset: usize,
     lists: Vec<ListState>,
     links: Vec<ActiveLink>,
     image_geometry_stack: Vec<Option<ImageGeometry>>,
@@ -491,7 +496,13 @@ pub(crate) fn convert_html(
     output: &Path,
     output_format: &str,
 ) -> Result<HtmlConversionSummary, HandlerError> {
-    convert_html_with_assets(input, output, output_format, HashMap::new())
+    convert_html_with_assets(
+        input,
+        output,
+        output_format,
+        HashMap::new(),
+        &HashMap::new(),
+    )
 }
 
 pub(crate) fn convert_html_with_assets(
@@ -499,6 +510,7 @@ pub(crate) fn convert_html_with_assets(
     output: &Path,
     output_format: &str,
     assets: HashMap<String, SemanticAsset>,
+    word_formats: &HashMap<String, hcd_core::EditorBlockContent>,
 ) -> Result<HtmlConversionSummary, HandlerError> {
     let metadata = std::fs::metadata(input).map_err(HandlerError::IoError)?;
     if metadata.len() > MAX_HTML_BYTES {
@@ -542,7 +554,7 @@ pub(crate) fn convert_html_with_assets(
         && std::env::var("OFFICECLI_HTML_PDF_MODE")
             .is_ok_and(|mode| mode.eq_ignore_ascii_case("semantic"));
     let conversion = match output_format {
-        "docx" => export_docx(&document, &temporary),
+        "docx" => export_docx(&document, &temporary, word_formats),
         "xlsx" => export_xlsx(&document, &temporary),
         "pptx" => export_pptx(&document, &temporary),
         "pdf" if legacy_pdf => export_pdf(&mut document, &temporary),
@@ -935,7 +947,7 @@ impl HtmlParser {
         }
         if let Some(table) = &mut self.table {
             if let Some(cell) = &mut table.cell {
-                append_normalized(cell, &decoded, false);
+                append_normalized(cell, &decoded, table.hcd_grid);
             }
             return Ok(());
         }
@@ -944,6 +956,7 @@ impl HtmlParser {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
                 links: Vec::new(),
+                word_block_id: None,
             });
         }
         if let Some(pending) = &mut self.pending {
@@ -1023,6 +1036,24 @@ impl HtmlParser {
             "section" | "main" => {
                 self.flush_pending()?;
                 self.flush_pdf_line()?;
+                self.grid_row_offset = 0;
+                if let (Some(sheet), Some(last_row)) = (
+                    tag.attributes
+                        .get("data-hcd-sheet-index")
+                        .and_then(|value| value.parse().ok()),
+                    tag.attributes
+                        .get("data-hcd-row-end")
+                        .and_then(|value| value.parse().ok()),
+                ) {
+                    if let Some((previous_sheet, previous_end)) = self.previous_grid_window {
+                        if previous_sheet == sheet {
+                            self.grid_row_offset = previous_end;
+                        }
+                    }
+                    self.previous_grid_window = Some((sheet, last_row));
+                } else {
+                    self.previous_grid_window = None;
+                }
                 if semantic_section_starts_new_page(&tag.attributes) {
                     self.push_section_break()?;
                 }
@@ -1065,6 +1096,7 @@ impl HtmlParser {
                 } else {
                     self.table = Some(TableBuilder {
                         fragment: hcd_table_fragment(&tag.attributes)?,
+                        grid_row_offset: self.grid_row_offset,
                         hcd_grid: tag.attributes.get("class").is_some_and(|classes| {
                             classes
                                 .split_ascii_whitespace()
@@ -1079,7 +1111,8 @@ impl HtmlParser {
                     finish_table_row(table)?;
                     if table.hcd_grid {
                         let source_row =
-                            hcd_table_usize(&tag.attributes, "data-hcd-row", MAX_EXCEL_ROWS)?;
+                            hcd_table_usize(&tag.attributes, "data-hcd-row", MAX_EXCEL_ROWS)?
+                                .saturating_sub(table.grid_row_offset);
                         if source_row == 0 || source_row <= table.rows.len() {
                             return Err(HandlerError::InvalidArgument(
                                 "HCD grid rows are not strictly increasing".to_string(),
@@ -1127,6 +1160,8 @@ impl HtmlParser {
                         if let Some(reference) = tag.attributes.get("data-hcd-merge") {
                             let (start_row, start_column, end_row, end_column) =
                                 parse_xlsx_merge(reference)?;
+                            let start_row = start_row.saturating_sub(table.grid_row_offset);
+                            let end_row = end_row.saturating_sub(table.grid_row_offset);
                             let area = (end_row - start_row + 1)
                                 .checked_mul(end_column - start_column + 1)
                                 .ok_or_else(|| {
@@ -1213,6 +1248,18 @@ impl HtmlParser {
             }
             _ => {}
         }
+        if matches!(
+            tag.name.as_str(),
+            "p" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+        ) && tag.attributes.get("class").is_some_and(|classes| {
+            classes
+                .split_ascii_whitespace()
+                .any(|class| class == "hcd-editor-block")
+        }) {
+            if let Some(pending) = self.pending.as_mut() {
+                pending.word_block_id = tag.attributes.get("data-hcd-id").cloned();
+            }
+        }
         Ok(())
     }
 
@@ -1269,6 +1316,7 @@ impl HtmlParser {
                 }
             }
             "section" | "main" => {
+                self.grid_row_offset = 0;
                 self.flush_pending()?;
                 self.flush_pdf_line()?;
             }
@@ -1470,6 +1518,7 @@ impl HtmlParser {
             kind,
             text: String::new(),
             links: Vec::new(),
+            word_block_id: None,
         });
         Ok(())
     }
@@ -1496,6 +1545,7 @@ impl HtmlParser {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
                 links: Vec::new(),
+                word_block_id: None,
             });
         }
         let pending = self.pending.as_mut().expect("created pending block");
@@ -1515,7 +1565,7 @@ impl HtmlParser {
         let trim_start = trimmed.as_ptr() as usize - pending.text.as_ptr() as usize;
         let trim_end = trim_start + trimmed.len();
         let text = trimmed.to_string();
-        if text.is_empty() {
+        if text.is_empty() && pending.word_block_id.is_none() {
             return Ok(());
         }
         let block = match pending.kind {
@@ -1532,6 +1582,9 @@ impl HtmlParser {
         };
         let block_index = self.document.blocks.len();
         self.push_block(block)?;
+        if let Some(id) = pending.word_block_id {
+            self.document.word_block_ids.insert(block_index, id);
+        }
         self.document
             .links
             .extend(pending.links.into_iter().filter_map(|link| {
@@ -1658,7 +1711,11 @@ impl HtmlParser {
     }
 }
 
-fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerError> {
+fn export_docx(
+    document: &SemanticHtml,
+    output: &Path,
+    word_formats: &HashMap<String, hcd_core::EditorBlockContent>,
+) -> Result<usize, HandlerError> {
     let output = output.to_string_lossy();
     super::create::create_blank_docx(&output)?;
     let handler = WordHandler::open(&output, true)?;
@@ -1666,6 +1723,20 @@ fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
     let mut pending = Vec::new();
     let mut embedded = 0usize;
     for (block_index, block) in document.blocks.iter().enumerate() {
+        if let Some(format) = document
+            .word_block_ids
+            .get(&block_index)
+            .and_then(|id| word_formats.get(id))
+        {
+            flush_docx_markdown(
+                &handler,
+                &mut pending,
+                &document.links,
+                &document.table_links,
+            )?;
+            append_formatted_word_block(&handler, block, format)?;
+            continue;
+        }
         if let HtmlBlock::Image {
             source,
             alt,
@@ -1700,6 +1771,82 @@ fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
     )?;
     handler.save()?;
     Ok(embedded)
+}
+
+fn append_formatted_word_block(
+    handler: &WordHandler,
+    block: &HtmlBlock,
+    content: &hcd_core::EditorBlockContent,
+) -> Result<(), HandlerError> {
+    let mut paragraph = HashMap::new();
+    if let Some(alignment) = content.alignment {
+        let alignment = if alignment == hcd_core::EditorAlignment::Justify {
+            "both"
+        } else {
+            alignment.css()
+        };
+        paragraph.insert("alignment".into(), alignment.into());
+    }
+    if let HtmlBlock::Heading { level, .. } = block {
+        paragraph.insert("style".into(), format!("Heading{level}"));
+    }
+    let path = handler.add(
+        "/body",
+        "paragraph",
+        InsertPosition::Append,
+        &paragraph,
+        None,
+    )?;
+    if let HtmlBlock::ListItem {
+        ordered, ordinal, ..
+    } = block
+    {
+        let prefix = if *ordered {
+            format!("{ordinal}. ")
+        } else {
+            "• ".to_string()
+        };
+        handler.add(
+            &path,
+            "run",
+            InsertPosition::Append,
+            &HashMap::from([("text".into(), prefix)]),
+            None,
+        )?;
+    }
+    for inline in &content.inlines {
+        if inline.text.is_empty() {
+            continue;
+        }
+        let mut properties = HashMap::from([("text".into(), inline.text.clone())]);
+        if inline.bold {
+            properties.insert("bold".into(), "true".into());
+        }
+        if inline.italic {
+            properties.insert("italic".into(), "true".into());
+        }
+        if inline.format.underline {
+            properties.insert("underline".into(), "single".into());
+        }
+        if let Some(font) = &inline.format.font {
+            properties.insert("font".into(), font.clone());
+            properties.insert("font.eastAsia".into(), font.clone());
+        }
+        if let Some(size) = inline.format.size_half_points {
+            properties.insert("size".into(), (f32::from(size) / 2.0).to_string());
+        }
+        if let Some(color) = &inline.format.color {
+            properties.insert("color".into(), color.clone());
+        }
+        let kind = if let Some(link) = inline.link.as_ref().filter(|link| safe_link(link)) {
+            properties.insert("url".into(), link.clone());
+            "hyperlink"
+        } else {
+            "run"
+        };
+        handler.add(&path, kind, InsertPosition::Append, &properties, None)?;
+    }
+    Ok(())
 }
 
 fn flush_docx_markdown(
@@ -1921,7 +2068,7 @@ fn append_xlsx_row(
             } else {
                 ""
             },
-            escape_xml_text(value)?
+            escape_xml_text(value)?.replace('\r', "&#13;")
         ));
     }
     worksheet.push_str("</row>");
@@ -3056,7 +3203,11 @@ fn finish_table_cell(table: &mut TableBuilder) {
         if let Some(column) = table.cell_column.take() {
             table.row.resize(column - 1, String::new());
         }
-        table.row.push(cell.trim().to_string());
+        table.row.push(if table.hcd_grid {
+            cell
+        } else {
+            cell.trim().to_string()
+        });
     }
 }
 
@@ -3472,6 +3623,25 @@ mod tests {
         );
         assert!(xml.contains("<row r=\"3\"></row>"), "{xml}");
         assert!(xml.contains("<c r=\"A4\" t=\"inlineStr\""), "{xml}");
+    }
+
+    #[test]
+    fn semantic_xlsx_preserves_addresses_and_text_across_grid_windows() {
+        let document = parse_html(
+            r#"<section data-hcd-sheet-index="0" data-hcd-row-end="2"><table class="hcd-grid"><tr data-hcd-row="2"><td data-hcd-column="1">0017</td></tr></table></section><section data-hcd-sheet-index="0" data-hcd-row-end="5"><table class="hcd-grid"><tr data-hcd-row="4"><td data-hcd-column="2" data-hcd-merge="B4:C5" rowspan="2" colspan="2"> first&#13;&#10;second </td></tr><tr data-hcd-row="5"></tr></table></section>"#,
+        ).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("windows.xlsx");
+        export_xlsx(&document, &output).unwrap();
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), false).unwrap();
+        let xml = package.read_part_xml("xl/worksheets/sheet1.xml").unwrap();
+        assert!(xml.contains("<mergeCell ref=\"B4:C5\"/>"), "{xml}");
+        assert!(
+            xml.contains("<c r=\"A2\" t=\"inlineStr\"><is><t>0017</t>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<c r=\"B4\" t=\"inlineStr\"><is><t xml:space=\"preserve\"> first&#13;\nsecond </t>"), "{xml}");
+        assert!(!xml.contains("<row r=\"6\">"), "{xml}");
     }
 
     #[test]

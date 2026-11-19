@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto'
 import { Server } from '@hocuspocus/server'
 import { TiptapTransformer } from '@hocuspocus/transformer'
 import * as Y from 'yjs'
-import { jsonToSnapshot, projectionToJson, schemaExtensions, type Projection } from './src/schema.ts'
+import { jsonToSnapshot, projectionToJson, schemaExtensions, type BlockContent, type Projection } from './src/schema.ts'
 
 const api = process.env.HCD_API_URL || 'http://127.0.0.1:8766'
 const secret = process.env.HCD_TOKEN_SECRET || ''
@@ -95,6 +95,37 @@ function yBlocks(document: Y.Doc): Y.XmlElement[] {
   return result
 }
 
+async function loadWordState(documentId: string, state: Uint8Array): Promise<Y.Doc> {
+  type OpaqueNode = Y.XmlElement<{ hcdTable: boolean; hcdContent: BlockContent; hcdBlockId: string }>
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, state)
+  const legacy = yBlocks(doc).filter(node => node.nodeName === 'hcdOpaque')
+    .map(node => node as unknown as OpaqueNode).filter(node => node.getAttribute('hcdTable') !== true)
+  if (!legacy.length) return doc
+  const canonical = new Map((await currentProjection(documentId)).blocks.map(block => [block.blockId, block]))
+  doc.transact(() => {
+    for (const node of legacy) {
+      const block = canonical.get(String(node.getAttribute('hcdBlockId')))
+      const allowed = new Set(block?.editableTextNodeIds)
+      node.setAttribute('hcdTable', allowed.size > 0 || !!block?.editableTableLayout)
+      if (!allowed.size || !block) continue
+      node.setAttribute('hcdContent', block.content)
+      for (const inline of block.content.inlines) {
+        if (!inline.nodeId || !allowed.has(inline.nodeId)) continue
+        const run = new Y.XmlElement('hcdOpaqueRun')
+        run.setAttribute('nodeId', inline.nodeId)
+        if (inline.text) {
+          const text = new Y.XmlText()
+          text.insert(0, inline.text)
+          run.insert(0, [text])
+        }
+        node.push([run])
+      }
+    }
+  }, 'hcd-canonical-ids')
+  return doc
+}
+
 async function checkpoint(documentId: string) {
   const item = pending.get(documentId)
   if (!item || item.saving) return
@@ -165,9 +196,13 @@ const server = new Server({
   },
   async onLoadDocument({ documentName }) {
     const selected = room(documentName)
-    if (isFixed(await documentFormat(selected.documentId))) return new Y.Doc()
+    const format = await documentFormat(selected.documentId)
+    if (isFixed(format)) return new Y.Doc()
     const response = await request(selected.documentId, '/collaboration/state', {}, selected.epoch)
-    if (response.ok) return new Uint8Array(await response.arrayBuffer())
+    if (response.ok) {
+      const state = new Uint8Array(await response.arrayBuffer())
+      return format === 'docx' ? loadWordState(selected.documentId, state) : state
+    }
     if (response.status !== 404) throw new Error(`HCD collaboration load failed: ${await response.text()}`)
     const projection = await currentProjection(selected.documentId)
     return TiptapTransformer.toYdoc(projectionToJson(projection), 'default', schemaExtensions)

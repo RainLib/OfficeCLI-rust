@@ -1,6 +1,8 @@
 //! Authenticated local HCD core API. Bundles stay private under the configured root.
 //! The HTTP surface only returns decoded, verified objects requested by the client.
-use crate::commands::hdoc::{HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope};
+use crate::commands::hdoc::{
+    source_document_id, HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope, PdfPageRange,
+};
 use crate::hdoc_remote::RemoteStore;
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
@@ -13,9 +15,9 @@ use base64::Engine;
 use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, editor_projection, hash_file, manifest_at_revision,
-    project_editor, restore_revision, search_bundle, BlockPrecondition, Bundle, EditorBlockContent,
-    EditorInline, HcdError, PatchBatch, StructureOperation, StructurePatchBatch,
-    HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
+    project_editor, restore_revision, search_bundle, sort_grid, BlockPrecondition, Bundle,
+    EditorBlockContent, EditorInline, GridSortRequest, HcdError, PatchBatch, StructureOperation,
+    StructurePatchBatch, HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
@@ -136,6 +138,9 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/project", post(project))
         .route("/v1/documents/{id}/patch", post(patch))
         .route("/v1/documents/{id}/node-patch", post(node_patch))
+        .route("/v1/documents/{id}/grid-sort", post(grid_sort))
+        .route("/v1/documents/{id}/grid-filter", get(grid_filter))
+        .route("/v1/documents/{id}/pdf-layout", get(pdf_layout))
         .route("/v1/documents/{id}/checkpoints", post(checkpoint))
         .route("/v1/documents/{id}/revisions", get(revisions))
         .route("/v1/documents/{id}/revisions/{revision}", get(revision))
@@ -146,6 +151,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
         .route("/v1/documents/{id}/export/{format}", get(export_document))
+        .route(
+            "/v1/documents/{id}/export-capabilities/{format}",
+            get(export_capabilities),
+        )
         .route(
             "/v1/documents/{id}/downloads/{format}",
             post(prepare_download),
@@ -221,7 +230,18 @@ async fn import_document(
         .to_ascii_lowercase();
     if !matches!(
         extension.as_str(),
-        "docx" | "html" | "htm" | "md" | "markdown" | "txt" | "pdf" | "pptx" | "xlsx" | "hcd"
+        "docx"
+            | "html"
+            | "htm"
+            | "md"
+            | "markdown"
+            | "txt"
+            | "pdf"
+            | "pptx"
+            | "xlsx"
+            | "csv"
+            | "tsv"
+            | "hcd"
     ) {
         return Err(bad("unsupported import extension"));
     }
@@ -255,7 +275,7 @@ async fn import_document(
         return import_hcd_archive(state, temporary, job_id).await;
     }
     let hash = hash_file(&temporary).map_err(internal)?;
-    let document_id = format!("doc-{}", &hash[..32]);
+    let document_id = source_document_id(&hash, &extension);
     let sources = state.root.join("sources");
     tokio::fs::create_dir_all(&sources)
         .await
@@ -868,16 +888,98 @@ async fn node_patch(
         return Err(bad("patch document ID mismatch"));
     }
     let bundle = open(&state, &id)?;
-    let format = bundle.manifest().map_err(hcd_error)?.source.format;
-    if !matches!(format.as_str(), "pdf" | "pptx" | "xlsx") {
-        return Err(bad("node patch endpoint accepts PDF, PPTX or XLSX bundles"));
+    let manifest = bundle.manifest().map_err(hcd_error)?;
+    let format = manifest.source.format.as_str();
+    if !matches!(format, "pdf" | "pptx" | "xlsx" | "csv" | "tsv") {
+        return Err(bad(
+            "node patch endpoint accepts PDF, PPTX or spreadsheet bundles",
+        ));
     }
-    let result = apply_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
+    let base = patch.base_revision;
+    let result = if let Some(hcd_core::PatchOperation::XlsxAutoFilterSet { .. }) =
+        patch.operations.first()
+    {
+        let source = state.root.join("sources").join(format!("{id}.xlsx"));
+        let editing_bundle = bundle.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(hcd_core::PatchOperation::XlsxAutoFilterSet {
+                sheet_id,
+                filter: Some(filter),
+            }) = patch.operations.first()
+            {
+                filter.validate()?;
+                if !source.is_file() {
+                    return Err(HcdError::Unsupported(
+                        "Saved AutoFilter requires the original XLSX on this server".into(),
+                    ));
+                }
+                hcd_formats::verify_xlsx_filter_source(&source, &manifest, sheet_id, filter)?;
+            }
+            apply_patch(&editing_bundle, &patch, base)
+        })
+        .await
+        .map_err(internal)?
+        .map_err(hcd_error)?
+    } else {
+        apply_patch(&bundle, &patch, base).map_err(hcd_error)?
+    };
     if !result.idempotent_replay {
         stamp_revision_author(&bundle, result.revision, &actor)?;
-        publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
+        publish_mutation(&state, &id, &bundle, base).await?;
     }
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GridFilterQuery {
+    sheet_id: String,
+    revision: u64,
+}
+
+async fn grid_filter(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<GridFilterQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Option<hcd_core::GridFilterView>>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let view = tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest()?;
+        let (manifest, _) = manifest_at_revision(&bundle, &head, Some(query.revision))?;
+        hcd_core::worksheet_filter(&bundle, &manifest, &query.sheet_id)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
+    Ok(Json(view))
+}
+
+async fn grid_sort(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<GridSortRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    let base = request.base_revision;
+    let sort_bundle = bundle.clone();
+    let sorted = tokio::task::spawn_blocking(move || sort_grid(&sort_bundle, request))
+        .await
+        .map_err(internal)?
+        .map_err(hcd_error)?;
+    let Some(result) = sorted else {
+        return Ok(Json(json!({ "revision": base, "changed": false })));
+    };
+    if !result.idempotent_replay {
+        stamp_revision_author(&bundle, result.revision, &actor)?;
+        publish_mutation(&state, &id, &bundle, base).await?;
+    }
+    Ok(Json(
+        json!({ "revision": result.revision, "changed": true }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -905,6 +1007,7 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
             if previous.bold == inline.bold
                 && previous.italic == inline.italic
                 && previous.link == inline.link
+                && previous.format == inline.format
             {
                 previous.text.push_str(&inline.text);
                 continue;
@@ -953,6 +1056,7 @@ async fn checkpoint(
                     return Err(bad("duplicate block ID in snapshot"));
                 }
                 if original.read_only
+                    && original.editable_text_node_ids.is_empty()
                     && normalized(block.content.clone()) != normalized(original.content.clone())
                 {
                     return Err(bad("read-only block was changed"));
@@ -1017,9 +1121,17 @@ async fn checkpoint(
         let Some(original) = existing.get(block_id) else {
             continue;
         };
-        let desired = normalized(block.content.clone());
-        if desired != normalized(original.content.clone()) {
-            if original.read_only {
+        let editable_table = !original.editable_text_node_ids.is_empty();
+        let (desired, before) = if editable_table {
+            (block.content.clone(), original.content.clone())
+        } else {
+            (
+                normalized(block.content.clone()),
+                normalized(original.content.clone()),
+            )
+        };
+        if desired != before {
+            if original.read_only && !editable_table {
                 return Err(bad("read-only block cannot be replaced"));
             }
             operations.push(StructureOperation::Replace {
@@ -1161,6 +1273,32 @@ async fn publish_mutation(
     Ok(())
 }
 
+async fn pdf_layout(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest().map_err(internal)?;
+        let (manifest, revision) =
+            manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+        let pages = hcd_core::pdf_page_layout(&bundle, &manifest).map_err(bad)?;
+        let page_count = if pages.is_empty() {
+            hcd_core::pdf_page_count(&bundle, &manifest).map_err(bad)?
+        } else {
+            pages.len()
+        };
+        Ok(Json(
+            json!({"revision": revision, "pageCount": page_count, "pages": pages}),
+        ))
+    })
+    .await
+    .map_err(internal)?
+}
+
 async fn index_page(
     State(state): State<ServerState>,
     Path((id, page)): Path<(String, usize)>,
@@ -1288,10 +1426,135 @@ async fn styles(
         .into_response())
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ExportQuery {
     revision: Option<u64>,
     source: Option<bool>,
+    #[serde(rename = "pdfPages")]
+    pdf_pages: Option<String>,
+    sheet: Option<String>,
+}
+
+fn checked_export_range(
+    format: &str,
+    source_format: &str,
+    query: &ExportQuery,
+) -> Result<Option<PdfPageRange>, ApiError> {
+    if !matches!(
+        format,
+        "docx" | "xlsx" | "csv" | "tsv" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
+    ) {
+        return Err(bad("unsupported export format"));
+    }
+    if matches!(format, "csv" | "tsv") && !matches!(source_format, "xlsx" | "csv" | "tsv") {
+        return Err(bad("CSV and TSV export require a spreadsheet"));
+    }
+    if let Some(sheet) = &query.sheet {
+        if !matches!(format, "csv" | "tsv") {
+            return Err(bad("sheet requires CSV or TSV output"));
+        }
+        if sheet.is_empty() || sheet.len() > 124 {
+            return Err(bad("invalid worksheet name"));
+        }
+    }
+    let Some(pages) = query.pdf_pages.as_deref() else {
+        return Ok(None);
+    };
+    if format != "pdf" || source_format != "pdf" {
+        return Err(bad("pdfPages requires PDF-to-PDF export"));
+    }
+    pages.parse().map(Some).map_err(bad)
+}
+
+fn export_filename(id: &str, revision: u64, format: &str, range: Option<PdfPageRange>) -> String {
+    let suffix = range.map_or_else(String::new, |range| {
+        format!("-pages-{}-{}", range.start, range.end)
+    });
+    format!("{id}-r{revision}{suffix}.{format}")
+}
+
+fn download_selection(
+    bundle: &Bundle,
+    head: &hcd_core::HcdManifest,
+    format: &str,
+    query: &ExportQuery,
+) -> Result<(u64, Option<PdfPageRange>), ApiError> {
+    let revision = query.revision.unwrap_or(head.revision);
+    if revision > head.revision {
+        return Err(bad("revision ahead of head"));
+    }
+    if format == "hcd" && revision != head.revision {
+        return Err(bad(
+            "portable HCD includes history through the current revision",
+        ));
+    }
+    let range = checked_export_range(format, &head.source.format, query)?;
+    if let Some(range) = range {
+        let (manifest, _) = manifest_at_revision(bundle, head, Some(revision)).map_err(bad)?;
+        let pages = hcd_core::pdf_page_layout(bundle, &manifest).map_err(bad)?;
+        let page_count = if pages.is_empty() {
+            hcd_core::pdf_page_count(bundle, &manifest).map_err(bad)?
+        } else {
+            pages.len()
+        };
+        if range.end > page_count {
+            return Err(bad(format!(
+                "PDF page range exceeds the {page_count}-page revision"
+            )));
+        }
+    }
+    Ok((revision, range))
+}
+
+fn check_source_download(
+    bundle: &Bundle,
+    head: &hcd_core::HcdManifest,
+    source: &std::path::Path,
+    format: &str,
+    revision: u64,
+    range: Option<PdfPageRange>,
+) -> Result<(), HcdError> {
+    if format != head.source.format {
+        return Err(HcdError::Unsupported(
+            "Source-backed export requires the original format".into(),
+        ));
+    }
+    if !source.is_file() {
+        return Err(HcdError::Unsupported(
+            "The original file is unavailable for source-backed export".into(),
+        ));
+    }
+    match format {
+        "docx" => hcd_formats::validate_docx_source_export(bundle, source, revision),
+        "pdf" => hcd_formats::validate_pdf_source_export(
+            bundle,
+            source,
+            revision,
+            range.map(|pages| pages.start..=pages.end),
+        ),
+        _ => Err(HcdError::Unsupported(
+            "Source export preflight supports DOCX and PDF".into(),
+        )),
+    }
+}
+
+async fn export_capabilities(
+    State(state): State<ServerState>,
+    Path((id, format)): Path<(String, String)>,
+    Query(query): Query<ExportQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest().map_err(internal)?;
+        let (revision, range) = download_selection(&bundle, &head, &format, &query)?;
+        let source = state.root.join("sources").join(format!("{id}.{format}"));
+        let native = check_source_download(&bundle, &head, &source, &format, revision, range);
+        Ok(Json(json!({ "revision": revision,
+            "source": { "available": native.is_ok(), "reason": native.err().map(|error| error.to_string()) }
+        })))
+    }).await.map_err(internal)?
 }
 
 async fn prepare_download(
@@ -1302,22 +1565,21 @@ async fn prepare_download(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    let head = bundle.manifest().map_err(internal)?;
-    let revision = query.revision.unwrap_or(head.revision);
-    if revision > head.revision {
-        return Err(bad("revision ahead of head"));
-    }
-    if format == "hcd" && revision != head.revision {
-        return Err(bad(
-            "portable HCD includes history through the current revision",
-        ));
-    }
-    if !matches!(
-        format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
-    ) {
-        return Err(bad("unsupported export format"));
-    }
+    let checked_query = query.clone();
+    let checked_format = format.clone();
+    let source = state.root.join("sources").join(format!("{id}.{format}"));
+    let (revision, range) = tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest().map_err(internal)?;
+        let (revision, range) =
+            download_selection(&bundle, &head, &checked_format, &checked_query)?;
+        if checked_query.source == Some(true) && matches!(checked_format.as_str(), "docx" | "pdf") {
+            check_source_download(&bundle, &head, &source, &checked_format, revision, range)
+                .map_err(hcd_error)?;
+        }
+        Ok::<_, ApiError>((revision, range))
+    })
+    .await
+    .map_err(internal)??;
     let ticket = uuid::Uuid::new_v4().to_string();
     let mut downloads = state.downloads.lock().await;
     downloads.retain(|_, item| item.expires_at > Instant::now());
@@ -1334,14 +1596,14 @@ async fn prepare_download(
             format: format.clone(),
             query: ExportQuery {
                 revision: Some(revision),
-                source: query.source,
+                ..query
             },
             expires_at: Instant::now() + Duration::from_secs(300),
         },
     );
     Ok(Json(json!({
         "url": format!("/v1/downloads/{ticket}"),
-        "filename": format!("{id}-r{revision}.{format}"),
+        "filename": export_filename(&id, revision, &format, range),
     })))
 }
 
@@ -1424,15 +1686,12 @@ async fn export_document_inner(
             "portable HCD includes history through the current revision",
         ));
     }
-    if !matches!(
-        format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
-    ) {
-        return Err(bad("unsupported export format"));
-    }
+    let range = checked_export_range(&format, &head.source.format, &query)?;
     let mime = match format.as_str() {
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "csv" => "text/csv; charset=utf-8",
+        "tsv" => "text/tab-separated-values; charset=utf-8",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "pdf" => "application/pdf",
         "hcd" => "application/zip",
@@ -1540,6 +1799,14 @@ async fn export_document_inner(
             .arg(&output)
             .arg("--revision")
             .arg(requested.to_string());
+        if let Some(range) = range {
+            command
+                .arg("--pdf-pages")
+                .arg(format!("{}-{}", range.start, range.end));
+        }
+        if let Some(sheet) = &query.sheet {
+            command.arg(format!("--sheet={sheet}"));
+        }
         if query.source.unwrap_or(false) {
             let source = state
                 .root
@@ -1569,9 +1836,12 @@ async fn export_document_inner(
         .insert(header::CONTENT_TYPE, mime.parse().map_err(internal)?);
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{id}-r{requested}.{format}\"")
-            .parse()
-            .map_err(internal)?,
+        format!(
+            "attachment; filename=\"{}\"",
+            export_filename(&id, requested, &format, range)
+        )
+        .parse()
+        .map_err(internal)?,
     );
     response
         .headers_mut()

@@ -14,6 +14,10 @@ import { ErrorToast } from './ErrorToast.tsx'
 
 type Manifest = { chunkCount: number; indexPageCount: number; revision: number; source: { format: string } }
 type Descriptor = { sequence: number; chunkId: string; region: string; continuation: boolean }
+type PdfPagePlacement = { sourcePage?: number; rotation: number }
+type PdfLayout = { revision: number; pageCount: number; pages: PdfPagePlacement[] }
+type PdfPageAction = { kind: 'move'; step: -1 | 1 } | { kind: 'rotate'; degrees: -90 | 90 } | { kind: 'insert' | 'delete' }
+type VisibleChunk = { id: string; chunk: Descriptor | null; position: number; rotation: number }
 type PptxGeometry = { xEmu: number; yEmu: number; widthEmu: number; heightEmu: number }
 type PdfGeometry = { xPt: number; yPt: number; widthPt: number; heightPt: number }
 type TextNode = { nodeId: string; nodeHash: string; text: string; editable: boolean; createdInHcd?: boolean; left?: string; top?: string; width?: string; height?: string; geometry?: PptxGeometry; pdfGeometry?: PdfGeometry; fontSize?: string; fontFamily?: string; fontWeight?: string; fontStyle?: string; color?: string; lineHeight?: string }
@@ -45,6 +49,15 @@ function mergeDescriptors(previous: Descriptor[], incoming: Descriptor[]): Descr
     .sort((left, right) => left.sequence - right.sequence)
 }
 
+function revealChunk(pages: HTMLElement | null, id: string, block: 'start' | 'center', behavior: ScrollBehavior) {
+  const scroll = pages?.parentElement
+  const page = pages?.querySelector<HTMLElement>(`#${id}`)
+  if (!scroll || !page) return
+  const box = page.getBoundingClientRect()
+  const offset = block === 'center' ? (scroll.clientHeight - box.height) / 2 : 0
+  scroll.scrollTo({ top: scroll.scrollTop + box.top - scroll.getBoundingClientRect().top - offset, behavior })
+}
+
 export function FixedViewer({ session, onClose, embedded }: { session: Session; onClose: () => void; embedded: boolean }) {
   const { locale } = useI18n()
   const [manifest, setManifest] = useState<Manifest | null>(null)
@@ -52,6 +65,8 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [historyBusy, setHistoryBusy] = useState(false)
   const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
   const [descriptors, setDescriptors] = useState<Descriptor[]>([])
+  const [pdfLayout, setPdfLayout] = useState<PdfLayout | null>(null)
+  const [pdfPageInput, setPdfPageInput] = useState('1')
   const [style, setStyle] = useState('')
   const [loadedPages, setLoadedPages] = useState(0)
   const [slideHeight, setSlideHeight] = useState(720)
@@ -77,6 +92,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const [searchTarget, setSearchTarget] = useState<SearchHit | null>(null)
   const tail = useRef<HTMLDivElement>(null)
   const pagesRef = useRef<HTMLElement>(null)
+  const organizedPage = useRef<number | null>(null)
   const collaborationSession = useMemo(() => ({ ...session, collaborationEpoch }), [session, collaborationEpoch])
   function recordEdit(nextRevision: number, label: string) {
     setEditHistory(previous => ({ head: nextRevision,
@@ -113,6 +129,27 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   }, [remoteRevision, saving, historyBusy, selected, newBox, viewRevision, manifest?.revision])
   useEffect(() => { saveLayout(layout, layoutScope) }, [layout, layoutScope])
   const displayedRevision = viewRevision ?? manifest?.revision ?? null
+  const activePdfLayout = pdfLayout?.revision === displayedRevision ? pdfLayout : null
+  const hasPdfOrder = !!pdfLayout?.pages.length
+  const orderedChunks = useMemo(() => {
+    const slots = pdfLayout?.pages ?? []
+    const pdfOrder = new Map(slots.map((page, index) => [page.sourcePage, { position: index + 1, rotation: page.rotation }]))
+    let sourcePage = 0
+    const result: VisibleChunk[] = []
+    for (const chunk of descriptors) {
+      if (!chunk.continuation) sourcePage += 1
+      const placement = pdfOrder.get(sourcePage)
+      if (hasPdfOrder && !placement) continue
+      result.push({ id: `hcd-page-${chunk.sequence}`, chunk, position: placement?.position ?? sourcePage, rotation: placement?.rotation ?? 0 })
+    }
+    slots.forEach((page, index) => {
+      if (page.sourcePage === undefined) result.push({ id: `hcd-blank-${index + 1}`, chunk: null, position: index + 1, rotation: page.rotation })
+    })
+    if (hasPdfOrder) result.sort((left, right) => left.position - right.position)
+    return result
+  }, [descriptors, pdfLayout, hasPdfOrder])
+  const outline = orderedChunks.filter(({ chunk }) => session.format !== 'pdf' || !chunk?.continuation)
+  const loadingPdfOrder = session.format === 'pdf' && (!pdfLayout || (hasPdfOrder && loadedPages < (manifest?.indexPageCount ?? 0)))
   const historical = viewRevision !== null && viewRevision !== manifest?.revision
   const draftDirty = (selected && draft !== selected.node.text) || (newBox && !!newDraft.trim())
   const status = saving || historyBusy ? '保存中' : historical ? '历史只读' : remoteRevision ? '有新修订' : readOnly ? '只读' : draftDirty ? '编辑中' : '已保存'
@@ -121,6 +158,72 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const canUndoSaved = !draftDirty && editHistory.head === manifest?.revision && editHistory.past.length > 0
   const canRedoSaved = !draftDirty && editHistory.head === manifest?.revision && editHistory.future.length > 0
   const historyLocked = readOnly || historical || saving || historyBusy
+  const controlledPage = Number(pdfPageInput)
+  const organizationLocked = historyLocked || !!draftDirty || !activePdfLayout || loadingPdfOrder
+    || !Number.isInteger(controlledPage) || controlledPage < 1 || controlledPage > activePdfLayout.pageCount
+  useEffect(() => {
+    const count = activePdfLayout?.pageCount
+    if (count) setPdfPageInput(previous => Number(previous) > count ? String(count) : previous)
+  }, [activePdfLayout?.pageCount])
+  async function organizePdfPage(action: PdfPageAction) {
+    if (organizationLocked || !activePdfLayout || !manifest) return
+    const index = controlledPage - 1
+    const previous: PdfPagePlacement[] = activePdfLayout.pages.length ? activePdfLayout.pages :
+      Array.from({ length: activePdfLayout.pageCount }, (_, position) => ({ sourcePage: position + 1, rotation: 0 }))
+    const pages = [...previous]
+    let target = index
+    let label: string
+    switch (action.kind) {
+      case 'insert':
+        if (pages.length >= 100000) return
+        target = index + 1
+        pages.splice(target, 0, { rotation: 0 })
+        label = '插入 PDF 空白页'
+        break
+      case 'delete':
+        if (pages.length <= 1) return
+        pages.splice(index, 1)
+        target = Math.min(index, pages.length - 1)
+        label = '删除 PDF 页面'
+        break
+      case 'move': {
+        target = index + action.step
+        if (target < 0 || target >= pages.length) return
+        const [page] = pages.splice(index, 1)
+        pages.splice(target, 0, page)
+        if (previous[target].sourcePage === page.sourcePage && previous[target].rotation === page.rotation) return
+        label = '移动 PDF 页面'
+        break
+      }
+      case 'rotate':
+        pages[index] = { ...pages[index], rotation: (pages[index].rotation + action.degrees + 360) % 360 }
+        label = '旋转 PDF 页面'
+        break
+    }
+    setSaving(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/32', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: manifest.revision,
+          actor: { client: 'officecli-hcd-fixed-editor' }, metadata: {},
+          operations: [{ op: 'pdf.page-layout.set', pages }] }),
+      })
+      const { revision } = await response.json() as { revision: number }
+      recordEdit(revision, label)
+      organizedPage.current = target + 1
+      setPdfLayout({ revision, pageCount: pages.length, pages })
+      setPdfPageInput(String(target + 1))
+      setSelected(null)
+      setNewBox(null)
+      setPlacingText(false)
+      setSearchTarget(null)
+      setManifest(previous => previous && ({ ...previous, revision }))
+      collaboration.announceRevision(revision)
+    } catch (cause) { setError(String(cause)) }
+    finally { setSaving(false) }
+  }
   async function travelHistory(direction: 'undo' | 'redo') {
     const steps = direction === 'undo' ? editHistory.past : editHistory.future
     const head = manifest?.revision
@@ -170,6 +273,15 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     if (direction === 'redo' && canRedoDraft) { redo(activeEditor!.state, activeEditor!.view.dispatch); return }
     void travelHistory(direction)
   }
+  useEffect(() => {
+    if (session.format !== 'pdf' || displayedRevision === null) return
+    const controller = new AbortController()
+    api(session, `/pdf-layout?revision=${displayedRevision}`, { signal: controller.signal })
+      .then(response => response.json() as Promise<PdfLayout>)
+      .then(result => { if (!controller.signal.aborted) setPdfLayout(result) })
+      .catch(cause => { if (!controller.signal.aborted) setError(String(cause)) })
+    return () => controller.abort()
+  }, [session, displayedRevision])
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return
@@ -221,6 +333,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   useEffect(() => {
     setDescriptors([])
     setLoadedPages(0)
+    setPdfLayout(null)
     setSearchTarget(null)
     setSelected(null)
     setNewBox(null)
@@ -231,25 +344,42 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     const marker = tail.current
     if (!marker) return
     let live = true
+    const load = (limit: number) => {
+      const count = Math.min(limit, manifest.indexPageCount - loadedPages)
+      void Promise.all(Array.from({ length: count }, (_, offset) =>
+        api(session, `/index/${loadedPages + offset}${viewRevision === null ? '' : `?revision=${viewRevision}`}`)
+          .then(response => response.json() as Promise<{ chunks: Descriptor[] }>)))
+        .then(indexes => {
+          if (!live) return
+          setDescriptors(previous => mergeDescriptors(previous, indexes.flatMap(index => index.chunks)))
+          setLoadedPages(previous => Math.max(previous, loadedPages + count))
+        }).catch(cause => { if (live) setError(String(cause)) })
+    }
+    if (hasPdfOrder) {
+      load(4)
+      return () => { live = false }
+    }
     const observer = new IntersectionObserver(entries => {
       if (!entries[0].isIntersecting) return
       observer.disconnect()
-      const page = loadedPages
-      void api(session, `/index/${page}${viewRevision === null ? '' : `?revision=${viewRevision}`}`).then(response => response.json())
-        .then((index: { chunks: Descriptor[] }) => {
-          if (!live) return
-          setDescriptors(previous => mergeDescriptors(previous, index.chunks))
-          setLoadedPages(previous => Math.max(previous, page + 1))
-        }).catch(cause => { if (live) setError(String(cause)) })
+      load(1)
     }, { rootMargin: '1600px' })
     observer.observe(marker)
     return () => { live = false; observer.disconnect() }
-  }, [session, manifest, loadedPages, descriptors, viewRevision])
+  }, [session, manifest, loadedPages, viewRevision, hasPdfOrder])
+  useEffect(() => {
+    if (loadingPdfOrder || organizedPage.current === null) return
+    const page = orderedChunks.find(({ chunk, position }) => !chunk?.continuation && position === organizedPage.current)
+    if (!page) return
+    organizedPage.current = null
+    revealChunk(pagesRef.current, page.id, 'start', 'auto')
+  }, [loadingPdfOrder, orderedChunks])
   useEffect(() => {
     if (!searchTarget || !descriptors.some(item => item.sequence === searchTarget.chunkSequence)) return
-    requestAnimationFrame(() => document.getElementById(`hcd-page-${searchTarget.chunkSequence}`)
-      ?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
-  }, [searchTarget, descriptors])
+    if (loadingPdfOrder) return
+    const frame = requestAnimationFrame(() => revealChunk(pagesRef.current, `hcd-page-${searchTarget.chunkSequence}`, 'center', 'smooth'))
+    return () => cancelAnimationFrame(frame)
+  }, [searchTarget, descriptors, loadingPdfOrder])
   async function searchContent(query: string): Promise<SearchResult> {
     const params = new URLSearchParams({ q: query })
     if (viewRevision !== null) params.set('revision', String(viewRevision))
@@ -445,6 +575,17 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
       {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div><span className="ribbon-note">{localizeDynamic(locale, session.format === 'pptx' ? '点击文字原位编辑 · 选中后拖动顶部把手移动、右下角调整尺寸' : session.format === 'pdf' ? '点击文字原位编辑 · 新增文字框可拖动和调整尺寸 · ⌘/Ctrl + Enter 保存' : '点击页面文字即可原位编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消')}</span></>}
       {activeTab === 'insert' && <><button className={placingText ? 'primary' : ''} disabled={!['pdf', 'pptx'].includes(session.format) || readOnly || historical || saving || historyBusy} onClick={() => void togglePlacement()}>{placingText ? '取消放置' : '新增文字框'}</button><span className="ribbon-note">{placingText ? '点击页面空白处放置文字框' : '新增文字框保留页面布局'}</span></>}
+      {activeTab === 'view' && session.format === 'pdf' && <div className="tool-group pdf-page-organizer" role="group" aria-label={localizeSource(locale, '页面组织')}>
+        <label><LocalText source="页面组织" /> <input type="number" min="1" max={activePdfLayout?.pageCount} value={pdfPageInput}
+          aria-label={localizeSource(locale, '要调整的页码')} onChange={event => setPdfPageInput(event.target.value)} /></label>
+        <button disabled={organizationLocked || controlledPage <= 1} onClick={() => void organizePdfPage({ kind: 'move', step: -1 })}><LocalText source="上移一页" /></button>
+        <button disabled={organizationLocked || controlledPage >= (activePdfLayout?.pageCount ?? 0)} onClick={() => void organizePdfPage({ kind: 'move', step: 1 })}><LocalText source="下移一页" /></button>
+        <button disabled={organizationLocked} onClick={() => void organizePdfPage({ kind: 'rotate', degrees: -90 })}><LocalText source="向左旋转" /></button>
+        <button disabled={organizationLocked} onClick={() => void organizePdfPage({ kind: 'rotate', degrees: 90 })}><LocalText source="向右旋转" /></button>
+        <button disabled={organizationLocked || (activePdfLayout?.pageCount ?? 0) >= 100000} onClick={() => void organizePdfPage({ kind: 'insert' })}><LocalText source="在后面插入空白页" /></button>
+        <button disabled={organizationLocked || (activePdfLayout?.pageCount ?? 0) <= 1} onClick={() => void organizePdfPage({ kind: 'delete' })}><LocalText source="删除本页" /></button>
+      </div>}
+      {activeTab === 'view' && activePdfLayout?.pages[controlledPage - 1]?.sourcePage !== undefined && !!activePdfLayout?.pages[controlledPage - 1]?.rotation && <span className="ribbon-note"><LocalText source="旋转后的页面可预览和导出。恢复原方向后可编辑页面文字。" /></span>}
       {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示页面目录"} /></label><label className="mode"><input type="checkbox" checked={readOnly || historical} disabled={session.scope === 'read' || historical} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><button disabled={historyLocked || !canUndoSaved} onClick={() => travel('undo')}><LocalText source={"撤销 "} />{editHistory.past.length} <LocalText source={" 步"} /></button><button disabled={historyLocked || !canRedoSaved} onClick={() => travel('redo')}><LocalText source={"重做 "} />{editHistory.future.length} <LocalText source={" 步"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{manifest?.revision ?? '…'} · {editHistory.past.length ? `下一步可撤销：${editHistory.past.at(-1)?.label}` : '当前会话无已保存的可撤销步骤'}</span></>}
       {selected && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || draft === selected.node.text} onClick={() => void saveText(selected.node, draft)}><LocalText source={"保存修改"} /></button>}
@@ -453,8 +594,16 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {newBox && !readOnly && !historical && <button className="primary save-trigger" disabled={saving || !newDraft.trim()} onClick={() => void saveNewBox(newBox, newDraft)}><LocalText source={"保存新增文字"} /></button>}
     </nav>}
     <div className="layout editor-layout">
-      {layout.showOutline && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{descriptors.map(chunk => <button key={chunk.sequence} onClick={() => document.getElementById(`hcd-page-${chunk.sequence}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${chunk.sequence + 1}` : `第 ${chunk.sequence + 1} 页`)}</button>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
-      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`}>{descriptors.map(chunk => <LazyChunk key={`${viewRevision ?? 'head'}:${chunk.sequence}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />)}<div ref={tail} className="load-tail" /></main></div>
+      {layout.showOutline && <aside className="outline-panel" aria-label={localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}><div className="panel-head"><h2>☷ {localizeDynamic(locale, session.format === 'pptx' ? '幻灯片目录' : '页面目录')}</h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏页面目录")} onClick={() => setLayoutOption('showOutline', false)}>×</button></div><nav>{!loadingPdfOrder && outline.map(({ id, chunk, position }) => <button key={id} aria-current={session.format === 'pdf' && position === controlledPage ? 'page' : undefined} onClick={() => {
+        if (session.format === 'pdf') setPdfPageInput(String(position))
+        revealChunk(pagesRef.current, id, 'start', 'smooth')
+      }}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${position}` : `第 ${position} 页`)}{!chunk && <> · <LocalText source="空白页" /></>}</button>)}</nav><small><LocalText source={"已索引 "} />{descriptors.length} / {manifest?.chunkCount ?? '…'} <LocalText source={" 个分片"} /></small></aside>}
+      <div className="document-scroll"><main ref={pagesRef} className={`fixed-pages ${session.format === 'pptx' ? 'pptx-pages' : ''}`} aria-busy={loadingPdfOrder}>
+        {loadingPdfOrder && <p className="ribbon-note" role="status"><LocalText source="正在加载页序" /></p>}
+        {!loadingPdfOrder && orderedChunks.map(({ id, chunk, rotation }) => chunk ? <LazyChunk key={`${viewRevision ?? 'head'}:${id}`} session={session} descriptor={chunk} revision={viewRevision} stylesheet={style} readOnly={readOnly || historical || rotation !== 0} rotation={rotation} selected={selected?.page === chunk.sequence ? selected.node : null} highlightNodeId={searchTarget?.chunkSequence === chunk.sequence ? searchTarget.nodeId : null} draft={draft} newBox={newBox} newDraft={newDraft} placingText={placingText} saving={saving} refresh={refresh} placeholderHeight={session.format === 'pptx' ? slideHeight : 900} availableWidth={stageWidth} onMeasureHeight={setSlideHeight} onSelect={node => void select({ node, page: chunk.sequence })} onDraft={setDraft} onEditorReady={setActiveEditor} onSave={(node, value) => void saveText(node, value)} onGeometry={saveGeometry} onPptxDelete={node => void deletePptxText(node)} onPdfGeometry={savePdfGeometry} onPdfDelete={node => void deletePdfText(node)} onCancel={() => setSelected(null)} onPlace={placeText} onNewDraft={setNewDraft} onSaveNew={(box, value) => void saveNewBox(box, value)} onCancelNew={() => setNewBox(null)} />
+          : <BlankPdfPage key={id} id={id} rotation={rotation} />)}
+        <div ref={tail} className="load-tail" />
+      </main></div>
       {rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>
         {rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div><LocaleSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示页面目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="fixed-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="fixed-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => setRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}>×</button></div>
@@ -470,8 +619,16 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   </div>
 }
 
+function BlankPdfPage({ id, rotation }: { id: string; rotation: number }) {
+  const { locale } = useI18n()
+  const landscape = rotation === 90 || rotation === 270
+  return <div id={id} className="fixed-page pdf-blank-page" role="img" aria-label={localizeSource(locale, '空白页')}
+    style={{ width: landscape ? '297mm' : '210mm', height: landscape ? '210mm' : '297mm' }} />
+}
+
 type LazyChunkProps = {
   session: Session; descriptor: Descriptor; revision: number | null; stylesheet: string; readOnly: boolean
+  rotation: number
   selected: TextNode | null; highlightNodeId: string | null; draft: string; newBox: NewTextBox | null; newDraft: string; placingText: boolean
   saving: boolean; refresh: number; placeholderHeight: number; availableWidth: number; onMeasureHeight: (height: number) => void
   onSelect: (node: TextNode) => void; onDraft: (value: string) => void
@@ -484,7 +641,7 @@ type LazyChunkProps = {
   onSaveNew: (box: NewTextBox, value: string) => void; onCancelNew: () => void
 }
 
-function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, selected, highlightNodeId, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPptxDelete, onPdfGeometry, onPdfDelete, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
+function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, rotation, selected, highlightNodeId, draft, newBox, newDraft, placingText, saving, refresh, placeholderHeight, availableWidth, onMeasureHeight, onSelect, onDraft, onEditorReady, onSave, onGeometry, onPptxDelete, onPdfGeometry, onPdfDelete, onCancel, onPlace, onNewDraft, onSaveNew, onCancelNew }: LazyChunkProps) {
   const { locale } = useI18n()
   const [active, setActive] = useState(false)
   const [srcDoc, setSrcDoc] = useState('')
@@ -786,11 +943,18 @@ function LazyChunk({ session, descriptor, revision, stylesheet, readOnly, select
   }
   // Fixed-page editors need same-origin DOM access for the portal; scripts stay disabled.
   const frameSandbox = ['pdf', 'pptx'].includes(session.format) ? 'allow-same-origin' : ''
-  const scaledWidth = session.format === 'pptx' && sourceWidth > 0 ? Math.ceil(sourceWidth * zoom) : undefined
-  const scaledHeight = session.format === 'pptx' ? Math.ceil(frameHeight * zoom) : frameHeight
-  return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? scaledHeight : placeholderHeight, width: session.format === 'pptx' && srcDoc ? scaledWidth : session.format === 'pdf' && srcDoc ? canvasWidth : undefined }}>
+  const pdfWidth = canvasWidth.endsWith('pt') ? sourceWidth * 4 / 3 : sourceWidth
+  const quarterTurn = rotation === 90 || rotation === 270
+  const scaledWidth = session.format === 'pptx' && sourceWidth > 0 ? Math.ceil(sourceWidth * zoom)
+    : session.format === 'pdf' ? (quarterTurn ? frameHeight : canvasWidth) : undefined
+  const scaledHeight = session.format === 'pptx' ? Math.ceil(frameHeight * zoom) : quarterTurn ? pdfWidth : frameHeight
+  const pageShift = rotation === 90 ? `translateX(${frameHeight}px)` : rotation === 180
+    ? `translate(${pdfWidth}px, ${frameHeight}px)` : `translateY(${pdfWidth}px)`
+  const transform = session.format === 'pptx' ? `scale(${zoom})` : rotation ? `${pageShift} rotate(${rotation}deg)` : undefined
+  const layerWidth = session.format === 'pptx' || rotation ? canvasWidth : '100%'
+  return <div ref={marker} id={`hcd-page-${descriptor.sequence}`} className="fixed-page" style={{ minHeight: srcDoc ? scaledHeight : placeholderHeight, width: srcDoc ? scaledWidth : undefined }}>
     <div className="fixed-canvas-slot" style={{ height: srcDoc ? scaledHeight : placeholderHeight }}>
-    <div className="fixed-canvas-layer" style={{ width: session.format === 'pptx' && srcDoc ? canvasWidth : '100%', height: srcDoc ? frameHeight : placeholderHeight, transform: session.format === 'pptx' && srcDoc ? `scale(${zoom})` : undefined }}>
+    <div className="fixed-canvas-layer" style={{ width: srcDoc ? layerWidth : '100%', height: srcDoc ? frameHeight : placeholderHeight, transform: srcDoc ? transform : undefined }}>
     {srcDoc ? <iframe ref={frame} sandbox={frameSandbox} title={localizeDynamic(locale, `HCD 分片 ${descriptor.sequence + 1}`)} srcDoc={srcDoc} loading="lazy" referrerPolicy="no-referrer" style={{ height: frameHeight, width: session.format === 'pptx' ? canvasWidth : undefined }} onLoad={() => { setFrameLocale(); findDirectTarget(); highlightSearchTarget() }} />
       : <div className="skeleton" style={{ minHeight: placeholderHeight }}>{localizeDynamic(locale, session.format === 'pptx' ? `幻灯片 ${descriptor.sequence + 1}` : `第 ${descriptor.sequence + 1} 个分片`)}</div>}
     {!readOnly && ['pdf', 'pptx'].includes(session.format) && selected && directTarget && createPortal(<div className="hcd-direct-editor"><FixedTextBoxEditor key={selected.nodeId} text={draft} disabled={saving} onChange={onDraft} onReady={onEditorReady} autoFocus={session.format === 'pptx' ? 'start' : true} onSave={value => onSave(selected, value)} onCancel={onCancel} /></div>, directTarget)}

@@ -308,12 +308,16 @@ pub fn build_run_properties(props: &std::collections::HashMap<String, String>) -
                 }
             }
             "font" | "fontFamily" | "font.name" => {
-                children.push(
-                    WordNode::new(WordElementType::Unknown("rFonts".to_string()))
-                        .with_attribute("ascii", value.as_str())
-                        .with_attribute("hAnsi", value.as_str())
-                        .with_attribute("cs", value.as_str()),
-                );
+                let mut entry = WordNode::new(WordElementType::Unknown("rFonts".to_string()))
+                    .with_attribute("ascii", value.as_str())
+                    .with_attribute("hAnsi", value.as_str())
+                    .with_attribute("cs", value.as_str());
+                if let Some(east_asia) = props.get("font.eastAsia") {
+                    entry
+                        .attributes
+                        .insert("eastAsia".into(), east_asia.clone());
+                }
+                children.push(entry);
             }
             "size" | "fontSize" | "font.size" => {
                 let half_points = if let Ok(pt) = value.parse::<f32>() {

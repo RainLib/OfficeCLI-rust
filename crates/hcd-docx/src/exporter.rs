@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+mod checkpoint;
+mod table_layout;
+
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
     pub revision: Option<u64>,
@@ -38,31 +41,30 @@ pub fn export_docx(
     }
     let source = source.as_ref();
     let target = target.as_ref();
-    let actual_source_hash = hash_file(source)?;
-    if actual_source_hash != head.source.sha256 {
-        return Err(HcdError::SourceMismatch(format!(
-            "expected source {}, actual {actual_source_hash}",
-            head.source.sha256
-        )));
+    let mut edits = source_replacements(&bundle, &head, source, revision)?;
+    if !edits.tables.is_empty() {
+        edits.text.entry("word/document.xml".into()).or_default();
     }
-
-    let revision_manifest = manifest_at_revision(&bundle, &head, revision)?;
-    let (dirty_parts, dirty_node_ids) = dirty_state_through(&bundle, revision)?;
-    reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
-    let text_by_part =
-        collect_text_by_part(&bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
 
     let temp_dir = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
-    if !text_by_part.is_empty() {
+    if !edits.text.is_empty() {
         let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
-        for (part, replacements) in &text_by_part {
+        for (part, replacements) in &edits.text {
             if !archive.contains(part) {
                 return Err(HcdError::InvalidBundle(format!(
                     "source part {part} referenced by HCD is missing"
                 )));
             }
             let replacement_path = temp_dir.path().join(safe_temp_name(part));
+            if part == "word/document.xml" && !edits.tables.is_empty() {
+                std::fs::write(
+                    &replacement_path,
+                    rewrite_table_part(&mut archive, &head.document_id, &edits)?,
+                )?;
+                replacement_paths.insert(part.clone(), replacement_path);
+                continue;
+            }
             let output = std::fs::File::create(&replacement_path)?;
             archive
                 .with_part(part, |reader| {
@@ -92,7 +94,11 @@ pub fn export_docx(
         ],
         flattened: Vec::new(),
         dropped: vec!["HCD recognition annotations are not exported to DOCX".to_string()],
-        warnings: head.warnings.clone(),
+        warnings: head
+            .warnings
+            .into_iter()
+            .filter(|warning| warning.code != "HCD_STRUCTURE_SEMANTIC_REBUILD")
+            .collect(),
     };
     if let Some(path) = &options.fidelity_report {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -103,11 +109,81 @@ pub fn export_docx(
     Ok(report)
 }
 
-fn reject_image_source_export(
+pub fn validate_source_export(
+    bundle: &Bundle,
+    source: &Path,
+    revision: u64,
+) -> Result<(), HcdError> {
+    let head = bundle.manifest()?;
+    let edits = source_replacements(bundle, &head, source, revision)?;
+    if !edits.tables.is_empty() {
+        let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+        rewrite_table_part(&mut archive, &head.document_id, &edits)?;
+    }
+    Ok(())
+}
+
+fn rewrite_table_part(
+    archive: &mut StreamingOxmlArchive,
+    document_id: &str,
+    edits: &checkpoint::SourceEdits,
+) -> Result<String, HcdError> {
+    const PART: &str = "word/document.xml";
+    let mut bytes = archive
+        .read_control_part(PART, 64 * 1024 * 1024)
+        .map_err(package_error)?;
+    if let Some(replacements) = edits
+        .text
+        .get(PART)
+        .filter(|replacements| !replacements.is_empty())
+    {
+        let mut updated = Vec::new();
+        rewrite_text_part(&mut bytes.as_slice(), &mut updated, replacements)?;
+        bytes = updated;
+    }
+    let text =
+        std::str::from_utf8(&bytes).map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+    table_layout::rewrite(text, document_id, &edits.tables)
+}
+
+fn source_replacements(
+    bundle: &Bundle,
+    head: &HcdManifest,
+    source: &Path,
+    revision: u64,
+) -> Result<checkpoint::SourceEdits, HcdError> {
+    if revision > head.revision || revision > MAX_REVISION {
+        return Err(HcdError::RevisionConflict(
+            "requested DOCX revision is unavailable".into(),
+        ));
+    }
+    let actual_source_hash = hash_file(source)?;
+    if actual_source_hash != head.source.sha256 {
+        return Err(HcdError::SourceMismatch(format!(
+            "expected source {}, actual {actual_source_hash}",
+            head.source.sha256
+        )));
+    }
+    let (revision_manifest, _) = hcd_core::manifest_at_revision(bundle, head, Some(revision))?;
+    let (dirty_parts, dirty_node_ids, structural) = dirty_state_through(bundle, revision)?;
+    reject_non_text_source_export(bundle, &revision_manifest, &dirty_node_ids)?;
+    if structural {
+        return checkpoint::replacements(bundle, head, revision);
+    }
+    Ok(checkpoint::SourceEdits {
+        text: collect_text_by_part(bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?,
+        tables: Vec::new(),
+    })
+}
+
+fn reject_non_text_source_export(
     bundle: &Bundle,
     manifest: &HcdManifest,
     dirty_node_ids: &HashSet<String>,
 ) -> Result<(), HcdError> {
+    if dirty_node_ids.is_empty() {
+        return Ok(());
+    }
     for page_number in 0..manifest.index_page_count {
         let page = bundle.read_index_page(manifest, page_number)?;
         for descriptor in page.chunks {
@@ -120,55 +196,51 @@ fn reject_image_source_export(
                     entry.node_id
                 )));
             }
+            if source_map
+                .entries
+                .iter()
+                .any(|entry| dirty_node_ids.contains(&entry.node_id))
+                && bundle
+                    .read_chunk(&descriptor)?
+                    .contains("data-hcd-style-patched=\"true\"")
+            {
+                return Err(HcdError::Unsupported(
+                    "This DOCX contains presentation style edits. Use the editable DOCX rebuild for this revision".into(),
+                ));
+            }
         }
     }
     Ok(())
 }
 
-fn manifest_at_revision(
-    bundle: &Bundle,
-    head: &HcdManifest,
-    revision: u64,
-) -> Result<HcdManifest, HcdError> {
-    if revision == head.revision {
-        return Ok(head.clone());
-    }
-    let record = bundle.revision(revision)?;
-    let mut manifest = head.clone();
-    manifest.revision = revision;
-    manifest.root_hash = record.root_hash;
-    manifest.annotation_root_hash = record.annotation_root_hash;
-    manifest.annotation_href =
-        (manifest.annotation_root_hash != hcd_core::hash_bytes(b"[]")).then(|| {
-            format!(
-                "annotations/sha256/{}.json{}",
-                manifest.annotation_root_hash,
-                manifest.storage_codec.suffix()
-            )
-        });
-    manifest.index_prefix = record.index_prefix;
-    manifest.index_root_href = record.index_root_href;
-    Ok(manifest)
-}
-
 fn dirty_state_through(
     bundle: &Bundle,
-    revision: u64,
-) -> Result<(HashSet<String>, HashSet<String>), HcdError> {
+    mut revision: u64,
+) -> Result<(HashSet<String>, HashSet<String>, bool), HcdError> {
     let mut dirty_parts = HashSet::new();
     let mut dirty_nodes = HashSet::new();
-    for current in 1..=revision {
-        let record = bundle.revision(current)?;
-        if record.structural_change {
-            return Err(HcdError::Unsupported(
-                "structural HCD revision requires source-free semantic DOCX rebuild; omit --source"
-                    .to_string(),
-            ));
+    let mut structural = false;
+    while revision > 0 {
+        let record = bundle.revision(revision)?;
+        if let Some(restore) = record
+            .patch_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("restore-"))
+        {
+            let target = restore
+                .strip_suffix(&format!("-{revision}"))
+                .and_then(|target| target.parse().ok())
+                .filter(|target| *target < revision)
+                .ok_or_else(|| HcdError::InvalidBundle("invalid DOCX restore revision".into()))?;
+            revision = target;
+            continue;
         }
+        structural |= record.structural_change;
         dirty_parts.extend(record.dirty_source_parts);
         dirty_nodes.extend(record.dirty_node_ids);
+        revision -= 1;
     }
-    Ok((dirty_parts, dirty_nodes))
+    Ok((dirty_parts, dirty_nodes, structural))
 }
 
 fn collect_text_by_part(
@@ -400,6 +472,299 @@ mod tests {
         assert!(xml.contains("甲😀乙"));
         assert!(xml.contains("xml:space=\"preserve\""));
         assert!(xml.contains(" padded "));
+    }
+
+    #[test]
+    fn checkpoint_text_exports_through_the_original_docx_parts() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/showcase/project-proposal.docx");
+        let path = temp.path().join("proposal.hcd");
+        let target = temp.path().join("updated.docx");
+        crate::import_docx(
+            &source,
+            &path,
+            &crate::ImportOptions::new("proposal"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let mut revision = hcd_core::project_editor(&bundle, 0).unwrap().revision;
+        let original = "Smart City Digital Twin Platform";
+        let updated = "Smart City Digital Twin 项目";
+        for (patch_id, before) in [("edit-text", original), ("edit-bold", updated)] {
+            let mut block = hcd_core::editor_projection(&bundle, Some(revision))
+                .unwrap()
+                .blocks
+                .into_iter()
+                .find(|block| {
+                    block
+                        .content
+                        .inlines
+                        .iter()
+                        .any(|inline| inline.text == before)
+                })
+                .unwrap();
+            for inline in &mut block.content.inlines {
+                inline.node_id = None;
+                if inline.text == before {
+                    inline.text = updated.to_string();
+                    if patch_id == "edit-bold" {
+                        inline.bold = !inline.bold;
+                    }
+                }
+            }
+            let patch = hcd_core::StructurePatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_4.to_string(),
+                document_id: "proposal".to_string(),
+                patch_id: patch_id.to_string(),
+                base_revision: revision,
+                operations: vec![hcd_core::StructureOperation::Replace {
+                    block_id: block.block_id,
+                    block: block.content,
+                    precondition: hcd_core::BlockPrecondition {
+                        block_hash: block.block_hash,
+                    },
+                }],
+            };
+            revision = hcd_core::apply_structure_patch(&bundle, &patch, revision)
+                .unwrap()
+                .revision;
+        }
+        assert!(matches!(
+            validate_source_export(&bundle, &source, revision),
+            Err(HcdError::Unsupported(_))
+        ));
+        let report = export_docx(
+            &path,
+            &source,
+            &target,
+            &ExportOptions {
+                revision: Some(revision - 1),
+                fidelity_report: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        let mut before = zip::ZipArchive::new(std::fs::File::open(&source).unwrap()).unwrap();
+        let mut after = zip::ZipArchive::new(std::fs::File::open(&target).unwrap()).unwrap();
+        assert_eq!(before.len(), after.len());
+        let names: Vec<_> = before.file_names().map(str::to_owned).collect();
+        for name in names {
+            let mut original_part = Vec::new();
+            let mut updated_part = Vec::new();
+            std::io::Read::read_to_end(&mut before.by_name(&name).unwrap(), &mut original_part)
+                .unwrap();
+            std::io::Read::read_to_end(&mut after.by_name(&name).unwrap(), &mut updated_part)
+                .unwrap();
+            if name == "word/document.xml" {
+                assert_eq!(
+                    String::from_utf8(original_part)
+                        .unwrap()
+                        .replacen(original, updated, 1)
+                        .as_bytes(),
+                    updated_part
+                );
+            } else {
+                assert_eq!(original_part, updated_part, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn inserted_word_table_row_has_editable_cells_and_stays_native_on_export() {
+        use hcd_core::{
+            apply_structure_patch, editor_projection, BlockPrecondition, StructureOperation,
+            StructurePatchBatch, WordTableAction, HCD_PATCH_SCHEMA_VERSION_4,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/showcase/project-proposal.docx");
+        let path = temp.path().join("table.hcd");
+        let output = temp.path().join("table.docx");
+        crate::import_docx(&source, &path, &crate::ImportOptions::new("table"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let revision = hcd_core::project_editor(&bundle, 0).unwrap().revision;
+        let mut table = editor_projection(&bundle, Some(revision))
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|block| block.editable_table_layout)
+            .unwrap();
+        let original_ids = table.editable_text_node_ids.clone();
+        let patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: "table".into(),
+            patch_id: "insert-table-row".into(),
+            base_revision: revision,
+            operations: vec![StructureOperation::TableEdit {
+                block_id: table.block_id.clone(),
+                action: WordTableAction::InsertRow,
+                index: 1,
+                precondition: BlockPrecondition {
+                    block_hash: table.block_hash,
+                },
+            }],
+        };
+        let revision = apply_structure_patch(&bundle, &patch, revision)
+            .unwrap()
+            .revision;
+        table = editor_projection(&bundle, Some(revision))
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|block| block.block_id == table.block_id)
+            .unwrap();
+        let new_cell_id = table
+            .editable_text_node_ids
+            .iter()
+            .find(|id| !original_ids.contains(id))
+            .unwrap();
+        let cell = table
+            .content
+            .inlines
+            .iter_mut()
+            .find(|inline| inline.node_id.as_ref() == Some(new_cell_id))
+            .unwrap();
+        assert!(cell.text.is_empty());
+        cell.text = "项目 😀".into();
+        let patch = StructurePatchBatch {
+            patch_id: "edit-table-cell".into(),
+            base_revision: revision,
+            operations: vec![StructureOperation::Replace {
+                block_id: table.block_id,
+                block: table.content,
+                precondition: BlockPrecondition {
+                    block_hash: table.block_hash,
+                },
+            }],
+            ..patch
+        };
+        let revision = apply_structure_patch(&bundle, &patch, revision)
+            .unwrap()
+            .revision;
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+        validate_source_export(&bundle, &source, revision).unwrap();
+        let report = export_docx(
+            &path,
+            &source,
+            &output,
+            &ExportOptions {
+                revision: Some(revision),
+                fidelity_report: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        let mut archive = StreamingOxmlArchive::open(&output).unwrap();
+        let xml = archive
+            .with_part("word/document.xml", |input| {
+                let mut xml = Vec::new();
+                input.read_to_end(&mut xml)?;
+                Ok(xml)
+            })
+            .unwrap();
+        assert!(std::str::from_utf8(&xml)
+            .unwrap()
+            .contains("<w:t xml:space=\"preserve\">项目 😀</w:t>"));
+    }
+
+    #[test]
+    fn filling_an_empty_table_targets_the_original_cell_without_a_text_anchor() {
+        use hcd_core::{
+            apply_structure_patch, editor_projection, BlockPrecondition, StructureOperation,
+            StructurePatchBatch, HCD_PATCH_SCHEMA_VERSION_4,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let template = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/showcase/project-proposal.docx");
+        let source = temp.path().join("blank.docx");
+        let path = temp.path().join("blank.hcd");
+        let output = temp.path().join("filled.docx");
+        let document_xml = temp.path().join("document.xml");
+        let blank = "<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>";
+        let prefix = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>";
+        let suffix = "</w:body></w:document>";
+        std::fs::write(&document_xml, format!("{prefix}{blank}{blank}{suffix}")).unwrap();
+        StreamingOxmlRewriter::rewrite(
+            &template,
+            &source,
+            &HashMap::from([("word/document.xml".into(), document_xml)]),
+            "word/document.xml",
+        )
+        .unwrap();
+        crate::import_docx(&source, &path, &crate::ImportOptions::new("blank"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let revision = hcd_core::project_editor(&bundle, 0).unwrap().revision;
+        let table = editor_projection(&bundle, None)
+            .unwrap()
+            .blocks
+            .into_iter()
+            .filter(|block| block.editable_table_layout)
+            .nth(1)
+            .unwrap();
+        assert_eq!(table.editable_empty_cells, vec![[0, 0]]);
+        let patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: "blank".into(),
+            patch_id: "activate-blank".into(),
+            base_revision: revision,
+            operations: vec![StructureOperation::TableCellActivate {
+                block_id: table.block_id.clone(),
+                row: 0,
+                column: 0,
+                precondition: BlockPrecondition {
+                    block_hash: table.block_hash,
+                },
+            }],
+        };
+        let revision = apply_structure_patch(&bundle, &patch, revision)
+            .unwrap()
+            .revision;
+        let mut table = editor_projection(&bundle, None)
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|block| block.block_id == table.block_id)
+            .unwrap();
+        table.content.inlines[0].text = "金额 <甲> & \"😀\" ".into();
+        let patch = StructurePatchBatch {
+            patch_id: "fill-blank".into(),
+            base_revision: revision,
+            operations: vec![StructureOperation::Replace {
+                block_id: table.block_id,
+                block: table.content,
+                precondition: BlockPrecondition {
+                    block_hash: table.block_hash,
+                },
+            }],
+            ..patch
+        };
+        let revision = apply_structure_patch(&bundle, &patch, revision)
+            .unwrap()
+            .revision;
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+        validate_source_export(&bundle, &source, revision).unwrap();
+        export_docx(&path, &source, &output, &ExportOptions::default()).unwrap();
+        let mut archive = StreamingOxmlArchive::open(&output).unwrap();
+        let xml = archive
+            .read_control_part("word/document.xml", 4096)
+            .unwrap();
+        let text =
+            "<w:r><w:t xml:space=\"preserve\">金额 &lt;甲&gt; &amp; &quot;😀&quot; </w:t></w:r>";
+        let filled = blank.replace("<w:p/>", &format!("<w:p>{text}</w:p>"));
+        assert_eq!(
+            std::str::from_utf8(&xml).unwrap(),
+            format!("{prefix}{blank}{filled}{suffix}")
+        );
     }
 
     #[test]

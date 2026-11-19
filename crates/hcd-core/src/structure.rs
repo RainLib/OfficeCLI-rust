@@ -16,6 +16,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+mod table_layout;
+mod table_text;
+pub use table_layout::{
+    word_table_layout_update, word_xml_children, WordTableAction, WordTableLayout, WordTableUpdate,
+    WordXmlChild,
+};
+pub use table_text::word_table_text_changes;
+
 const MAX_BLOCKS: usize = 1_000_000;
 const MAX_INLINE_BYTES: usize = 1024 * 1024;
 const MAX_OPS: usize = 10_000;
@@ -33,6 +41,138 @@ pub struct EditorInline {
     pub italic: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    #[serde(default, skip_serializing_if = "EditorTextFormat::is_empty")]
+    pub format: EditorTextFormat,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditorTextFormat {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_half_points: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+impl EditorTextFormat {
+    pub fn is_empty(&self) -> bool {
+        !self.underline
+            && self.font.is_none()
+            && self.size_half_points.is_none()
+            && self.color.is_none()
+    }
+
+    fn from_css(&mut self, name: &str, value: &str) {
+        match name {
+            "font-family" => {
+                let primary = value
+                    .split(',')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_matches(['\'', '"']);
+                if valid_font(primary) {
+                    self.font = Some(primary.to_owned());
+                }
+            }
+            "font-size" => {
+                if let Some(points) = value
+                    .strip_suffix("pt")
+                    .and_then(|value| value.trim().parse::<f64>().ok())
+                {
+                    let half_points = points * 2.0;
+                    if (2.0..=512.0).contains(&half_points)
+                        && (half_points.round() - half_points).abs() < 0.001
+                    {
+                        self.size_half_points = Some(half_points.round() as u16);
+                    }
+                }
+            }
+            "color" => {
+                if let Some(color) = value.strip_prefix('#').filter(|value| valid_color(value)) {
+                    self.color = Some(color.to_ascii_uppercase());
+                }
+            }
+            "text-decoration" => {
+                self.underline |= value
+                    .split_ascii_whitespace()
+                    .any(|token| token == "underline")
+            }
+            _ => {}
+        }
+    }
+
+    fn css(&self) -> String {
+        let mut css = String::new();
+        if self.underline {
+            css.push_str("text-decoration:underline;");
+        }
+        if let Some(font) = &self.font {
+            css.push_str(&format!("font-family:'{font}';"));
+        }
+        if let Some(size) = self.size_half_points {
+            css.push_str(&format!("font-size:{}pt;", f64::from(size) / 2.0));
+        }
+        if let Some(color) = &self.color {
+            css.push_str(&format!("color:#{color};"));
+        }
+        css
+    }
+}
+
+fn valid_font(font: &str) -> bool {
+    !font.is_empty()
+        && font.len() <= 128
+        && font
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_'))
+}
+
+fn valid_color(color: &str) -> bool {
+    color.len() == 6 && color.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorAlignment {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+impl EditorAlignment {
+    fn from_css(style: &str) -> Option<Self> {
+        css_declarations(style)
+            .find_map(|(name, value)| (name == "text-align").then_some(value))
+            .and_then(|value| match value {
+                "left" => Some(Self::Left),
+                "center" => Some(Self::Center),
+                "right" => Some(Self::Right),
+                "justify" => Some(Self::Justify),
+                _ => None,
+            })
+    }
+
+    pub fn css(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+            Self::Justify => "justify",
+        }
+    }
+}
+
+fn css_declarations(style: &str) -> impl Iterator<Item = (&str, &str)> {
+    style
+        .split(';')
+        .filter_map(|declaration| declaration.split_once(':'))
+        .map(|(name, value)| (name.trim(), value.trim()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +190,8 @@ pub struct EditorBlockContent {
     pub kind: EditorBlockKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<EditorAlignment>,
     pub inlines: Vec<EditorInline>,
 }
 
@@ -60,6 +202,14 @@ pub struct EditorBlockView {
     pub block_hash: String,
     pub region: String,
     pub read_only: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub format_edited: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub editable_text_node_ids: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub editable_table_layout: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub editable_empty_cells: Vec<[usize; 2]>,
     pub content: EditorBlockContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only_html: Option<String>,
@@ -113,6 +263,26 @@ pub enum StructureOperation {
         block: EditorBlockContent,
         precondition: BlockPrecondition,
     },
+    #[serde(rename = "table.edit")]
+    TableEdit {
+        block_id: String,
+        action: WordTableAction,
+        index: usize,
+        precondition: BlockPrecondition,
+    },
+    #[serde(rename = "table.insert")]
+    TableInsert {
+        after_block_id: Option<String>,
+        rows: usize,
+        columns: usize,
+    },
+    #[serde(rename = "table.cell.activate")]
+    TableCellActivate {
+        block_id: String,
+        row: usize,
+        column: usize,
+        precondition: BlockPrecondition,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -126,6 +296,7 @@ struct Block {
     id: String,
     region: String,
     read_only: bool,
+    format_edited: bool,
     content: EditorBlockContent,
     html: String,
     entries: Vec<NodeMapEntry>,
@@ -136,16 +307,38 @@ impl Block {
         hash_bytes(self.html.as_bytes())
     }
 
-    fn view(&self) -> EditorBlockView {
+    fn view(&self, editable_table_layout: bool) -> EditorBlockView {
         EditorBlockView {
             block_id: self.id.clone(),
             block_hash: self.hash(),
             region: self.region.clone(),
             read_only: self.read_only,
+            format_edited: self.format_edited,
+            editable_text_node_ids: table_text::editable_ids(self),
+            editable_table_layout,
+            editable_empty_cells: if editable_table_layout {
+                table_layout::empty_cells(self)
+            } else {
+                Vec::new()
+            },
             content: self.content.clone(),
             read_only_html: self.read_only.then(|| self.html.clone()),
         }
     }
+}
+
+fn word_table_id(block: &Block) -> Option<&str> {
+    if !block.html.starts_with("<table ") {
+        return None;
+    }
+    block
+        .html
+        .split('>')
+        .next()?
+        .split_once(" data-hcd-id=\"")?
+        .1
+        .split('"')
+        .next()
 }
 
 pub fn editor_projection(
@@ -156,10 +349,24 @@ pub fn editor_projection(
     let (manifest, revision) = crate::manifest_at_revision(bundle, &head, revision)?;
     ensure_semantic_flow(&manifest)?;
     let blocks = load_blocks(bundle, &manifest)?;
+    let mut table_counts = HashMap::new();
+    if manifest.source.format == "docx" {
+        for id in blocks.iter().filter_map(word_table_id) {
+            *table_counts.entry(id).or_insert(0usize) += 1;
+        }
+    }
     Ok(EditorProjection {
         document_id: manifest.document_id,
         revision,
-        blocks: blocks.iter().map(Block::view).collect(),
+        blocks: blocks
+            .iter()
+            .map(|block| {
+                block.view(
+                    table_counts.get(block.id.as_str()) == Some(&1)
+                        && table_layout::can_edit(block),
+                )
+            })
+            .collect(),
     })
 }
 
@@ -275,6 +482,9 @@ fn revision_record(
         dirty_source_parts: Vec::new(),
         dirty_grid_parts: Vec::new(),
         converted_formula_node_ids: Vec::new(),
+        grid_values_reordered: false,
+        grid_filter_changed: false,
+        pdf_layout_changed: false,
         grid_row_insertions: Vec::new(),
         grid_row_deletions: Vec::new(),
         grid_column_insertions: Vec::new(),
@@ -329,6 +539,8 @@ struct OpenBlock {
     name: String,
     id: Option<String>,
     ordered: bool,
+    alignment: Option<EditorAlignment>,
+    format_edited: bool,
 }
 
 fn scan_chunk(
@@ -363,6 +575,12 @@ fn scan_chunk(
                         depth: stack.len() + 1,
                         id: attribute(&start, &reader, "data-hcd-id")?,
                         ordered: stack.iter().any(|tag| tag == "ol"),
+                        format_edited: attribute(&start, &reader, "data-hcd-format-edited")?
+                            .as_deref()
+                            == Some("true"),
+                        alignment: attribute(&start, &reader, "style")?
+                            .as_deref()
+                            .and_then(EditorAlignment::from_css),
                         name: name.clone(),
                     });
                 }
@@ -376,6 +594,12 @@ fn scan_chunk(
                         depth: stack.len() + 1,
                         id: attribute(&start, &reader, "data-hcd-id")?,
                         ordered: stack.iter().any(|tag| tag == "ol"),
+                        format_edited: attribute(&start, &reader, "data-hcd-format-edited")?
+                            .as_deref()
+                            == Some("true"),
+                        alignment: attribute(&start, &reader, "style")?
+                            .as_deref()
+                            .and_then(EditorAlignment::from_css),
                         name,
                     };
                     blocks.push(block_from_raw(
@@ -440,6 +664,7 @@ fn scan_chunk(
                     bold: false,
                     italic: false,
                     link: None,
+                    format: EditorTextFormat::default(),
                 })
             })
             .collect();
@@ -447,9 +672,11 @@ fn scan_chunk(
             id: stable_node_id(&[document_id, &descriptor.chunk_id, "opaque"]),
             region: descriptor.region.clone(),
             read_only: true,
+            format_edited: false,
             content: EditorBlockContent {
                 kind: EditorBlockKind::Opaque,
                 level: None,
+                alignment: None,
                 inlines,
             },
             html: html.to_string(),
@@ -482,9 +709,10 @@ fn block_from_raw(
                 EditorInline {
                     text: text.clone(),
                     node_id: Some(entry.node_id.clone()),
-                    bold: mark.is_some_and(|value| value.0),
-                    italic: mark.is_some_and(|value| value.1),
-                    link: mark.and_then(|value| value.2.clone()),
+                    bold: mark.is_some_and(|value| value.bold),
+                    italic: mark.is_some_and(|value| value.italic),
+                    link: mark.and_then(|value| value.link.clone()),
+                    format: mark.map(|value| value.format.clone()).unwrap_or_default(),
                 }
             })
         })
@@ -521,9 +749,11 @@ fn block_from_raw(
         id,
         region: descriptor.region.clone(),
         read_only,
+        format_edited: open.format_edited,
         content: EditorBlockContent {
             kind,
             level,
+            alignment: open.alignment,
             inlines,
         },
         html: raw.to_string(),
@@ -531,7 +761,13 @@ fn block_from_raw(
     })
 }
 
-type Marks = (bool, bool, Option<String>);
+#[derive(Default, Clone)]
+struct Marks {
+    bold: bool,
+    italic: bool,
+    link: Option<String>,
+    format: EditorTextFormat,
+}
 
 fn extract_marks(raw: &str) -> Result<HashMap<String, Marks>, HcdError> {
     let mut reader = Reader::from_str(raw);
@@ -546,34 +782,28 @@ fn extract_marks(raw: &str) -> Result<HashMap<String, Marks>, HcdError> {
         match event {
             Event::Start(start) | Event::Empty(start) => {
                 let name = tag_name(start.name().as_ref());
-                let inherited = stack.last().cloned().unwrap_or((false, false, None));
-                let style = attribute(&start, &reader, "style")?
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                let weight = style.split(';').find_map(|declaration| {
-                    declaration
-                        .trim()
-                        .strip_prefix("font-weight:")
-                        .map(str::trim)
-                });
-                let bold = inherited.0
-                    || name == "strong"
-                    || weight.is_some_and(|value| {
-                        value == "bold" || value.parse::<u16>().is_ok_and(|number| number >= 600)
-                    });
-                let italic = inherited.1 || name == "em" || style.contains("font-style:italic");
-                let link = if name == "a" {
-                    attribute(&start, &reader, "href")?
-                } else {
-                    inherited.2
-                };
+                let mut mark = stack.last().cloned().unwrap_or_default();
+                mark.bold |= matches!(name.as_str(), "strong" | "b");
+                mark.italic |= matches!(name.as_str(), "em" | "i");
+                mark.format.underline |= name == "u";
+                if name == "a" {
+                    mark.link = attribute(&start, &reader, "href")?;
+                }
+                let style = attribute(&start, &reader, "style")?.unwrap_or_default();
+                for (name, value) in css_declarations(&style) {
+                    mark.bold |= name == "font-weight"
+                        && (value.eq_ignore_ascii_case("bold")
+                            || value.parse::<u16>().is_ok_and(|number| number >= 600));
+                    mark.italic |= name == "font-style" && value.eq_ignore_ascii_case("italic");
+                    mark.format.from_css(name, value);
+                }
                 if let Some(id) = attribute(&start, &reader, "data-hcd-id")? {
                     if attribute(&start, &reader, "data-hcd-node-hash")?.is_some() {
-                        marks.insert(id, (bold, italic, link.clone()));
+                        marks.insert(id, mark.clone());
                     }
                 }
                 if push {
-                    stack.push((bold, italic, link));
+                    stack.push(mark);
                 }
             }
             Event::End(_) => {
@@ -832,6 +1062,72 @@ fn apply_operation(
     dirty_parts: &mut HashSet<String>,
 ) -> Result<(), HcdError> {
     match operation {
+        StructureOperation::TableInsert {
+            after_block_id,
+            rows,
+            columns,
+        } => {
+            if manifest.source.format != "docx" {
+                return Err(HcdError::Unsupported(
+                    "Tables can only be inserted in DOCX".into(),
+                ));
+            }
+            let index = insertion_index(blocks, after_block_id.as_deref())?;
+            if !insertion_touches_region(blocks, index, "body") {
+                return Err(HcdError::Unsupported(
+                    "Cannot insert a table outside the body".into(),
+                ));
+            }
+            let table = table_layout::insert(manifest, patch_id, operation_index, *rows, *columns)?;
+            dirty_nodes.extend(table.entries.iter().map(|entry| entry.node_id.clone()));
+            dirty_parts.insert("word/document.xml".to_string());
+            blocks.insert(index, table);
+        }
+        StructureOperation::TableCellActivate {
+            block_id,
+            row,
+            column,
+            precondition,
+        } => {
+            let index = editable_word_table_index(blocks, manifest, block_id, precondition)?;
+            let table = table_layout::activate_cell(
+                &blocks[index],
+                manifest,
+                patch_id,
+                operation_index,
+                *row,
+                *column,
+            )?;
+            let entry = table
+                .entries
+                .last()
+                .expect("activation appends one source map entry");
+            dirty_nodes.insert(entry.node_id.clone());
+            dirty_parts.insert(entry.source.part.clone());
+            blocks[index] = table;
+        }
+        StructureOperation::TableEdit {
+            block_id,
+            action,
+            index,
+            precondition,
+        } => {
+            let position = editable_word_table_index(blocks, manifest, block_id, precondition)?;
+            let current = &blocks[position];
+            let edited = table_layout::edit(
+                current,
+                manifest,
+                patch_id,
+                operation_index,
+                *action,
+                *index,
+            )?;
+            for entry in current.entries.iter().chain(&edited.entries) {
+                dirty_nodes.insert(entry.node_id.clone());
+                dirty_parts.insert(entry.source.part.clone());
+            }
+            blocks[position] = edited;
+        }
         StructureOperation::Insert {
             after_block_id,
             block,
@@ -854,8 +1150,15 @@ fn apply_operation(
                     "generated block ID collision".to_string(),
                 ));
             }
-            let generated =
-                render_new_block(manifest, patch_id, operation_index, id, block.clone(), None)?;
+            let generated = render_new_block(
+                manifest,
+                patch_id,
+                operation_index,
+                id,
+                block.clone(),
+                None,
+                false,
+            )?;
             dirty_nodes.extend(generated.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(
                 generated
@@ -911,14 +1214,26 @@ fn apply_operation(
             block,
             precondition,
         } => {
-            validate_content(block)?;
             let index = block_index(blocks, block_id, precondition)?;
             if blocks[index].read_only {
-                return Err(HcdError::Unsupported(format!(
-                    "block {block_id} is read-only"
-                )));
+                if table_text::editable_ids(&blocks[index]).is_empty() {
+                    return Err(HcdError::Unsupported(format!(
+                        "block {block_id} is read-only"
+                    )));
+                }
+                let updated = table_text::replace(&blocks[index], block)?;
+                for (before, after) in blocks[index].entries.iter().zip(&updated.entries) {
+                    if before.node_hash != after.node_hash {
+                        dirty_nodes.insert(after.node_id.clone());
+                        dirty_parts.insert(after.source.part.clone());
+                    }
+                }
+                blocks[index] = updated;
+                return Ok(());
             }
+            validate_content(block)?;
             let old = &blocks[index];
+            let format_edited = old.format_edited || typography_changed(&old.content, block);
             let first_node_id = old.entries.first().map(|entry| entry.node_id.clone());
             dirty_nodes.extend(old.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(old.entries.iter().map(|entry| entry.source.part.clone()));
@@ -929,6 +1244,7 @@ fn apply_operation(
                 block_id.clone(),
                 block.clone(),
                 first_node_id,
+                format_edited,
             )?;
             dirty_nodes.extend(generated.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(
@@ -941,6 +1257,46 @@ fn apply_operation(
         }
     }
     Ok(())
+}
+
+fn typography_changed(before: &EditorBlockContent, after: &EditorBlockContent) -> bool {
+    if before.alignment != after.alignment {
+        return true;
+    }
+    let left = format_groups(before);
+    let right = format_groups(after);
+    if !left
+        .iter()
+        .map(|(format, _)| *format)
+        .eq(right.iter().map(|(format, _)| *format))
+    {
+        return true;
+    }
+    left != right
+        && before
+            .inlines
+            .iter()
+            .flat_map(|inline| inline.text.bytes())
+            .eq(after.inlines.iter().flat_map(|inline| inline.text.bytes()))
+}
+
+fn format_groups(content: &EditorBlockContent) -> Vec<(&EditorTextFormat, usize)> {
+    let mut groups: Vec<(&EditorTextFormat, usize)> = Vec::new();
+    for inline in content
+        .inlines
+        .iter()
+        .filter(|inline| !inline.text.is_empty())
+    {
+        if let Some((_, length)) = groups
+            .last_mut()
+            .filter(|(format, _)| *format == &inline.format)
+        {
+            *length += inline.text.len();
+        } else {
+            groups.push((&inline.format, inline.text.len()));
+        }
+    }
+    groups
 }
 
 fn block_index(
@@ -956,6 +1312,28 @@ fn block_index(
         return Err(HcdError::PreconditionFailed(format!(
             "block {id} hash mismatch"
         )));
+    }
+    Ok(index)
+}
+
+fn editable_word_table_index(
+    blocks: &[Block],
+    manifest: &HcdManifest,
+    block_id: &str,
+    precondition: &BlockPrecondition,
+) -> Result<usize, HcdError> {
+    let index = block_index(blocks, block_id, precondition)?;
+    if manifest.source.format != "docx"
+        || !table_layout::can_edit(&blocks[index])
+        || blocks
+            .iter()
+            .filter(|block| word_table_id(block) == Some(block_id))
+            .count()
+            != 1
+    {
+        return Err(HcdError::Unsupported(
+            "Editing cells or dimensions requires one unfragmented Word table".into(),
+        ));
     }
     Ok(index)
 }
@@ -1026,6 +1404,23 @@ fn validate_content(content: &EditorBlockContent) -> Result<(), HcdError> {
                 return Err(HcdError::InvalidPatch("unsafe inline link".to_string()));
             }
         }
+        if inline
+            .format
+            .font
+            .as_deref()
+            .is_some_and(|value| !valid_font(value))
+            || inline
+                .format
+                .color
+                .as_deref()
+                .is_some_and(|value| !valid_color(value))
+            || inline
+                .format
+                .size_half_points
+                .is_some_and(|value| !(2..=512).contains(&value))
+        {
+            return Err(HcdError::InvalidPatch("invalid inline formatting".into()));
+        }
         Ok(next)
     })?;
     if total > MAX_INLINE_BYTES {
@@ -1043,6 +1438,7 @@ fn render_new_block(
     block_id: String,
     content: EditorBlockContent,
     first_node_id: Option<String>,
+    format_edited: bool,
 ) -> Result<Block, HcdError> {
     let part = match manifest.source.format.as_str() {
         "docx" => "word/document.xml",
@@ -1066,8 +1462,17 @@ fn render_new_block(
     if let Some(wrapper) = wrapper {
         html.push_str(&format!("<{wrapper} class=\"hcd-editor-list\">"));
     }
+    let alignment = content
+        .alignment
+        .map(|alignment| format!(" style=\"text-align:{}\"", alignment.css()))
+        .unwrap_or_default();
+    let format_marker = if format_edited {
+        " data-hcd-format-edited=\"true\""
+    } else {
+        ""
+    };
     html.push_str(&format!(
-        "<{tag} class=\"hcd-editor-block\" data-hcd-id=\"{}\">",
+        "<{tag} class=\"hcd-editor-block\" data-hcd-id=\"{}\"{format_marker}{alignment}>",
         escape_html(&block_id)
     ));
     let mut entries = Vec::new();
@@ -1078,6 +1483,7 @@ fn render_new_block(
             bold: false,
             italic: false,
             link: None,
+            format: EditorTextFormat::default(),
         }]
     } else {
         content.inlines.clone()
@@ -1110,8 +1516,13 @@ fn render_new_block(
         if inline.italic {
             html.push_str("<em>");
         }
+        let css = if inline.format.is_empty() {
+            String::new()
+        } else {
+            format!(" style=\"{}\"", escape_html(&inline.format.css()))
+        };
         html.push_str(&format!(
-            "<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span>",
+            "<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\"{css}>{}</span>",
             escape_html(&inline.text)
         ));
         if inline.italic {
@@ -1153,6 +1564,7 @@ fn render_new_block(
         id: block_id,
         region: "body".to_string(),
         read_only: false,
+        format_edited,
         content,
         html,
         entries,
@@ -1275,6 +1687,7 @@ fn write_blocks(
             last_node_id: source_map.entries.last().map(|entry| entry.node_id.clone()),
             continuation: false,
             grid: None,
+            pdf_layout: Vec::new(),
         });
         offset = end;
     }
@@ -1371,14 +1784,31 @@ mod tests {
     use crate::{BundleWriter, HcdCapabilities, SourceDescriptor, StorageCodec};
 
     #[test]
+    fn format_boundary_changes_are_detected_without_text_changes() {
+        let block = |first: &str, second: &str| {
+            serde_json::from_value::<EditorBlockContent>(serde_json::json!({
+                "kind": "paragraph", "inlines": [
+                    {"text": first, "format": {"color": "A33555"}}, {"text": second}
+                ]
+            }))
+            .unwrap()
+        };
+        let original = block("Digital", " Twin");
+        assert!(typography_changed(&original, &block("Digi", "tal Twin")));
+        assert!(!typography_changed(&original, &block("Online", " Twin")));
+    }
+
+    #[test]
     fn body_insert_can_use_the_boundary_before_a_footer() {
         let block = |id: &str, region: &str| Block {
             id: id.to_string(),
             region: region.to_string(),
             read_only: region != "body",
+            format_edited: false,
             content: EditorBlockContent {
                 kind: EditorBlockKind::Paragraph,
                 level: None,
+                alignment: None,
                 inlines: Vec::new(),
             },
             html: String::new(),
@@ -1445,6 +1875,7 @@ mod tests {
             last_node_id: None,
             continuation: false,
             grid: None,
+            pdf_layout: Vec::new(),
         };
         let map = ChunkSourceMap {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
@@ -1547,12 +1978,14 @@ mod tests {
                     block: EditorBlockContent {
                         kind: EditorBlockKind::Paragraph,
                         level: None,
+                        alignment: None,
                         inlines: vec![EditorInline {
                             text: value.to_string(),
                             node_id: None,
                             bold: false,
                             italic: false,
                             link: None,
+                            format: EditorTextFormat::default(),
                         }],
                     },
                     precondition: BlockPrecondition {
@@ -1620,12 +2053,14 @@ mod tests {
                 block: EditorBlockContent {
                     kind: EditorBlockKind::Paragraph,
                     level: None,
+                    alignment: None,
                     inlines: vec![EditorInline {
                         text: "unsafe".to_string(),
                         node_id: None,
                         bold: false,
                         italic: false,
                         link: Some("javascript:alert(1)".to_string()),
+                        format: EditorTextFormat::default(),
                     }],
                 },
                 precondition: BlockPrecondition {

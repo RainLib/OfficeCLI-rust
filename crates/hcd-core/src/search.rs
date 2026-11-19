@@ -1,5 +1,6 @@
 use crate::{extract_html_text_nodes, manifest_at_revision, Bundle, HcdError, INDEX_PAGE_SIZE};
 use serde::Serialize;
+use std::collections::HashMap;
 
 pub const MAX_SEARCH_HITS: usize = 200;
 const MAX_QUERY_CHARS: usize = 128;
@@ -18,6 +19,8 @@ pub struct SearchHit {
     pub sheet_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sheet_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_number: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +47,12 @@ pub fn search_bundle(
     }
     let head = bundle.manifest()?;
     let (manifest, revision) = manifest_at_revision(bundle, &head, revision)?;
+    let layout = crate::pdf_page_layout(bundle, &manifest)?;
+    let page_positions: HashMap<_, _> = layout
+        .iter()
+        .enumerate()
+        .filter_map(|(position, page)| page.source_page.map(|number| (number, position + 1)))
+        .collect();
     let mut result = SearchResult {
         revision,
         hits: Vec::new(),
@@ -51,7 +60,8 @@ pub fn search_bundle(
     };
     let mut scanned_chunks = 0usize;
     let mut scanned_bytes = 0u64;
-    for page_number in 0..manifest.index_page_count {
+    let mut source_page = 0u32;
+    'scan: for page_number in 0..manifest.index_page_count {
         let page = bundle.read_index_page(&manifest, page_number)?;
         for descriptor in page.chunks {
             if descriptor.sequence >= manifest.chunk_count
@@ -61,6 +71,13 @@ pub fn search_bundle(
                     "invalid search index sequence".to_string(),
                 ));
             }
+            if !descriptor.continuation {
+                source_page += 1;
+            }
+            let page_position = page_positions.get(&source_page).copied();
+            if !layout.is_empty() && page_position.is_none() {
+                continue;
+            }
             if descriptor.text_chars == 0 {
                 continue;
             }
@@ -68,7 +85,7 @@ pub fn search_bundle(
                 || scanned_bytes.saturating_add(descriptor.byte_length) > MAX_SEARCH_HTML_BYTES
             {
                 result.truncated = true;
-                return Ok(result);
+                break 'scan;
             }
             scanned_chunks += 1;
             scanned_bytes += descriptor.byte_length;
@@ -84,10 +101,18 @@ pub fn search_bundle(
                 let Some(text) = nodes.get(&entry.node_id) else {
                     continue;
                 };
+                let page_number = page_position.or_else(|| {
+                    entry
+                        .source
+                        .part
+                        .strip_prefix("pdf/pages/")
+                        .and_then(|number| number.parse::<usize>().ok())
+                        .filter(|&number| number > 0)
+                });
                 for (offset, preview) in matching_previews(text, needle) {
                     if result.hits.len() == MAX_SEARCH_HITS {
                         result.truncated = true;
-                        return Ok(result);
+                        break 'scan;
                     }
                     result.hits.push(SearchHit {
                         chunk_sequence: descriptor.sequence,
@@ -97,10 +122,16 @@ pub fn search_bundle(
                         preview,
                         sheet_id: descriptor.grid.as_ref().map(|grid| grid.sheet_id.clone()),
                         sheet_name: descriptor.grid.as_ref().map(|grid| grid.sheet_name.clone()),
+                        page_number,
                     });
                 }
             }
         }
+    }
+    if !layout.is_empty() {
+        result
+            .hits
+            .sort_by_key(|hit| (hit.page_number, hit.chunk_sequence));
     }
     Ok(result)
 }

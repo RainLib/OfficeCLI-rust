@@ -203,6 +203,9 @@ pub fn render_standalone_html_with_transform(
 ) -> Result<HtmlPresentationReport, HcdError> {
     let head = bundle.manifest()?;
     let (manifest, revision) = manifest_at_revision(bundle, &head, options.revision)?;
+    let layout = crate::pdf_page_layout(bundle, &manifest)?;
+    let visible_pdf_pages: std::collections::HashSet<_> =
+        layout.iter().filter_map(|page| page.source_page).collect();
     if options.chunk_limit.is_some() {
         let mut descriptors = Sha256::new();
         for page_number in 0..manifest.index_page_count {
@@ -319,6 +322,7 @@ pub fn render_standalone_html_with_transform(
     )?;
 
     let mut expected_sequence = first_chunk;
+    let mut written_chunks = 0;
     let first_index_page = first_chunk / crate::INDEX_PAGE_SIZE;
     let end_index_page = chunk_end.div_ceil(crate::INDEX_PAGE_SIZE);
     for page_number in first_index_page..end_index_page {
@@ -339,6 +343,20 @@ pub fn render_standalone_html_with_transform(
                 )));
             }
             let html = bundle.read_chunk_verified(&descriptor)?;
+            expected_sequence += 1;
+            if !layout.is_empty() {
+                let source_page = html
+                    .split_once('>')
+                    .and_then(|(head, _)| head.split_once(" data-hcd-page=\""))
+                    .and_then(|(_, value)| value.split_once('"'))
+                    .and_then(|(value, _)| value.parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PDF chunk has no source page number".into())
+                    })?;
+                if !visible_pdf_pages.contains(&source_page) {
+                    continue;
+                }
+            }
             let presented_html = if let Some(base_href) = &options.asset_base_href {
                 rewrite_asset_references(&html, &asset_hrefs, base_href)
             } else {
@@ -358,7 +376,7 @@ pub fn render_standalone_html_with_transform(
                 options.max_output_bytes,
                 presented_html.as_bytes(),
             )?;
-            expected_sequence += 1;
+            written_chunks += 1;
         }
     }
     if expected_sequence != chunk_end {
@@ -399,7 +417,7 @@ pub fn render_standalone_html_with_transform(
         revision,
         profile: manifest.profile,
         first_chunk,
-        chunk_count: chunk_end - first_chunk,
+        chunk_count: written_chunks,
         total_chunk_count: manifest.chunk_count,
         next_chunk: (chunk_end < manifest.chunk_count).then_some(chunk_end),
         bytes_written: written,

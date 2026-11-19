@@ -1,6 +1,7 @@
 import {
   BooleanNumber,
   BorderStyleTypes,
+  CellValueType,
   HorizontalAlign,
   type ICellData,
   type IStyleData,
@@ -188,7 +189,7 @@ function emuAttribute(element: HTMLElement, name: string): number | undefined {
 }
 
 export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) => string,
-  styles: Record<string, IStyleData> = {}): ParsedGridChunk {
+  styles: Record<string, IStyleData> = {}, delimitedFields = false): ParsedGridChunk {
   const document = new DOMParser().parseFromString(chunk.html, 'text/html');
   const section = document.querySelector<HTMLElement>('[data-hcd-sheet]');
   if (!section || !chunk.descriptor.grid) throw new Error(`无效的 XLSX HCD 分片 ${chunk.descriptor.chunkId}`);
@@ -231,6 +232,7 @@ export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) 
     cells.push({
       ...position,
       data: { v: hasNumber ? numericValue : text,
+        ...(delimitedFields && !hasNumber && !cell.dataset.hcdFormulaExpression ? { t: CellValueType.FORCE_STRING } : {}),
         ...(cell.dataset.hcdFormulaExpression ? { f: cell.dataset.hcdFormulaExpression } : {}),
         ...(style ? { s: style } : {}) },
       link,

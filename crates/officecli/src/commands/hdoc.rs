@@ -1,9 +1,9 @@
 use clap::{Args, Subcommand, ValueEnum};
 use handler_common::{HandlerError, OutputFormat};
 use hcd_core::{
-    hash_file, manifest_at_revision, render_standalone_html_with_transform, Bundle, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions, PatchBatch,
-    StorageCodec, HCD_SCHEMA_VERSION,
+    hash_bytes, hash_file, manifest_at_revision, render_standalone_html_with_transform, Bundle,
+    FidelityLevel, FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions,
+    PatchBatch, StorageCodec, HCD_SCHEMA_VERSION,
 };
 use hcd_formats::{ExportOptions, ImportOptions, PdfRasterMode};
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ pub enum HdocSubcommand {
 
 #[derive(Args)]
 pub struct HdocImportCommand {
-    /// Immutable source DOCX, XLSX, PPTX, PDF, HTML, UTF-8 Markdown, or UTF-8 TXT
+    /// Immutable source DOCX, XLSX, PPTX, PDF, HTML, or UTF-8 CSV, TSV, Markdown or TXT
     pub source: String,
     /// New HCD directory; must not already exist
     #[arg(short, long)]
@@ -372,12 +372,39 @@ pub struct HdocExportCommand {
     #[arg(short, long)]
     pub output: String,
     /// Semantic target format; inferred from --output when omitted
-    #[arg(long, value_name = "docx|xlsx|pptx|pdf|html|md|txt")]
+    #[arg(long, value_name = "docx|xlsx|csv|tsv|pptx|pdf|html|md|txt")]
     pub to: Option<String>,
+    /// Export one page or an inclusive page range from a PDF revision.
+    #[arg(long, value_name = "START[-END]")]
+    pub pdf_pages: Option<PdfPageRange>,
+    /// Exact worksheet name for CSV or TSV export.
+    #[arg(long, value_name = "NAME")]
+    pub sheet: Option<String>,
     #[arg(long)]
     pub revision: Option<u64>,
     #[arg(long)]
     pub fidelity_report: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PdfPageRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl std::str::FromStr for PdfPageRange {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (start, end) = value.split_once('-').unwrap_or((value, value));
+        let invalid = "PDF pages must be a positive page number or an inclusive range such as 2-5";
+        let start = start.trim().parse().map_err(|_| invalid)?;
+        let end = end.trim().parse().map_err(|_| invalid)?;
+        if start == 0 || end < start {
+            return Err(invalid);
+        }
+        Ok(Self { start, end })
+    }
 }
 
 pub fn handle_hdoc(
@@ -1147,7 +1174,22 @@ fn percent_encode_href_component(value: &str) -> String {
 
 fn deterministic_document_id(source: &str) -> Result<String, HandlerError> {
     let source_hash = hash_file(source).map_err(handler_error)?;
-    Ok(format!("doc-{}", &source_hash[..32]))
+    let extension = Path::new(source)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Ok(source_document_id(&source_hash, &extension))
+}
+
+pub(crate) fn source_document_id(source_hash: &str, extension: &str) -> String {
+    // Identical bytes may produce different cells depending on the separator.
+    let hash = if matches!(extension, "csv" | "tsv") {
+        hash_bytes(format!("{extension}:{source_hash}").as_bytes())
+    } else {
+        source_hash.to_string()
+    };
+    format!("doc-{}", &hash[..32])
 }
 
 fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, bool), HandlerError> {
@@ -1238,14 +1280,45 @@ fn export(
     let head = bundle.manifest().map_err(handler_error)?;
     let target = semantic_target(&command.output, command.to.as_deref())?;
     let source_format = normalize_format(&head.source.format);
+    let delimited = matches!(target.as_str(), "csv" | "tsv");
+    if command.sheet.is_some() && !delimited {
+        return Err(HandlerError::InvalidArgument(
+            "--sheet requires CSV or TSV output".to_string(),
+        ));
+    }
+    if command.pdf_pages.is_some() && (target != "pdf" || source_format != "pdf") {
+        return Err(HandlerError::InvalidArgument(
+            "--pdf-pages requires PDF-to-PDF export".to_string(),
+        ));
+    }
     let options = ExportOptions {
         revision: command.revision,
         fidelity_report: command.fidelity_report.clone(),
     };
     let report = match command.source.as_deref() {
+        source if delimited => hcd_formats::export_delimited_grid(
+            &bundle,
+            source.filter(|_| target == source_format).map(Path::new),
+            Path::new(&command.output),
+            &target,
+            &options,
+            command.sheet.as_deref(),
+        )
+        .map_err(handler_error)?,
         Some(source) if target == source_format => {
-            hcd_formats::export_document(&command.bundle, source, &command.output, &options)
+            if let Some(range) = command.pdf_pages {
+                hcd_formats::export_pdf_pages(
+                    &bundle,
+                    Path::new(source),
+                    Path::new(&command.output),
+                    &options,
+                    range.start..=range.end,
+                )
                 .map_err(handler_error)?
+            } else {
+                hcd_formats::export_document(&command.bundle, source, &command.output, &options)
+                    .map_err(handler_error)?
+            }
         }
         _ => semantic_export(
             &bundle,
@@ -1254,6 +1327,7 @@ fn export(
             &target,
             command.revision,
             command.fidelity_report.as_deref(),
+            command.pdf_pages,
         )?,
     };
     render(
@@ -1283,10 +1357,10 @@ fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, Hand
     let target = requested.unwrap_or(extension);
     if !matches!(
         target.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx" | "xlsx" | "csv" | "tsv" | "pptx" | "pdf" | "html" | "md" | "txt"
     ) {
         return Err(HandlerError::UnsupportedMode(format!(
-            "HCD export supports .docx, .xlsx, .pptx, .pdf, .html, .md/.markdown, or .txt; found .{target}"
+            "HCD export supports .docx, .xlsx, .csv, .tsv, .pptx, .pdf, .html, .md/.markdown, or .txt; found .{target}"
         )));
     }
     Ok(target)
@@ -1312,6 +1386,7 @@ fn semantic_export(
     target: &str,
     requested_revision: Option<u64>,
     fidelity_report: Option<&Path>,
+    pdf_pages: Option<PdfPageRange>,
 ) -> Result<FidelityReport, HandlerError> {
     if !matches!(target, "docx" | "xlsx" | "pptx" | "pdf" | "md" | "txt") {
         return Err(HandlerError::UnsupportedMode(format!(
@@ -1327,6 +1402,23 @@ fn semantic_export(
     }
     let (manifest, revision) =
         manifest_at_revision(bundle, head, requested_revision).map_err(handler_error)?;
+    let mut saved_filter = false;
+    if target == "xlsx" && manifest.source.format == "xlsx" {
+        for page in 0..manifest.index_page_count {
+            let index = bundle
+                .read_index_page(&manifest, page)
+                .map_err(handler_error)?;
+            if index.chunks.iter().any(|descriptor| {
+                descriptor
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.auto_filter.is_some())
+            }) {
+                saved_filter = true;
+                break;
+            }
+        }
+    }
     let output_path = Path::new(output);
     let parent = output_path
         .parent()
@@ -1334,7 +1426,8 @@ fn semantic_export(
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     if target == "pdf" && manifest.profile == "fixed-layout" && manifest.source.format == "pdf" {
-        let pages = super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path)?;
+        let pages =
+            super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path, pdf_pages)?;
         let report = FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             level: FidelityLevel::Visual,
@@ -1384,11 +1477,34 @@ fn semantic_export(
     let chunk_count = presentation.chunk_count;
     materialized.as_file_mut().flush()?;
     let assets = semantic_assets(bundle, revision).map_err(handler_error)?;
+    let word_formats = if target == "docx"
+        && manifest.profile == "semantic-flow"
+        && manifest.capabilities.structure_patch
+    {
+        hcd_core::editor_projection(bundle, Some(revision))
+            .map_err(handler_error)?
+            .blocks
+            .into_iter()
+            .filter(|block| {
+                !block.read_only
+                    && (block.content.alignment.is_some()
+                        || block
+                            .content
+                            .inlines
+                            .iter()
+                            .any(|inline| !inline.format.is_empty()))
+            })
+            .map(|block| (block.block_id, block.content))
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let summary = super::html_convert::convert_html_with_assets(
         materialized.path(),
         output_path,
         target,
         assets,
+        &word_formats,
     )?;
     let image_count = summary.image_count;
     let embedded_image_count = summary.embedded_image_count;
@@ -1409,6 +1525,14 @@ fn semantic_export(
         node_id: None,
         source_part: None,
     }));
+    if saved_filter {
+        warnings.push(FidelityWarning {
+            code: "HCD_XLSX_AUTOFILTER_REQUIRES_SOURCE".to_string(),
+            message: "Use --source with the original XLSX to include the saved worksheet AutoFilter and filtered row visibility".to_string(),
+            node_id: None,
+            source_part: None,
+        });
+    }
     let mut preserved = vec![
         format!("canonical HCD revision {revision} text in chunk sequence order"),
         format!(
@@ -1452,7 +1576,11 @@ fn semantic_export(
                 "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact".to_string(),
             ]
         },
-        dropped: Vec::new(),
+        dropped: if saved_filter {
+            vec!["saved worksheet AutoFilter".to_string()]
+        } else {
+            Vec::new()
+        },
         warnings,
     };
     if let Some(path) = fidelity_report {

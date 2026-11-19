@@ -14,6 +14,7 @@ import { readLayout, saveLayout, type LayoutPreferences } from './editorLayout.t
 import { useFixedCollaboration } from './fixedCollaboration.tsx'
 import { api, type Session } from './api.ts'
 import { ErrorToast } from './ErrorToast.tsx'
+import { GridDataTools, type GridAutoFilter, type GridDataSelection, type GridFilterCriterion, type GridFilterView, type GridSortDirection } from './GridDataTools.tsx'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
 
@@ -64,6 +65,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const { locale } = useI18n()
   const [status, setStatus] = useState('正在加载工作簿')
   const [revision, setRevision] = useState<number | null>(null)
+  const [activeSheetName, setActiveSheetName] = useState<string>()
+  const [activeSheetId, setActiveSheetId] = useState<string>()
   const [history, setHistory] = useState<EditHistory>({ head: null, past: [], future: [] })
   const [historyBusy, setHistoryBusy] = useState(false)
   const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
@@ -89,6 +92,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [formulaText, setFormulaText] = useState('')
   const [formulaDirty, setFormulaDirty] = useState(false)
   const [gridSelectionKind, setGridSelectionKind] = useState<GridSelectionKind>('cell')
+  const [dataSelection, setDataSelection] = useState<GridDataSelection | null>(null)
+  const [dataBusy, setDataBusy] = useState(false)
+  const [gridFilter, setGridFilter] = useState<{ selection: GridDataSelection; matched: number; total: number } | null>(null)
+  const [savedFilter, setSavedFilter] = useState<{ selection: GridDataSelection; view: GridFilterView } | null>(null)
+  const [loadingSavedFilter, setLoadingSavedFilter] = useState(false)
   const formulaInput = useRef<HTMLInputElement>(null)
   const updateFormulaBarRef = useRef<() => void>(() => {})
   const host = useRef<HTMLDivElement>(null)
@@ -108,7 +116,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   function resetHistory(nextRevision: number) {
     setHistory({ head: nextRevision, past: [], future: [] })
   }
-  const historyLocked = historyBusy || mergeBusy || rowBusy || columnBusy || columnWidthBusy || rowHeightBusy
+  const historyLocked = historyBusy || mergeBusy || rowBusy || columnBusy || columnWidthBusy || rowHeightBusy || dataBusy
     || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
   async function travelHistory(direction: 'undo' | 'redo') {
     const current = runtime.current
@@ -171,6 +179,31 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   })
   useEffect(() => () => { deletionResolver.current?.(false); deletionResolver.current = null }, [])
   useEffect(() => { saveLayout(layout, 'xlsx') }, [layout])
+  useEffect(() => { setGridFilter(null) }, [session, revision, editing])
+
+  useEffect(() => {
+    const current = runtime.current
+    if (!current || session.format !== 'xlsx' || revision === null || !activeSheetId) return
+    const controller = new AbortController()
+    const query = new URLSearchParams({ sheetId: activeSheetId, revision: String(revision) })
+    setLoadingSavedFilter(true)
+    void api(session, `/grid-filter?${query}`, { signal: controller.signal })
+      .then(response => response.json() as Promise<GridFilterView | null>)
+      .then(view => {
+        if (controller.signal.aborted || runtime.current !== current) return
+        const sheet = current.adapter.workbook.getActiveSheet()
+        if (sheet.getSheetId() !== activeSheetId) return
+        if (!view) { setSavedFilter(null); return }
+        const { startRow, endRow, startColumn, endColumn } = view.filter
+        const address = sheet.getRange(startRow - 1, startColumn - 1, endRow - startRow + 1,
+          endColumn - startColumn + 1).getA1Notation()
+        current.adapter.applySavedFilter(activeSheetId, view.hiddenRows)
+        setSavedFilter({ selection: { sheetId: activeSheetId, address, startRow, endRow, startColumn, endColumn }, view })
+      })
+      .catch(cause => { if (!controller.signal.aborted) setError(`读取已保存筛选失败：${String(cause)}`) })
+      .finally(() => { if (!controller.signal.aborted) setLoadingSavedFilter(false) })
+    return () => controller.abort()
+  }, [session, revision, activeSheetId, editing])
   function confirmDeletion(message: string): Promise<boolean> {
     return new Promise(resolve => {
       if (deletionResolver.current) { resolve(false); return }
@@ -238,6 +271,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   useEffect(() => {
     let alive = true
     const client = new ServiceGridClient(session)
+    setRevision(null)
+    setSavedFilter(null)
+    setLoadingSavedFilter(false)
     let disposeUniver: (() => void) | undefined
     let removePatchListener: (() => void) | undefined
     const boot = async () => {
@@ -283,10 +319,19 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       disposeUniver = () => univer.dispose()
       const workbook = univerAPI.createWorkbook(workbookData)
       const updateFormulaBar = () => {
+        if (!alive) return
         const sheet = workbook.getActiveSheet()
+        setActiveSheetName(sheet.getSheetName())
+        setActiveSheetId(sheet.getSheetId())
         const selection = sheet.getActiveRange()
-        if (!selection || !alive) return
-        setGridSelectionKind(selectionKind(sheet))
+        if (!selection) return
+        const kind = selectionKind(sheet)
+        setGridSelectionKind(kind)
+        setDataSelection(kind === 'cell' ? {
+          sheetId: sheet.getSheetId(), address: selection.getA1Notation(),
+          startRow: selection.getRow() + 1, endRow: selection.getRow() + selection.getHeight(),
+          startColumn: selection.getColumn() + 1, endColumn: selection.getColumn() + selection.getWidth(),
+        } : null)
         const cell = sheet.getRange(selection.getRow(), selection.getColumn())
         setFormulaAddress(cell.getA1Notation())
         setFormulaText(String(cell.getFormulas?.()[0]?.[0] || (cell.getValue() ?? '')))
@@ -294,7 +339,15 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       }
       updateFormulaBarRef.current = updateFormulaBar
       univerAPI.addEvent(univerAPI.Event.SelectionChanged, updateFormulaBar)
-      univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, updateFormulaBar)
+      let currentSheetId = workbook.getActiveSheet().getSheetId()
+      univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, ({ activeSheet }) => {
+        if (currentSheetId !== activeSheet.getSheetId()) {
+          currentSheetId = activeSheet.getSheetId()
+          runtime.current?.adapter.clearRowFilter()
+          if (alive) { setGridFilter(null); setSavedFilter(null) }
+        }
+        updateFormulaBar()
+      })
       const adapter = new HcdUniverAdapter(client, univerAPI, workbook, editing ? 'editable' : 'readonly', message => {
         if (alive) setStatus(message)
       }, styleCatalog)
@@ -354,6 +407,133 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     void boot().catch(cause => { if (alive) setError(String(cause)) })
     return () => { alive = false; runtime.current = null; localeApi.current = null; updateFormulaBarRef.current = () => {}; removePatchListener?.(); disposeUniver?.(); client.dispose() }
   }, [session, editing])
+
+  async function sortSelection(sortColumn: number, hasHeader: boolean, direction: GridSortDirection) {
+    const current = runtime.current
+    const selection = dataSelection
+    if (!current || !selection || !editing || session.scope !== 'write' || gridFilter || savedFilter || loadingSavedFilter
+      || historyLocked || gridBusy.current || syncing.current || current.adapter.hasPendingPatch()) return
+    gridBusy.current = true
+    current.adapter.lockCellWrites(true)
+    setDataBusy(true)
+    setStatus('正在排序…')
+    setError('')
+    try {
+      const { address: _address, ...range } = selection
+      const response = await api(session, '/grid-sort', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...range, sortColumn, hasHeader, direction,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision }),
+      })
+      const saved = await response.json() as { revision: number; changed: boolean }
+      if (runtime.current !== current) return
+      if (!saved.changed) { setStatus('选区已按指定顺序排列'); return }
+      recordEdit(saved.revision, '排序选区')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      try {
+        await current.adapter.refreshFromServer()
+        updateFormulaBarRef.current()
+        setStatus(`revision ${saved.revision} · 选区已排序`)
+      } catch (cause) {
+        setError(`排序已保存为 r${saved.revision}，视图同步失败：${String(cause)}`)
+      }
+    } catch (cause) {
+      if (runtime.current === current) {
+        setError(`排序失败：${String(cause)}`)
+        setStatus(`revision ${current.client.manifest.revision}`)
+      }
+    } finally {
+      current.adapter.lockCellWrites(false)
+      gridBusy.current = false
+      setDataBusy(false)
+    }
+  }
+
+  async function filterSelection(criteria: GridFilterCriterion[], hasHeader: boolean) {
+    const current = runtime.current
+    const selection = gridFilter?.selection ?? dataSelection
+    if (!current || !selection || savedFilter || loadingSavedFilter || historyLocked || gridBusy.current || syncing.current || current.adapter.hasPendingPatch()) return
+    gridBusy.current = true
+    current.adapter.lockCellWrites(true)
+    setDataBusy(true)
+    try {
+      const result = await current.adapter.filterRows(selection.sheetId,
+        selection.startRow - 1 + Number(hasHeader), selection.endRow - 1,
+        criteria.map(({ column, query }) => ({ column: column - 1, query })))
+      if (runtime.current === current) {
+        setGridFilter({ selection, ...result })
+        setError('')
+      }
+    } catch (cause) {
+      if (runtime.current === current) setError(`筛选失败：${String(cause)}`)
+    } finally {
+      current.adapter.lockCellWrites(false)
+      gridBusy.current = false
+      setDataBusy(false)
+    }
+  }
+
+  async function saveGridFilter(selection: GridDataSelection, filter: GridAutoFilter | null) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || session.format !== 'xlsx'
+      || historyLocked || gridBusy.current || loadingSavedFilter || syncing.current || current.adapter.hasPendingPatch()) return
+    gridBusy.current = true
+    current.adapter.lockCellWrites(true)
+    setDataBusy(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/30', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.auto-filter.set', sheetId: selection.sheetId, filter }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      if (runtime.current !== current) return
+      recordEdit(saved.revision, filter ? '保存筛选' : '移除已保存筛选')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      try {
+        await current.adapter.refreshFromServer()
+        const sheet = current.adapter.workbook.getActiveSheet()
+        if (!filter && sheet.getSheetId() === selection.sheetId) {
+          sheet.setActiveRange(sheet.getRange(selection.startRow - 1, selection.startColumn - 1,
+            selection.endRow - selection.startRow + 1, selection.endColumn - selection.startColumn + 1))
+        }
+        updateFormulaBarRef.current()
+      } catch (cause) {
+        setError(`筛选已保存为 r${saved.revision}，视图同步失败：${String(cause)}`)
+      }
+    } catch (cause) {
+      if (runtime.current === current) setError(`保存筛选失败：${String(cause)}`)
+    } finally {
+      current.adapter.lockCellWrites(false)
+      gridBusy.current = false
+      setDataBusy(false)
+    }
+  }
+
+  function saveSelectedFilter([primary, ...additionalCriteria]: GridFilterCriterion[]) {
+    const selection = savedFilter?.selection ?? gridFilter?.selection ?? dataSelection
+    if (!selection || !primary) return
+    const { startRow, endRow, startColumn, endColumn } = selection
+    void saveGridFilter(selection, { startRow, endRow, startColumn, endColumn, ...primary,
+      additionalCriteria: additionalCriteria.length ? additionalCriteria : undefined })
+  }
+
+  function clearGridFilter() {
+    if (savedFilter) { void saveGridFilter(savedFilter.selection, null); return }
+    const adapter = runtime.current?.adapter
+    adapter?.clearRowFilter()
+    const selection = gridFilter?.selection
+    const sheet = adapter?.workbook.getActiveSheet()
+    if (selection && sheet?.getSheetId() === selection.sheetId) {
+      sheet.setActiveRange(sheet.getRange(selection.startRow - 1, selection.startColumn - 1,
+        selection.endRow - selection.startRow + 1, selection.endColumn - selection.startColumn + 1))
+    }
+    setGridFilter(null)
+  }
 
   async function mergeSelection() {
     const current = runtime.current
@@ -898,7 +1078,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       </div>
     </div>}
     {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} activeTab={activeTab}
-      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen} presence={layout.showCollaborators ? collaboration.avatars : null} />}
+      onTab={setActiveTab} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen} activeSheetName={activeSheetName}
+      beforeExport={async () => {
+        if (runtime.current?.adapter.hasPendingPatch() || gridBusy.current || historyBusy) throw new Error('请等待当前单元格保存完成')
+        return revision
+      }} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => setSettingsOpen(true)}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     {layout.showToolbar && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
@@ -919,7 +1103,13 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         </>}
         {gridSelectionKind === 'cell' && <button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并选中单元格"} /></button>}
       </div><span className="ribbon-note"><LocalText source={"整行只显示行操作，整列只显示列操作；普通单元格可选择两种操作 · "} />{localizeDynamic(locale, status)}</span></>}
-      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => setEditing(!event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setSettingsOpen(true)}><LocalText source={"界面设置"} /></button></>}
+      {activeTab === 'data' && <GridDataTools key={savedFilter ? JSON.stringify([savedFilter.selection.sheetId, savedFilter.view.filter]) : 'grid-data'}
+        selection={savedFilter?.selection ?? gridFilter?.selection ?? dataSelection} busy={historyLocked || loadingSavedFilter} editing={editing}
+        filter={savedFilter ? { matched: savedFilter.view.total - savedFilter.view.hiddenRows.length, total: savedFilter.view.total } : gridFilter}
+        savedFilter={savedFilter?.view.filter} canSaveFilter={session.format === 'xlsx' && editing && session.scope === 'write'}
+        onSort={(column, header, direction) => void sortSelection(column, header, direction)} onSaveFilter={saveSelectedFilter}
+        onFilter={(criteria, header) => void filterSelection(criteria, header)} onClearFilter={clearGridFilter} />}
+      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read' || dataBusy} onChange={event => setEditing(!event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => setSettingsOpen(true)}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><div className="tool-group"><button disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"撤销 "} />{history.past.length} <LocalText source={" 步"} /></button><button disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"重做 "} />{history.future.length} <LocalText source={" 步"} /></button></div><span className="ribbon-note"><LocalText source={"当前修订 r"} />{revision ?? '…'} · {localizeDynamic(locale, history.past.length ? `下一步可撤销：${history.past.at(-1)?.label}` : '当前会话无可撤销步骤')} <LocalText source={" · 协作者更新后将清空本地步骤"} /></span></>}
     </nav>}
     <form className="xlsx-formula-bar" aria-label={localizeSource(locale, "公式栏")} onSubmit={event => { event.preventDefault(); applyFormulaBarInput() }}>
@@ -949,7 +1139,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} actions={contextActions}
       count={showRowContext ? { label: '插入行数', value: rowInsertCount, onChange: value => { setRowInsertCount(value); if (error.includes('插入行数必须')) setError('') } } : undefined}
       onClose={() => setContextMenu(null)} />}
-    <EditorStatusbar mode={localizeSource(locale, "工作簿视图")} format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
+    <EditorStatusbar mode={localizeSource(locale, "工作簿视图")} format={session.format} revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} />
     {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>
 }

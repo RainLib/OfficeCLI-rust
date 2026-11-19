@@ -14,6 +14,7 @@ use hcd_core::{
     NodeMapEntry, SourceAnchor, TextExtractEntry, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION,
     MAX_CHUNK_BYTES,
 };
+use pdf_handler::PdfHandler;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -523,19 +524,7 @@ fn import_pdf_inner<F>(
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
-    pdf_handler::reader::preflight_structural_streams(
-        source,
-        pdf_handler::reader::PdfStructuralLimits {
-            maximum_source_bytes: MAX_HCD_PDF_SOURCE_BYTES as usize,
-            maximum_dictionary_bytes: MAX_HCD_PDF_STREAM_DICTIONARY_BYTES,
-            maximum_encoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
-            maximum_decoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
-            maximum_total_decoded_bytes: MAX_HCD_PDF_STRUCTURAL_TOTAL_BYTES,
-            maximum_structural_streams: MAX_HCD_PDF_STRUCTURAL_STREAMS,
-            maximum_xref_entries: MAX_HCD_PDF_XREF_ENTRIES,
-        },
-    )
-    .map_err(pdf_parse_error)?;
+    preflight_pdf(source)?;
     let source_path = source
         .to_str()
         .ok_or_else(|| HcdError::InvalidBundle("PDF path is not UTF-8".to_string()))?;
@@ -1064,6 +1053,16 @@ pub(crate) fn export_pdf(
     target: &Path,
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
+    export_pdf_revision(bundle, source, target, options, None)
+}
+
+pub(crate) fn export_pdf_revision(
+    bundle: &Bundle,
+    source: &Path,
+    target: &Path,
+    options: &ExportOptions,
+    page_range: Option<std::ops::RangeInclusive<usize>>,
+) -> Result<FidelityReport, HcdError> {
     if target.exists() {
         return Err(HcdError::InvalidBundle(format!(
             "target already exists: {}",
@@ -1072,7 +1071,24 @@ pub(crate) fn export_pdf(
     }
     let (manifest, dirty_parts, dirty_node_ids, _) =
         checked_export_state_with_restores(bundle, source, options)?;
+    let layout = hcd_core::pdf_page_layout(bundle, &manifest)?;
+    let organized = !layout.is_empty();
+    let selected_layout = pdf_layout_range(&layout, page_range.as_ref())?;
     let mut nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    if organized {
+        let selected = selected_layout
+            .iter()
+            .filter_map(|page| page.source_page.map(u64::from))
+            .collect::<std::collections::HashSet<_>>();
+        nodes.retain(|node| selected.contains(&page_number(&node.source.part)));
+    } else if let Some(range) = &page_range {
+        nodes.retain(|node| {
+            usize::try_from(page_number(&node.source.part)).is_ok_and(|page| range.contains(&page))
+        });
+    }
+    if organized || page_range.is_some() {
+        preflight_pdf(source)?;
+    }
     nodes.sort_by(|left, right| {
         let left_page = page_number(&left.source.part);
         let right_page = page_number(&right.source.part);
@@ -1081,7 +1097,10 @@ pub(crate) fn export_pdf(
     let overlay_positions = pdf_overlay_positions(bundle, &manifest, &nodes)?;
     let has_active_edits = !nodes.is_empty();
 
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let parent = target
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let temp = tempfile::Builder::new()
         .prefix(".officecli-hcd-pdf-")
@@ -1089,7 +1108,7 @@ pub(crate) fn export_pdf(
         .tempfile_in(parent)?;
     std::fs::copy(source, temp.path())?;
     let mut masked_overlays = false;
-    if !nodes.is_empty() {
+    if has_active_edits || organized || page_range.is_some() {
         let temp_path = temp.path().to_str().ok_or_else(|| {
             HcdError::InvalidBundle("temporary PDF path is not UTF-8".to_string())
         })?;
@@ -1179,15 +1198,35 @@ pub(crate) fn export_pdf(
                 )
                 .map_err(|error| HcdError::Unsupported(error.to_string()))?;
         }
+        apply_pdf_page_selection(&handler, selected_layout, page_range.as_ref())?;
         handler
             .save()
             .map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
     }
-    pdf_handler::reader::PdfReader::open(&temp.path().to_string_lossy())
+    let exported = pdf_handler::reader::PdfReader::open(&temp.path().to_string_lossy())
         .map_err(|error| HcdError::InvalidBundle(format!("exported PDF is invalid: {error}")))?;
-    temp.persist(target)
+    let expected_count = if organized {
+        Some(selected_layout.len())
+    } else {
+        page_range
+            .as_ref()
+            .map(|range| range.end() - range.start() + 1)
+    };
+    if expected_count.is_some_and(|count| exported.page_count() != count) {
+        return Err(HcdError::InvalidBundle(
+            "exported PDF page count does not match the current page selection".into(),
+        ));
+    }
+    temp.persist_noclobber(target)
         .map_err(|error| HcdError::Io(error.error))?;
 
+    let has_deleted_pages = organized
+        && page_range.is_none()
+        && layout
+            .iter()
+            .filter(|page| page.source_page.is_some())
+            .count()
+            != hcd_core::pdf_page_count(bundle, &manifest)?;
     let mut warnings = manifest.warnings;
     if masked_overlays {
         warnings.push(FidelityWarning {
@@ -1198,9 +1237,11 @@ pub(crate) fn export_pdf(
         });
     }
 
-    let report = FidelityReport {
+    let mut report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
-        level: if !has_active_edits {
+        level: if organized && !has_active_edits {
+            FidelityLevel::High
+        } else if !has_active_edits {
             FidelityLevel::Exact
         } else {
             FidelityLevel::Semantic
@@ -1216,8 +1257,111 @@ pub(crate) fn export_pdf(
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
         warnings,
     };
+    if organized {
+        report.preserved[0] =
+            "original PDF page objects, page resources, and applied page order and rotation".into();
+    }
+    if has_deleted_pages || page_range.is_some() {
+        report.dropped.push("document-level outlines, named destinations, attachments, tags and signatures, plus links to omitted pages and unsupported annotations".to_string());
+    }
+    if let Some(range) = page_range {
+        report.level = if has_active_edits {
+            FidelityLevel::Semantic
+        } else {
+            FidelityLevel::High
+        };
+        report.preserved[0] = format!("selectable text, graphics, page geometry, and supported annotations from pages {}–{} in the exported order", range.start(), range.end());
+    }
     write_fidelity_report(options, &report)?;
     Ok(report)
+}
+
+pub fn validate_pdf_source_export(
+    bundle: &Bundle,
+    source: &Path,
+    revision: u64,
+    page_range: Option<std::ops::RangeInclusive<usize>>,
+) -> Result<(), HcdError> {
+    let options = ExportOptions {
+        revision: Some(revision),
+        fidelity_report: None,
+    };
+    let (manifest, ..) = checked_export_state_with_restores(bundle, source, &options)?;
+    let layout = hcd_core::pdf_page_layout(bundle, &manifest)?;
+    if layout.is_empty() && page_range.is_none() {
+        return Ok(());
+    }
+    let selected = pdf_layout_range(&layout, page_range.as_ref())?;
+    preflight_pdf(source)?;
+    let path = source
+        .to_str()
+        .ok_or_else(|| HcdError::Unsupported("PDF source path must be UTF-8".into()))?;
+    // Opening and changing this handler only alters its in-memory object graph.
+    let handler =
+        PdfHandler::open(path, true).map_err(|error| HcdError::Unsupported(error.to_string()))?;
+    apply_pdf_page_selection(&handler, selected, page_range.as_ref())
+}
+
+fn pdf_layout_range<'a>(
+    layout: &'a [hcd_core::PdfPagePlacement],
+    range: Option<&std::ops::RangeInclusive<usize>>,
+) -> Result<&'a [hcd_core::PdfPagePlacement], HcdError> {
+    let Some(range) = range.filter(|_| !layout.is_empty()) else {
+        return Ok(layout);
+    };
+    range
+        .start()
+        .checked_sub(1)
+        .and_then(|start| layout.get(start..*range.end()))
+        .filter(|pages| !pages.is_empty())
+        .ok_or_else(|| {
+            HcdError::InvalidPatch("PDF page range is outside the organized document".into())
+        })
+}
+
+fn apply_pdf_page_selection(
+    handler: &PdfHandler,
+    layout: &[hcd_core::PdfPagePlacement],
+    range: Option<&std::ops::RangeInclusive<usize>>,
+) -> Result<(), HcdError> {
+    let result = if !layout.is_empty() {
+        let plan: Vec<_> = layout
+            .iter()
+            .map(|page| match page.source_page {
+                Some(source) => pdf_handler::PdfPageSelection::Source {
+                    page: source,
+                    rotation: page.rotation,
+                },
+                None => pdf_handler::PdfPageSelection::Blank {
+                    width: hcd_core::PDF_BLANK_WIDTH_PT,
+                    height: hcd_core::PDF_BLANK_HEIGHT_PT,
+                    rotation: page.rotation,
+                },
+            })
+            .collect();
+        handler.organize_pages(&plan, range.is_some())
+    } else if let Some(range) = range {
+        handler.retain_page_range(range.clone())
+    } else {
+        return Ok(());
+    };
+    result.map_err(|error| HcdError::Unsupported(error.to_string()))
+}
+
+fn preflight_pdf(source: &Path) -> Result<(), HcdError> {
+    pdf_handler::reader::preflight_structural_streams(
+        source,
+        pdf_handler::reader::PdfStructuralLimits {
+            maximum_source_bytes: MAX_HCD_PDF_SOURCE_BYTES as usize,
+            maximum_dictionary_bytes: MAX_HCD_PDF_STREAM_DICTIONARY_BYTES,
+            maximum_encoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
+            maximum_decoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
+            maximum_total_decoded_bytes: MAX_HCD_PDF_STRUCTURAL_TOTAL_BYTES,
+            maximum_structural_streams: MAX_HCD_PDF_STRUCTURAL_STREAMS,
+            maximum_xref_entries: MAX_HCD_PDF_XREF_ENTRIES,
+        },
+    )
+    .map_err(pdf_parse_error)
 }
 
 fn page_number(part: &str) -> u64 {

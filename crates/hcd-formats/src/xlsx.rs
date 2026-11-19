@@ -19,6 +19,9 @@ use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use time::{Date, Duration, Month};
 
+pub(crate) mod delimited;
+pub(crate) mod grid_filter;
+
 const MAX_CONTROL_BYTES: u64 = 16 * 1024 * 1024;
 const ROWS_PER_WINDOW: usize = 128;
 const MAX_MERGED_RANGES: usize = 1_000_000;
@@ -125,6 +128,7 @@ struct CellBuilder {
     shared_formula_index: Option<u32>,
     value: String,
     inline_text: String,
+    complex_value: bool,
     capture: Capture,
 }
 
@@ -654,6 +658,7 @@ where
                 column_end: self.last_column,
                 default_column_width_emu: Some(default_column_width_emu(self.default_column_width)),
                 default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
+                auto_filter: None,
             },
         )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
@@ -723,6 +728,7 @@ where
                 column_end: None,
                 default_column_width_emu: Some(default_column_width_emu(self.default_column_width)),
                 default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
+                auto_filter: None,
             },
         )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
@@ -767,6 +773,7 @@ impl SharedStringStore {
                 reader.config_mut().check_end_names = true;
                 let mut buffer = Vec::with_capacity(64 * 1024);
                 let mut current: Option<String> = None;
+                let mut rich = false;
                 let mut in_text = false;
                 let mut budget = XmlBudget::default();
                 loop {
@@ -779,6 +786,16 @@ impl SharedStringStore {
                     match event {
                         Event::Start(ref start) if local_name(start.name().as_ref()) == "si" => {
                             current = Some(String::new());
+                            rich = false;
+                        }
+                        Event::Start(ref start) | Event::Empty(ref start)
+                            if current.is_some()
+                                && matches!(
+                                    local_name(start.name().as_ref()),
+                                    "r" | "rPh" | "phoneticPr" | "extLst"
+                                ) =>
+                        {
+                            rich = true;
                         }
                         Event::Start(ref start) if local_name(start.name().as_ref()) == "t" => {
                             in_text = current.is_some();
@@ -801,7 +818,7 @@ impl SharedStringStore {
                         Event::End(ref end) if local_name(end.name().as_ref()) == "si" => {
                             let value = current.take().unwrap_or_default();
                             store
-                                .push(&value)
+                                .push(&value, rich)
                                 .map_err(|error| PackageError::ReadPartError(error.to_string()))?;
                         }
                         Event::Eof => {
@@ -820,16 +837,17 @@ impl SharedStringStore {
         Ok(store)
     }
 
-    fn push(&mut self, value: &str) -> Result<(), HcdError> {
+    fn push(&mut self, value: &str, rich: bool) -> Result<(), HcdError> {
         let offset = self.values.seek(SeekFrom::End(0))?;
         self.offsets.write_all(&offset.to_le_bytes())?;
-        self.values.write_all(&(value.len() as u64).to_le_bytes())?;
+        let length_and_rich = (value.len() as u64) << 1 | u64::from(rich);
+        self.values.write_all(&length_and_rich.to_le_bytes())?;
         self.values.write_all(value.as_bytes())?;
         self.count += 1;
         Ok(())
     }
 
-    fn get(&mut self, index: u64) -> Result<String, HcdError> {
+    fn get(&mut self, index: u64) -> Result<(String, bool), HcdError> {
         if index >= self.count {
             return Err(HcdError::InvalidBundle(format!(
                 "shared string index {index} exceeds {} entries",
@@ -842,7 +860,8 @@ impl SharedStringStore {
         let offset = u64::from_le_bytes(encoded);
         self.values.seek(SeekFrom::Start(offset))?;
         self.values.read_exact(&mut encoded)?;
-        let length = u64::from_le_bytes(encoded);
+        let length_and_rich = u64::from_le_bytes(encoded);
+        let length = length_and_rich >> 1;
         if length > MAX_CHUNK_BYTES as u64 {
             return Err(HcdError::ResourceLimit(
                 "NODE_TOO_LARGE: shared string exceeds 2 MiB".to_string(),
@@ -851,6 +870,7 @@ impl SharedStringStore {
         let mut bytes = vec![0u8; length as usize];
         self.values.read_exact(&mut bytes)?;
         String::from_utf8(bytes)
+            .map(|value| (value, length_and_rich & 1 != 0))
             .map_err(|error| HcdError::InvalidBundle(format!("shared string UTF-8: {error}")))
     }
 }
@@ -2940,12 +2960,16 @@ fn record_chart_reference_cell(
         return Ok(());
     }
     let value = match cell.value_type.as_str() {
-        "s" => shared_strings.get(cell.value.parse().map_err(|_| {
-            HcdError::InvalidBundle(format!(
-                "invalid shared string index in chart source cell {}",
-                cell.reference
-            ))
-        })?)?,
+        "s" => {
+            shared_strings
+                .get(cell.value.parse().map_err(|_| {
+                    HcdError::InvalidBundle(format!(
+                        "invalid shared string index in chart source cell {}",
+                        cell.reference
+                    ))
+                })?)?
+                .0
+        }
         "inlineStr" => cell.inline_text,
         "b" => match cell.value.as_str() {
             "1" => "TRUE".to_string(),
@@ -3959,6 +3983,7 @@ fn drawing_grid_address(
         column_end: anchor.to_col.map(|value| value + 1),
         default_column_width_emu: None,
         default_row_height_emu: None,
+        auto_filter: None,
     }
 }
 
@@ -4140,6 +4165,8 @@ where
                     reference: attribute(start, "r").unwrap_or_default(),
                     value_type: attribute(start, "t").unwrap_or_default(),
                     style_index: attribute(start, "s").and_then(|value| value.parse().ok()),
+                    complex_value: attribute(start, "cm").is_some()
+                        || attribute(start, "vm").is_some(),
                     ..Default::default()
                 });
             }
@@ -4192,6 +4219,15 @@ where
                 if cell.is_some() && local_name(start.name().as_ref()) == "v" =>
             {
                 cell.as_mut().expect("checked cell").capture = Capture::Value;
+            }
+            Event::Start(ref start) | Event::Empty(ref start)
+                if cell.is_some()
+                    && matches!(
+                        local_name(start.name().as_ref()),
+                        "r" | "rPh" | "phoneticPr" | "extLst"
+                    ) =>
+            {
+                cell.as_mut().expect("checked cell").complex_value = true;
             }
             Event::Start(ref start)
                 if cell.is_some() && local_name(start.name().as_ref()) == "t" =>
@@ -4476,18 +4512,26 @@ fn append_cell(
     format_stats: &mut XlsxFormatStats,
 ) -> Result<(), HcdError> {
     let is_numeric = matches!(cell.value_type.as_str(), "" | "n");
-    let raw_text = match cell.value_type.as_str() {
+    let (raw_text, rich) = match cell.value_type.as_str() {
         "s" => shared_strings.get(cell.value.parse().map_err(|_| {
             HcdError::InvalidBundle(format!("invalid shared string index in {}", cell.reference))
         })?)?,
-        "inlineStr" => cell.inline_text,
-        "b" => match cell.value.as_str() {
-            "1" => "TRUE".to_string(),
-            "0" => "FALSE".to_string(),
-            _ => cell.value,
-        },
-        _ => cell.value,
+        "inlineStr" => (cell.inline_text, false),
+        "b" => (
+            match cell.value.as_str() {
+                "1" => "TRUE".to_string(),
+                "0" => "FALSE".to_string(),
+                _ => cell.value,
+            },
+            false,
+        ),
+        _ => (cell.value, false),
     };
+    let sortable = !cell.complex_value
+        && !rich
+        && !cell.formula
+        && (matches!(cell.value_type.as_str(), "s" | "inlineStr" | "str")
+            || (is_numeric && raw_text.parse::<f64>().is_ok_and(f64::is_finite)));
     let formatted = format_xlsx_cell(&raw_text, cell.style_index, is_numeric, styles, date_1904);
     if formatted.text != raw_text {
         format_stats.formatted_cells = format_stats.formatted_cells.saturating_add(1);
@@ -4576,7 +4620,7 @@ fn append_cell(
         column: cell_col,
         span: column_span,
         html: format!(
-            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}{}{}{}><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
+            "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}{}{}{} data-hcd-sortable=\"{sortable}\"><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
             cell.style_index
                 .map(|index| format!(" hcd-xs-{index}"))
                 .unwrap_or_default(),
@@ -4742,6 +4786,7 @@ pub(crate) fn export_xlsx(
     let mut created_cells: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut created_formulas: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let mut formula_converted_to_value = false;
+    let mut grid_values_reordered = false;
     let mut converted_formula_node_ids = BTreeSet::new();
     let mut converted_formula_cells: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut row_insertions: HashMap<String, Vec<RowShift>> = HashMap::new();
@@ -4749,6 +4794,7 @@ pub(crate) fn export_xlsx(
     for &revision in &revisions {
         let record = bundle.revision(revision)?;
         formula_converted_to_value |= !record.converted_formula_node_ids.is_empty();
+        grid_values_reordered |= record.grid_values_reordered;
         converted_formula_node_ids.extend(record.converted_formula_node_ids);
         for shift in record.grid_row_insertions {
             row_insertions
@@ -4887,7 +4933,8 @@ pub(crate) fn export_xlsx(
     }
     let chart_caches_may_be_stale = (!formula_replacements.is_empty()
         || !created_formulas.is_empty()
-        || formula_converted_to_value)
+        || formula_converted_to_value
+        || grid_values_reordered)
         && archive
             .entries()
             .iter()
@@ -4973,9 +5020,18 @@ pub(crate) fn export_xlsx(
             .map_err(package_error)?;
         replacement_paths.insert(part.clone(), path);
     }
+    grid_filter::write_saved_filters(
+        bundle,
+        &manifest,
+        &workbook,
+        &mut archive,
+        scratch.path(),
+        &mut replacement_paths,
+    )?;
     if !formula_replacements.is_empty()
         || !created_formulas.is_empty()
         || formula_converted_to_value
+        || grid_values_reordered
     {
         let path = scratch.path().join("workbook-recalculate.xml");
         let source_workbook = archive
@@ -7665,6 +7721,287 @@ mod tests {
     }
 
     #[test]
+    fn saved_grid_filter_reopens_and_exports_native_filter_and_hidden_rows() {
+        use hcd_core::{
+            apply_patch, restore_revision, validate_bundle, worksheet_filter, GridAutoFilter,
+            GridFilterCriterion, PatchBatch, PatchOperation, HCD_PATCH_SCHEMA_VERSION_30,
+        };
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("filter.hcd");
+        let filtered = temp.path().join("filtered.xlsx");
+        let cleared = temp.path().join("cleared.xlsx");
+        let mut options = ImportOptions::new("saved-filter-budget");
+        options.chunk_blocks = 2;
+        let original = import_xlsx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let sheet_id = sheet_grid_id(&original.document_id, "xl/worksheets/sheet2.xml");
+        let filter = GridAutoFilter {
+            start_row: 1,
+            end_row: 21,
+            start_column: 1,
+            end_column: 7,
+            column: 7,
+            query: "pEnDiNg".into(),
+            additional_criteria: Vec::new(),
+        };
+        let legacy_json = r#"{"startRow":1,"endRow":21,"startColumn":1,"endColumn":7,"column":7,"query":"pEnDiNg"}"#;
+        assert_eq!(
+            serde_json::from_str::<GridAutoFilter>(legacy_json).unwrap(),
+            filter
+        );
+        assert_eq!(serde_json::to_string(&filter).unwrap(), legacy_json);
+        grid_filter::verify_xlsx_filter_source(&source, &original, &sheet_id, &filter).unwrap();
+        assert!(grid_filter::verify_xlsx_filter_source(
+            &source,
+            &original,
+            &sheet_id,
+            &GridAutoFilter {
+                end_row: 20,
+                ..filter.clone()
+            }
+        )
+        .is_err());
+        let patch = |patch_id: &str, base_revision, filter| PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_30.into(),
+            document_id: original.document_id.clone(),
+            patch_id: patch_id.into(),
+            base_revision,
+            actor: Default::default(),
+            metadata: Default::default(),
+            operations: vec![PatchOperation::XlsxAutoFilterSet {
+                sheet_id: sheet_id.clone(),
+                filter,
+            }],
+        };
+        let saved =
+            apply_patch(&bundle, &patch("save-filter", 0, Some(filter.clone())), 0).unwrap();
+        assert_eq!(saved.revision, 1);
+        assert_ne!(saved.root_hash, original.root_hash);
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let reopened = Bundle::open(&path).unwrap();
+        let view = worksheet_filter(&reopened, &reopened.manifest().unwrap(), &sheet_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.filter, filter);
+        let visible = [6, 10, 15, 21];
+        let expected_hidden: Vec<_> = (2..=21).filter(|row| !visible.contains(row)).collect();
+        assert_eq!(view.hidden_rows, expected_hidden);
+        assert_eq!(view.total, 20);
+        assert!(worksheet_filter(&bundle, &original, &sheet_id)
+            .unwrap()
+            .is_none());
+        export_xlsx(&bundle, &source, &filtered, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&filtered, "xl/worksheets/sheet2.xml");
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let root = doc
+            .descendants()
+            .find(|node| node.has_tag_name("autoFilter"))
+            .unwrap();
+        assert_eq!(root.attribute("ref"), Some("A1:G21"));
+        assert!(root.children().any(|node| node.has_tag_name("extLst")));
+        let column = root
+            .children()
+            .find(|node| node.has_tag_name("filterColumn"))
+            .unwrap();
+        assert_eq!(column.attribute("colId"), Some("6"));
+        let criterion = column
+            .descendants()
+            .find(|node| node.has_tag_name("customFilter"))
+            .unwrap();
+        assert_eq!(criterion.attribute("val"), Some("*pEnDiNg*"));
+        let hidden: Vec<u32> = doc
+            .descendants()
+            .filter(|node| node.has_tag_name("row") && node.attribute("hidden") == Some("1"))
+            .map(|node| node.attribute("r").unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(hidden, expected_hidden);
+        for part in [
+            "xl/workbook.xml",
+            "xl/worksheets/sheet1.xml",
+            "xl/worksheets/sheet3.xml",
+            "xl/styles.xml",
+        ] {
+            assert_eq!(
+                read_zip_entry(&source, part),
+                read_zip_entry(&filtered, part)
+            );
+        }
+        let filtered_bundle = temp.path().join("reimport.hcd");
+        let imported = import_xlsx(&filtered, &filtered_bundle, &options, |_| Ok(())).unwrap();
+        assert!(
+            grid_filter::verify_xlsx_filter_source(&filtered, &imported, &sheet_id, &filter)
+                .is_err()
+        );
+        apply_patch(&bundle, &patch("clear-filter", 1, None), 1).unwrap();
+        assert!(
+            worksheet_filter(&bundle, &bundle.manifest().unwrap(), &sheet_id)
+                .unwrap()
+                .is_none()
+        );
+        export_xlsx(&bundle, &source, &cleared, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&source, "xl/worksheets/sheet2.xml"),
+            read_zip_entry(&cleared, "xl/worksheets/sheet2.xml")
+        );
+        restore_revision(&bundle, 1, 2).unwrap();
+        assert_eq!(
+            worksheet_filter(&bundle, &bundle.manifest().unwrap(), &sheet_id)
+                .unwrap()
+                .unwrap()
+                .filter,
+            filter
+        );
+
+        let mut multi = GridAutoFilter {
+            additional_criteria: vec![GridFilterCriterion {
+                column: 2,
+                query: "operations".into(),
+            }],
+            ..filter
+        };
+        for (patch_id, column) in [("duplicate-criterion", 7), ("criterion-outside-range", 8)] {
+            multi.additional_criteria[0].column = column;
+            assert!(matches!(
+                apply_patch(&bundle, &patch(patch_id, 3, Some(multi.clone())), 3),
+                Err(HcdError::InvalidPatch(_))
+            ));
+            assert_eq!(bundle.manifest().unwrap().revision, 3);
+        }
+        multi.additional_criteria[0].column = 2;
+        apply_patch(
+            &bundle,
+            &patch("multi-column-filter", 3, Some(multi.clone())),
+            3,
+        )
+        .unwrap();
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let view = worksheet_filter(&bundle, &bundle.manifest().unwrap(), &sheet_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.filter, multi);
+        let expected_hidden: Vec<_> = (2..=21).filter(|row| *row != 6).collect();
+        assert_eq!(view.hidden_rows, expected_hidden);
+        let multiple = temp.path().join("multiple.xlsx");
+        export_xlsx(&bundle, &source, &multiple, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&multiple, "xl/worksheets/sheet2.xml");
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let criteria: Vec<_> = doc
+            .descendants()
+            .filter(|node| node.has_tag_name("filterColumn"))
+            .map(|node| {
+                (
+                    node.attribute("colId"),
+                    node.descendants()
+                        .find(|child| child.has_tag_name("customFilter"))
+                        .unwrap()
+                        .attribute("val"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            criteria,
+            [
+                (Some("1"), Some("*operations*")),
+                (Some("6"), Some("*pEnDiNg*"))
+            ]
+        );
+        let hidden: Vec<u32> = doc
+            .descendants()
+            .filter(|node| node.has_tag_name("row") && node.attribute("hidden") == Some("1"))
+            .map(|node| node.attribute("r").unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(hidden, expected_hidden);
+    }
+
+    #[test]
+    fn grid_sort_reorders_native_values_across_chunks_and_rejects_formulas() {
+        use hcd_core::{sort_grid, GridSortDirection, GridSortRequest};
+
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("budget.hcd");
+        let exported = temp.path().join("sorted.xlsx");
+        let mut options = ImportOptions::new("sorted-budget");
+        options.chunk_blocks = 2;
+        let manifest = import_xlsx(&source, &bundle_path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let grids: Vec<_> = (0..manifest.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&manifest, page).unwrap().chunks)
+            .filter_map(|descriptor| descriptor.grid)
+            .filter(|grid| grid.kind == GridChunkKind::Cells)
+            .collect();
+        let sheet = |name: &str| {
+            grids
+                .iter()
+                .find(|grid| grid.sheet_name == name)
+                .unwrap()
+                .sheet_id
+                .clone()
+        };
+        let request = |patch_id: &str, base_revision| GridSortRequest {
+            patch_id: patch_id.into(),
+            base_revision,
+            sheet_id: sheet("Transactions"),
+            start_row: 1,
+            end_row: 5,
+            start_column: 1,
+            end_column: 7,
+            sort_column: 5,
+            has_header: true,
+            direction: GridSortDirection::Ascending,
+        };
+
+        let result = sort_grid(&bundle, request("sort-transactions", 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result.dirty_chunk_ids.len() > 1);
+        assert!(sort_grid(&bundle, request("repeat-sorted-order", 1))
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            sort_grid(&bundle, request("stale-revision", 0)),
+            Err(HcdError::RevisionConflict(_))
+        ));
+
+        let formula = GridSortRequest {
+            sheet_id: sheet("Overview"),
+            start_row: 7,
+            end_row: 9,
+            end_column: 8,
+            ..request("sort-formula", 1)
+        };
+        assert!(sort_grid(&bundle, formula)
+            .unwrap_err()
+            .to_string()
+            .contains("formula"));
+        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        assert!(bundle.revision(1).unwrap().grid_values_reordered);
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let xml = read_zip_entry(&exported, "xl/worksheets/sheet2.xml");
+        assert!(xml.contains("<c r=\"D2\" s=\"2\" t=\"inlineStr\"><is><t>Client visit - NYC</t>"));
+        for (row, value) in [(2, 5200), (3, 12000), (4, 28000), (5, 45000)] {
+            assert!(xml.contains(&format!("<c r=\"E{row}\" s=\"3\"><v>{value}</v></c>")));
+        }
+        for part in [
+            "xl/worksheets/sheet1.xml",
+            "xl/worksheets/sheet3.xml",
+            "xl/styles.xml",
+        ] {
+            assert_eq!(
+                read_zip_entry(&source, part),
+                read_zip_entry(&exported, part)
+            );
+        }
+        assert!(read_zip_entry(&exported, "xl/workbook.xml").contains("fullCalcOnLoad=\"1\""));
+    }
+
+    #[test]
     fn styled_budget_cell_becomes_formula_without_corrupting_html_attributes() {
         let source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/showcase/budget-tracker.xlsx");
@@ -8463,13 +8800,13 @@ mod tests {
     fn shared_string_store_supports_disk_backed_random_reads() {
         let temp = tempfile::tempdir().unwrap();
         let mut store = SharedStringStore::empty(temp.path()).unwrap();
-        store.push("first").unwrap();
-        store.push("中间 😀").unwrap();
-        store.push("last").unwrap();
+        store.push("first", false).unwrap();
+        store.push("中间 😀", true).unwrap();
+        store.push("last", false).unwrap();
 
-        assert_eq!(store.get(2).unwrap(), "last");
-        assert_eq!(store.get(0).unwrap(), "first");
-        assert_eq!(store.get(1).unwrap(), "中间 😀");
+        assert_eq!(store.get(2).unwrap(), ("last".into(), false));
+        assert_eq!(store.get(0).unwrap(), ("first".into(), false));
+        assert_eq!(store.get(1).unwrap(), ("中间 😀".into(), true));
     }
 
     #[test]
