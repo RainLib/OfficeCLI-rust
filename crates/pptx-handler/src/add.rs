@@ -4909,10 +4909,7 @@ fn strip_named_element(xml: &str, qualified_name: &str) -> String {
     let mut out = xml.to_string();
     let open_tag_pat = format!("<{}", qualified_name);
     let close_tag_pat = format!("</{}>", qualified_name);
-    loop {
-        let Some(open) = out.find(&open_tag_pat) else {
-            break;
-        };
+    while let Some(open) = out.find(&open_tag_pat) {
         // Make sure the tag really starts here — char after must be whitespace,
         // `/`, or `>` so we don't match `<p:transitionRule>` etc.
         let next = out.as_bytes().get(open + open_tag_pat.len()).copied();

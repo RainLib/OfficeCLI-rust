@@ -52,7 +52,7 @@ impl DocumentHandler for ExcelHandler {
             output.push_str(&format!("=== {} ===\n", ws.name));
             let cell_refs: Vec<&crate::dom_types::Cell> = ws.cells.values().collect();
             let mut sorted = cell_refs;
-            sorted.sort_by(|a, b| (a.row, a.col).cmp(&(b.row, b.col)));
+            sorted.sort_by_key(|a| (a.row, a.col));
 
             for cell in sorted {
                 let type_label = match cell.value_type {

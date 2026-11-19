@@ -2725,21 +2725,19 @@ fn merge_ppr_into_props(
                     merged.insert("border".to_string(), "preserve".to_string());
                 }
             }
-            "shd" => {
-                if !new_props.contains_key("shading") && !new_props.contains_key("shd") {
-                    let fill = child.attributes.get("fill").cloned().unwrap_or_default();
-                    let pat = child
-                        .attributes
-                        .get("val")
-                        .cloned()
-                        .unwrap_or("clear".to_string());
-                    let clr = child
-                        .attributes
-                        .get("color")
-                        .cloned()
-                        .unwrap_or("auto".to_string());
-                    merged.insert("shd".to_string(), format!("{};{};{}", pat, fill, clr));
-                }
+            "shd" if !new_props.contains_key("shading") && !new_props.contains_key("shd") => {
+                let fill = child.attributes.get("fill").cloned().unwrap_or_default();
+                let pat = child
+                    .attributes
+                    .get("val")
+                    .cloned()
+                    .unwrap_or("clear".to_string());
+                let clr = child
+                    .attributes
+                    .get("color")
+                    .cloned()
+                    .unwrap_or("auto".to_string());
+                merged.insert("shd".to_string(), format!("{};{};{}", pat, fill, clr));
             }
             _ => {}
         }
@@ -11493,10 +11491,7 @@ fn strip_named_element_pub(xml: &str, qualified_name: &str) -> String {
     let mut out = xml.to_string();
     let open_tag_pat = format!("<{}", qualified_name);
     let close_tag_pat = format!("</{}>", qualified_name);
-    loop {
-        let Some(open) = out.find(&open_tag_pat) else {
-            break;
-        };
+    while let Some(open) = out.find(&open_tag_pat) {
         // Ensure the match is the start of a real tag (not a longer name).
         let next = out.as_bytes().get(open + open_tag_pat.len()).copied();
         if !matches!(

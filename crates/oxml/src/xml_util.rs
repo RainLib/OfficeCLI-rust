@@ -268,7 +268,7 @@ fn locate_matches(xml: &str, xpath: &str) -> Result<Vec<(usize, usize)>, XmlUtil
             (r.start, r.end)
         })
         .collect();
-    ranges.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
     Ok(ranges)
 }
 

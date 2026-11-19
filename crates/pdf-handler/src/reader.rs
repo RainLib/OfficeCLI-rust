@@ -196,7 +196,9 @@ fn validate_structural_dictionary(
                     ));
                 }
                 let entries = index
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .try_fold(0usize, |total, pair| {
                         usize::try_from(pair[1])
                             .ok()

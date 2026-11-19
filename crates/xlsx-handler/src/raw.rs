@@ -66,10 +66,12 @@ pub fn filter_worksheet_xml(xml: &str, opts: &RawOptions) -> Result<String, Hand
                     continue;
                 }
             }
-            Event::Empty(element) if in_sheet_data && element.local_name().as_ref() == b"c" => {
-                if !include_cell(element, allowed_columns.as_ref()) {
-                    continue;
-                }
+            Event::Empty(element)
+                if in_sheet_data
+                    && element.local_name().as_ref() == b"c"
+                    && !include_cell(element, allowed_columns.as_ref()) =>
+            {
+                continue;
             }
             _ => {}
         }

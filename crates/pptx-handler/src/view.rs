@@ -782,7 +782,7 @@ fn apply_group_properties(
         .cloned()
         .collect();
 
-    replacements.sort_by(|left, right| right.0.start.cmp(&left.0.start));
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0.start));
     let mut result = xml.to_string();
     for (range, replacement) in replacements {
         result.replace_range(range, &replacement);

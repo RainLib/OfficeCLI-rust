@@ -711,10 +711,9 @@ fn css_twips(style: &str, key: &str) -> Option<u64> {
         .trim();
     let (number, scale) = if let Some(v) = value.strip_suffix("pt") {
         (v, 20.0)
-    } else if let Some(v) = value.strip_suffix("px") {
-        (v, 15.0)
     } else {
-        return None;
+        let v = value.strip_suffix("px")?;
+        (v, 15.0)
     };
     let number = number.trim().parse::<f64>().ok()? * scale;
     (number.is_finite() && number > 0.0 && number < 2_000_000.0).then_some(number.round() as u64)

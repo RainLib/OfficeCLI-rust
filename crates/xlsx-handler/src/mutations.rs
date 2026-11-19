@@ -1017,7 +1017,7 @@ fn remove_ranges(xml: &str, ranges: Vec<Range<usize>>) -> String {
 }
 
 fn apply_replacements(xml: &str, mut replacements: Vec<(Range<usize>, String)>) -> String {
-    replacements.sort_by(|left, right| right.0.start.cmp(&left.0.start));
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0.start));
     let mut result = xml.to_string();
     for (range, replacement) in replacements {
         result.replace_range(range, &replacement);
@@ -2503,7 +2503,7 @@ fn set_all_pivot_field_attributes(
         .filter(|node| node.is_element() && node.tag_name().name() == "pivotField")
         .map(|node| node.range())
         .collect();
-    ranges.sort_by(|left, right| right.start.cmp(&left.start));
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
     let mut out = xml.to_string();
     for range in ranges {
         out = rewrite_opening_tag_attributes(&out, range, &[(attribute, value.to_string())])?;
@@ -3540,7 +3540,7 @@ fn append_element_to_tag(
         }
     }
 
-    let last_child = node.children().filter(|n| n.is_element()).next_back();
+    let last_child = node.children().rfind(|n| n.is_element());
 
     let new_count = current_count + 1;
 

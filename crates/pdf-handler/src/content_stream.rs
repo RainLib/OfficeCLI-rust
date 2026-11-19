@@ -2005,7 +2005,7 @@ fn convert_to_rgb_png(data: &[u8]) -> Option<Vec<u8>> {
         PixelFormat::RGB24 => encode_png(width, height, &pixels),
         PixelFormat::CMYK32 => {
             let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-            for chunk in pixels.chunks_exact(4) {
+            for chunk in pixels.as_chunks::<4>().0 {
                 // PDF/Photoshop CMYK JPEGs have inverted channels (C_raw = 255 - C_actual, etc.)
                 let c_raw = chunk[0] as f32;
                 let m_raw = chunk[1] as f32;
@@ -2192,7 +2192,7 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
                 }
                 "DeviceCMYK" | "CMYK" => {
                     // Normal CMYK to RGB
-                    for chunk in pixels.chunks_exact(4) {
+                    for chunk in pixels.as_chunks::<4>().0 {
                         let c = chunk[0] as f32 / 255.0;
                         let m = chunk[1] as f32 / 255.0;
                         let y = chunk[2] as f32 / 255.0;
@@ -2290,7 +2290,7 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
                 if num_channels == 3 {
                     rgb_pixels = pixels;
                 } else if num_channels == 4 {
-                    for chunk in pixels.chunks_exact(4) {
+                    for chunk in pixels.as_chunks::<4>().0 {
                         let c = chunk[0] as f32 / 255.0;
                         let m = chunk[1] as f32 / 255.0;
                         let y = chunk[2] as f32 / 255.0;
@@ -3375,6 +3375,43 @@ mod tests {
         assert!((image.bbox.y - 40.0).abs() < 0.01);
         assert!((image.bbox.width - 20.0).abs() < 0.01);
         assert!((image.bbox.height - 30.0).abs() < 0.01);
+
+        // Browser PDF output composes page scaling with a separate image
+        // matrix. Temporary graphics-state changes must not leak past Q.
+        for (content, width, height) in [
+            (
+                "q .23999999 0 0 -.23999999 0 792 cm q 3.125 0 0 3.125 0 0 cm Q q 600 0 0 -300 790.625 600 cm /Im1 Do Q Q",
+                144.0,
+                72.0,
+            ),
+            (
+                "q 144 0 0 72 0 0 cm Q q 72 0 0 36 0 0 cm /Im1 Do Q",
+                72.0,
+                36.0,
+            ),
+            (
+                "q 0 1 -1 0 300 0 cm 144 0 0 72 0 0 cm /Im1 Do Q",
+                72.0,
+                144.0,
+            ),
+        ] {
+            let parsed = parse_page_content_stream_text_only_bounded(
+                content.as_bytes(), page_id, &document, 1024,
+            ).unwrap();
+            assert_eq!(parsed.image_blocks.len(), 1, "{content}");
+            let image = &parsed.image_blocks[0];
+            assert!((image.bbox.width - width).abs() < 0.01, "{image:?}");
+            assert!((image.bbox.height - height).abs() < 0.01, "{image:?}");
+        }
+
+        let unused_matrix = parse_page_content_stream_text_only_bounded(
+            b"q 144 0 0 72 0 0 cm Q",
+            page_id,
+            &document,
+            1024,
+        )
+        .unwrap();
+        assert!(unused_matrix.image_blocks.is_empty());
     }
 
     #[test]
@@ -3510,7 +3547,7 @@ mod tests {
                                                                         println!("  /{}: {:?}", String::from_utf8_lossy(k), v);
                                                                     }
                                                                     println!("First 20 CMYK pixels:");
-                                                                    for (idx, chunk) in pixels.chunks_exact(4).take(20).enumerate() {
+                                                                    for (idx, chunk) in pixels.as_chunks::<4>().0.iter().take(20).enumerate() {
                                                                         let c_raw = chunk[0];
                                                                         let m_raw = chunk[1];
                                                                         let y_raw = chunk[2];
@@ -3585,7 +3622,9 @@ mod tests {
                                                             {
                                                                 println!("First 20 FlateDecode CMYK pixels:");
                                                                 for (idx, chunk) in decompressed
-                                                                    .chunks_exact(4)
+                                                                    .as_chunks::<4>()
+                                                                    .0
+                                                                    .iter()
                                                                     .take(20)
                                                                     .enumerate()
                                                                 {

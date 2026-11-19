@@ -163,10 +163,8 @@ fn matches_selector(node: &crate::dom_types::WordNode, selector: &Selector) -> b
                     }
                 }
             }
-            "heading" => {
-                if node.heading_level().is_none() {
-                    return false;
-                }
+            "heading" if node.heading_level().is_none() => {
+                return false;
             }
             _ => {} // Ignore unknown shorthands
         }

@@ -20,7 +20,7 @@ pub fn build_text_offset_map_internal(
         // Sort cells by (row, col) for consistent ordering
         let cell_refs: Vec<&Cell> = ws.cells.values().collect();
         let mut sorted_cells = cell_refs;
-        sorted_cells.sort_by(|a, b| (a.row, a.col).cmp(&(b.row, b.col)));
+        sorted_cells.sort_by_key(|a| (a.row, a.col));
 
         // Sheet header
         let sheet_header = format!("[{}]\n", ws.name);

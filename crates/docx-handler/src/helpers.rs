@@ -453,12 +453,10 @@ pub fn build_run_properties(props: &std::collections::HashMap<String, String>) -
                         .with_attribute("val", value.as_str()),
                 );
             }
-            "font.strike" => {
-                if value == "true" || value == "1" {
-                    children.push(WordNode::new(WordElementType::Unknown(
-                        "strike".to_string(),
-                    )));
-                }
+            "font.strike" if (value == "true" || value == "1") => {
+                children.push(WordNode::new(WordElementType::Unknown(
+                    "strike".to_string(),
+                )));
             }
             _ => {}
         }
