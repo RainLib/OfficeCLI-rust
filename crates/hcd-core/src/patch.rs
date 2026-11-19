@@ -29,6 +29,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 
+mod grid_filter;
+mod grid_sort;
+pub use grid_filter::{worksheet_filter, GridFilterView};
+pub use grid_sort::{sort_grid, GridSortDirection, GridSortRequest};
+
 const MAX_PATCH_OPERATIONS: usize = 10_000;
 const MAX_PATCH_INSERT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 256;
@@ -430,6 +435,7 @@ pub fn apply_patch(
                         | PatchOperation::PdfTextInsert { .. }
                         | PatchOperation::PdfTextGeometry { .. }
                         | PatchOperation::PdfTextDelete { .. }
+                        | PatchOperation::PdfPageLayoutSet { .. }
                         | PatchOperation::PptxTextInsert { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::PptxTextDelete { .. }
@@ -462,6 +468,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxColumnInsert { .. }
                         | PatchOperation::XlsxColumnDelete { .. }
                         | PatchOperation::XlsxGridRange { .. }
+                        | PatchOperation::XlsxAutoFilterSet { .. }
                         | PatchOperation::XlsxMergeBlank { .. }
                         | PatchOperation::XlsxUnmerge { .. }
                 )
@@ -581,6 +588,41 @@ pub fn apply_patch(
         xlsx_column_insert.as_ref(),
         xlsx_column_delete.as_ref(),
     );
+    let auto_filter = match patch.operations.first() {
+        Some(PatchOperation::XlsxAutoFilterSet { sheet_id, filter }) => {
+            if let Some(filter) = filter {
+                grid_filter::evaluate_grid_filter(bundle, &manifest, sheet_id, filter, true)?;
+            }
+            Some((sheet_id.as_str(), filter))
+        }
+        _ => None,
+    };
+    let pdf_layout = match patch.operations.first() {
+        Some(PatchOperation::PdfPageLayoutSet { pages }) => {
+            let source_page_count = crate::pdf_page_count(bundle, &manifest)?;
+            crate::validate_pdf_placements(pages, source_page_count)?;
+            if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_52
+                && (pages.len() != source_page_count
+                    || pages.iter().any(|page| page.source_page.is_none()))
+            {
+                return Err(HcdError::InvalidPatch(
+                    "hcd-patch/52 must include every source page exactly once".into(),
+                ));
+            }
+            Some(
+                if pages.len() == source_page_count
+                    && pages.iter().enumerate().all(|(index, page)| {
+                        page.source_page == Some(index as u32 + 1) && page.rotation == 0
+                    })
+                {
+                    &[][..]
+                } else {
+                    pages.as_slice()
+                },
+            )
+        }
+        _ => None,
+    };
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
@@ -743,7 +785,9 @@ pub fn apply_patch(
         // A move rewrites the index the deck's page order lives in, without
         // touching a single chunk. A copy rewrites it with one page more.
         || pptx_slide_reorder.is_some()
-        || pptx_slide_copy.is_some();
+        || pptx_slide_copy.is_some()
+        || auto_filter.is_some()
+        || pdf_layout.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -799,6 +843,7 @@ pub fn apply_patch(
     let mut dropped_slide_chunks = 0usize;
     let mut removed_slide_node_ids: Vec<String> = Vec::new();
     let mut appended_index_page: Option<crate::ChunkIndexPage> = None;
+    let mut wrote_auto_filter = false;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -837,6 +882,52 @@ pub fn apply_patch(
         let mut page = bundle.read_index_page(&manifest, page_number)?;
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
+            if let Some(layout) = pdf_layout.filter(|_| descriptor.sequence == 0) {
+                if descriptor.pdf_layout == layout {
+                    return Err(HcdError::PreconditionFailed(
+                        "PDF page layout is already in the requested state".into(),
+                    ));
+                }
+                descriptor.pdf_layout = layout.to_vec();
+                page_changed = true;
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+            }
+            if let Some(grid) = descriptor
+                .grid
+                .as_mut()
+                .filter(|grid| grid.kind == crate::GridChunkKind::Cells)
+            {
+                if let Some((_, filter)) = auto_filter
+                    .filter(|(sheet_id, _)| !wrote_auto_filter && *sheet_id == grid.sheet_id)
+                {
+                    if &grid.auto_filter == filter {
+                        return Err(HcdError::PreconditionFailed(
+                            "AutoFilter is already in the requested state".into(),
+                        ));
+                    }
+                    grid.auto_filter.clone_from(filter);
+                    wrote_auto_filter = true;
+                    page_changed = true;
+                    dirty_chunks.insert(descriptor.chunk_id.clone());
+                }
+                if grid.auto_filter.is_some()
+                    && patch.operations.iter().any(|operation| match operation {
+                        PatchOperation::XlsxRowInsert { sheet_id, .. }
+                        | PatchOperation::XlsxRowDelete { sheet_id, .. }
+                        | PatchOperation::XlsxRowRemoveLast { sheet_id, .. }
+                        | PatchOperation::XlsxColumnInsert { sheet_id, .. }
+                        | PatchOperation::XlsxColumnDelete { sheet_id, .. }
+                        | PatchOperation::XlsxGridRange { sheet_id, .. }
+                        | PatchOperation::XlsxMerge { sheet_id, .. }
+                        | PatchOperation::XlsxMergeBlank { sheet_id, .. } => {
+                            sheet_id == &grid.sheet_id
+                        }
+                        _ => false,
+                    })
+                {
+                    return Err(HcdError::Unsupported("Clear the saved AutoFilter before shifting rows or columns or merging cells on this sheet".into()));
+                }
+            }
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
             let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
             let inserted_visuals = image_insertions.get(&descriptor.chunk_id);
@@ -1224,7 +1315,7 @@ pub fn apply_patch(
                             &replacement_hash,
                         )?;
                     }
-                    if manifest.source.format == "xlsx" && entry.source.node_kind == "cell" {
+                    if manifest.source.is_spreadsheet() && entry.source.node_kind == "cell" {
                         set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
                     }
                     if manifest.source.format == "pdf" {
@@ -2551,6 +2642,11 @@ pub fn apply_patch(
             &mut index_root_href,
         )?;
     }
+    if auto_filter.is_some() && !wrote_auto_filter {
+        return Err(HcdError::InvalidPatch(
+            "AutoFilter worksheet does not exist".into(),
+        ));
+    }
 
     // A move puts two pages in each other's place and rewrites nothing else: a
     // page says the same thing wherever it stands, so only the index — which is
@@ -2828,6 +2924,13 @@ pub fn apply_patch(
             })
             .chain(rich_converted_formula_ids)
             .collect(),
+        grid_values_reordered: manifest.source.is_spreadsheet()
+            && patch
+                .metadata
+                .get("gridValuesReordered")
+                .is_some_and(|value| value == "true"),
+        grid_filter_changed: wrote_auto_filter,
+        pdf_layout_changed: pdf_layout.is_some(),
         grid_row_insertions: xlsx_row_insert
             .as_ref()
             .into_iter()
@@ -3268,6 +3371,9 @@ fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_47
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_46
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_37
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_51
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_52
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_53
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -3294,7 +3400,7 @@ fn validate_patch_identity(
         )));
     }
     if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_19
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || !patch
                 .operations
                 .iter()
@@ -3311,7 +3417,7 @@ fn validate_patch_identity(
         ));
     }
     if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -3323,7 +3429,7 @@ fn validate_patch_identity(
         ));
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_21
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -3335,7 +3441,7 @@ fn validate_patch_identity(
         ));
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_22 {
-        if manifest.source.format != "xlsx"
+        if !manifest.source.is_spreadsheet()
             || !patch.operations.iter().any(|operation| {
                 matches!(
                     operation,
@@ -3371,7 +3477,7 @@ fn validate_patch_identity(
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28
         || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_29
     {
-        if manifest.source.format != "xlsx"
+        if !manifest.source.is_spreadsheet()
             || !patch
                 .operations
                 .iter()
@@ -3439,7 +3545,7 @@ fn validate_patch_identity(
         ));
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_25
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -3450,8 +3556,32 @@ fn validate_patch_identity(
             "hcd-patch/25 accepts one XLSX grid range operation only".to_string(),
         ));
     }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_51
+        && (patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxAutoFilterSet { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/51 accepts one XLSX AutoFilter operation only".into(),
+        ));
+    }
+    if matches!(
+        patch.schema_version.as_str(),
+        crate::HCD_PATCH_SCHEMA_VERSION_52 | crate::HCD_PATCH_SCHEMA_VERSION_53
+    ) && (patch.operations.len() != 1
+        || !matches!(
+            patch.operations.first(),
+            Some(PatchOperation::PdfPageLayoutSet { .. })
+        ))
+    {
+        return Err(HcdError::Unsupported(
+            "PDF page layout patches accept one layout operation".into(),
+        ));
+    }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_26
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -4272,7 +4402,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -4314,7 +4444,7 @@ fn validate_patch_identity(
                 end_column,
             } => {
                 if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
@@ -4364,7 +4494,7 @@ fn validate_patch_identity(
                         | crate::HCD_PATCH_SCHEMA_VERSION_28
                         | crate::HCD_PATCH_SCHEMA_VERSION_29
                         | crate::HCD_PATCH_SCHEMA_VERSION_50
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
@@ -4407,7 +4537,7 @@ fn validate_patch_identity(
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || (patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
                         && patch.operations.len() != 1)
                 {
@@ -4446,7 +4576,7 @@ fn validate_patch_identity(
                 if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                 {
                     return Err(HcdError::Unsupported(
                         "xlsx.formula.to-value requires an XLSX hcd-patch/28 batch".to_string(),
@@ -4484,7 +4614,7 @@ fn validate_patch_identity(
             } => {
                 if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                 {
                     return Err(HcdError::Unsupported(
                         "numeric XLSX cell edits require an XLSX hcd-patch/29 batch".to_string(),
@@ -4518,7 +4648,7 @@ fn validate_patch_identity(
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
                     || !sheet_id[2..]
@@ -4557,7 +4687,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -4608,7 +4738,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -4638,7 +4768,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.row.insert requires one operation on an XLSX bundle with hcd-patch/12".to_string()));
@@ -4659,7 +4789,7 @@ fn validate_patch_identity(
                 if !matches!(
                     patch.schema_version.as_str(),
                     HCD_PATCH_SCHEMA_VERSION_14 | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.row.delete requires one operation on an XLSX bundle with hcd-patch/14".to_string()));
@@ -4685,7 +4815,7 @@ fn validate_patch_identity(
                     HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.column.insert requires one operation on an XLSX bundle with hcd-patch/13".to_string()));
@@ -4704,7 +4834,7 @@ fn validate_patch_identity(
             }
             PatchOperation::XlsxColumnDelete { sheet_id, column } => {
                 if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.column.delete requires one operation on an XLSX bundle with hcd-patch/15".to_string()));
@@ -4729,7 +4859,7 @@ fn validate_patch_identity(
                 count,
             } => {
                 if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_25
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -4759,6 +4889,41 @@ fn validate_patch_identity(
                     ));
                 }
             }
+            PatchOperation::PdfPageLayoutSet { .. } => {
+                if !matches!(
+                    patch.schema_version.as_str(),
+                    crate::HCD_PATCH_SCHEMA_VERSION_52 | crate::HCD_PATCH_SCHEMA_VERSION_53
+                ) || manifest.schema_version != crate::HCD_SCHEMA_VERSION
+                    || manifest.source.format != "pdf"
+                {
+                    return Err(HcdError::Unsupported(
+                        "Page organization requires a PDF and a PDF layout patch schema".into(),
+                    ));
+                }
+            }
+            PatchOperation::XlsxAutoFilterSet { sheet_id, filter } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_51
+                    || manifest.schema_version != crate::HCD_SCHEMA_VERSION
+                    || manifest.source.format != "xlsx"
+                {
+                    return Err(HcdError::Unsupported(
+                        "Saved AutoFilter requires XLSX and hcd-patch/51".into(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid AutoFilter worksheet ID".into(),
+                    ));
+                }
+                if let Some(filter) = filter {
+                    filter.validate()?;
+                }
+            }
             PatchOperation::XlsxColumnWidth {
                 sheet_id,
                 column,
@@ -4773,7 +4938,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -4801,7 +4966,7 @@ fn validate_patch_identity(
                 height_points,
             } => {
                 if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -4832,7 +4997,7 @@ fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -6535,6 +6700,7 @@ fn mint_xlsx_sheet_chunk(
         first_node_id: None,
         last_node_id: None,
         continuation: false,
+        pdf_layout: Vec::new(),
         grid: Some(crate::GridChunkAddress {
             sheet_id: addition.sheet_id.clone(),
             sheet_name: addition.name.clone(),
@@ -6548,6 +6714,7 @@ fn mint_xlsx_sheet_chunk(
             default_column_width_emu: None,
             default_row_height_emu: None,
             sheet_part: Some(addition.sheet_part.clone()),
+            auto_filter: None,
         }),
     })
 }
@@ -7153,6 +7320,7 @@ fn clone_pptx_slide_chunks(
                 .map(|entry| entry.node_id.clone()),
             last_node_id: copied_map.entries.last().map(|entry| entry.node_id.clone()),
             continuation: source.continuation,
+            pdf_layout: Vec::new(),
             grid: None,
         });
     }
@@ -7213,6 +7381,7 @@ fn mint_pptx_slide_chunk(
         first_node_id: None,
         last_node_id: None,
         continuation: false,
+        pdf_layout: Vec::new(),
         grid: None,
     })
 }
@@ -11320,7 +11489,7 @@ impl FontPresentation {
     /// The inline `style` value this presentation writes, serialized exactly as
     /// `update_start_tag_style` would for an element with no other declarations,
     /// so a rendered block and a patched node carry the same CSS.
-    fn style_value(&self) -> String {
+    pub(crate) fn style_value(&self) -> String {
         self.css
             .iter()
             .map(|(property, value)| format!("{property}:{value}"))
@@ -12086,6 +12255,7 @@ fn apply_annotations(
             | PatchOperation::XlsxCellNumberFormat { .. }
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
+            | PatchOperation::PdfPageLayoutSet { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
@@ -12100,6 +12270,7 @@ fn apply_annotations(
             | PatchOperation::XlsxColumnInsert { .. }
             | PatchOperation::XlsxColumnDelete { .. }
             | PatchOperation::XlsxGridRange { .. }
+            | PatchOperation::XlsxAutoFilterSet { .. }
             | PatchOperation::XlsxMergeBlank { .. }
             | PatchOperation::XlsxRowRemoveLast { .. }
             | PatchOperation::XlsxColumnWidth { .. }

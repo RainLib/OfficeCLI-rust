@@ -296,7 +296,7 @@ function emuAttribute(element: HTMLElement, name: string): number | undefined {
 }
 
 export function parseGridChunk(chunk: LoadedChunk, resolveAsset: (href: string) => string,
-  styles: Record<string, IStyleData> = {}): ParsedGridChunk {
+  styles: Record<string, IStyleData> = {}, delimitedFields = false): ParsedGridChunk {
   const document = new DOMParser().parseFromString(chunk.html, 'text/html');
   const section = document.querySelector<HTMLElement>('[data-hcd-sheet]');
   if (!section || !chunk.descriptor.grid) throw new Error(`无效的 XLSX HCD 分片 ${chunk.descriptor.chunkId}`);

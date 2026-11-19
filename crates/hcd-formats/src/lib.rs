@@ -14,10 +14,12 @@ use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
 pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
+pub use pdf::validate_pdf_source_export;
 pub use theme_fonts::{
     apply_theme_fonts, pdf_body_face, pdf_text_forecast, PdfBodyFace, PdfFaceOptions,
     PdfForecastFace, PdfRetargetLine, PdfTextForecast, ThemeFontApplication,
 };
+pub use xlsx::grid_filter::verify_xlsx_filter_source;
 
 /// Expand presentation-only Markdown features without changing canonical HCD.
 /// The transform is bounded to one chunk and safe to call after every revision.
@@ -44,6 +46,8 @@ where
             hcd_docx::import_docx(source, output, &docx_options, emit)
         }
         "xlsx" => xlsx::import_xlsx(source, output.as_ref(), options, emit),
+        "csv" => xlsx::delimited::import(source, output.as_ref(), options, "csv", emit),
+        "tsv" => xlsx::delimited::import(source, output.as_ref(), options, "tsv", emit),
         "pptx" => pptx::import_pptx(source, output.as_ref(), options, emit),
         "pdf" => pdf::import_pdf(source, output.as_ref(), options, emit),
         "html" | "htm" => textual::import_html(source, output.as_ref(), options, emit),
@@ -77,6 +81,14 @@ pub fn export_document(
             },
         ),
         "xlsx" => xlsx::export_xlsx(&opened, source.as_ref(), target.as_ref(), options),
+        format @ ("csv" | "tsv") => xlsx::delimited::export(
+            &opened,
+            Some(source.as_ref()),
+            target.as_ref(),
+            format,
+            options,
+            None,
+        ),
         "pptx" => pptx::export_pptx(&opened, source.as_ref(), target.as_ref(), options),
         "pdf" => pdf::export_pdf(&opened, source.as_ref(), target.as_ref(), options),
         "html" => textual::export_html(&opened, source.as_ref(), target.as_ref(), options),
@@ -146,6 +158,32 @@ pub fn validate_source_export(
         }
     }
     Ok(())
+}
+
+pub fn export_delimited_grid(
+    bundle: &hcd_core::Bundle,
+    source: Option<&Path>,
+    target: &Path,
+    format: &str,
+    options: &ExportOptions,
+    sheet_name: Option<&str>,
+) -> Result<hcd_core::FidelityReport, HcdError> {
+    xlsx::delimited::export(bundle, source, target, format, options, sheet_name)
+}
+
+pub fn export_pdf_pages(
+    bundle: &hcd_core::Bundle,
+    source: &Path,
+    target: &Path,
+    options: &ExportOptions,
+    page_range: std::ops::RangeInclusive<usize>,
+) -> Result<hcd_core::FidelityReport, HcdError> {
+    if bundle.manifest()?.source.format != "pdf" {
+        return Err(HcdError::Unsupported(
+            "native page extraction requires a PDF bundle".to_string(),
+        ));
+    }
+    pdf::export_pdf_revision(bundle, source, target, options, Some(page_range))
 }
 
 fn extension(path: &Path) -> Result<String, HcdError> {

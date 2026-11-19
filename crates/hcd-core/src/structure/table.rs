@@ -367,6 +367,7 @@ fn rebuild(original: &Block, html: String, added: Vec<NodeMapEntry>) -> Result<B
             texts.get(&entry.node_id).map(|text| {
                 let mark = marks.get(&entry.node_id);
                 EditorInline {
+                    format: Default::default(),
                     text: text.clone(),
                     node_id: Some(entry.node_id.clone()),
                     bold: mark.is_some_and(|mark| mark.0),
@@ -413,6 +414,7 @@ pub(super) fn insert(
         region: "body".into(),
         read_only: true,
         content: EditorBlockContent {
+            alignment: None,
             kind: EditorBlockKind::Opaque,
             level: None,
             font: None,
@@ -712,23 +714,7 @@ pub(super) fn edit(
                     && extract_html_text_nodes(&render(&cell.children))?.is_empty()
                     && empty_content(&cell.children)
                 {
-                    let Xml::Element(blank) = builder.cell(Some(cell))? else {
-                        unreachable!()
-                    };
-                    if let Some(paragraph) = empty_paragraph(&mut cell.children) {
-                        let Xml::Element(generated) = &blank.children[0] else {
-                            unreachable!()
-                        };
-                        if !paragraph.attrs.contains_key("data-hcd-id") {
-                            paragraph
-                                .set("data-hcd-id", generated.attrs.get("data-hcd-id").cloned());
-                        }
-                        builder.entries.last_mut().unwrap().source.paragraph_id =
-                            paragraph.attrs.get("data-hcd-id").cloned();
-                        paragraph.children.extend(generated.children.clone());
-                    } else {
-                        cell.children.extend(blank.children);
-                    }
+                    seed_empty_cell(cell, &mut builder)?;
                 }
             }
         }
@@ -779,6 +765,73 @@ pub(super) fn edit(
         }
     }
     rebuild(original, render(&nodes), builder.entries)
+}
+pub(super) fn activate_cell(
+    original: &Block,
+    manifest: &HcdManifest,
+    patch: &str,
+    operation: usize,
+    table_index: usize,
+    row: usize,
+    column: usize,
+) -> Result<Block, HcdError> {
+    ensure_table(original)?;
+    let mut nodes = parse(&original.html)?;
+    let path =
+        find_table(&nodes, table_index).ok_or_else(|| invalid("table index was not found"))?;
+    let table = element_mut(&mut nodes, &path);
+    if table.attrs.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "data-hcd-continuation" | "data-hcd-table-fragment"
+        )
+    }) {
+        return Err(invalid(
+            "empty cell editing requires one unfragmented table",
+        ));
+    }
+    let layout = grid(table)?;
+    let selected = layout
+        .cells
+        .iter()
+        .find(|cell| cell.row == row && cell.column == column)
+        .filter(|cell| cell.rows == 1 && cell.columns == 1)
+        .ok_or_else(|| invalid("cell is missing or merged"))?;
+    let cell = element_mut(&mut table.children, &selected.path);
+    if !extract_html_text_nodes(&render(&cell.children))?.is_empty()
+        || !empty_content(&cell.children)
+    {
+        return Err(invalid("only an empty cell can be activated"));
+    }
+    let mut builder = Builder {
+        manifest,
+        patch,
+        operation,
+        number: 0,
+        entries: vec![],
+    };
+    seed_empty_cell(cell, &mut builder)?;
+    rebuild(original, render(&nodes), builder.entries)
+}
+
+fn seed_empty_cell(cell: &mut Element, builder: &mut Builder<'_>) -> Result<(), HcdError> {
+    let Xml::Element(blank) = builder.cell(Some(cell))? else {
+        unreachable!()
+    };
+    if let Some(paragraph) = empty_paragraph(&mut cell.children) {
+        let Xml::Element(generated) = &blank.children[0] else {
+            unreachable!()
+        };
+        if !paragraph.attrs.contains_key("data-hcd-id") {
+            paragraph.set("data-hcd-id", generated.attrs.get("data-hcd-id").cloned());
+        }
+        builder.entries.last_mut().unwrap().source.paragraph_id =
+            paragraph.attrs.get("data-hcd-id").cloned();
+        paragraph.children.extend(generated.children.clone());
+    } else {
+        cell.children.extend(blank.children);
+    }
+    Ok(())
 }
 fn empty_content(nodes: &[Xml]) -> bool {
     nodes.iter().all(|node| match node {
@@ -862,6 +915,7 @@ mod tests {
             region: "body".into(),
             read_only: true,
             content: EditorBlockContent {
+                alignment: None,
                 kind: EditorBlockKind::Opaque,
                 level: None,
                 font: None,

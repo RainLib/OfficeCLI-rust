@@ -2,7 +2,9 @@ import type { Editor } from '@tiptap/core'
 import './table-tools.css'
 
 export type TableAction = 'insertRow' | 'deleteRow' | 'insertColumn' | 'deleteColumn' | 'deleteTable'
-export type TableActionDetail = { blockId: string; tableIndex: number; action: TableAction; index: number }
+export type TableActionDetail = { blockId: string; tableIndex: number } & (
+  { action: TableAction; index: number } | { action: 'activateCell'; row: number; column: number }
+)
 type MenuScope = 'row' | 'column' | 'table'
 const HIDE_DELAY = 800
 
@@ -193,15 +195,45 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
   doc.addEventListener('pointerout', leave); doc.addEventListener('pointerdown', outside); doc.addEventListener('keydown', keydown)
   doc.addEventListener('pointermove', follow); owner.addEventListener('pointermove', follow); owner.addEventListener('pointerout', leaveOwner)
   owner.addEventListener('pointerdown', outside); owner.addEventListener('keydown', keydown); owner.addEventListener('hcd-table-controls-active', otherTable)
-  const sync = () => { if (!editor.isEditable) hide() }
-  editor.on('transaction', sync)
+  const blankButtons: HTMLButtonElement[] = []
+  if (doc.body.dataset.hcdSourceFormat === 'docx') {
+    const tables = [...doc.querySelectorAll('table')]
+    for (const [tableIndex, table] of tables.entries()) {
+      if (table.hasAttribute('data-hcd-continuation') || table.hasAttribute('data-hcd-table-fragment')) continue
+      for (const row of table.rows) for (const cell of row.cells) {
+        if (cell.rowSpan !== 1 || cell.colSpan !== 1 || cell.textContent?.trim()
+          || cell.querySelector('[data-hcd-node-hash], img, svg, table, object')) continue
+        const paragraph = cell.querySelector('p.hcd-empty-paragraph')
+        if (!paragraph) continue
+        const item = doc.createElement('button')
+        item.type = 'button'; item.textContent = '+'; item.className = 'hcd-empty-cell-edit'
+        item.setAttribute('aria-label', label('编辑空白单元格')); item.title = label('编辑空白单元格')
+        item.style.cssText = 'border:0;background:transparent;color:#385983;cursor:pointer'
+        item.addEventListener('click', () => {
+          if (!editor.isEditable) return
+          const selected = address(table, cell)
+          if (selected) editor.view.dom.dispatchEvent(new CustomEvent<TableActionDetail>('hcd-table-action', {
+            detail: { blockId, tableIndex, action: 'activateCell', row: selected.row, column: selected.column },
+          }))
+        })
+        paragraph.append(item)
+        blankButtons.push(item)
+      }
+    }
+  }
+  const sync = () => {
+    for (const button of blankButtons) button.hidden = !editor.isEditable
+    if (!editor.isEditable) hide()
+  }
+  sync()
+  editor.on('transaction', sync); editor.on('update', sync)
   let scrollFrame: number | undefined
   const scroll = () => { if (!layer.hidden && scrollFrame === undefined) scrollFrame = owner.defaultView!.requestAnimationFrame(() => { scrollFrame = undefined; position() }) }
   viewport?.addEventListener('scroll', scroll, { passive: true })
   const observer = new ResizeObserver(() => { if (!layer.hidden) position() }); observer.observe(doc.querySelector('.hcd-opaque-content')!)
   return { destroy() {
     clearTimeout(hideTimer); if (scrollFrame !== undefined) owner.defaultView!.cancelAnimationFrame(scrollFrame)
-    viewport?.removeEventListener('scroll', scroll); observer.disconnect(); editor.off('transaction', sync)
+    viewport?.removeEventListener('scroll', scroll); observer.disconnect(); editor.off('transaction', sync); editor.off('update', sync); blankButtons.forEach(button => button.remove())
     doc.removeEventListener('pointerover', show); doc.removeEventListener('focusin', show); doc.removeEventListener('pointerdown', show)
     doc.removeEventListener('pointerout', leave); doc.removeEventListener('pointerdown', outside); doc.removeEventListener('keydown', keydown)
     doc.removeEventListener('pointermove', follow); owner.removeEventListener('pointermove', follow); owner.removeEventListener('pointerout', leaveOwner)

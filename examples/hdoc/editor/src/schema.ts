@@ -1,13 +1,15 @@
-import { Extension, Node, type JSONContent } from '@tiptap/core'
+import { Extension, Mark, Node, type JSONContent } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import { Fragment, Slice, type Node as PmNode } from '@tiptap/pm/model'
 
-export type Inline = { text: string; bold?: boolean; italic?: boolean; link?: string | null; nodeId?: string | null }
+export type TextFormat = { font?: string; sizeHalfPoints?: number; color?: string; underline?: boolean }
+export type Alignment = 'left' | 'center' | 'right' | 'justify'
+export type Inline = { text: string; bold?: boolean; italic?: boolean; link?: string | null; nodeId?: string | null; format?: TextFormat }
 /** The faces a block carries, in the three script slots `text.font` uses. Only the
  * slots the theme covers are present, which is what the server's `font` object looks
  * like, so a projection can be sent back unchanged. */
 export type BlockFont = { latin?: string; eastAsia?: string; bidi?: string }
-export type BlockContent = { kind: 'paragraph' | 'heading' | 'list_item' | 'opaque'; level?: number | null; font?: BlockFont | null; inlines: Inline[] }
+export type BlockContent = { kind: 'paragraph' | 'heading' | 'list_item' | 'opaque'; level?: number | null; font?: BlockFont | null; alignment?: Alignment; inlines: Inline[] }
 export type Block = { blockId: string; blockHash: string; region: string; readOnly: boolean; editableTextNodeIds?: string[]; content: BlockContent; readOnlyHtml?: string; presentationHtml?: string }
 export type Projection = { documentId: string; revision: number; blocks: Block[] }
 
@@ -35,6 +37,56 @@ export function parseBlockFont(element: HTMLElement): BlockFont | null {
   if (bidi) font.bidi = bidi
   return Object.keys(font).length ? font : null
 }
+
+function alignment(value: unknown): Alignment | undefined {
+  return value === 'left' || value === 'center' || value === 'right' || value === 'justify' ? value : undefined
+}
+
+function textFormat(attributes: Record<string, unknown> | undefined): TextFormat {
+  const { font, sizeHalfPoints, color } = attributes || {}
+  return {
+    ...(typeof font === 'string' && /^[\p{L}\p{N} _-]+$/u.test(font) && new TextEncoder().encode(font).length <= 128 ? { font } : {}),
+    ...(typeof sizeHalfPoints === 'number' && Number.isInteger(sizeHalfPoints) && sizeHalfPoints >= 2 && sizeHalfPoints <= 512 ? { sizeHalfPoints } : {}),
+    ...(typeof color === 'string' && /^[0-9A-F]{6}$/i.test(color) ? { color: color.toUpperCase() } : {}),
+  }
+}
+
+const HcdTextFormat = Mark.create({
+  name: 'hcdTextFormat',
+  addAttributes() {
+    return { font: { default: null, rendered: false }, sizeHalfPoints: { default: null, rendered: false }, color: { default: null, rendered: false } }
+  },
+  parseHTML() {
+    return [{ tag: 'span[data-hcd-text-format]', getAttrs: element => {
+      const style = textFormat({ font: element.getAttribute('data-hcd-font'), sizeHalfPoints: Number(element.getAttribute('data-hcd-size')), color: element.getAttribute('data-hcd-color') })
+      return Object.keys(style).length ? style : false
+    } }]
+  },
+  renderHTML({ mark }) {
+    const format = textFormat(mark.attrs)
+    const css: string[] = []
+    const attributes: Record<string, string> = { 'data-hcd-text-format': '' }
+    if (format.font) { css.push(`font-family:'${format.font}'`); attributes['data-hcd-font'] = format.font }
+    if (format.sizeHalfPoints) { css.push(`font-size:${format.sizeHalfPoints / 2}pt`); attributes['data-hcd-size'] = String(format.sizeHalfPoints) }
+    if (format.color) { css.push(`color:#${format.color}`); attributes['data-hcd-color'] = format.color }
+    if (css.length) attributes.style = css.join(';')
+    return ['span', attributes, 0]
+  },
+})
+
+const HcdAlignment = Extension.create({
+  name: 'hcdAlignment',
+  addGlobalAttributes() {
+    return [{ types: ['paragraph', 'heading'], attributes: { hcdAlignment: {
+      default: null,
+      parseHTML: element => alignment(element.style.textAlign),
+      renderHTML: attributes => {
+        const value = alignment(attributes.hcdAlignment)
+        return value ? { style: `text-align:${value}` } : {}
+      },
+    } } }]
+  },
+})
 
 export const HcdIdentity = Extension.create({
   name: 'hcdIdentity',
@@ -81,7 +133,7 @@ export const HcdOpaqueRun = Node.create({
 })
 
 export const schemaExtensions = [// Imported documents must not gain an implicit empty paragraph on checkpoint.
-  StarterKit.configure({ undoRedo: false, trailingNode: false, link: { openOnClick: false } }), HcdIdentity, HcdOpaque, HcdOpaqueRun]
+  StarterKit.configure({ undoRedo: false, trailingNode: false, link: { openOnClick: false } }), HcdIdentity, HcdAlignment, HcdTextFormat, HcdOpaque, HcdOpaqueRun]
 
 // A pasted or split block must receive its own HCD identity at the next checkpoint.
 export function clearPastedBlockIds(slice: Slice): Slice {
@@ -103,6 +155,9 @@ function inlineJson(inline: Inline): JSONContent {
   const marks: Array<{ type: string; attrs?: Record<string, unknown> }> = []
   if (inline.bold) marks.push({ type: 'bold' })
   if (inline.italic) marks.push({ type: 'italic' })
+  const format = textFormat(inline.format)
+  if (Object.keys(format).length) marks.push({ type: 'hcdTextFormat', attrs: format })
+  if (inline.format?.underline) marks.push({ type: 'underline' })
   if (inline.link) marks.push({ type: 'link', attrs: { href: inline.link } })
   return { type: 'text', text: inline.text, ...(marks.length ? { marks } : {}) }
 }
@@ -112,9 +167,9 @@ function blockJson(block: Block, revision: number): JSONContent {
     return { type: 'hcdOpaque', attrs: { hcdBlockId: block.blockId, hcdContent: block.content, previewRevision: revision, preview: block.content.inlines.map(part => part.text).join('').slice(0, 160) || '▣' }, content: opaqueRunJson(block.content) }
   }
   const content = block.content.inlines.filter(part => part.text.length > 0).map(inlineJson)
-  const attrs = { hcdBlockId: block.blockId, ...(block.content.font ? { hcdFont: block.content.font } : {}) }
+  const attrs = { hcdBlockId: block.blockId, hcdAlignment: block.content.alignment, ...(block.content.font ? { hcdFont: block.content.font } : {}) }
   if (block.content.kind === 'heading') return { type: 'heading', attrs: { ...attrs, level: block.content.level || 1 }, content }
-  if (block.content.kind === 'list_item') return { type: 'listItem', attrs, content: [{ type: 'paragraph', content }] }
+  if (block.content.kind === 'list_item') return { type: 'listItem', attrs, content: [{ type: 'paragraph', attrs: { hcdAlignment: block.content.alignment }, content }] }
   return { type: 'paragraph', attrs, content }
 }
 
@@ -149,11 +204,14 @@ function inlinesFromNode(node: JSONContent): Inline[] {
   const result: Inline[] = []
   const walk = (current: JSONContent) => {
     if (current.type === 'text') {
+      const format = { ...textFormat(current.marks?.find(mark => mark.type === 'hcdTextFormat')?.attrs),
+        ...(current.marks?.some(mark => mark.type === 'underline') ? { underline: true } : {}) }
       result.push({
         text: current.text || '',
         bold: current.marks?.some(mark => mark.type === 'bold') || false,
         italic: current.marks?.some(mark => mark.type === 'italic') || false,
         link: current.marks?.find(mark => mark.type === 'link')?.attrs?.href || null,
+        ...(Object.keys(format).length ? { format } : {}),
       })
     }
     current.content?.forEach(walk)
@@ -184,9 +242,9 @@ export function jsonToSnapshot(json: JSONContent): Array<{ blockId: string | nul
         ...content, inlines: content.inlines.map(inline => inline.nodeId && runs.has(inline.nodeId) ? { ...inline, text: runs.get(inline.nodeId)! } : inline),
       } })
     } else if (node.type === 'paragraph' || node.type === 'heading') {
-      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: node.type, ...(node.type === 'heading' ? { level: node.attrs?.level || 1 } : {}), ...blockFontAttribute(node.attrs), inlines: inlinesFromNode(node) } })
+      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: node.type, ...(node.type === 'heading' ? { level: node.attrs?.level || 1 } : {}), ...blockFontAttribute(node.attrs), alignment: alignment(node.attrs?.hcdAlignment ?? node.content?.[0]?.attrs?.hcdAlignment), inlines: inlinesFromNode(node) } })
     } else if (node.type === 'listItem') {
-      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: 'list_item', level: 0, ...blockFontAttribute(node.attrs), inlines: inlinesFromNode(node) } })
+      result.push({ blockId: node.attrs?.hcdBlockId || null, content: { kind: 'list_item', level: 0, ...blockFontAttribute(node.attrs), alignment: alignment(node.attrs?.hcdAlignment ?? node.content?.[0]?.attrs?.hcdAlignment), inlines: inlinesFromNode(node) } })
     }
   }
   for (const node of json.content || []) {

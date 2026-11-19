@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:53",
+  "title": "HTML Canonical Document PDF page organization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/53" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["op", "pages"],
+        "properties": {
+          "op": { "const": "pdf.page-layout.set" },
+          "pages": {
+            "type": "array", "minItems": 1, "maxItems": 100000,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["rotation"],
+              "properties": {
+                "sourcePage": { "type": "integer", "minimum": 1, "maximum": 100000 },
+                "rotation": { "enum": [0, 90, 180, 270] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

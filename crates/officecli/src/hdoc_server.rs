@@ -1,6 +1,8 @@
 //! Authenticated local HCD core API. Bundles stay private under the configured root.
 //! The HTTP surface only returns decoded, verified objects requested by the client.
-use crate::commands::hdoc::{HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope};
+use crate::commands::hdoc::{
+    source_document_id, HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope, PdfPageRange,
+};
 use crate::hdoc_remote::RemoteStore;
 mod admin;
 mod agent_continuation;
@@ -35,13 +37,14 @@ use futures::StreamExt;
 use hcd_core::{
     apply_patch, apply_structure_patch, audit_action, detect_font_format, editor_projection,
     hash_file, list_documents, manifest_at_revision, pin_document_theme, project_editor,
-    resolve_document_theme, restore_revision, search_bundle, theme_documents, theme_font_plan,
-    theme_font_report, unpin_document_theme, AuditRecord, BlockPrecondition, Bundle, DiskCatalog,
-    DocumentSummary, EditorBlockContent, EditorInline, FontDeleteReport, FontFace, FontFileFormat,
-    FontLicense, FontRevision, FontScript, FontStretch, FontStyle, HcdError, PatchBatch,
-    StructureOperation, StructurePatchBatch, ThemeDocumentRef, ThemeEmbedKind, ThemeFontSlots,
-    ThemeRevision, FONT_CATALOG_SCHEMA, HCD_PATCH_SCHEMA_VERSION_4, LICENSE_WARN_WINDOW_DAYS,
-    MAX_AUDIT_LIMIT, MAX_FONT_BYTES, MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
+    resolve_document_theme, restore_revision, search_bundle, sort_grid, theme_documents,
+    theme_font_plan, theme_font_report, unpin_document_theme, AuditRecord, BlockPrecondition,
+    Bundle, DiskCatalog, DocumentSummary, EditorBlockContent, EditorInline, FontDeleteReport,
+    FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch, FontStyle,
+    GridSortRequest, HcdError, PatchBatch, StructureOperation, StructurePatchBatch,
+    ThemeDocumentRef, ThemeEmbedKind, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
+    HCD_PATCH_SCHEMA_VERSION_4, LICENSE_WARN_WINDOW_DAYS, MAX_AUDIT_LIMIT, MAX_FONT_BYTES,
+    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -306,6 +309,9 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/patch", post(patch))
         .route("/v1/documents/{id}/node-patch", post(node_patch))
         .route("/v1/documents/{id}/node-patch-review", post(grid_drafts::review))
+        .route("/v1/documents/{id}/grid-sort", post(grid_sort))
+        .route("/v1/documents/{id}/grid-filter", get(grid_filter))
+        .route("/v1/documents/{id}/pdf-layout", get(pdf_layout))
         .route("/v1/documents/{id}/checkpoints", post(checkpoint))
         .route("/v1/documents/{id}/revisions", get(revisions))
         .route("/v1/documents/{id}/revisions/{revision}", get(revision))
@@ -414,6 +420,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             get(exports::capabilities),
         )
         .route("/v1/documents/{id}/export/{format}", get(export_document))
+        .route(
+            "/v1/documents/{id}/export-capabilities/{format}",
+            get(exports::format_capabilities),
+        )
         .route(
             "/v1/documents/{id}/downloads/{format}",
             post(prepare_download),
@@ -602,6 +612,8 @@ async fn import_document(
             | "pdf"
             | "pptx"
             | "xlsx"
+            | "csv"
+            | "tsv"
             | "hcd"
             | "png"
             | "jpg"
@@ -640,7 +652,7 @@ async fn import_document(
         return import_hcd_archive(state, temporary, job_id, actor).await;
     }
     let hash = hash_file(&temporary).map_err(internal)?;
-    let document_id = format!("doc-{}", &hash[..32]);
+    let document_id = source_document_id(&hash, &extension);
     let sources = state.root.join("sources");
     tokio::fs::create_dir_all(&sources)
         .await
@@ -1927,8 +1939,18 @@ async fn node_patch(
     )
     .await?;
     let bundle = open(&state, &id)?;
-    let format = bundle.manifest().map_err(hcd_error)?.source.format;
-    let semantic = matches!(format.as_str(), "docx" | "html" | "md" | "txt");
+    let manifest = bundle.manifest().map_err(hcd_error)?;
+    let format = manifest.source.format.as_str();
+    if let Some(hcd_core::PatchOperation::XlsxAutoFilterSet {
+        sheet_id,
+        filter: Some(filter),
+    }) = patch.operations.first()
+    {
+        let source = state.root.join("sources").join(format!("{id}.xlsx"));
+        hcd_formats::verify_xlsx_filter_source(&source, &manifest, sheet_id, filter)
+            .map_err(hcd_error)?;
+    }
+    let semantic = matches!(format, "docx" | "html" | "md" | "txt");
     if semantic {
         require_clean_collaboration(&state, &id, &headers).await?;
         if patch.operations.iter().any(|op| {
@@ -1943,12 +1965,12 @@ async fn node_patch(
             return Err(bad("semantic node edits accept mapped text and image operations; use structure patches for block changes"));
         }
     } else if !matches!(
-        format.as_str(),
-        "pdf" | "pptx" | "xlsx" | "png" | "jpg" | "jpeg" | "webp"
+        format,
+        "pdf" | "pptx" | "xlsx" | "csv" | "tsv" | "png" | "jpg" | "jpeg" | "webp"
     ) {
         return Err(bad("unsupported node patch source format"));
     }
-    if hcd_formats::images::is_image_format(&format) {
+    if hcd_formats::images::is_image_format(format) {
         check_collaboration_epoch(&state, &id, &headers).await?;
         image_workspace::check_region(&state, &id, None).await?;
     }
@@ -1990,6 +2012,58 @@ async fn node_patch(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GridFilterQuery {
+    sheet_id: String,
+    revision: u64,
+}
+
+async fn grid_filter(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<GridFilterQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Option<hcd_core::GridFilterView>>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let view = tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest()?;
+        let (manifest, _) = manifest_at_revision(&bundle, &head, Some(query.revision))?;
+        hcd_core::worksheet_filter(&bundle, &manifest, &query.sheet_id)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
+    Ok(Json(view))
+}
+
+async fn grid_sort(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<GridSortRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    let base = request.base_revision;
+    let sort_bundle = bundle.clone();
+    let sorted = tokio::task::spawn_blocking(move || sort_grid(&sort_bundle, request))
+        .await
+        .map_err(internal)?
+        .map_err(hcd_error)?;
+    let Some(result) = sorted else {
+        return Ok(Json(json!({ "revision": base, "changed": false })));
+    };
+    if !result.idempotent_replay {
+        stamp_revision_author(&bundle, result.revision, &actor)?;
+        publish_mutation(&state, &id, &bundle, base).await?;
+    }
+    Ok(Json(
+        json!({ "revision": result.revision, "changed": true }),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SnapshotRequest {
     expected_revision: u64,
     blocks: Vec<SnapshotBlock>,
@@ -2013,6 +2087,7 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
             if previous.bold == inline.bold
                 && previous.italic == inline.italic
                 && previous.link == inline.link
+                && previous.format == inline.format
             {
                 previous.text.push_str(&inline.text);
                 continue;
@@ -2287,6 +2362,32 @@ async fn publish_mutation(
         ));
     }
     Ok(())
+}
+
+async fn pdf_layout(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest().map_err(internal)?;
+        let (manifest, revision) =
+            manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+        let pages = hcd_core::pdf_page_layout(&bundle, &manifest).map_err(bad)?;
+        let page_count = if pages.is_empty() {
+            hcd_core::pdf_page_count(&bundle, &manifest).map_err(bad)?
+        } else {
+            pages.len()
+        };
+        Ok(Json(
+            json!({"revision": revision, "pageCount": page_count, "pages": pages}),
+        ))
+    })
+    .await
+    .map_err(internal)?
 }
 
 async fn index_page(
@@ -3590,7 +3691,10 @@ mod tests {
             exports::capabilities(
                 State(state.clone()),
                 Path(id.into()),
-                Query(RevisionQuery { revision }),
+                Query(exports::ExportQuery {
+                    revision,
+                    ..Default::default()
+                }),
                 bearer(secret, id, "read"),
             )
             .await
@@ -4115,7 +4219,10 @@ mod tests {
         assert!(exports::capabilities(
             State(state.clone()),
             Path(id.into()),
-            Query(RevisionQuery { revision: Some(1) }),
+            Query(exports::ExportQuery {
+                revision: Some(1),
+                ..Default::default()
+            }),
             bearer(secret, id, "read")
         )
         .await
@@ -4124,7 +4231,10 @@ mod tests {
             exports::capabilities(
                 State(state),
                 Path(id.into()),
-                Query(RevisionQuery { revision: None }),
+                Query(exports::ExportQuery {
+                    revision: None,
+                    ..Default::default()
+                }),
                 bearer(secret, "other-document", "read")
             )
             .await

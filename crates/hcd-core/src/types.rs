@@ -9,6 +9,12 @@ pub struct SourceDescriptor {
     pub size_bytes: u64,
 }
 
+impl SourceDescriptor {
+    pub fn is_spreadsheet(&self) -> bool {
+        matches!(self.format.as_str(), "xlsx" | "csv" | "tsv")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssetDescriptor {
@@ -122,6 +128,29 @@ pub struct GridChunkAddress {
     /// worksheet and for a worksheet a patch just created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet_part: Option<String>,
+    /// Saved worksheet-wide filter, carried by the first cell chunk only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<GridAutoFilter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridAutoFilter {
+    pub start_row: u32,
+    pub end_row: u32,
+    pub start_column: u32,
+    pub end_column: u32,
+    pub column: u32,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_criteria: Vec<GridFilterCriterion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridFilterCriterion {
+    pub column: u32,
+    pub query: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,6 +186,19 @@ pub struct ChunkDescriptor {
     /// visible worksheet windows without downloading every HTML fragment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridChunkAddress>,
+    /// Viewed page order and clockwise rotation relative to the source PDF.
+    /// Only the first chunk carries this immutable revision metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pdf_layout: Vec<PdfPagePlacement>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfPagePlacement {
+    /// An omitted source page creates a blank A4 page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_page: Option<u32>,
+    pub rotation: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +385,13 @@ pub struct PptxShapePrecondition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum PatchOperation {
+    #[serde(rename = "pdf.page-layout.set", rename_all = "camelCase")]
+    PdfPageLayoutSet { pages: Vec<PdfPagePlacement> },
+    #[serde(rename = "xlsx.auto-filter.set", rename_all = "camelCase")]
+    XlsxAutoFilterSet {
+        sheet_id: String,
+        filter: Option<GridAutoFilter>,
+    },
     #[serde(rename = "text.splice", rename_all = "camelCase")]
     TextSplice {
         node_id: String,
@@ -727,6 +776,7 @@ impl PatchOperation {
             Self::AnnotationRemove { .. }
             | Self::ImageInsert { .. }
             | Self::PdfTextInsert { .. }
+            | Self::PdfPageLayoutSet { .. }
             | Self::PptxTextInsert { .. }
             | Self::XlsxCellSet { .. }
             | Self::XlsxRichTextCreate { .. }
@@ -737,6 +787,7 @@ impl PatchOperation {
             | Self::XlsxColumnInsert { .. }
             | Self::XlsxColumnDelete { .. }
             | Self::XlsxGridRange { .. }
+            | Self::XlsxAutoFilterSet { .. }
             | Self::XlsxMergeBlank { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. }
@@ -760,6 +811,7 @@ impl PatchOperation {
                 | Self::TextFontClear { .. }
                 | Self::ImageInsert { .. }
                 | Self::PdfTextInsert { .. }
+                | Self::PdfPageLayoutSet { .. }
                 | Self::PptxTextInsert { .. }
                 | Self::PptxShapeGeometry { .. }
                 | Self::PptxTextDelete { .. }
@@ -786,6 +838,7 @@ impl PatchOperation {
                 | Self::XlsxColumnInsert { .. }
                 | Self::XlsxColumnDelete { .. }
                 | Self::XlsxGridRange { .. }
+                | Self::XlsxAutoFilterSet { .. }
                 | Self::XlsxMergeBlank { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
@@ -979,6 +1032,13 @@ pub struct RevisionRecord {
     /// Formula cells converted to literal values in this revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub converted_formula_node_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub grid_values_reordered: bool,
+    /// A saved worksheet filter changed the index without editing cells.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub grid_filter_changed: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pdf_layout_changed: bool,
     /// Sequential row insertions, expressed in the worksheet coordinates at each revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_row_insertions: Vec<GridRowInsertion>,

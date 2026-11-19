@@ -34,8 +34,8 @@ const reasonLabels: Record<string, string> = {
   layout_engine_unavailable: '高保真 PDF 排版服务不可用，请配置 Chromium 后重试。',
 }
 
-export function ExportControl({ session, revision, beforeExport }: {
-  session: Session; revision: number | null; beforeExport?: () => Promise<number | null>
+export function ExportControl({ session, revision, beforeExport, activeSheetName }: {
+  session: Session; revision: number | null; beforeExport?: () => Promise<number | null>; activeSheetName?: string
 }) {
   const { locale } = useI18n()
   const [open, setOpen] = useState(false)
@@ -45,8 +45,15 @@ export function ExportControl({ session, revision, beforeExport }: {
   const [planError, setPlanError] = useState('')
   const [reload, setReload] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [pdfPages, setPdfPages] = useState('')
   const [error, setError] = useState('')
-  const [ready, setReady] = useState<{ url: string; filename: string; revision: number; format: string; mode: string; previewUrl?: string } | null>(null)
+  const [ready, setReady] = useState<{ url: string; filename: string; revision: number; format: string; mode: string; parameters: string; previewUrl?: string } | null>(null)
+  const showPdfRange = session.format === 'pdf' && selection?.format === 'pdf'
+  const selectedRange = showPdfRange ? pdfPages.trim() : ''
+  const rangeParameters = selectedRange ? `&pdfPages=${encodeURIComponent(selectedRange)}` : ''
+  const workbookSheet = selection?.format === 'csv' || selection?.format === 'tsv' ? activeSheetName : undefined
+  const sheetParameters = workbookSheet ? `&sheet=${encodeURIComponent(workbookSheet)}` : ''
+  const parameters = rangeParameters + sheetParameters
   const latestRevision = useRef(revision)
   latestRevision.current = revision
   const preparation = useRef<AbortController | null>(null)
@@ -55,7 +62,7 @@ export function ExportControl({ session, revision, beforeExport }: {
     if (!open || revision === null) return
     const request = new AbortController()
     setLoading(true); setPlanError('')
-    void api(session, `/export-capabilities?revision=${revision}`, { signal: request.signal })
+    void api(session, `/export-capabilities?revision=${revision}${rangeParameters}`, { signal: request.signal })
       .then(response => response.json() as Promise<ExportCapabilities>).then(result => {
         if (request.signal.aborted) return
         setPlan(result)
@@ -67,11 +74,11 @@ export function ExportControl({ session, revision, beforeExport }: {
       }).catch(cause => { if (!request.signal.aborted) setPlanError(String(cause)) })
       .finally(() => { if (!request.signal.aborted) setLoading(false) })
     return () => request.abort()
-  }, [open, revision, session, reload])
+  }, [open, revision, session, reload, rangeParameters])
   const currentPlan = plan?.revision === revision ? plan : null
   const format = currentPlan?.formats.find(item => item.format === selection?.format)
   const mode = format?.modes.find(item => item.id === selection?.mode)
-  const visibleReady = ready?.revision === revision && ready?.format === selection?.format && ready?.mode === selection?.mode ? ready : null
+  const visibleReady = ready?.revision === revision && ready?.format === selection?.format && ready?.mode === selection?.mode && ready?.parameters === parameters ? ready : null
   function select(next: Selection) { setSelection(next); setReady(null); setError('') }
 
   async function prepare() {
@@ -87,14 +94,14 @@ export function ExportControl({ session, revision, beforeExport }: {
       if (savedRevision === null) throw new Error(localizeSource(locale, '文档修订尚未加载'))
       // Saving can create a revision with different export constraints. Recheck
       // the exact saved revision instead of silently changing the chosen mode.
-      const checked = await (await api(session, `/export-capabilities?revision=${savedRevision}`, { signal: request.signal })).json() as ExportCapabilities
+      const checked = await (await api(session, `/export-capabilities?revision=${savedRevision}${rangeParameters}`, { signal: request.signal })).json() as ExportCapabilities
       if (request.signal.aborted) return
       if (latestRevision.current !== savedRevision) throw new Error(localizeSource(locale, '文档已更新，请重新准备导出。'))
       setPlan(checked)
       const allowed = checked.formats.find(item => item.format === chosen.format)?.modes.find(item => item.id === chosen.mode)
       if (!allowed?.available) throw new Error(localizeSource(locale, reasonLabels[allowed?.reasonCode || ''] || '当前导出方式不可用，请重新选择。'))
       const filename = session.title || session.documentId
-      const response = await api(session, `/downloads/${chosen.format}?revision=${savedRevision}${chosenMode.source ? '&source=true' : ''}&filename=${encodeURIComponent(filename)}`, { method: 'POST', signal: request.signal })
+      const response = await api(session, `/downloads/${chosen.format}?revision=${savedRevision}${chosenMode.source ? '&source=true' : ''}&filename=${encodeURIComponent(filename)}${parameters}`, { method: 'POST', signal: request.signal })
       const ticket = await response.json() as { url: string; filename: string; revision: number }
       if (request.signal.aborted) return
       if (latestRevision.current !== savedRevision || ticket.revision !== savedRevision) throw new Error(localizeSource(locale, '文档已更新，请重新准备导出。'))
@@ -103,7 +110,7 @@ export function ExportControl({ session, revision, beforeExport }: {
       const url = new URL(ticket.url, base.origin).href
       const previewUrl = new URL(window.location.href)
       previewUrl.searchParams.set('pdfPreview', `${new URL(url).pathname}/preview`)
-      setReady({ url, filename: ticket.filename, revision: savedRevision, ...chosen, previewUrl: chosen.format === 'pdf' ? previewUrl.href : undefined })
+      setReady({ url, filename: ticket.filename, revision: savedRevision, ...chosen, parameters, previewUrl: chosen.format === 'pdf' ? previewUrl.href : undefined })
     } catch (cause) { if (!request.signal.aborted) setError(String(cause)) }
     finally { if (!request.signal.aborted) setBusy(false) }
   }
@@ -124,6 +131,8 @@ export function ExportControl({ session, revision, beforeExport }: {
       {format && <label><LocalText source="导出方式" /><select disabled={busy || loading || !!planError} aria-label={localizeSource(locale, '导出方式')} value={selection?.mode || ''} onChange={event => select({ format: format.format, mode: event.target.value })}>
         {format.modes.map(item => <option key={item.id} value={item.id} disabled={!item.available}>{localizeSource(locale, modeLabels[item.id] || item.id)}{item.available ? '' : ` · ${localizeSource(locale, '不可用')}`}</option>)}
       </select></label>}
+      {showPdfRange && <label><LocalText source="PDF 页码范围" /><input value={pdfPages} maxLength={23} disabled={busy} placeholder={localizeSource(locale, '全部页')} onChange={event => { setPdfPages(event.target.value); setReady(null); setError('') }} /></label>}
+      {workbookSheet && <p className="export-guidance"><LocalText source="导出工作表" /> · {workbookSheet}</p>}
       {mode && <div className="export-guidance" aria-live="polite">
         {!mode.available && <p role="alert" title={mode.reason || undefined}>{localizeSource(locale, reasonLabels[mode.reasonCode || ''] || '当前导出方式不可用，请重新选择。')}</p>}
         {mode.id === 'source' && mode.available && <p><LocalText source="优先保留源文档结构和未修改内容。" /></p>}

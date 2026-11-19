@@ -31,6 +31,7 @@ export interface HcdManifest {
   storageCodec?: 'none' | 'gzip';
   documentId: string;
   profile: string;
+  source?: { format: string };
   revision: number;
   rootHash: string;
   indexPrefix: string;

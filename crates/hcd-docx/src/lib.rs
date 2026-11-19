@@ -462,6 +462,7 @@ mod tests {
             content.inlines = values
                 .iter()
                 .map(|(text, bold, italic)| hcd_core::EditorInline {
+                    format: Default::default(),
                     text: text.to_string(),
                     node_id: None,
                     bold: *bold,

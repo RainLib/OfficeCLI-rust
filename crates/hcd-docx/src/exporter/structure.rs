@@ -244,6 +244,22 @@ pub(super) fn document(
         .into_iter()
         .filter(|b| b.region == "body")
         .collect::<Vec<_>>();
+    let alignments: HashMap<_, _> = original
+        .iter()
+        .map(|block| (&block.block_id, block.content.alignment))
+        .collect();
+    if current.iter().any(|block| {
+        block
+            .content
+            .inlines
+            .iter()
+            .any(|inline| !inline.format.is_empty())
+            || alignments.get(&block.block_id).copied().flatten() != block.content.alignment
+    }) {
+        return Err(bad(
+            "This revision has typed Word formatting changes. Use the editable DOCX rebuild",
+        ));
+    }
     let native = body
         .elements()
         .filter(|e| matches!(e.name.as_str(), "p" | "tbl"))
@@ -683,13 +699,28 @@ fn table(
             if cell.row != r {
                 out.push_str("<w:p/>");
             } else if let Some(source) = cell.native {
-                for child in &source.children {
-                    match child {
-                        Xml::Element(e) if e.name != "tcPr" => {
-                            out.push_str(&rewritten(e, updates)?)
+                let introduced_text = hcd_core::extract_html_text_nodes(&cell.html.raw())?
+                    .iter()
+                    .any(|(id, value)| !ordinals.contains_key(id.as_str()) && !value.is_empty());
+                if introduced_text {
+                    let body = source
+                        .elements()
+                        .filter(|element| element.name != "tcPr")
+                        .collect::<Vec<_>>();
+                    if !matches!(body.as_slice(), [paragraph] if paragraph.name == "p" && paragraph.elements().all(|element| element.name == "pPr"))
+                    {
+                        return Err(bad("The original cell contains content that cannot be replaced by newly entered text"));
+                    }
+                    out.push_str(&new_cell_text(cell.html, Some(source))?);
+                } else {
+                    for child in &source.children {
+                        match child {
+                            Xml::Element(e) if e.name != "tcPr" => {
+                                out.push_str(&rewritten(e, updates)?)
+                            }
+                            Xml::Raw(s) => out.push_str(s),
+                            _ => {}
                         }
-                        Xml::Raw(s) => out.push_str(s),
-                        _ => {}
                     }
                 }
             } else {
@@ -742,6 +773,7 @@ fn new_cell_text(html: &Element, template: Option<&Element>) -> Result<String, H
             read_only: false,
             editable_text_node_ids: vec![],
             content: hcd_core::EditorBlockContent {
+                alignment: None,
                 kind: EditorBlockKind::Paragraph,
                 level: None,
                 font: None,
@@ -758,6 +790,7 @@ fn new_cell_text(html: &Element, template: Option<&Element>) -> Result<String, H
         ) {
             if let Some(text) = e.attr("data-hcd-id").and_then(|id| texts.get(id)) {
                 inlines.push(hcd_core::EditorInline {
+                    format: Default::default(),
                     text: text.clone(),
                     node_id: None,
                     bold: false,

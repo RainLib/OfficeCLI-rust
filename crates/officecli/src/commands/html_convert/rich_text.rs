@@ -344,6 +344,16 @@ pub(super) fn export_docx(document: &SemanticHtml, package: &Path) -> Result<usi
     };
     let mut embedded = 0;
     for (index, block) in document.blocks.iter().enumerate() {
+        if let Some(content) = document
+            .word_block_ids
+            .get(&index)
+            .and_then(|id| document.word_formats.get(id))
+        {
+            writer.flush()?;
+            append_typed_word_block(&handler, block, content)?;
+            writer.paragraph += 1;
+            continue;
+        }
         if let HtmlBlock::Image {
             source,
             alt,
@@ -499,7 +509,7 @@ fn xml_text(text: &str) -> Result<String, HandlerError> {
         } else {
             ""
         },
-        escape_xml_text(text)?
+        escape_xml_text(text)?.replace('\r', "&#13;")
     ))
 }
 
@@ -1023,4 +1033,80 @@ C &lt;D&gt;</pre><table><tr><td>plain</td><td><a href="https://example.com/cell"
         let overfragmented = format!("<p>{}</p>", "<b>x</b><i>y</i>".repeat(32_769));
         assert!(parse_html(&overfragmented).is_err());
     }
+}
+
+fn append_typed_word_block(
+    handler: &WordHandler,
+    block: &HtmlBlock,
+    content: &hcd_core::EditorBlockContent,
+) -> Result<(), HandlerError> {
+    let mut paragraph = HashMap::new();
+    if let Some(alignment) = content.alignment {
+        let alignment = if alignment == hcd_core::EditorAlignment::Justify {
+            "both"
+        } else {
+            alignment.css()
+        };
+        paragraph.insert("alignment".into(), alignment.into());
+    }
+    if let HtmlBlock::Heading { level, .. } = block {
+        paragraph.insert("style".into(), format!("Heading{level}"));
+    }
+    let path = handler.add(
+        "/body",
+        "paragraph",
+        InsertPosition::Append,
+        &paragraph,
+        None,
+    )?;
+    if let HtmlBlock::ListItem {
+        ordered, ordinal, ..
+    } = block
+    {
+        let prefix = if *ordered {
+            format!("{ordinal}. ")
+        } else {
+            "• ".to_string()
+        };
+        handler.add(
+            &path,
+            "run",
+            InsertPosition::Append,
+            &HashMap::from([("text".into(), prefix)]),
+            None,
+        )?;
+    }
+    for inline in &content.inlines {
+        if inline.text.is_empty() {
+            continue;
+        }
+        let mut properties = HashMap::from([("text".into(), inline.text.clone())]);
+        if inline.bold {
+            properties.insert("bold".into(), "true".into());
+        }
+        if inline.italic {
+            properties.insert("italic".into(), "true".into());
+        }
+        if inline.format.underline {
+            properties.insert("underline".into(), "single".into());
+        }
+        if let Some(font) = &inline.format.font {
+            properties.insert("font".into(), font.clone());
+            properties.insert("font.eastAsia".into(), font.clone());
+        }
+        if let Some(size) = inline.format.size_half_points {
+            properties.insert("size".into(), (f32::from(size) / 2.0).to_string());
+        }
+        if let Some(color) = &inline.format.color {
+            properties.insert("color".into(), color.clone());
+        }
+        let kind = if let Some(link) = inline.link.as_ref().filter(|link| safe_link(link)) {
+            properties.insert("url".into(), link.clone());
+            "hyperlink"
+        } else {
+            "run"
+        };
+        handler.add(&path, kind, InsertPosition::Append, &properties, None)?;
+    }
+    Ok(())
 }

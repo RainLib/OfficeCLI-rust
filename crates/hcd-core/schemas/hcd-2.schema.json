@@ -257,6 +257,20 @@
         },
         "grid": {
           "$ref": "#/$defs/gridChunkAddress"
+        },
+        "pdfLayout": {
+          "$ref": "#/$defs/pdfPageLayout"
+        }
+      }
+    },
+    "pdfPageLayout": {
+      "type": "array", "minItems": 1, "maxItems": 100000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["rotation"],
+        "properties": {
+          "sourcePage": { "type": "integer", "minimum": 1, "maximum": 100000 },
+          "rotation": { "enum": [0, 90, 180, 270] }
         }
       }
     },
@@ -331,7 +345,33 @@
         "sheetPart": {
           "type": "string",
           "pattern": "^xl/(worksheets|chartsheets)/[^/]+\\.xml$"
+        },
+        "autoFilter": { "$ref": "#/$defs/gridAutoFilter" }
+      }
+    },
+    "gridAutoFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startRow", "endRow", "startColumn", "endColumn", "column", "query"],
+      "properties": {
+        "startRow": { "type": "integer", "minimum": 1, "maximum": 1048575 },
+        "endRow": { "type": "integer", "minimum": 2, "maximum": 1048576 },
+        "startColumn": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "endColumn": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "column": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "query": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "additionalCriteria": {
+          "type": "array", "maxItems": 99,
+          "items": { "$ref": "#/$defs/gridFilterCriterion" }
         }
+      }
+    },
+    "gridFilterCriterion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["column", "query"],
+      "properties": {
+        "column": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "query": { "type": "string", "minLength": 1, "maxLength": 253 }
       }
     },
     "sourceAnchor": {

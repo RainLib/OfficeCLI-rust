@@ -10,12 +10,12 @@ import type { Session } from './api.ts'
 import { useDocumentViewState } from './DocumentViewState.tsx'
 import { HostPublicationControl, permits, useHostPolicy } from './HostIntegration.tsx'
 
-export type EditorTab = 'home' | 'insert' | 'view' | 'revisions' | 'format' | 'sheet'
+export type EditorTab = 'home' | 'insert' | 'view' | 'revisions' | 'format' | 'sheet' | 'data'
 
-export function EditorHeader({ session, revision, status, onTab, onClose, onSettings, onSearch, settingsOpen, beforeExport, presence, readOnly, onReadOnly, focused, onFocus, outlineOpen, onToggleOutline }: {
+export function EditorHeader({ session, revision, status, onTab, onClose, onSettings, onSearch, settingsOpen, beforeExport, activeSheetName, presence, readOnly, onReadOnly, focused, onFocus, outlineOpen, onToggleOutline }: {
   session: Session; revision: number | null; status: string; activeTab: EditorTab
   onTab: (tab: EditorTab) => void; onClose: () => void; onSettings: () => void; onSearch: () => void
-  settingsOpen: boolean; beforeExport?: () => Promise<number | null>; presence?: ReactNode
+  settingsOpen: boolean; beforeExport?: () => Promise<number | null>; activeSheetName?: string; presence?: ReactNode
   readOnly: boolean; onReadOnly: (value: boolean) => void; focused: boolean; onFocus: () => void
   outlineOpen: boolean; onToggleOutline: () => void
 }) {
@@ -37,7 +37,7 @@ export function EditorHeader({ session, revision, status, onTab, onClose, onSett
       <button className="icon-button focus-trigger" aria-pressed={focused} aria-label={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} title={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} onClick={onFocus}>{focused ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
       {session.format === 'pptx' && <button className="icon-button properties-trigger" aria-label={localizeSource(locale, '形状属性')} title={localizeSource(locale, '形状属性')} aria-pressed={rightPanel === 'properties' && !focused} onClick={() => { if (focused) onFocus(); setRightPanel('properties') }}><Shapes size={18} /></button>}
       <button className="icon-button settings-trigger" aria-label={localizeSource(locale, '界面设置')} title={localizeSource(locale, '界面设置')} aria-expanded={settingsOpen} onClick={() => { setPanelOpen(false); if (focused) onFocus(); onSettings() }}><Settings2 size={18} /></button>
-      {(permits(session, 'document.download') || permits(session, 'document.export')) && <ExportControl session={session} revision={revision} beforeExport={beforeExport} />}
+      {(permits(session, 'document.download') || permits(session, 'document.export')) && <ExportControl session={session} revision={revision} beforeExport={beforeExport} activeSheetName={activeSheetName} />}
       <button className="icon-button sidebar-toggle right-sidebar-toggle" aria-label={localizeSource(locale, rightOpen ? '收起右侧栏' : '展开右侧栏')} title={localizeSource(locale, rightOpen ? '收起右侧栏' : '展开右侧栏')} aria-expanded={rightOpen} onClick={() => { if (rightOpen) closeRightPanel(); else { if (focused) onFocus(); reopenRightPanel() } }}>{rightOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
     </div>
   </header>
@@ -48,9 +48,9 @@ export function ContentToolbar({ activeTab, onTab, expanded, onToggle, readOnly,
 }) {
   const { locale } = useI18n()
   const policy = useHostPolicy()
-  const tabs: [EditorTab, string][] = [['home', '开始'], ...(format === 'xlsx' ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []), ['insert', '插入'], ['view', '视图'], ['revisions', '修订']]
+  const tabs: [EditorTab, string][] = [['home', '开始'], ...(format === 'xlsx' ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []), ['insert', '插入'], ...(['xlsx', 'csv', 'tsv'].includes(format) ? [['data', '数据']] as [EditorTab, string][] : []), ['view', '视图'], ['revisions', '修订']]
   return <div className="content-toolbar">
-    {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="只读预览" /><small>{format.toUpperCase()}</small></span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
+    {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="只读预览" /><small>{format.toUpperCase()}</small>{['xlsx', 'csv', 'tsv'].includes(format) && <button aria-pressed={activeTab === 'data'} onClick={() => onTab('data')}><LocalText source="数据" /></button>}</span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
     <div className="content-toolbar-actions"><button className="toolbar-search" aria-label={localizeSource(locale, '查找全文')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={15} /><span><LocalText source="查找" /></span></button>
     {!readOnly && <button className="icon-button toolbar-toggle" title={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-label={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-expanded={expanded} onClick={onToggle}>{expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>}</div>
   </div>
