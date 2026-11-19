@@ -1,3 +1,4 @@
+import { WorkspacePanel } from './WorkspacePanel.tsx'
 import { useEffect, useState } from 'react'
 import { AlignCenter, AlignJustify, AlignLeft, AlignRight, Bold, Italic, MousePointer2, Underline } from 'lucide-react'
 import { CollapseSidebarIcon } from './EditorChrome.tsx'
@@ -30,7 +31,7 @@ export function PptxProperties({ node, fonts, hidden, disabled, dirty, onClose, 
   const color = /^#[0-9a-f]{6}$/i.test(node?.runColor || '') ? node!.runColor! : '#272D3B'
   const geometry = Object.fromEntries(Object.entries(position).map(([key, value]) => [key, Math.round(Number(value) * 12700)])) as PptxGeometry
   const geometryValid = Object.values(position).every(value => value.trim() !== '' && Number.isFinite(Number(value))) && geometry.xEmu >= 0 && geometry.yEmu >= 0 && geometry.widthEmu > 0 && geometry.heightEmu > 0
-  return <aside hidden={hidden} className="workspace-sidebar shape-properties" aria-label={localizeSource(locale, '形状属性')}>
+  return <WorkspacePanel side="right" hidden={hidden} className="workspace-sidebar shape-properties" aria-label={localizeSource(locale, '形状属性')}>
     <div className="panel-head"><h2><LocalText source="形状属性" /></h2><button className="panel-close" aria-label={localizeSource(locale, '隐藏右侧栏')} onClick={onClose}><CollapseSidebarIcon /></button></div>
     <nav className="inspector-tabs" aria-label={localizeSource(locale, '属性分类')}>
       <button aria-pressed={tab === 'text'} onClick={() => setTab('text')}><LocalText source="文本" /></button>
@@ -67,5 +68,5 @@ export function PptxProperties({ node, fonts, hidden, disabled, dirty, onClose, 
       </>}
     </div>
     {!!agents.length && <div className="inspector-presence">{agents.slice(0, 3).map(agent => <span key={agent.agentId}><i>{agent.name.slice(0, 1)}</i>{agent.name} · <LocalText source={agentStatus[agent.status] || agent.status} /></span>)}</div>}
-  </aside>
+  </WorkspacePanel>
 }

@@ -6,13 +6,13 @@ import { LocalText, localizeSource } from './sourceLocale.tsx'
 export type Appearance = 'system' | 'light' | 'dark'
 const storageKey = 'hcd-appearance-v1'
 const valid = (value: unknown): value is Appearance => ['system', 'light', 'dark'].includes(value as string)
-const AppearanceContext = createContext({ preference: 'system' as Appearance, theme: 'light' as 'light' | 'dark', setPreference: (_value: Appearance) => {} })
+const AppearanceContext = createContext({ preference: 'system' as Appearance, theme: 'light' as 'light' | 'dark', localControls: true, setPreference: (_value: Appearance) => {} })
 
 /** Appearance is scoped to the workspace, including floating menus. It never
  * changes a document's own theme or remounts a collaboration/editor runtime. */
-export function AppearanceProvider({ children, initialAppearance, appearance, onAppearanceChange, persist = false }: {
+export function AppearanceProvider({ children, initialAppearance, appearance, onAppearanceChange, persist = false, localControls = true }: {
   children: ReactNode; initialAppearance?: Appearance; appearance?: Appearance
-  onAppearanceChange?: (value: Appearance) => void; persist?: boolean
+  onAppearanceChange?: (value: Appearance) => void; persist?: boolean; localControls?: boolean
 }) {
   const [saved, setSaved] = useState<Appearance>(() => {
     if (valid(initialAppearance)) return initialAppearance
@@ -38,14 +38,15 @@ export function AppearanceProvider({ children, initialAppearance, appearance, on
     if (persist) try { localStorage.setItem(storageKey, value) } catch { /* Optional storage. */ }
   }
   const theme = preference === 'system' ? systemDark ? 'dark' : 'light' : preference
-  return <AppearanceContext.Provider value={{ preference, theme, setPreference }}>{children}</AppearanceContext.Provider>
+  return <AppearanceContext.Provider value={{ preference, theme, setPreference, localControls }}>{children}</AppearanceContext.Provider>
 }
 
 export const useAppearance = () => useContext(AppearanceContext)
 
-export function AppearanceSelect() {
-  const { preference, setPreference } = useAppearance()
+export function AppearanceSelect({ global = false }: { global?: boolean } = {}) {
+  const { preference, setPreference, localControls } = useAppearance()
   const { locale } = useI18n()
+  if (!global && !localControls) return null
   const label = localizeSource(locale, '界面主题')
   const Icon = preference === 'system' ? Monitor : preference === 'dark' ? Moon : Sun
   return <label className="appearance-control" title={label}><Icon size={15} aria-hidden="true" /><select aria-label={label} value={preference} onChange={event => setPreference(event.target.value as Appearance)}>

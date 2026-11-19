@@ -373,3 +373,10 @@
 .hcd-surface .word-preview-status{position:sticky;left:12px;width:max-content;padding:8px 14px;color:#758097;font-size:12px}
 .hcd-surface .word-preview-error{margin:12px;padding:12px 16px;border-radius:12px;background:#fff2ed;color:#95442f;max-width:700px}
 .hcd-surface .word-preview-error button{margin-left:12px}
+
+.document-tab[data-ai-writing] { --cursor-color:#365ec5; position:relative; background:color-mix(in srgb,var(--cursor-color) 10%,var(--panel,#fff)); }
+.document-tab[data-ai-writing][data-format=xlsx]{--cursor-color:#187c62}
+.document-tab[data-ai-writing][data-format=pptx]{--cursor-color:#bd542c}
+.document-tab[data-ai-writing][data-format=excalidraw]{--cursor-color:#7952b1}
+.document-tab .native-tab-cursor{align-self:flex-start;width:19px;height:19px;color:var(--cursor-color)}
+.format-icon.format-excalidraw{color:#7952b1;background:#efe8fc}

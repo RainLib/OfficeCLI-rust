@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build"
+    "build": "tsc --noEmit && vite build",
+    "demo": "node demo.mjs",
+    "test:acceptance": "node verify.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@officecli/hcd-reference-editor": "file:../editor",
+    "lucide-react": "^1.73.0",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },

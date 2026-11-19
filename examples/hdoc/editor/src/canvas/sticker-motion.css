@@ -1,0 +1,71 @@
+@import "../companion-motion.css";
+
+.canvas-sticker-motion { transform-box: fill-box; transform-origin: center; }
+[data-motion=float] .canvas-sticker-motion{animation:sticker-float 4.8s ease-in-out infinite}[data-motion=wiggle] .canvas-sticker-motion{animation:sticker-wiggle 6s ease-in-out infinite}[data-motion=twinkle] .canvas-sticker-motion{animation:sticker-twinkle 4s ease-in-out infinite}
+@keyframes sticker-float{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-3px) rotate(2deg)}}
+@keyframes sticker-wiggle{0%,65%,100%{transform:rotate(0)}72%{transform:rotate(-6deg)}80%{transform:rotate(5deg)}88%{transform:rotate(-3deg)}}
+@keyframes sticker-twinkle{0%,100%{transform:scale(.98);opacity:.88}50%{transform:scale(1.05);opacity:1}}
+[data-motion=drift] :is([data-sticker-layer=petal-near], [data-sticker-layer=petal-far]) {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: petal-drift 5.6s ease-in-out infinite;
+}
+[data-motion=drift] [data-sticker-layer=petal-far] {
+  animation: petal-turn 7s ease-in-out infinite;
+}
+@keyframes petal-drift {
+  0%, 100% { transform: translate(-1px,-1px) rotate(-9deg); }
+  41% { transform: translate(2.8px,1.6px) rotate(13deg); }
+  70% { transform: translate(1px,3.6px) rotate(4deg); }
+}
+@keyframes petal-turn {
+  0%, 100% { transform: translate(0,0) rotate(5deg); }
+  54% { transform: translate(-2.2px,3.2px) rotate(-17deg); }
+}
+[data-motion=flutter] :is([data-sticker-layer=wing-left], [data-sticker-layer=wing-right]) {
+  transform-box: view-box;
+  transform-origin: 50% 53%;
+  animation: sticker-wing 4.8s ease-in-out infinite;
+}
+[data-motion=flutter] [data-sticker-layer=wing-left] { --wing-tilt: 3deg; }
+[data-motion=flutter] [data-sticker-layer=wing-right] { --wing-tilt: -3deg; }
+@keyframes sticker-wing {
+  0%, 36%, 70%, 100% { transform: scaleX(1); }
+  48% { transform: scaleX(.64) rotate(var(--wing-tilt)); }
+  59% { transform: scaleX(.90); }
+  64% { transform: scaleX(.83); }
+}
+[data-motion=flight] [data-sticker-layer=plane] {
+  transform-box: fill-box;
+  transform-origin: 68% 36%;
+  animation: sticker-glide 5.4s ease-in-out infinite;
+}
+[data-motion=flight] [data-sticker-layer=trail] { animation: sticker-trail 5.4s ease-in-out infinite; }
+@keyframes sticker-glide {
+  0%, 100% { transform: translate(-1px,1px) rotate(-2deg); }
+  48% { transform: translate(2.5px,-1.8px) rotate(2deg); }
+  78% { transform: translate(.6px,-.6px) rotate(0deg); }
+}
+@keyframes sticker-trail {
+  0%, 100% { stroke-dashoffset: 0; opacity: .82; }
+  48% { stroke-dashoffset: -4; opacity: 1; }
+}
+[data-motion]:not([data-motion=companion-idle]) :is(.canvas-sticker-motion, [data-sticker-layer]) { animation-delay: var(--sticker-phase, 0s); }
+[data-motion=blink] [data-sticker-layer=eyes], [data-motion=gleam] [data-sticker-layer=eyes], :is([data-motion=reply], [data-motion=companion-idle]) [data-sticker-layer=eyes] {
+  transform-box: fill-box; transform-origin: center; animation: journal-blink 5.8s ease-in-out infinite;
+}
+[data-motion=gleam] [data-sticker-layer=glint], [data-motion=glow] [data-sticker-layer=glint], [data-motion=blink] [data-sticker-layer=glint] {
+  transform-box: fill-box; transform-origin: center; animation: journal-gleam 4.4s ease-in-out infinite;
+}
+[data-motion=glow] [data-sticker-layer=lantern] { animation: firefly-glow 4.8s ease-in-out infinite; }
+[data-motion=glow] :is([data-sticker-layer=wing-left],[data-sticker-layer=wing-right]) {
+  transform-box: view-box; transform-origin: 46% 44%; animation: firefly-hover 4.8s ease-in-out infinite;
+}
+@keyframes journal-blink { 0%,71%,78%,100% { transform:scaleY(1); } 74% { transform:scaleY(.18); } }
+@keyframes journal-gleam { 0%,100% { transform:scale(.78);opacity:.64; } 55% { transform:scale(1.1);opacity:1; } }
+@keyframes firefly-glow { 0%,100% { opacity:.57; } 53% { opacity:1; } }
+@keyframes firefly-hover { 0%,100% { transform:scaleX(1); } 50% { transform:scaleX(.86); } }
+@media (prefers-reduced-motion: reduce), print {
+  .canvas-sticker-motion, [data-sticker-layer] { animation: none !important; }
+}
+[data-paused=true] :is(.canvas-sticker-motion, [data-sticker-layer]) { animation: none !important; }

@@ -2,9 +2,7 @@
 import { parseArgs } from "node:util";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, existsSync, readFileSync } from "node:fs";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
+import { mkdirSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import {
   Store,
@@ -14,7 +12,15 @@ import {
   passwordHash,
   iso,
 } from "./src/store.mjs";
-import { createWorkspaceServer } from "./src/server.mjs";
+import { createRuntime, listen } from "./src/runtime.mjs";
+import {
+  bindAddress,
+  createTenantGateway,
+  publicOrigin,
+  readTenantRegistry,
+  readWorkspace,
+  validIdentity,
+} from "./src/tenants.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url)),
   repo = resolve(here, "../..");
@@ -22,6 +28,11 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     root: { type: "string" },
+    tenants: { type: "string" },
+    port: { type: "string" },
+    "selection-mcp": { type: "boolean" },
+    "tenant-id": { type: "string" },
+    "app-id": { type: "string" },
     "public-url": { type: "string" },
     "bind-host": { type: "string" },
     "engine-port": { type: "string" },
@@ -37,67 +48,46 @@ const { values, positionals } = parseArgs({
 const command = positionals[0],
   root = values.root && resolve(values.root);
 let store,
-  server,
-  children = [],
-  closing = false;
-async function stop(code = 0) {
-  if (closing) return;
-  closing = true;
-  if (server) server.close();
-  const waits = children.map(async (child) => {
-    if (
-      child.pid === undefined ||
-      child.exitCode !== null ||
-      child.signalCode !== null
-    )
-      return;
-    const ended = once(child, "exit");
-    child.kill("SIGTERM");
-    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    timer.unref();
-    try {
-      await ended;
-    } finally {
-      clearTimeout(timer);
-    }
-  });
-  await Promise.all(waits);
-  server?.closeAllConnections();
-  store?.close();
-  process.exitCode = code;
+  gateway,
+  shutdown,
+  started = false;
+const runtimes = [];
+function stop(code = 0) {
+  if (!shutdown) {
+    process.exitCode = code;
+    gateway?.close();
+    shutdown = Promise.all(runtimes.map((rt) => rt.stop())).finally(() =>
+      store?.close(),
+    );
+  }
+  return shutdown;
 }
 try {
-  check(root, 400, "请指定 --root。");
   if (command === "init") {
+    check(root && !values.tenants, 400, "初始化工作空间需要 --root。");
     mkdirSync(root, { recursive: true, mode: 0o700 });
     check(
       !existsSync(join(root, "config.json")) &&
-        !existsSync(join(root, "business.sqlite")),
+        !existsSync(join(root, "business.sqlite")) &&
+        !existsSync(join(root, "keys.json")),
       409,
       "此目录已初始化，请使用 start；已有数据不会覆盖。",
     );
-    const url = new URL(values["public-url"] || "http://127.0.0.1:7400");
+    const url = publicOrigin(values["public-url"] || "http://127.0.0.1:7400");
+    const tenantId = values["tenant-id"] ?? "default",
+      appId = values["app-id"] ?? "workspace";
     check(
-      ["http:", "https:"].includes(url.protocol) &&
-        url.pathname === "/" &&
-        !url.search &&
-        !url.hash &&
-        !url.username &&
-        !url.password,
+      validIdentity(tenantId) && validIdentity(appId),
       400,
-      "public-url 必须是无路径、无凭据的 HTTP(S) origin。",
-    );
-    check(
-      url.protocol === "https:" ||
-        ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname),
-      400,
-      "非 loopback 部署请使用 HTTPS public-url。",
+      "租户和应用标识需为 1–256 个字符。",
     );
     const publicPort = Number(
-        url.port || (url.protocol === "https:" ? 443 : 80),
+        values.port ?? (url.port || (url.protocol === "https:" ? 443 : 80)),
       ),
       enginePort = Number(values["engine-port"] || publicPort + 1),
       collabPort = Number(values["collab-port"] || publicPort + 2);
+    const bindHost = bindAddress(values["bind-host"] || "127.0.0.1");
+    const internalHost = bindHost === "::1" ? "[::1]" : "127.0.0.1";
     check(
       [publicPort, enginePort, collabPort].every(
         (p) => Number.isInteger(p) && p > 0 && p < 65536,
@@ -125,18 +115,21 @@ try {
     const config = {
       schemaVersion: "officecli-workspace/1",
       name: values.name || "OfficeCLI 工作空间",
-      tenantId: "default",
-      appId: "workspace",
+      tenantId,
+      appId,
       publicUrl: url.origin,
-      bindHost: values["bind-host"] || "127.0.0.1",
+      selectionMcp: values["selection-mcp"] === true,
+      bindHost,
       port: publicPort,
-      callbackUrl: `http://127.0.0.1:${publicPort}`,
-      engineUrl: `http://127.0.0.1:${enginePort}`,
-      collabUrl: `http://127.0.0.1:${collabPort}`,
+      callbackUrl: `http://${internalHost}:${publicPort}`,
+      engineUrl: `http://${internalHost}:${enginePort}`,
+      collabUrl: `http://${internalHost}:${collabPort}`,
     };
     // The secrets file is written first; an interrupted init can be inspected
     // without ever starting with an absent or regenerated signing identity.
-    atomic(join(root, "keys.json"), JSON.stringify(keys, null, 2) + "\n");
+    atomic(join(root, "keys.json"), JSON.stringify(keys, null, 2) + "\n", {
+      exclusive: true,
+    });
     store = new Store(root);
     store.transaction(() => {
       const id = randomUUID();
@@ -158,28 +151,20 @@ try {
       `工作空间已初始化：${url.origin}\n管理员：${username}\n使用 node apps/workspace/cli.mjs start --root <目录> 启动。`,
     );
   } else if (command === "start") {
-    const config = JSON.parse(readFileSync(join(root, "config.json"))),
-      keys = JSON.parse(readFileSync(join(root, "keys.json")));
     check(
-      config.schemaVersion === "officecli-workspace/1",
+      Boolean(root) !== Boolean(values.tenants),
       400,
-      "工作空间配置版本不兼容。",
+      "请选择 --root <目录> 或 --tenants <租户清单>。",
     );
+    const port = Number(values.port ?? 7400);
     check(
-      ["jwt", "provider", "service", "events", "objects"].every(
-        (key) =>
-          typeof keys[key] === "string" && Buffer.byteLength(keys[key]) >= 32,
-      ) &&
-        new Set(
-          ["jwt", "provider", "service", "events", "objects"].map(
-            (key) => keys[key],
-          ),
-        ).size === 5,
+      Number.isInteger(port) && port > 0 && port < 65536,
       400,
-      "工作空间密钥缺失或重复。",
+      "监听端口无效。",
     );
-    // The persisted public port prevents two supervisors from serving this
-    // root concurrently. The engine also holds its own root-level lock.
+    const workspaces = values.tenants
+      ? readTenantRegistry(resolve(values.tenants), port)
+      : [readWorkspace(root)];
     const assets = resolve(values.assets || join(here, "dist"));
     const binary = resolve(
       values.officecli ||
@@ -200,106 +185,31 @@ try {
       400,
       "构建产物不完整，请先执行 node apps/workspace/scripts/build.mjs。",
     );
-    store = new Store(root);
-    const runtime = createWorkspaceServer({
-      store,
-      config,
-      keys,
-      adminAssets: join(assets, "admin"),
-      editorAssets: join(assets, "editor"),
-    });
-    server = runtime.server;
-    await new Promise((yes, no) => {
-      server.once("error", no);
-      server.listen(config.port, config.bindHost, yes);
-    });
-    const integration = {
-      schemaVersion: "officecli-integration/1",
-      tenantId: config.tenantId,
-      appId: config.appId,
-      providerUrl: config.callbackUrl,
-      keyId: "provider-1",
-      providerSecretEnv: "HCD_WORKSPACE_PROVIDER_SECRET",
-      serviceSecretEnv: "HCD_WORKSPACE_SERVICE_SECRET",
-      transferOrigins: [config.callbackUrl],
-      events: {
-        url: config.callbackUrl + "/officecli-events/v1/events",
-        keyId: "event-1",
-        secretEnv: "HCD_WORKSPACE_EVENT_SECRET",
-      },
-    };
-    const configPath = join(root, "engine-integration.json");
-    atomic(configPath, JSON.stringify(integration, null, 2) + "\n");
-    const env = {
-      ...process.env,
-      HCD_TOKEN_SECRET: keys.jwt,
-      HCD_WORKSPACE_PROVIDER_SECRET: keys.provider,
-      HCD_WORKSPACE_SERVICE_SECRET: keys.service,
-      HCD_WORKSPACE_EVENT_SECRET: keys.events,
-      HCD_API_URL: config.engineUrl,
-      HCD_COLLAB_PORT: new URL(config.collabUrl).port,
-    };
-    // Defaults must be repeatable and work with no developer cloud credentials.
-    for (const key of [
-      "HCD_DATABASE_URL",
-      "HCD_S3_BUCKET",
-      "HCD_DEFAULT_THEME",
-      "OPENAI_API_KEY",
-      "RAINY_OPENAI_API_KEY",
-    ])
-      delete env[key];
-    // Disable before any credential discovery, including developer-home files.
-    env.HCD_AI_ENABLED = "false";
-    env.HCD_COLLAB_BIND = "127.0.0.1";
+    for (const workspace of workspaces) {
+      const runtime = createRuntime(
+        workspace,
+        { assets, binary, sidecar },
+        (tenant) => {
+          console.error(`工作空间 ${tenant} 的子服务已退出。`);
+          if (values.tenants && started) void runtime.stop();
+          else void stop(1);
+        },
+      );
+      runtimes.push(runtime);
+    }
     process.once("SIGINT", () => void stop());
     process.once("SIGTERM", () => void stop());
-    function start(executable, args) {
-      const child = spawn(executable, args, {
-        env,
-        stdio: ["ignore", "inherit", "inherit"],
-      });
-      children.push(child);
-      child.once("error", () => void stop(1));
-      child.once("exit", () => {
-        if (!closing) {
-          console.error("工作空间子服务已退出，正在停止其余服务。");
-          void stop(1);
-        }
-      });
-      return child;
+    if (values.tenants) {
+      gateway = createTenantGateway(runtimes);
+      await listen(gateway.server, port, values["bind-host"] || "127.0.0.1");
     }
-    start(binary, [
-      "hdoc",
-      "serve",
-      "--root",
-      join(root, "engine"),
-      "--bind",
-      new URL(config.engineUrl).host,
-      "--integration-config",
-      configPath,
-    ]);
-    const deadline = Date.now() + 120_000;
-    while (true) {
-      check(!closing && Date.now() < deadline, 503, "编辑服务启动超时。");
-      try {
-        if (
-          (
-            await fetch(config.engineUrl + "/health", {
-              signal: AbortSignal.timeout(1000),
-            })
-          ).ok
-        )
-          break;
-      } catch {}
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    start(process.execPath, [sidecar]);
-    console.log(
-      `OfficeCLI Workspace：${config.publicUrl}\n业务数据与编辑数据均保存在指定 root；AI 默认关闭。`,
-    );
+    await Promise.all(runtimes.map((runtime) => runtime.start()));
+    started = true;
+    for (const { config } of workspaces)
+      console.log(`OfficeCLI Workspace · ${config.name} · ${config.publicUrl}`);
   } else
     throw new Error(
-      "用法：node apps/workspace/cli.mjs <init|start> --root <目录> [--public-url URL] [--password-env NAME]",
+      "用法：node apps/workspace/cli.mjs init --root <目录> 或 start (--root <目录> | --tenants <清单>)",
     );
 } catch (error) {
   console.error(error.message);

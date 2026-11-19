@@ -26,18 +26,22 @@
     "test:provider": "node scripts/verify-provider.mjs"
   },
   "dependencies": {
+    "@excalidraw/excalidraw": "0.18.1",
     "@hocuspocus/provider": "4.7.0",
     "@hocuspocus/server": "4.7.0",
     "@hocuspocus/transformer": "4.7.0",
     "@tiptap/core": "3.31.3",
     "@tiptap/extension-collaboration": "3.31.3",
     "@tiptap/extension-collaboration-caret": "3.31.3",
+    "@tiptap/extensions": "3.31.3",
     "@tiptap/pm": "3.31.3",
     "@tiptap/react": "3.31.3",
     "@tiptap/starter-kit": "3.31.3",
+    "@tiptap/y-tiptap": "3.0.9",
     "@univerjs/preset-sheets-core": "^0.25.1",
     "@univerjs/preset-sheets-drawing": "^0.25.1",
     "@univerjs/presets": "^0.25.1",
+    "highlight.js": "11.11.1",
     "lucide-react": "^1.73.0",
     "pdfjs-dist": "^6.3.289",
     "react-markdown": "^10.1.0",
@@ -59,6 +63,7 @@
     "react-dom": "19.2.0",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
-    "vite": "7.1.11"
+    "vite": "7.1.11",
+    "zod": "4.6.7"
   }
 }

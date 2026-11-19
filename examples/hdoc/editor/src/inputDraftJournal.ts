@@ -78,11 +78,11 @@ export class InputDraftJournal {
   private closed = false
   private version = 0
   pending = 0
-  private constructor(private readonly identity: Pick<InputDraft, 'id' | 'namespace' | 'documentId' | 'epoch'>, private readonly release: () => void, private readonly changed: (error?: unknown) => void) {}
-  static async create(namespace: string, documentId: string, epoch: number, changed: (error?: unknown) => void) {
+  private constructor(private readonly identity: Pick<InputDraft, 'id' | 'namespace' | 'documentId' | 'epoch'>, private readonly release: () => void, private readonly changed: (error?: unknown) => void, private readonly maximumBytes: number) {}
+  static async create(namespace: string, documentId: string, epoch: number, changed: (error?: unknown) => void, maximumBytes = maxBytes) {
     await openDatabase()
     const id = crypto.randomUUID(), release = await hold(id)
-    return new InputDraftJournal({ id, namespace, documentId, epoch }, release, changed)
+    return new InputDraftJournal({ id, namespace, documentId, epoch }, release, changed, maximumBytes)
   }
   replace(content: string | null) {
     if (this.closed) return
@@ -91,7 +91,7 @@ export class InputDraftJournal {
     this.changed()
     this.queue = this.queue.then(async () => {
       if (this.failed) return
-      if (content !== null && new TextEncoder().encode(content).length > maxBytes) throw new Error('未提交输入超过 2 MiB')
+      if (content !== null && new TextEncoder().encode(content).length > this.maximumBytes) throw new Error(`未提交输入超过 ${this.maximumBytes / 1024 / 1024} MiB`)
       const db = await openDatabase(), tx = transaction(db), saved = complete(tx)
       const store = tx.objectStore('drafts')
       if (content === null) store.delete(this.identity.id)

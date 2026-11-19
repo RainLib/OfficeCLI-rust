@@ -34,7 +34,7 @@ export function GridAgentOverlay({ session, host, runtime, revision }: {
       const current = runtime.current, element = host.current
       const sheet = current?.adapter.workbook.getActiveSheet()
       const bounds = element?.parentElement?.getBoundingClientRect()
-      const visible = !!element?.getClientRects().length
+      const visible = !!element?.getClientRects().length && !element.closest(".document-tab-panel[hidden]")
       if (current && boundApi !== current.adapter.univerAPI) {
         subscriptions.forEach(subscription => subscription.dispose())
         boundApi = current.adapter.univerAPI

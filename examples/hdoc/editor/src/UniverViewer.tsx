@@ -1,12 +1,16 @@
 import { keepHistory } from './editHistory.ts'
 import { LeftPanelShell } from './LeftPanelShell.tsx'
 import { AppearanceSelect, useAppearance } from './Appearance.tsx'
+import { DocumentPanelTools } from './DocumentPanelTools.tsx'
+import { WorkspacePanel } from './WorkspacePanel.tsx'
 import { WorkspaceDrawers } from './WorkspaceDrawers.tsx'
 import { useDocumentViewState } from './DocumentViewState.tsx'
 import { CanvasViewport, useCanvasZoom } from './CanvasZoom.tsx'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { EmbedSelection, EmbedCommittedRevision } from './embedSelection'
+import type { HcdEmbedSelection } from './public'
 import { BooleanNumber, createUniver, defaultTheme, LocaleType, RANGE_TYPE, type IWorkbookData, type ICellData } from '@univerjs/presets'
 import { CellAlertManagerService, DeviceInputEventType, extractFormulaError, SetFormulaCalculationResultMutation, SetSelectionsOperation, UniverSheetsCorePreset,
   SetInlineFormatBoldCommand, SetInlineFormatItalicCommand, SetInlineFormatUnderlineCommand,
@@ -16,6 +20,7 @@ import { HcdUniverAdapter, type HcdPatchEventDetail } from '../../xlsx-univer-vi
 import { parseStyleCatalog } from '../../xlsx-univer-viewer/src/hcd-parser.ts'
 import { editedInlineRuns, inheritInlineRuns, validateInlineRuns, type XlsxInlineRun } from '../../xlsx-univer-viewer/src/rich-text.ts'
 import { ServiceGridClient } from './ServiceGridClient.ts'
+import { restoreGridTabView, trackGridTabView } from './gridTabState.ts'
 import type { CalculationResult } from './capabilities.ts'
 import { EditorHeader, EditorStatusbar, ContentToolbar, CollapseSidebarIcon } from './EditorChrome.tsx'
 import { ContextMenu, type MenuAction } from './ContextMenu.tsx'
@@ -26,6 +31,7 @@ import { api, type Session } from './api.ts'
 import { loadThemeCss } from './themeCss.ts'
 import { ErrorToast } from './ErrorToast.tsx'
 import { useAgentActivities, useAgentWorkspace, AgentPanel } from './AgentActivityLayer.tsx'
+import { useResourceNavigation } from './resources/ResourceWorkspace.tsx'
 import { GridAgentOverlay } from './GridAgentOverlay.tsx'
 import { InputDraftRecovery, useInputDraft } from './useInputDraft.tsx'
 import type { InputDraft } from './inputDraftJournal.ts'
@@ -95,7 +101,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const { theme: appearanceTheme } = useAppearance()
   const agents = useAgentActivities()
   const { panelOpen, setPanelOpen, requestTask } = useAgentWorkspace()
-  const { preview, setPreview, focused, setFocused, activeTab, setActiveTab, rightPanel, setRightPanel } = useDocumentViewState()
+  const { focused, setFocused, activeTab, setActiveTab, rightPanel, setRightPanel } = useDocumentViewState()
   const { zoom, setZoom } = useCanvasZoom()
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -121,8 +127,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const restoringRef = useRef(false)
   const [error, setError] = useState('')
   const [themeCss, setThemeCss] = useState('')
-  const editing = session.scope === 'write' && !preview
-  const setEditing = (value: boolean) => setPreview(!value)
+  const editing = session.scope === 'write'
+  const reportSelection = useContext(EmbedSelection)
+  const [hostRange, setHostRange] = useState<Extract<HcdEmbedSelection['target'],{kind:'sheet'}> | null>(null)
   const editingRef = useRef(editing)
   editingRef.current = editing
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(session.documentId))
@@ -130,6 +137,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const setSettingsOpen = (value: boolean | ((open: boolean) => boolean)) => setRightPanel(previous => (typeof value === 'function' ? value(previous === 'settings') : value) ? 'settings' : null)
   function openSettings() { setFocused(false); setPanelOpen(false); setSettingsOpen(true) }
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
+  const hostRevision = useContext(EmbedCommittedRevision)
+  useEffect(() => {
+    if (hostRevision !== undefined) setRemoteRevision(previous => Math.max(previous ?? 0, hostRevision))
+  }, [hostRevision])
+
   const [searchOpen, setSearchOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [deletionPrompt, setDeletionPrompt] = useState<string | null>(null)
@@ -160,6 +172,12 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const [verifiedFunctions, setVerifiedFunctions] = useState<string[]>([])
   const calculationRequest = useRef(0)
   const [gridSelectionKind, setGridSelectionKind] = useState<GridSelectionKind>('cell')
+  useEffect(() => {
+    if (!reportSelection) return
+    reportSelection(editing && !formulaDirty && !batchInput && hostRange && revision !== null && collaborationEpoch !== undefined
+      ? {documentId:session.documentId, revision, collaborationEpoch, target:hostRange} : null)
+    return () => reportSelection(null)
+  }, [reportSelection,editing,formulaDirty,batchInput,hostRange,revision,collaborationEpoch,session.documentId])
   const formulaInput = useRef<HTMLInputElement>(null)
   const updateFormulaBarRef = useRef<() => void>(() => {})
   const host = useRef<HTMLDivElement>(null)
@@ -344,7 +362,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   }
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!host.current?.getClientRects().length) return
+      if (!host.current?.getClientRects().length || host.current.closest(".document-tab-panel[hidden]")) return
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return
       const target = event.target
       if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return
@@ -389,19 +407,18 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     if (remoteRevision <= current.client.manifest.revision) { setRemoteRevision(null); return }
     if (current.adapter.hasPendingPatch() || gridInput.current || gridBatch.current || current.adapter.workbook.isCellEditing() || restoringRef.current) return
     syncing.current = true
-    void current.adapter.refreshFromServer().then(refreshed => {
+    void current.adapter.refreshFromServer().then(async refreshed => {
       if (!refreshed || runtime.current !== current) return
-      setRevision(current.client.manifest.revision)
-      updateFormulaBarRef.current()
-      // A refresh started before our local acknowledgement may finish after
-      // it. Only a genuinely different head invalidates the local undo stack.
+      const auth = await (await api(session, '/auth')).json() as { collaborationEpoch: number }
+      if (runtime.current !== current) return
       const actual = current.client.manifest.revision
+      epochRef.current = auth.collaborationEpoch
+      setCollaborationEpoch(auth.collaborationEpoch)
+      setRevision(actual)
+      updateFormulaBarRef.current()
       setHistory(previous => previous.head === actual ? previous : { head: actual, past: [], future: [] })
-      setRemoteRevision(null)
+      setRemoteRevision(previous => previous !== null && previous > actual ? previous : null)
       setError('')
-      void api(session, '/auth').then(response => response.json())
-        .then((auth: { collaborationEpoch: number }) => setCollaborationEpoch(auth.collaborationEpoch))
-        .catch(() => {})
     }).catch(cause => setError(`协作修订同步失败：${String(cause)}`)).finally(() => { syncing.current = false })
   }, [remoteRevision, revision, status, historyBusy, session, formulaDirty, restoringInput, batchInput])
 
@@ -439,6 +456,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     const client = new ServiceGridClient(session)
     let disposeUniver: (() => void) | undefined
     let removePatchListener: (() => void) | undefined
+    let stopTrackingView: (() => void) | undefined
     const boot = async () => {
       await client.open()
       const auth = await (await api(session, '/auth')).json() as { collaborationEpoch: number }
@@ -494,6 +512,13 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         const selection = sheet.getActiveRange()
         if (!selection || !alive) return
         setGridSelectionKind(selectionKind(sheet))
+        if (reportSelection) {
+          const bounds=selection.getRange(), sheetId=sheet.getSheetId()
+          const target={kind:'sheet' as const,sheetId,sheetIndex:client.sheets().findIndex(s=>s.sheetId===sheetId),
+            top:bounds.startRow,left:bounds.startColumn,bottom:bounds.endRow,right:bounds.endColumn}
+          const allowed=target.sheetIndex>=0 && (target.bottom-target.top+1)*(target.right-target.left+1)<=128
+          setHostRange(previous => !allowed ? null : JSON.stringify(previous)===JSON.stringify(target) ? previous : target)
+        }
         const cell = sheet.getRange(selection.getRow(), selection.getColumn())
         setFormulaAddress(cell.getA1Notation())
         // Continue tracking the real selection while keeping the draft's own
@@ -640,6 +665,15 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       window.addEventListener('hcd-patch', onPatch)
       removePatchListener = () => window.removeEventListener('hcd-patch', onPatch)
       await adapter.start()
+      await adapter.waitForRendered()
+      if (!alive) return
+      try { await restoreGridTabView(session, adapter, client.manifest.revision, auth.collaborationEpoch) }
+      catch { /* An unavailable cached viewport must leave the workbook usable. */ }
+      if (!alive) return
+      stopTrackingView = trackGridTabView(session, adapter, univerAPI, () => {
+        const epoch = epochRef.current
+        return epoch === undefined ? null : { revision: client.manifest.revision, collaborationEpoch: epoch }
+      })
       if (alive) setVerifiedFunctions(client.verifiedFunctions)
       updateFormulaBar()
       runtime.current = { client, adapter }
@@ -651,19 +685,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       }
     }
     void boot().catch(cause => { if (alive) setError(String(cause)) })
-    return () => { alive = false; runtime.current = null; localeApi.current = null; updateFormulaBarRef.current = () => {}; removePatchListener?.(); disposeUniver?.(); client.dispose() }
+    return () => { alive = false; runtime.current = null; localeApi.current = null; updateFormulaBarRef.current = () => {}; stopTrackingView?.(); removePatchListener?.(); disposeUniver?.(); client.dispose() }
   }, [session])
-
-  function changeMode(readOnly: boolean) {
-    if (!readOnly && session.scope !== 'write') return
-    if (runtime.current?.adapter.workbook.isCellEditing()) { setError('请先确认单元格编辑，再切换模式。'); return }
-    if (formulaDirty || gridBatch.current || runtime.current?.adapter.hasPendingPatch() || historyLocked || gridBusy.current) {
-      setError('请先应用当前公式并等待保存完成，再切换模式。')
-      return
-    }
-    runtime.current?.adapter.setMode(readOnly ? 'readonly' : 'editable')
-    setEditing(!readOnly)
-  }
 
   async function mergeSelection() {
     const current = runtime.current
@@ -1539,7 +1562,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const contextActions: MenuAction[] = [
     { label: '用 Agent 修改选区…', accent: true, disabled: gridActionDisabled || !activeRange, action: () => {
       setFocused(false)
-      requestTask('请修改当前选区，保留其他单元格、公式与格式：', { sheetId: activeSheet?.getSheetId(), range: activeRange?.getA1Notation(), nodeId: selectedCellLink()?.nodeId, format: 'xlsx' })
+      const currentRevision = runtime.current?.client.manifest.revision
+      const epoch = epochRef.current
+      const targetVersion = currentRevision === undefined || epoch === undefined ? undefined : { revision: currentRevision, collaborationEpoch: epoch }
+      requestTask('请修改当前选区，保留其他单元格、公式与格式：', { sheetId: activeSheet?.getSheetId(), range: activeRange?.getA1Notation(), nodeId: selectedCellLink()?.nodeId, format: 'xlsx' }, { targetVersion })
     } },
     ...(contextSelectionKind === 'cell' ? [{ label: '合并单元格', action: () => void mergeSelection(),
       disabled: gridActionDisabled || !activeRange || !!selectedMerge || activeRange.getHeight() * activeRange.getWidth() < 2 },
@@ -1558,8 +1584,23 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   ]
 
   const headerStatus = error ? (error.includes('已保存为 r') ? '同步失败' : '保存失败') : status === '保存中…' ? '保存中' : revision === null ? '加载中' : formulaDirty || batchInput ? '编辑中' : editing ? '已保存' : '只读'
+  const formulaDisabled = revision === null || !editing || restoringInput || !!batchInput
   const draftTargetLabel = gridInput.current ? `${runtime.current?.adapter.workbook.getSheetBySheetId(gridInput.current.sheetId)?.getSheetName() || localizeSource(locale, '工作表')}!${gridInput.current.address}` : ''
-  return <div className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(!panelOpen && !settingsOpen && activeTab !== 'revisions') || focused ? 'right-hidden' : ''} ${focused ? 'focus-mode' : ''}`}>
+  useResourceNavigation(session, revision !== null && !!runtime.current, async ({ ref, preview, ai }) => {
+    const current = runtime.current, bounds = preview.bounds
+    if (!current || ref.anchor.kind !== 'sheet-range' || !bounds) throw new Error('表格引用尚未就绪。')
+    if (formulaDirty || gridBatch.current || current.adapter.workbook.isCellEditing() || current.adapter.hasPendingPatch()) throw new Error('请先保存当前单元格输入，再定位引用。')
+    setFocused(false)
+    await current.adapter.loadRange(ref.anchor.sheetId, bounds.row, bounds.endRow)
+    await current.adapter.focusCell(ref.anchor.sheetId, bounds.row, bounds.column)
+    const sheet = current.adapter.workbook.getSheetBySheetId(ref.anchor.sheetId)
+    if (!sheet) throw new Error('引用的工作表已删除。')
+    sheet.setActiveRange(sheet.getRange(bounds.row, bounds.column, bounds.endRow - bounds.row + 1, bounds.endColumn - bounds.column + 1))
+    if (ai) requestTask(`请编辑白板引用的 ${preview.label} 区域，保留其他内容。`, { sheetId: ref.anchor.sheetId, range: ref.anchor.range, format: 'xlsx', cells: (preview.cells || ref.anchor.cells).map(cell => ({ nodeId: cell.nodeId })) }, {
+      targetVersion: epochRef.current === undefined ? undefined : { revision: preview.revision, collaborationEpoch: epochRef.current },
+    })
+  })
+  return <div data-document-scope={session.scope} className={`workspace semantic-workspace univer-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(!panelOpen && !settingsOpen && activeTab !== 'revisions') || focused ? 'right-hidden' : ''} ${focused ? 'focus-mode' : ''}`}>
     {themeCss && <style>{themeCss}</style>}
     {deletionPrompt && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) answerDeletion(false) }}>
       <div className="hcd-dialog" role="dialog" aria-modal="true" aria-label={localizeSource(locale, "确认删除")} onKeyDown={event => { if (event.key === 'Escape') answerDeletion(false) }}>
@@ -1567,11 +1608,10 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         <div className="hcd-dialog-actions"><button autoFocus onClick={() => answerDeletion(false)}><LocalText source={"取消"} /></button><button className="primary" onClick={() => answerDeletion(true)}><LocalText source={"删除"} /></button></div>
       </div>
     </div>}
-    {layout.showHeader && <EditorHeader outlineOpen={layout.showOutline && !focused} onToggleOutline={() => { setFocused(false); setLayoutOption('showOutline', !layout.showOutline || focused) }} session={session} revision={revision} status={headerStatus} activeTab={activeTab}
-      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} onClose={onClose} onSettings={() => setSettingsOpen(previous => !previous)} onSearch={() => setSearchOpen(true)} settingsOpen={settingsOpen && !panelOpen} readOnly={!editing} onReadOnly={changeMode} focused={focused} onFocus={() => setFocused(value => !value)} presence={layout.showCollaborators ? collaboration.avatars : null} />}
-    {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} onClick={() => openSettings()}><LocalText source={"⚙ 界面设置"} /></button>}
+    {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} onClose={onClose} onSearch={() => setSearchOpen(true)} focused={focused} onFocus={() => setFocused(value => !value)} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     <div className="layout editor-layout">
+      <DocumentPanelTools session={session} leftOpen={layout.showOutline && !focused} focused={focused} onExitFocus={() => setFocused(false)} onToggleLeft={() => { setFocused(false); setLayoutOption('showOutline', !layout.showOutline || focused) }} />
       <WorkspaceDrawers leftOpen={layout.showOutline && !focused} rightOpen={!focused && (panelOpen || rightPanel !== null)} onCloseLeft={() => setLayoutOption('showOutline', false)} onCloseRight={() => { setPanelOpen(false); setSettingsOpen(false); if (activeTab === 'revisions') setActiveTab('home') }} />
       <LeftPanelShell session={session} hidden={!layout.showOutline || focused} label="工作表" onClose={() => setLayoutOption('showOutline', false)} onSearch={() => setSearchOpen(true)} onWorkspace={onClose} onSettings={openSettings}><div className="panel-head"><h2><LocalText source="工作表" /></h2></div><nav>{runtime.current?.client.sheets().filter(sheet => sheet.sheetState === 'visible').map(sheet => <button key={sheet.sheetId} onClick={() => { const workbook = runtime.current?.adapter.workbook; const target = workbook?.getSheetBySheetId(sheet.sheetId); if (target) workbook?.setActiveSheet(target) }}>{sheet.sheetName}</button>)}</nav></LeftPanelShell>
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
@@ -1596,14 +1636,14 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         </>}
         {gridSelectionKind === 'cell' && <button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并选中单元格"} /></button>}
       </div><span className="ribbon-note"><LocalText source={"整行只显示行操作，整列只显示列操作；普通单元格可选择两种操作 · "} />{localizeDynamic(locale, status)}</span></>}
-      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={!editing} disabled={session.scope === 'read'} onChange={event => changeMode(event.target.checked)} /><LocalText source={"只读模式"} /></label><button onClick={() => openSettings()}><LocalText source={"界面设置"} /></button></>}
+      {activeTab === 'view' && <><button onClick={() => openSettings()}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><div className="tool-group"><button disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"撤销 "} />{history.past.length} <LocalText source={" 步"} /></button><button disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"重做 "} />{history.future.length} <LocalText source={" 步"} /></button></div><span className="ribbon-note"><LocalText source={"当前修订 r"} />{revision ?? '…'} · {localizeDynamic(locale, history.past.length ? `下一步可撤销：${history.past.at(-1)?.label}` : '当前会话无可撤销步骤')} <LocalText source={" · 协作者更新后将清空本地步骤"} /></span></>}
     </nav>}
     {!focused && <form className="xlsx-formula-bar" aria-label={localizeSource(locale, "公式栏")} onSubmit={event => { event.preventDefault(); applyFormulaBarInput() }}>
       <span className="xlsx-formula-address" aria-label={localizeSource(locale, "选中单元格")}>{formulaAddress}</span>
       <label htmlFor={`xlsx-formula-expression-${session.documentId}`}>ƒx</label>
       <input id={`xlsx-formula-expression-${session.documentId}`} ref={formulaInput} aria-label={localizeSource(locale, "单元格内容或公式")} value={formulaText}
-        disabled={!editing || restoringInput || !!batchInput} maxLength={100_000} placeholder={localizeSource(locale, "输入文字、数字或 =SUM(A1:A10)")}
+        disabled={formulaDisabled} maxLength={100_000} placeholder={localizeSource(locale, "输入文字、数字或 =SUM(A1:A10)")}
         onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); cancelGridInput() } }}
         onChange={event => changeFormulaInput(event.target.value)} />
       {(formulaCalculation || formulaDirty && formulaText.startsWith('=')) && <output className="xlsx-calculation-status" aria-label={localizeSource(locale, "计算校验")}
@@ -1614,7 +1654,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         {formulaDirty ? <LocalText source="保存后核算" /> : formulaCalculation?.status === 'calculated'
           ? <><LocalText source="已核验" /> · {formulaCalculation.value}</> : <LocalText source="计算暂不可用" />}
       </output>}
-      <select aria-label={localizeSource(locale, "插入常用函数")} disabled={!editing || restoringInput || !!batchInput} value="" onChange={event => {
+      <select aria-label={localizeSource(locale, "插入常用函数")} disabled={formulaDisabled} value="" onChange={event => {
         if (!event.target.value) return
         changeFormulaInput(`=${event.target.value}(`)
         formulaInput.current?.focus()
@@ -1622,7 +1662,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         <option value=""><LocalText source={"常用函数"} /></option>
         {verifiedFunctions.map(name => name.replace('RANK_', 'RANK.')).map(name => <option key={name} value={name}>{name}</option>)}
       </select>
-      <button type="submit" disabled={!editing || restoringInput || !!batchInput}><LocalText source={"应用内容"} /></button>
+      <button type="submit" disabled={formulaDisabled}><LocalText source={"应用内容"} /></button>
       {formulaDirty && <><output className="xlsx-draft-target" aria-label="未应用输入位置" title={`${localizeSource(locale, '未应用输入')} · ${draftTargetLabel}`}>{draftTargetLabel}</output><button className="xlsx-input-cancel" type="button" aria-label={localizeSource(locale, '取消输入')} onClick={cancelGridInput}><LocalText source="取消输入" /></button></>}
     </form>}
     <InputDraftRecovery protection={inputProtection} disabled={!editing || restoringInput || formulaDirty || !!batchInput || !runtime.current || !!runtime.current?.adapter.hasPendingPatch()} onRestore={restoreGridInput} onError={setError} />
@@ -1671,11 +1711,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         return true
       }} />
 
-      {settingsOpen && !panelOpen && !focused && <aside className="workspace-sidebar" aria-label={localizeSource(locale, "界面设置")}><section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setSettingsOpen(false)}><CollapseSidebarIcon /></button></div><LocaleSelect /><AppearanceSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset></section></aside>}
-      {rightPanel === 'revisions' && !panelOpen && !focused && <aside className="workspace-sidebar xlsx-history-sidebar" aria-label={localizeSource(locale, "编辑步骤")}><div className="panel-head"><h2><LocalText source={"编辑步骤"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "关闭编辑步骤")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div><p><LocalText source={"本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。"} /></p>
+      {settingsOpen && !panelOpen && !focused && <WorkspacePanel side="right" className="workspace-sidebar" aria-label={localizeSource(locale, "界面设置")}><section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setSettingsOpen(false)}><CollapseSidebarIcon /></button></div><LocaleSelect /><AppearanceSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="xlsx-header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="xlsx-header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset></section></WorkspacePanel>}
+      {rightPanel === 'revisions' && !panelOpen && !focused && <WorkspacePanel side="right" className="workspace-sidebar xlsx-history-sidebar" aria-label={localizeSource(locale, "编辑步骤")}><div className="panel-head"><h2><LocalText source={"编辑步骤"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "关闭编辑步骤")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div><p><LocalText source={"本次打开期间保存的操作。每次撤销和重做都会生成新的 HCD 修订。"} /></p>
         {history.past.length ? <ol className="xlsx-edit-steps">{history.past.map((step, index) => <li key={`${index}-${step.revision}`}><span>{index + 1}</span><strong>{localizeDynamic(locale, step.label)}</strong><small><LocalText source={"保存前 r"} />{step.revision}</small></li>).reverse()}</ol> : <p><LocalText source={"暂无可撤销步骤"} /></p>}
         {history.future.length > 0 && <><h3><LocalText source={"可重做"} /></h3><ol className="xlsx-edit-steps">{history.future.slice().reverse().map((step, index) => <li key={`${index}-${step.revision}`}><span>↷</span><strong>{localizeDynamic(locale, step.label)}</strong></li>)}</ol></>}
-      </aside>}
+      </WorkspacePanel>}
     </div>
     {contextMenu && <ContextMenu title="单元格与选区" x={contextMenu.x} y={contextMenu.y} actions={contextActions}
       count={showRowContext ? { label: '插入行数', value: rowInsertCount, onChange: value => { setRowInsertCount(value); if (error.includes('插入行数必须')) setError('') } } : undefined}

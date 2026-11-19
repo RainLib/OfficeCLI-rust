@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,7 @@ function run(cmd, args, cwd) {
 if (process.env.OFFICECLI_SKIP_UI_BUILD !== "1") {
   run("npm", ["run", "build"], admin);
   run("npm", ["run", "build"], editor);
+  run("npm", ["run", "build"], join(repo, "examples/hdoc/embed-host"));
 }
 const { build } = await import(
   join(editor, "node_modules/esbuild/lib/main.js")
@@ -35,6 +37,13 @@ await build({
     js: "const __officecliSidecarUrl = require('node:url').pathToFileURL(__filename).href;",
   },
 });
+await build({
+  entryPoints: [join(app, "src/selection-transport.mjs")],
+  outfile: join(out, "selection-mcp.cjs"),
+  nodePaths: [join(editor, "node_modules")],
+  bundle: true, platform: "node", format: "cjs", target: "node24",
+});
+cpSync(join(repo, "examples/hdoc/embed-host/dist"), join(out, "embed-example"), { recursive: true });
 cpSync(join(admin, "embed"), join(out, "admin"), { recursive: true });
 cpSync(join(editor, "dist"), join(out, "editor"), { recursive: true });
 const binary =
@@ -45,4 +54,10 @@ const binary =
 if (!existsSync(binary))
   throw new Error("请先 cargo build -p officecli --bin officecli");
 cpSync(binary, join(out, "officecli"));
+const blanks = mkdtempSync(join(tmpdir(), "officecli-blank-"));
+try {
+  for (const format of ["docx", "xlsx", "pptx"])
+    run(binary, ["create", join(blanks, "blank." + format), "--locale", "zh-CN"], repo);
+  cpSync(blanks, join(out, "blank"), { recursive: true });
+} finally { rmSync(blanks, { recursive: true, force: true }); }
 console.log(`Workspace 构建完成：${out}`);

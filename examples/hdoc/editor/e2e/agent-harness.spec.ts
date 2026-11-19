@@ -584,8 +584,14 @@ test('Word mixed inline edits preserve cover styles, preview nodes and native so
   const editorHandle=await editor.elementHandle(),projection=await json(id,'/editor')
   const original=projection.blocks.find((block:any)=>block.region==='body'&&!block.readOnly&&block.content.inlines.some((inline:any)=>inline.text))
   const nodeId=original.content.inlines[0].nodeId
-  await active.getByRole('button',{name:'预览',exact:true}).click()
-  const iframe=active.locator('.word-page-preview iframe'),body=iframe.contentFrame().locator('body'),target=body.locator(`[data-hcd-id="${nodeId}"]`)
+  const reader=await page.context().newPage()
+  await reader.goto(`${uiUrl}/?locale=zh-CN`)
+  await reader.getByPlaceholder('doc-…').fill(id);await reader.getByPlaceholder('粘贴短期令牌',{exact:true}).fill(jwt(id,'test-reader','read'))
+  await reader.getByRole('button',{name:'打开文档',exact:true}).click()
+  const reading=reader.locator(`[data-document-id="${id}"]`)
+  await expect(reading.locator('[data-document-scope]')).toHaveAttribute('data-document-scope', 'read')
+  await expect(active.locator('.mode-switch')).toHaveCount(0)
+  const iframe=reading.locator('.word-page-preview iframe'),body=iframe.contentFrame().locator('body'),target=body.locator(`[data-hcd-id="${nodeId}"]`)
   await expect(body).toHaveAttribute('data-hcd-page-count',/^\d+$/)
   const metrics=async()=>target.evaluate(element=>{
     const leaf=element.firstElementChild||element,style=getComputedStyle(leaf),p=element.closest('p')!,ps=getComputedStyle(p)
@@ -593,7 +599,7 @@ test('Word mixed inline edits preserve cover styles, preview nodes and native so
   })
   const baseline=await metrics()
   expect(baseline.size).toBe('32px');expect(baseline.color).toBe('rgb(40, 87, 164)');expect(baseline.align).toBe('center')
-  await page.screenshot({path:info.outputPath('word-cover-before.png')})
+  await reader.screenshot({path:info.outputPath('word-cover-before.png')})
   await iframe.evaluate((element:HTMLIFrameElement)=>{
     ;(window as any).__richWord={frame:element,doc:element.contentDocument,anchor:element.contentDocument!.querySelector('[data-hcd-node-hash]'),loads:0}
     element.addEventListener('load',()=>{(window as any).__richWord.loads++})
@@ -632,8 +638,8 @@ for n in a.namelist():
 print('Native cover paragraph layout, 24pt blue runs, explicit bold/normal and untouched package parts verified.')`,source,output],{encoding:'utf8'})
   expect(checked.status,checked.stderr||checked.stdout).toBe(0)
   await info.attach('native-source-export',{body:checked.stdout,contentType:'text/plain'})
-  await page.screenshot({path:info.outputPath('word-cover-agent-edited.png')})
-  const viewport=active.locator('.canvas-viewport')
+  await reader.screenshot({path:info.outputPath('word-cover-agent-edited.png')})
+  const viewport=reading.locator('.canvas-viewport')
   await viewport.evaluate(element=>{element.scrollTop=750})
   const scrollTop=await viewport.evaluate(element=>element.scrollTop)
   expect(scrollTop).toBeGreaterThan(500)
@@ -646,8 +652,7 @@ print('Native cover paragraph layout, 24pt blue runs, explicit bold/normal and u
     return {doc:element.contentDocument===before.doc,anchor:before.anchor.isConnected,loads:before.loads}
   })).toEqual({doc:true,anchor:true,loads:0})
   await viewport.evaluate(element=>{element.scrollTop=0})
-  // The human draft follows the same rendering rules before a checkpoint.
-  await active.getByRole('button',{name:'编辑',exact:true}).click()
+  // An independent reader cannot see the writer's uncommitted local draft.
   await expect(editor).toContainText('MARK_WORD_RICH')
   expect(await editorHandle!.evaluate(element=>element===document.querySelector('[data-document-id="harness-rich-docx"] .hcd-editor-body'))).toBe(true)
   const title=editor.locator(':scope > p').first()
@@ -655,14 +660,16 @@ print('Native cover paragraph layout, 24pt blue runs, explicit bold/normal and u
   await title.evaluate(element=>{const range=document.createRange();range.selectNodeContents(element);range.collapse(false);const selection=window.getSelection()!;selection.removeAllRanges();selection.addRange(range)})
   await page.keyboard.press(process.platform==='darwin'?'Meta+b':'Control+b');await page.keyboard.insertText(' 中文😀')
   const beforeDraft=(await json(id,'')).revision
-  await active.getByRole('button',{name:'预览',exact:true}).click()
-  await expect(target).toContainText('中文😀')
+  await expect(editor).toContainText('中文😀')
+  await expect(target).not.toContainText('中文😀')
   expect(await metrics()).toEqual(baseline)
   expect((await json(id,'')).revision).toBe(beforeDraft)
   await page.screenshot({path:info.outputPath('word-cover-local-draft.png')})
-  await active.getByRole('button',{name:'编辑',exact:true}).click()
   await active.getByRole('button',{name:'保存点',exact:true}).click()
   await expect.poll(async()=>JSON.stringify((await json(id,'/editor')).blocks[0].content)).toContain('中文😀')
+  await expect(target).toContainText('中文😀')
+  expect(await metrics()).toEqual(baseline)
+  await reader.close()
 })
 
 test('two model agents preserve successive edits after a real revision conflict',async ({},info) => {
@@ -1628,7 +1635,7 @@ test('Pen chat drawer preserves draft, reading position and expanded tools throu
   await page.getByRole('button',{name:'专注模式',exact:true}).click();await expect(drawer).toBeHidden()
   await page.getByRole('button',{name:'退出专注模式',exact:true}).click();await expect(drawer).toBeVisible()
   expect(Math.abs(await feed.evaluate(el=>el.scrollTop)-scroll)).toBeLessThan(3)
-  await page.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
   await page.screenshot({path:info.outputPath('chat-drawer-dark-preserved.png')})
   await drawer.getByRole('button',{name:'图片与资源',exact:true}).click()
   await expect(drawer.locator('.image-studio')).toBeVisible()
@@ -1716,9 +1723,9 @@ test('cross-document workflow UI builds a real XLSX to DOCX to PPTX plan, preser
   await panel.getByRole('button',{name:'核对并继续',exact:true}).click()
   await expect(panel.getByLabel('工作流核对结果',{exact:true})).toBeVisible()
   await page.screenshot({path:info.outputPath('workflow-ui-review.png')})
-  await page.locator(`[data-document-id="${report}"] .header-actions`).getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
   await page.screenshot({path:info.outputPath('workflow-ui-review-dark.png')})
-  await page.locator(`[data-document-id="${report}"] .header-actions`).getByRole('combobox',{name:'界面主题',exact:true}).selectOption('light')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('light')
   await panel.getByRole('button',{name:'授权执行剩余步骤',exact:true}).click()
   await expect(panel.locator('[data-workflow-status]')).toHaveAttribute('data-workflow-status','completed',{timeout:60_000})
   const headers=workflowGrantHeaders(created.plan.documents,report),fixture={anchor:report,route:`/agent-workflows/${created.workflowId}`,headers}

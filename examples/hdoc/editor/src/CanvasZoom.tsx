@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { Minus, Plus } from 'lucide-react'
 import { useI18n } from './i18n.tsx'
 import { localizeSource } from './sourceLocale.tsx'
+import { readTabState, writeTabState } from './tabState.ts'
 
 const clampZoom = (value: number) => Math.round(Math.max(0.25, Math.min(3, value)) * 100) / 100
 const ZoomContext = createContext<{ zoom: number; setZoom: Dispatch<SetStateAction<number>> } | null>(null)
@@ -36,7 +37,7 @@ export function ZoomControls() {
 
 /** Native, non-passive listeners also cover same-origin preview frames. Browser
  * zoom remains available outside the canvas; ordinary wheel events still scroll. */
-export function CanvasViewport({ children, native = false, className = 'document-scroll', ...props }: HTMLAttributes<HTMLDivElement> & { native?: boolean }) {
+export function CanvasViewport({ children, native = false, className = 'document-scroll', scrollStateKey, ...props }: HTMLAttributes<HTMLDivElement> & { native?: boolean; scrollStateKey?: string | null }) {
   const { zoom, setZoom } = useCanvasZoom()
   const viewport = useRef<HTMLDivElement>(null)
   const zoomRef = useRef(zoom)
@@ -51,6 +52,45 @@ export function CanvasViewport({ children, native = false, className = 'document
     element.scrollTop += rect.top - bounds.top + point.contentY * zoom - point.y
     anchor.current = null
   }, [zoom])
+  useLayoutEffect(() => {
+    const element = viewport.current
+    if (!element || !scrollStateKey || props.hidden) return
+    const saved = readTabState<{ left: number; top: number }>(scrollStateKey)
+    let restoring = !!saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)
+    const overflowAnchor = element.style.overflowAnchor
+    // Font loading and pagination may reflow after the editor's first layout.
+    // Keep the saved offset until the next intentional scroll or edit.
+    if (restoring) element.style.overflowAnchor = 'none'
+    let applied = { left: element.scrollLeft, top: element.scrollTop }
+    const finish = () => { restoring = false; observer.disconnect() }
+    const restore = () => {
+      if (!restoring || !saved || !element.clientHeight) return
+      element.scrollTo({ ...saved, behavior: 'instant' })
+      applied = { left: element.scrollLeft, top: element.scrollTop }
+      if (Math.abs(saved.left - applied.left) < 1 && Math.abs(saved.top - applied.top) < 1) finish()
+    }
+    const observer = new ResizeObserver(restore)
+    const save = () => {
+      if (!restoring && element.clientHeight) writeTabState(scrollStateKey, { left: element.scrollLeft, top: element.scrollTop })
+    }
+    const interact = () => { finish(); element.style.overflowAnchor = overflowAnchor }
+    const scroll = () => {
+      if (applied.left !== element.scrollLeft || applied.top !== element.scrollTop) interact()
+      save()
+    }
+    restore()
+    if (restoring && element.firstElementChild) observer.observe(element.firstElementChild)
+    element.addEventListener('scroll', scroll, { passive: true })
+    const interrupts = ['pointerdown', 'wheel', 'keydown']
+    interrupts.forEach(name => element.addEventListener(name, interact, { passive: true, capture: true }))
+    window.addEventListener('pagehide', save)
+    return () => {
+      interact()
+      element.removeEventListener('scroll', scroll)
+      interrupts.forEach(name => element.removeEventListener(name, interact, true))
+      window.removeEventListener('pagehide', save)
+    }
+  }, [scrollStateKey, props.hidden])
   useEffect(() => {
     const element = viewport.current
     if (!element) return

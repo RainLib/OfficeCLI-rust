@@ -87,7 +87,10 @@ export function verifySignature(store, request, body, secret, keyId) {
     store.run("INSERT INTO nonces VALUES(?,?)", nonce, now() + 600);
   });
 }
-export function createProvider(store, config, keys) {
+export function createProvider(store, config, keys, { modelIds = [] } = {}) {
+  function permissions(user, file) {
+    return store.permissions(user, file).filter(op => op !== "document.ai" || modelIds.length > 0);
+  }
   const binding = (data) =>
     check(
       data?.tenantId === config.tenantId && data?.appId === config.appId,
@@ -107,7 +110,9 @@ export function createProvider(store, config, keys) {
       403,
       "编辑会话归属不匹配。",
     );
-    const user = store.get("SELECT * FROM users WHERE id=?", session.user_id);
+    const user = allowExpired
+      ? store.get("SELECT * FROM users WHERE id=?", session.user_id)
+      : store.user(session.user_id);
     const browser = store.get(
       "SELECT * FROM sessions WHERE hash=?",
       session.browser_hash,
@@ -315,15 +320,19 @@ export function createProvider(store, config, keys) {
         400,
         "权限请求无效。",
       );
-      const granted = store.permissions(user, file);
+      const granted = permissions(user, file);
+      const acl = store.permissions(user, file);
+      const selectionAgent = config.selectionMcp === true && !user.is_guest && file.format === "excalidraw" &&
+        ["document.view","document.edit","document.ai"].every(op=>acl.includes(op));
       return {
         granted: data.operations.filter((op) => granted.includes(op)),
-        permissionVersion: `acl-${hash(JSON.stringify(granted)).slice(0, 16)}`,
+        permissionVersion: `acl-${hash(JSON.stringify([granted, granted.includes("document.ai") ? modelIds : [], selectionAgent])).slice(0, 16)}`,
         expiresAt: new Date(
           Math.min(now() + 30, session.expires) * 1000,
         ).toISOString(),
         constraints: {
           exportFormats: [
+            "excalidraw",
             "docx",
             "xlsx",
             "pptx",
@@ -336,7 +345,8 @@ export function createProvider(store, config, keys) {
             "webp",
             "hcd",
           ],
-          modelIds: [],
+          ...(selectionAgent && {selectionAgent:true}),
+          modelIds: granted.includes("document.ai") ? [...modelIds] : [],
         },
       };
     }
@@ -596,5 +606,5 @@ export function createProvider(store, config, keys) {
       iso(),
     );
   }
-  return { callback, object, event, descriptor, identity };
+  return { callback, object, event, descriptor, identity, permissions };
 }

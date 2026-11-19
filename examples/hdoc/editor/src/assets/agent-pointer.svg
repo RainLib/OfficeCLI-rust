@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <g class="agent-pointer-glyph" transform="translate(-3 -2.5)">
+    <path class="agent-arrow-face" d="M8.75 8.85 Q8.21 6.96 10.03 7.71 L20.72 13.32 Q22.57 14.32 20.61 15.08 L16.38 16.64 L14.72 20.86 Q13.90 22.83 13.06 20.88 Z" fill="currentColor" stroke="var(--agent-outline,#fffdfb)" stroke-width="1.1" stroke-linejoin="round"/>
+    <path d="M9.46 8.41 L16.18 15.87 L14.24 20.66 Q13.89 21.51 13.56 20.52 Z" fill="#21172f" fill-opacity=".21"/>
+    <path class="agent-arrow-edge" d="M20.84 14.23 Q21.04 14.41 20.40 14.67 L16.04 16.27 L14.30 20.65 Q13.90 21.59 13.55 20.65" stroke="#291c39" stroke-opacity=".62" stroke-width=".88" stroke-linecap="round" stroke-linejoin="round"/>
+    <path class="agent-arrow-light" d="M9.32 8.34 Q9.25 7.93 9.85 8.18 L20.13 13.59" stroke="#fffaf3" stroke-opacity=".68" stroke-width=".9" stroke-linecap="round"/>
+  </g>
+</svg>

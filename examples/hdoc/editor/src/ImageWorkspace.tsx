@@ -1,10 +1,15 @@
+import { AgentPointer } from './AgentPointer'
+import { WorkspacePanel, WorkspacePanelControls, WorkspacePanelLayer } from './WorkspacePanel.tsx'
+import { WorkspaceDrawers } from './WorkspaceDrawers.tsx'
+import { DocumentVisitorIdentity, ShareControl } from './DocumentSharing.tsx'
 import { keepHistory } from './editHistory.ts'
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type CSSProperties } from 'react'
-import { ArrowDownToLine, ArrowUpRight, Check, CheckCheck, CloudCheck, Crop, Eraser, Expand, FlipHorizontal2, FlipVertical2, Grid2X2, History, Image as ImageIcon, LoaderCircle, LockKeyhole, Maximize, Minus, MousePointer2, PanelRightClose, PanelRightOpen, Paintbrush, Plus, Redo2, RotateCcw, RotateCw, SlidersHorizontal, Sparkles, Undo2, Users, X } from 'lucide-react'
+import { useWorkflowPreparation } from './WorkflowWorkspace.tsx'
+import { ArrowDownToLine, ArrowUpRight, Check, CheckCheck, CloudCheck, Crop, Eraser, Expand, FlipHorizontal2, FlipVertical2, Grid2X2, History, Image as ImageIcon, LoaderCircle, LockKeyhole, Maximize, Minus, PanelRightClose, PanelRightOpen, Paintbrush, Plus, Redo2, RotateCcw, RotateCw, SlidersHorizontal, Sparkles, Undo2, Users, X } from 'lucide-react'
 import { api, type Session } from './api.ts'
 import { HostPublicationControl, permits } from './HostIntegration.tsx'
 import { ExportControl } from './ExportControl.tsx'
-import { AppearanceSelect } from './Appearance.tsx'
+import { AppearanceSelect, useAppearance } from './Appearance.tsx'
 import { ImageRenderer, blankEdits, base64Blob, downloadImage, imageFileSize, type ImageEdits } from './imageRender.ts'
 import { ImageMaskFlow } from './ImageMaskFlow.tsx'
 import { InputDraftRecovery, useInputDraft } from './useInputDraft.tsx'
@@ -36,13 +41,14 @@ function ImageAgentPointer({ agent, scale, index }: { agent: Worker; scale: numb
       position.current=[x,y];node.style.left=`${x*100}%`;node.style.top=`${y*100}%`;if(t<1)frame=requestAnimationFrame(draw)
     };frame=requestAnimationFrame(draw);return()=>cancelAnimationFrame(frame)
   },[agent.status,agent.position[0],agent.position[1]])
-  return <div ref={ref} className="image-agent-pointer" aria-hidden={agent.status!=='running'} style={{ opacity:agent.status==='running'?1:0, '--pointer-scale':1/scale, '--pointer-color':['#8264b8','#27866a','#ad8245','#5865c7'][index%4] } as CSSProperties}><MousePointer2 size={20} fill="currentColor" /><span>{agent.name}</span></div>
+  return <div ref={ref} className="image-agent-pointer" aria-hidden={agent.status!=='running'} style={{ opacity:agent.status==='running'?1:0, '--pointer-scale':1/scale, '--pointer-color':['#8264b8','#27866a','#ad8245','#5865c7'][index%4] } as CSSProperties}><AgentPointer phase={agent.role==='局部重绘' && agent.status==='running'?'writing':'idle'}/><span className="agent-name-chip">{agent.name}</span></div>
 }
 
 export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: Session; onClose: () => void; onOpenDocument?: (id: string, token: string, title?: string) => void }) {
+  const { localControls } = useAppearance()
   const [info, setInfo] = useState<Info | null>(null), [source, setSource] = useState<Blob | null>(null)
   const [edits, setEdits] = useState<ImageEdits>(() => blankEdits(1, 1)), [undo, setUndo] = useState<ImageEdits[]>([]), [redo, setRedo] = useState<ImageEdits[]>([])
-  const [editing, setEditing] = useState(false), [panel, setPanel] = useState<Panel>('info'), [panelOpen, setPanelOpen] = useState(true)
+  const [panel, setPanel] = useState<Panel>('info'), [panelOpen, setPanelOpen] = useState(() => window.innerWidth > 900)
   const [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(''), [stale, setStale] = useState<number | null>(null)
   const [view, setView] = useState({ scale: .5, x: 0, y: 0 }), [background, setBackground] = useState(false)
   const [aspect, setAspect] = useState('free'), [sizeLocked, setSizeLocked] = useState(true)
@@ -67,6 +73,7 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
   const drag = useRef<{ type: 'pan' | 'paint' | 'crop'; start: [number, number]; view: typeof view; cropStart?: [number, number] } | null>(null)
   const loaded = useRef(false), requestNo = useRef(0), seenReady = useRef(new Set<string>())
   const readOnly = session.scope !== 'write'
+  const editing = !readOnly
   const aiEnabled = !session.hostIntegration && !!info?.aiAvailable
   const hasHistory = permits(session, 'history.view')
   const canExport = permits(session, 'document.download') || permits(session, 'document.export')
@@ -126,7 +133,7 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
       const c = input.conversion
       setConversionPending(!!c)
       if (c) { setFormat(c.format); setQuality(c.quality); setTransparent(c.transparent); setFill(c.fill); setExportWidth(c.width); setExportHeight(c.height); setConvertOriginal(c.original); setFilename(c.filename) }
-      setPanel(c ? 'convert' : input.strokes.length || input.prompt ? 'inpaint' : input.cropSelection ? 'crop' : 'adjust'); setPanelOpen(true); setEditing(true)
+      setPanel(c ? 'convert' : input.strokes.length || input.prompt ? 'inpaint' : input.cropSelection ? 'crop' : 'adjust'); setPanelOpen(true)
       setNotice('已找回图片草稿；尚未保存或重新请求模型。')
     } finally { setBusy('') }
   }
@@ -202,7 +209,7 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
   function edit(patch: Partial<ImageEdits>) { if (readOnly || busy || running) return; setUndo(old => keepHistory([...old, edits])); setRedo([]); setEdits(old => ({ ...old, ...patch })); setError('') }
   function undoEdit() { const prev = undo.at(-1); if (prev) { setRedo(old => keepHistory([...old, edits])); setEdits(prev); setUndo(old => old.slice(0, -1)) } }
   function redoEdit() { const next = redo.at(-1); if (next) { setUndo(old => keepHistory([...old, edits])); setEdits(next); setRedo(old => old.slice(0, -1)) } }
-  function openPanel(next: Panel) { if (busy || (['ai', 'inpaint', 'compare'].includes(next) && !aiEnabled) || (next === 'history' && !hasHistory) || (['convert', 'export'].includes(next) && session.hostIntegration)) return; if (next !== panel) setResult(null); setPanel(next); setPanelOpen(true); setHistoryRevision(null); if (['crop', 'adjust', 'ai', 'inpaint', 'compare'].includes(next)) setEditing(true); if ((next === 'export' || next === 'convert') && !conversionPending) { setConversionPending(true); setExportWidth(edits.width); setExportHeight(edits.height); setFilename(title.replace(/\.[^.]+$/, '')); } }
+  function openPanel(next: Panel) { if (busy || (['ai', 'inpaint', 'compare'].includes(next) && !aiEnabled) || (next === 'history' && !hasHistory) || (['convert', 'export'].includes(next) && session.hostIntegration)) return; if (next !== panel) setResult(null); setPanel(next); setPanelOpen(true); setHistoryRevision(null); if ((next === 'export' || next === 'convert') && !conversionPending) { setConversionPending(true); setExportWidth(edits.width); setExportHeight(edits.height); setFilename(title.replace(/\.[^.]+$/, '')); } }
   function resize(value: number, axis: 'width' | 'height', exporting = false) {
     if (!Number.isFinite(value) || value < 1 || value > 8192) return
     const ratio = exporting ? exportWidth / exportHeight : edits.width / edits.height
@@ -225,6 +232,10 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
     } catch (cause) { setError(String(cause)); return null } finally { setBusy('') }
   }
   const save = () => saveCurrent()
+  useWorkflowPreparation(session, async () => {
+    if (running) throw new Error('图片任务正在运行，请在完成后关闭。')
+    if (await saveCurrent() === null) throw new Error('请先完成并保存图片编辑。')
+  })
   function drawMask() {
     const raw = rawMask.current, target = maskDisplay.current; if (!raw || !target) return
     if (target.width !== raw.width) target.width = raw.width; if (target.height !== raw.height) target.height = raw.height
@@ -274,7 +285,7 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
   const applyCandidate = () => task('正在应用候选', async () => {
     if (!job || !info) return
     const receipt = inputProtection.capture()
-    await api(session, `/image/jobs/${job.jobId}/apply`, { method: 'POST', headers: epochHeaders, body: JSON.stringify({ expectedRevision: info.revision }) }); await reload(receipt); inputProtection.acknowledge(receipt); setPrompt(''); setPanel('info'); setEditing(false); setNotice('局部重绘已保存为新版本。')
+    await api(session, `/image/jobs/${job.jobId}/apply`, { method: 'POST', headers: epochHeaders, body: JSON.stringify({ expectedRevision: info.revision }) }); await reload(receipt); inputProtection.acknowledge(receipt); setPrompt(''); setPanel('info'); setNotice('局部重绘已保存为新版本。')
   })
   const convert = () => task('正在编码图片', async () => {
     if (!info || !source) return
@@ -298,18 +309,22 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
   const setZoom = (scale: number) => { interacted.current = true; setView(v => ({ ...v, scale: Math.max(.02, Math.min(8, scale)) })) }
   const cropStyle = cropSelection ? { left: `${cropSelection[0] / (info?.width || edits.width) * 100}%`, top: `${cropSelection[1] / (info?.height || edits.height) * 100}%`, width: `${cropSelection[2] / (info?.width || edits.width) * 100}%`, height: `${cropSelection[3] / (info?.height || edits.height) * 100}%` } : undefined
   const compareVisible = panel === 'compare' && !!candidate, historicalVisible = panel === 'history' && !!historyUrl
-  return <section className="image-workspace" aria-label="图片工作台">
+  return <section data-document-scope={session.scope} className="image-workspace" aria-label="图片工作台">
     <header className="image-header">
       <button className="im-collection" onClick={onClose}><PanelRightOpen size={16} /><span>图片集</span></button>
       <div className="im-title"><strong>{title}</strong><small>工作空间 / 品牌素材 <CloudCheck size={13} />{busy || (dirty ? '编辑草稿' : `原图已保留 · r${info?.revision ?? '…'}`)}</small></div>
-      <div className="im-mode"><button aria-pressed={editing} onClick={() => { if (!readOnly) { setEditing(true); if (panel === 'info') openPanel('crop') } }} disabled={readOnly}>编辑</button><button aria-pressed={!editing} onClick={() => { setEditing(false); setPanel('info'); setHistoryRevision(null) }}>预览</button></div>
-      <div className="im-header-actions"><details className="im-profile-menu"><summary aria-label="界面与主题"><span>{session.displayName?.slice(0,1)||'我'}</span></summary><div><AppearanceSelect /></div></details><HostPublicationControl session={session} revision={info?.revision ?? null} beforeSave={saveCurrent} />{aiEnabled && <button onClick={() => openPanel('ai')} className="im-collaborate"><Users size={16} /><span>协作 · {running ? job.agents.length : agentCount}</span></button>}{hasHistory && <IconButton label="版本记录" onClick={() => openPanel('history')}><History size={17} /></IconButton>}{canExport && (session.hostIntegration ? <ExportControl session={session} revision={info?.revision ?? null} beforeExport={saveCurrent} /> : <button className="im-dark" onClick={() => openPanel('export')}><ArrowUpRight size={16} />导出</button>)}<button className="im-panel-toggle" aria-expanded={panelOpen} onClick={() => setPanelOpen(v => !v)}>{panelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>面板</span></button></div>
+      <div className="im-header-actions"><ShareControl />{localControls && <details className="im-profile-menu"><summary aria-label="界面与主题"><span>{session.displayName?.slice(0,1)||'我'}</span></summary><div><AppearanceSelect /></div></details>}<HostPublicationControl session={session} revision={info?.revision ?? null} beforeSave={saveCurrent} />{canExport && (session.hostIntegration ? <ExportControl session={session} revision={info?.revision ?? null} beforeExport={saveCurrent} /> : <button className="im-dark" onClick={() => openPanel('export')}><ArrowUpRight size={16} />导出</button>)}</div>
     </header>
     <div className="image-input-recovery"><InputDraftRecovery protection={inputProtection} disabled={!info || readOnly || !!busy || running || hasInput} onRestore={restoreInput} onError={setError} />{hasInput && !readOnly && <div className="image-draft-status"><span role="status" aria-label="图片草稿保护状态" data-protection={inputProtection.status}>{({ loading: '正在准备本地保护', writing: '正在保护图片草稿', protected: '图片草稿已保存在此浏览器', failed: '图片草稿尚未受到保护' })[inputProtection.status]}</span><button disabled={!!busy || running} onClick={discardCurrent}>舍弃当前图片草稿</button></div>}</div>
     <div className="image-body">
+      <WorkspacePanelLayer><WorkspacePanelControls side="right" open={panelOpen} onToggle={() => setPanelOpen(value => !value)}>
+        {aiEnabled && <button className="im-collaborate" aria-label="协作" title="协作" aria-pressed={panelOpen && ['ai', 'inpaint'].includes(panel)} onClick={() => openPanel('ai')}><Users size={18} /></button>}
+        {hasHistory && <button aria-label="版本记录" title="版本记录" aria-pressed={panelOpen && panel === 'history'} onClick={() => openPanel('history')}><History size={18} /></button>}
+      </WorkspacePanelControls></WorkspacePanelLayer>
+      <WorkspaceDrawers leftOpen={false} rightOpen={panelOpen} onCloseLeft={() => {}} onCloseRight={() => setPanelOpen(false)} />
       <main className="image-stage-panel">
         <nav className="image-toolbar" aria-label="图片工具" inert={!!busy}>
-          {!editing ? <><button className="im-soft" onClick={() => { interacted.current = false; fit() }}><Maximize size={15} />适合窗口</button><button onClick={() => setZoom(1)}><Expand size={15} />原始大小</button><span className="im-spacer" />{!session.hostIntegration && <button onClick={() => openPanel('convert')}><Grid2X2 size={15} />转换格式</button>}<IconButton label="切换透明背景" onClick={() => setBackground(v => !v)}><Grid2X2 size={15} /></IconButton><button className="im-dark" onClick={() => openPanel('crop')} disabled={readOnly}><SlidersHorizontal size={15} />开始编辑</button></> : inpaintMode ? <><button className="im-soft" onClick={() => openPanel('inpaint')}><Paintbrush size={15} />局部重绘</button><button className={!erase ? 'im-soft' : ''} aria-pressed={!erase} onClick={() => setErase(false)} disabled={running}><Paintbrush size={15} />涂抹</button><button aria-pressed={erase} className={erase ? 'im-soft' : ''} onClick={() => setErase(true)} disabled={running}><Eraser size={15} />擦除</button><IconButton label="撤销蒙版" onClick={undoMask} disabled={!maskCount || running}><Undo2 size={15} /></IconButton><span className="im-spacer" /><button onClick={clearMask} disabled={!maskCount || running}><RotateCcw size={15} />清空蒙版</button></> : <><button className={panel === 'crop' ? 'im-soft' : ''} onClick={() => openPanel('crop')}><Crop size={15} />裁剪与旋转</button><button className={panel === 'adjust' ? 'im-soft' : ''} onClick={() => openPanel('adjust')}><SlidersHorizontal size={15} />光线与色彩</button>{aiEnabled && <button className={panel === 'ai' ? 'im-soft' : ''} onClick={() => openPanel('ai')}><Sparkles size={15} />AI 修图</button>}<span className="im-spacer" /><IconButton label="撤销编辑" onClick={undoEdit} disabled={!undo.length || !!busy || running}><Undo2 size={15} /></IconButton><IconButton label="重做编辑" onClick={redoEdit} disabled={!redo.length || !!busy || running}><Redo2 size={15} /></IconButton></>}
+          {!editing ? <><button className="im-soft" onClick={() => { interacted.current = false; fit() }}><Maximize size={15} />适合窗口</button><button onClick={() => setZoom(1)}><Expand size={15} />原始大小</button><span className="im-spacer" />{!session.hostIntegration && <button onClick={() => openPanel('convert')}><Grid2X2 size={15} />转换格式</button>}<IconButton label="切换透明背景" onClick={() => setBackground(v => !v)}><Grid2X2 size={15} /></IconButton></> : inpaintMode ? <><button className="im-soft" onClick={() => openPanel('inpaint')}><Paintbrush size={15} />局部重绘</button><button className={!erase ? 'im-soft' : ''} aria-pressed={!erase} onClick={() => setErase(false)} disabled={running}><Paintbrush size={15} />涂抹</button><button aria-pressed={erase} className={erase ? 'im-soft' : ''} onClick={() => setErase(true)} disabled={running}><Eraser size={15} />擦除</button><IconButton label="撤销蒙版" onClick={undoMask} disabled={!maskCount || running}><Undo2 size={15} /></IconButton><span className="im-spacer" /><button onClick={clearMask} disabled={!maskCount || running}><RotateCcw size={15} />清空蒙版</button></> : <><button className={panel === 'crop' ? 'im-soft' : ''} onClick={() => openPanel('crop')}><Crop size={15} />裁剪与旋转</button><button className={panel === 'adjust' ? 'im-soft' : ''} onClick={() => openPanel('adjust')}><SlidersHorizontal size={15} />光线与色彩</button>{aiEnabled && <button className={panel === 'ai' ? 'im-soft' : ''} onClick={() => openPanel('ai')}><Sparkles size={15} />AI 修图</button>}{!session.hostIntegration && <button onClick={() => openPanel('convert')}><Grid2X2 size={15} />转换格式</button>}<span className="im-spacer" /><IconButton label="撤销编辑" onClick={undoEdit} disabled={!undo.length || !!busy || running}><Undo2 size={15} /></IconButton><IconButton label="重做编辑" onClick={redoEdit} disabled={!redo.length || !!busy || running}><Redo2 size={15} /></IconButton></>}
         </nav>
         <div className={`image-canvas-viewport${background ? ' im-checker' : ''}${canPaint ? ' im-painting' : ''}`} ref={viewport} role="region" tabIndex={0} aria-label="图片画布，滚轮缩放，空格拖动" onDoubleClick={() => { if (!canPaint) { interacted.current = false; fit() } }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}>
           {!source && <div className="im-loading" role="status"><LoaderCircle size={22} />正在载入原图…</div>}
@@ -327,14 +342,14 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
         {(compareVisible || historicalVisible) && <label className="image-compare-control"><span>{historicalVisible ? `r${historyRevision}` : '原图'}</span><input type="range" aria-label="拖动对比分割线" min={0} max={100} value={compare} onChange={e => setCompare(+e.target.value)} /><span>{historicalVisible ? '当前版本' : '候选'}</span></label>}
         <div className="image-stage-caption"><span><ImageIcon size={14} />{title}</span><small>{inpaintMode ? '涂抹需要修改的位置 · [ / ] 调整画笔 · 空格平移' : panel === 'crop' && !edits.crop ? '拖动框选裁剪区域 · 空格平移' : '滚轮缩放 · 空格拖动 · 双击适合窗口'}</small></div>
       </main>
-      <aside className="image-drawer" hidden={!panelOpen} aria-label={panelTitle[panel]}>
+      <WorkspacePanel side="right" className="image-drawer" hidden={!panelOpen} aria-label={panelTitle[panel]}>
         <div className="image-drawer-head"><h2>{panelTitle[panel]}</h2><IconButton label="收起图片面板" onClick={() => setPanelOpen(false)}><PanelRightClose size={17} /></IconButton></div>
         <div className="image-drawer-scroll" inert={!!busy}>
         {panel === 'info' && <>
-          <nav className="im-segments"><button aria-pressed onClick={() => openPanel('info')}>信息</button><button disabled={readOnly} onClick={() => openPanel('crop')}>编辑</button><button disabled={readOnly} onClick={() => openPanel('ai')}>AI 修图</button></nav>
+          <nav className="im-segments"><button aria-pressed onClick={() => openPanel('info')}>信息</button><button disabled={readOnly} onClick={() => openPanel('crop')}>调整</button>{aiEnabled && <button disabled={readOnly} onClick={() => openPanel('ai')}>AI 修图</button>}</nav>
           <h3 className="im-editorial">每一处细节，都清晰。</h3><p>查看原图，或直接开始编辑。<br />你的原始图片始终保留。</p>
           <dl className="image-metadata"><dt>尺寸</dt><dd>{info?.width} × {info?.height} px</dd><dt>格式</dt><dd>{info?.format.toUpperCase()}</dd><dt>源文件大小</dt><dd>{imageFileSize(info?.sourceBytes || 0)}</dd><dt>工作色彩空间</dt><dd>sRGB</dd><dt>透明通道</dt><dd>{info?.hasAlpha ? '支持透明区域' : '不含透明通道'}</dd></dl>
-          <hr /><p>快速操作</p><div className="im-quick-actions"><button onClick={() => openPanel('crop')} disabled={readOnly}><Crop size={16} />裁剪与旋转</button><button onClick={() => openPanel('convert')}><Expand size={16} />调整大小与画质</button><button onClick={() => openPanel('adjust')} disabled={readOnly}><SlidersHorizontal size={16} />色彩与光线</button></div>
+          <hr /><p>快速操作</p><div className="im-quick-actions"><button onClick={() => openPanel('crop')} disabled={readOnly}><Crop size={16} />裁剪与旋转</button>{!session.hostIntegration && <button onClick={() => openPanel('convert')}><Expand size={16} />调整大小与画质</button>}<button onClick={() => openPanel('adjust')} disabled={readOnly}><SlidersHorizontal size={16} />色彩与光线</button></div>
         </>}
         {panel === 'crop' && <><p>保留构图，让画面恰到好处。</p><Field label="裁剪比例"><select aria-label="裁剪比例" value={aspect} onChange={e => setAspect(e.target.value)}><option value="free">自由裁剪</option>{['1:1', '4:3', '3:2', '16:9', '9:16'].map(v => <option key={v}>{v}</option>)}</select></Field><p className="im-note">在图片上拖动选择范围，再应用裁剪。</p><button className="im-soft im-wide" onClick={cropApply} disabled={!cropSelection || readOnly}>应用裁剪范围</button>{edits.crop && <button className="im-wide" onClick={reset}>重置裁剪</button>}<hr /><h3>旋转与翻转</h3><div className="im-transform-buttons"><IconButton label="逆时针旋转" onClick={() => { edit({ rotation: (edits.rotation + 270) % 360, width: edits.height, height: edits.width }); clearMask() }} disabled={readOnly || running}><RotateCcw size={19} /></IconButton><IconButton label="顺时针旋转" onClick={() => { edit({ rotation: (edits.rotation + 90) % 360, width: edits.height, height: edits.width }); clearMask() }} disabled={readOnly || running}><RotateCw size={19} /></IconButton><IconButton label="水平翻转" onClick={() => { edit({ flipX: !edits.flipX }); clearMask() }} disabled={readOnly || running}><FlipHorizontal2 size={19} /></IconButton><IconButton label="垂直翻转" onClick={() => { edit({ flipY: !edits.flipY }); clearMask() }} disabled={readOnly || running}><FlipVertical2 size={19} /></IconButton></div><hr /><h3>图像尺寸</h3><div className="im-dimensions"><Field label="宽度 px"><input type="number" aria-label="图片宽度" value={edits.width} onChange={e => resize(+e.target.value, 'width')} /></Field><span>×</span><Field label="高度 px"><input type="number" aria-label="图片高度" value={edits.height} onChange={e => resize(+e.target.value, 'height')} /></Field></div><label className="im-checkbox"><input type="checkbox" checked={sizeLocked} onChange={e => setSizeLocked(e.target.checked)} />锁定宽高比例</label></>}
         {panel === 'adjust' && <><p>轻一点调整，留下真实质感。</p><h3>光线</h3>{([['exposure', '曝光'], ['contrast', '对比度'], ['highlights', '高光'], ['shadows', '阴影']] as const).map(([key, label]) => <Slider key={key} label={label} value={edits[key]} onChange={v => edit({ [key]: v })} />)}<hr /><h3>色彩</h3>{([['warmth', '色温'], ['saturation', '饱和度']] as const).map(([key, label]) => <Slider key={key} label={label} value={edits[key]} onChange={v => edit({ [key]: v })} />)}<button className="im-wide" onClick={reset} disabled={readOnly || running}><RotateCcw size={15} />重置调整</button></>}
@@ -373,9 +388,9 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
           {['convert', 'export'].includes(panel) && !result && <><small>{readOnly ? '下载副本' : '转换后可下载，或在新标签继续编辑。'}</small><button className="im-dark im-wide" onClick={() => void convert()} disabled={!!busy || !source}><ArrowUpRight size={16} />{busy || (panel === 'convert' ? '转换为副本' : '导出副本')}</button></>}
           {panel === 'history' && historyRevision !== null && <button className="im-dark im-wide" disabled={readOnly || !permits(session, 'history.restore') || !!busy || running || hasInput || historyRevision === info?.revision} onClick={() => void task('正在恢复', async () => { await api(session, `/restore/${historyRevision}`, { method: 'POST', headers: epochHeaders, body: JSON.stringify({ expectedRevision: info?.revision }) }); await reload(); setHistoryRevision(null); setNotice('已恢复为新版本。') })}>恢复此版本</button>}
         </div>
-      </aside>
+      </WorkspacePanel>
     </div>
     {(error || notice || stale !== null) && <div className={`image-feedback${error ? ' is-error' : ''}`} role={error ? 'alert' : 'status'}><span>{error || (stale !== null ? `协作者已更新至 r${stale}，你的草稿仍保留。` : notice)}</span>{stale !== null && <button onClick={() => { if (!hasInput || window.confirm('读取最新版本会清除当前图片草稿，是否继续？')) void task('读取最新版本', async () => { const receipt = inputProtection.capture(); await reload(receipt); inputProtection.acknowledge(receipt); setPrompt(''); setConversionPending(false) }) }}>读取最新版本</button>}<IconButton label="关闭提示" onClick={() => { setError(''); setNotice('') }}><X size={14} /></IconButton></div>}
-    <footer className="image-statusbar"><span><i />{editing ? '编辑模式' : '预览模式'}　{info ? `${edits.width} × ${edits.height} px · ${info.format.toUpperCase()} · ${imageFileSize(info.sourceBytes)}` : '载入中'}</span><span className="im-spacer" /><small>空格拖动 · 滚轮缩放画布</small><IconButton label="缩小图片" onClick={() => setZoom(view.scale / 1.15)}><Minus size={13} /></IconButton><button onClick={() => setZoom(1)} aria-label="图片缩放比例">{Math.round(view.scale * 100)}%</button><IconButton label="放大图片" onClick={() => setZoom(view.scale * 1.15)}><Plus size={13} /></IconButton><IconButton label="适合窗口" onClick={() => { interacted.current = false; fit() }}><Expand size={14} /></IconButton></footer>
+    <footer className="image-statusbar"><span><i />{editing ? '可编辑' : '可查看'}　{info ? `${edits.width} × ${edits.height} px · ${info.format.toUpperCase()} · ${imageFileSize(info.sourceBytes)}` : '载入中'}</span><DocumentVisitorIdentity /><span className="im-spacer" /><small>空格拖动 · 滚轮缩放画布</small><IconButton label="缩小图片" onClick={() => setZoom(view.scale / 1.15)}><Minus size={13} /></IconButton><button onClick={() => setZoom(1)} aria-label="图片缩放比例">{Math.round(view.scale * 100)}%</button><IconButton label="放大图片" onClick={() => setZoom(view.scale * 1.15)}><Plus size={13} /></IconButton><IconButton label="适合窗口" onClick={() => { interacted.current = false; fit() }}><Expand size={14} /></IconButton></footer>
   </section>
 }

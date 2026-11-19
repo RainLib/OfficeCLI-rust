@@ -38,15 +38,24 @@ export function WorkflowWorkspaceProvider({ sessions, activate, children }: { se
   return <Context.Provider value={value}>{children}</Context.Provider>
 }
 
-export function useWorkflowPreparation(session: Session | undefined, beforeRun: (() => Promise<unknown>) | undefined) {
+export type PreparationListener = (prepare: (() => Promise<unknown>) | null) => void
+export const EmbedPreparation = createContext<PreparationListener | undefined>(undefined)
+
+export function useWorkflowPreparation(session: Session | undefined, beforeRun: (() => Promise<unknown>) | undefined, enabled = true) {
   const workspace = useWorkflowWorkspace(), latest = useRef(beforeRun)
   latest.current = beforeRun
   const register = workspace?.register
+  const host = useContext(EmbedPreparation)
   useLayoutEffect(() => {
-    if (!session || !register || session.hostIntegration) return
+    if (!enabled || !session || !host || !beforeRun) return
+    host(async () => latest.current?.())
+    return () => host(null)
+  }, [host, session, enabled, !!beforeRun])
+  useLayoutEffect(() => {
+    if (!enabled || !session || !register) return
     return register(session, async () => {
       if (!latest.current) throw new Error('编辑器尚未提供保存检查。')
       return latest.current()
     })
-  }, [register, session])
+  }, [register, session, enabled])
 }

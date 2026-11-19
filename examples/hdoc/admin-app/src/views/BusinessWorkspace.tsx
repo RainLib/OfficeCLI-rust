@@ -21,10 +21,13 @@ import {
   Menu,
   Moon,
   Palette,
+  PanelsTopLeft,
+  Presentation,
   RefreshCw,
   ScrollText,
   Search,
   Settings2,
+  Share2,
   ShieldCheck,
   Sun,
   Type,
@@ -43,7 +46,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PageHeader, EmptyState } from "@/components/Page";
-import { FormatIcon, Notice } from "@/components/Workspace";
+import { FormatIcon, Notice, WorkspaceShelfArt } from "@/components/Workspace";
 import { ToastProvider } from "@/components/Toast";
 import { formatBytes } from "@/lib/format";
 import { useRoute } from "@/lib/router";
@@ -120,9 +123,11 @@ function Login({
     setBusy(true);
     setError("");
     try {
-      onLogin(
-        await businessJson<BusinessSession>("/login", { username, password }),
-      );
+      const account = await businessJson<BusinessSession>("/login", { username, password });
+      const returnTo = new URLSearchParams(location.search).get("returnTo");
+      if (returnTo && /^(\/(s|p)\/[a-f0-9-]{36}(?:[?#]|$)|\/editor\/?(?:\?|$))/.test(returnTo)) {
+        location.assign(returnTo);
+      } else onLogin(account);
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -139,7 +144,7 @@ function Login({
         <div>
           <h1 className="text-2xl font-semibold">登录工作空间</h1>
           <p className="mt-3 text-xs text-muted-foreground">
-            {name} · 继续处理你的文档与品牌资源
+            {name} · 管理团队文档和白板
           </p>
         </div>
         <form onSubmit={(event) => void submit(event)} className="space-y-5">
@@ -165,16 +170,26 @@ function Login({
             {busy ? "正在登录…" : "登录工作空间"}
           </Button>
         </form>
+        <a href="/public" className="block text-center text-xs text-accent-foreground hover:underline">无需登录，浏览公开文件库 →</a>
         <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <ShieldCheck className="size-4" />
-          由当前部署管理账号、权限和文档
+          账号、文件和权限由本工作区管理
         </p>
       </main>
     </div>
   );
 }
 const navigation = [
-  { route: "documents", label: "文档管理", icon: Files, group: "工作空间" },
+  { route: "overview", label: "工作空间", icon: Layers2, group: "工作空间" },
+  { route: "writing", label: "文档空间", icon: FilePlus2, group: "工作空间" },
+  { route: "boards", label: "白板空间", icon: Presentation, group: "工作空间" },
+  { route: "documents", label: "全部文件", icon: Files, group: "工作空间" },
+  {
+    route: "integration",
+    label: "应用接入",
+    icon: PanelsTopLeft,
+    group: "工作空间",
+  },
   {
     route: "users",
     label: "用户与角色",
@@ -235,7 +250,7 @@ export function BusinessWorkspace({ name }: { name: string }) {
     let alive = true;
     void businessRequest<BusinessSession>("/session")
       .then((value) => {
-        if (alive) login(value);
+        if (alive && !value.user.isGuest) login(value);
       })
       .catch(() => {})
       .finally(() => {
@@ -261,6 +276,9 @@ export function BusinessWorkspace({ name }: { name: string }) {
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("hcdAdminTheme", dark ? "dark" : "light");
   }, [dark]);
+  useEffect(() => {
+    if (account && !account.user.isGuest && route === "overview") window.location.replace("/workbench/");
+  }, [account, route]);
   const logout = async () => {
     try {
       await businessJson("/logout", {});
@@ -281,12 +299,9 @@ export function BusinessWorkspace({ name }: { name: string }) {
     (item) => !item.admin || account.user.role === "admin",
   );
   const path = route.split("?")[0],
-    selected =
-      path.split("/")[0] === "overview"
-        ? "documents"
-        : ["preview", "upload"].includes(path)
-          ? "themes"
-          : path.split("/")[0];
+    selected = ["preview", "upload"].includes(path)
+      ? "themes"
+      : path.split("/")[0];
   const go = (value: string) => {
     setMobile(false);
     navigate(value);
@@ -394,10 +409,24 @@ export function BusinessWorkspace({ name }: { name: string }) {
             <ErrorMessage value={error} />
             {restricted ? (
               <EmptyState title="需要管理员权限" />
-            ) : path.startsWith("documents/") ? (
-              <FileDetails key={path} id={path.slice(10)} navigate={go} />
-            ) : selected === "documents" || selected === "overview" ? (
-              <BusinessFiles navigate={go} userId={account.user.id} />
+            ) : /^(documents|writing|boards)\/[^/]+$/.test(path) ? (
+              <FileDetails
+                key={path}
+                id={path.split("/")[1]}
+                back={selected}
+                navigate={go}
+              />
+            ) : ["documents", "writing", "boards", "overview"].includes(
+                path,
+              ) ? (
+              <BusinessFiles
+                key={selected}
+                area={selected}
+                navigate={go}
+                userId={account.user.id}
+              />
+            ) : path === "integration" ? (
+              <EditorIntegration workspace={account.workspace} />
             ) : selected === "users" ? (
               <BusinessUsers />
             ) : selected === "events" ? (
@@ -441,12 +470,78 @@ export function BusinessWorkspace({ name }: { name: string }) {
     </ToastProvider>
   );
 }
+function EditorIntegration({ workspace }: { workspace: BusinessSession["workspace"] }) {
+  const code = `import { EmbeddedHcdEditor } from "@officecli/hcd-reference-editor/react";
+import "@officecli/hcd-reference-editor/style.css";
+
+<EmbeddedHcdEditor documentId={session.documentId} token={session.token}
+  apiUrl="/v1/documents" collabUrl={collabUrl} locale="zh-CN"
+  chatPanel={showChat ? <BusinessChat /> : false} onSelectionChange={setSelection} />`;
+  return (
+    <>
+      <PageHeader
+        title="应用接入"
+        description="在业务系统中单独嵌入文档编辑器或白板编辑器。"
+      />
+      {workspace && (
+        <section aria-label="当前工作区接入信息" className="rounded-2xl border p-5">
+          <h2 className="mb-4 font-semibold">当前工作区</h2>
+          <dl className="grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-5">
+            {[
+              ["租户标识", workspace.tenantId],
+              ["应用标识", workspace.appId],
+              ["访问地址", workspace.publicUrl],
+              ["内置 AI", workspace.aiEnabled ? "已启用" : "已关闭"],
+              ["外部选区 MCP", workspace.selectionMcp ? "已启用" : "已关闭"],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-xs text-muted-foreground">{label}</dt>
+                <dd className="mt-1 break-all font-medium">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <section className="rounded-2xl border border-[#cfdee7] bg-[#e6eef2] p-5 text-[#324e60] dark:border-[#354956] dark:bg-[#25343e] dark:text-[#d8e7ef]">
+          <FilePlus2 />
+          <h2 className="mt-3 font-semibold">文档编辑器</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            在业务页面编辑正文。可将选中的文字交给外部 Agent，改动保存为文件修订。
+          </p>
+          <Button variant="outline" className="mt-4" asChild><a href="/embed-example/?view=document&amp;standalone=1">体验文档嵌入 <ArrowUpRight /></a></Button>
+        </section>
+        <section className="rounded-2xl border border-[#e1d3e8] bg-[#eee6f3] p-5 text-[#543d64] dark:border-[#4a3a53] dark:bg-[#322739] dark:text-[#e9daef]">
+          <Presentation />
+          <h2 className="mt-3 font-semibold">白板编辑器</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            打开 Excalidraw 场景，保留可编辑的文字、图形和连接。
+          </p>
+          <Button variant="outline" className="mt-4" asChild><a href="/embed-example/?view=board&amp;standalone=1">体验白板嵌入 <ArrowUpRight /></a></Button>
+        </section>
+      </div>
+      <section className="space-y-3 rounded-2xl border p-5">
+        <h2 className="font-semibold">挂载编辑器</h2>
+        <p className="text-sm text-muted-foreground">
+          用当前成员的登录会话调用 <code>{"POST /workspace/api/files/{fileId}/editor-session"}</code>{" "}
+          换取文件令牌。组件按文件类型打开编辑器。外部 Agent 通过 <code>PUT /workspace/api/embed/selection</code>{" "}
+          取得当前选区的短期 MCP 凭据。
+        </p>
+        <pre className="overflow-x-auto rounded-xl bg-secondary p-4 text-xs leading-6">
+          {code}
+        </pre>
+      </section>
+    </>
+  );
+}
 function BusinessFiles({
   navigate,
   userId,
+  area,
 }: {
   navigate: Navigate;
   userId: string;
+  area: string;
 }) {
   const [files, setFiles] = useState<BusinessFile[]>([]),
     [query, setQuery] = useState(""),
@@ -456,6 +551,23 @@ function BusinessFiles({
     [create, setCreate] = useState(false),
     [name, setName] = useState("新文档"),
     [kind, setKind] = useState("txt");
+  const boardOnly = area === "boards",
+    overview = area === "overview";
+  const shelf = files.filter((f) =>
+    boardOnly
+      ? f.format === "excalidraw"
+      : area === "writing"
+        ? f.format !== "excalidraw"
+        : true,
+  );
+  const openCreate = (board: boolean) => {
+    setName(board ? "新白板" : "新文档");
+    setKind(board ? "excalidraw" : "txt");
+    setError("");
+    setCreate(true);
+  };
+  const fileRoute = (id: string, board: boolean) =>
+    (area === "overview" ? (board ? "boards" : "writing") : area) + "/" + id;
   const upload = useRef<HTMLInputElement>(null);
   const refresh = useCallback(async () => {
     try {
@@ -495,18 +607,18 @@ function BusinessFiles({
     setError("");
     try {
       const result = await businessJson<{ file: BusinessFile }>("/files", {
-        name: `${name.replace(/\.(txt|md|html)$/i, "")}.${kind}`,
+        name: `${name.replace(/\.(txt|md|html|excalidraw)$/i, "")}.${kind}`,
       });
       setCreate(false);
       await refresh();
-      navigate(`documents/${result.file.id}`);
+      navigate(fileRoute(result.file.id, result.file.format === "excalidraw"));
     } catch (cause) {
       setError(String(cause));
     } finally {
       setBusy(false);
     }
   };
-  const visible = files.filter(
+  const visible = shelf.filter(
     (file) =>
       file.name.toLowerCase().includes(query.toLowerCase()) &&
       (format === "all" || file.format === format),
@@ -514,14 +626,36 @@ function BusinessFiles({
   return (
     <>
       <PageHeader
-        title="文档管理"
-        description="在一个工作空间中管理业务文件，继续编辑并保存最终版本。"
+        title={
+          overview
+            ? "工作空间"
+            : boardOnly
+              ? "白板空间"
+              : area === "writing"
+                ? "文档空间"
+                : "全部文件"
+        }
+        description={
+          overview
+            ? "分别创建文档和白板，或继续编辑有权访问的文件。"
+            : boardOnly
+              ? "创建白板，或导入已有的 Excalidraw 场景。"
+              : "管理有权访问的文档，编辑并回写业务版本。"
+        }
         actions={
           <>
-            <Button variant="outline" onClick={() => setCreate(true)}>
-              <FilePlus2 />
-              新建文档
-            </Button>
+            {!overview && (
+              <Button variant="outline" onClick={() => openCreate(boardOnly)}>
+                {boardOnly ? <Presentation /> : <FilePlus2 />}
+                {boardOnly ? "新建白板" : "新建文档"}
+              </Button>
+            )}
+            {area === "documents" && (
+              <Button variant="outline" onClick={() => openCreate(true)}>
+                <Presentation />
+                新建白板
+              </Button>
+            )}
             <Button disabled={busy} onClick={() => upload.current?.click()}>
               <Upload />
               {busy ? "正在上传…" : "上传文件"}
@@ -531,7 +665,12 @@ function BusinessFiles({
               className="hidden"
               type="file"
               aria-label="上传业务文件"
-              accept=".docx,.xlsx,.pptx,.pdf,.html,.htm,.md,.txt,.png,.jpg,.jpeg,.webp"
+              accept={
+                boardOnly
+                  ? ".excalidraw"
+                  : ".docx,.xlsx,.pptx,.pdf,.html,.htm,.md,.txt,.png,.jpg,.jpeg,.webp" +
+                    (area === "writing" ? "" : ",.excalidraw")
+              }
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) void sendFile(file);
@@ -540,13 +679,64 @@ function BusinessFiles({
           </>
         }
       />
+      {overview && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {[false, true].map((board) => (
+            <section
+              key={String(board)}
+              className={cn(
+                "relative isolate overflow-hidden rounded-2xl border p-5 sm:p-6",
+                board
+                  ? "border-[#e1d3e8] bg-[#eee6f3] text-[#543d64] dark:border-[#4a3a53] dark:bg-[#322739] dark:text-[#e9daef]"
+                  : "border-[#cfdee7] bg-[#e6eef2] text-[#324e60] dark:border-[#354956] dark:bg-[#25343e] dark:text-[#d8e7ef]",
+              )}
+            >
+              <WorkspaceShelfArt board={board} className="pointer-events-none absolute right-4 top-4 h-12 w-[72px]" />
+              <h2 className="pr-16 text-xl font-semibold">
+                {board ? "白板空间" : "文档空间"}
+              </h2>
+              <p className="mt-2 pr-16 text-sm">
+                {board
+                  ? "自由绘制、头脑风暴与团队协作"
+                  : "文字、表格与演示文稿"}
+              </p>
+              <div className="mt-5 flex flex-wrap gap-2">
+                <Button
+                  className={
+                    board
+                      ? "bg-[#5c456b] text-white hover:bg-[#483654]"
+                      : "bg-[#355366] text-white hover:bg-[#293f4e]"
+                  }
+                  onClick={() => openCreate(board)}
+                >
+                  {board ? "新建白板" : "新建文档"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => navigate(board ? "boards" : "writing")}
+                >
+                  {board ? "打开白板库" : "打开文档库"}
+                  <ArrowUpRight />
+                </Button>
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-2 sm:gap-3">
         {[
-          ["可访问文档", files.length],
-          ["我负责的", files.filter((file) => file.ownerId === userId).length],
+          [
+            boardOnly
+              ? "可访问白板"
+              : area === "writing"
+                ? "可访问文档"
+                : "可访问文件",
+            shelf.length,
+          ],
+          ["我负责的", shelf.filter((file) => file.ownerId === userId).length],
           [
             "已有业务回写",
-            files.filter((file) => file.lastPublishedRevision !== null).length,
+            shelf.filter((file) => file.lastPublishedRevision !== null).length,
           ],
         ].map(([label, count]) => (
           <div
@@ -579,7 +769,7 @@ function BusinessFiles({
           onChange={(event) => setFormat(event.target.value)}
         >
           <option value="all">所有格式</option>
-          {[...new Set(files.map((file) => file.format))].map((item) => (
+          {[...new Set(shelf.map((file) => file.format))].map((item) => (
             <option key={item}>{item}</option>
           ))}
         </Select>
@@ -597,7 +787,9 @@ function BusinessFiles({
           <table className="w-full text-left text-xs">
             <thead className="text-[10px] text-muted-foreground">
               <tr>
-                <th className="p-3 font-normal">文档名称</th>
+                <th className="p-3 font-normal">
+                  {boardOnly ? "白板名称" : "文件名称"}
+                </th>
                 <th className="p-3 font-normal">业务版本</th>
                 <th className="hidden p-3 font-normal sm:table-cell">负责人</th>
                 <th className="hidden p-3 font-normal md:table-cell">
@@ -615,7 +807,11 @@ function BusinessFiles({
                   <td className="p-3">
                     <button
                       className="flex max-w-[420px] items-center gap-3 text-left"
-                      onClick={() => navigate(`documents/${file.id}`)}
+                      onClick={() =>
+                        navigate(
+                          fileRoute(file.id, file.format === "excalidraw"),
+                        )
+                      }
                     >
                       <FormatIcon format={file.format} />
                       <span className="min-w-0">
@@ -651,14 +847,26 @@ function BusinessFiles({
         </div>
       ) : (
         <EmptyState
-          title={query ? "未找到匹配文件" : "开始你的第一份文档"}
-          description="上传已有文件，或新建一份文档。"
+          title={
+            query
+              ? "未找到匹配文件"
+              : boardOnly
+                ? "创建你的第一块白板"
+                : "开始你的第一份文件"
+          }
+          description={
+            boardOnly
+              ? "上传已有场景，或新建一块白板。"
+              : "上传已有文件，或从空白文件开始。"
+          }
         />
       )}
       <Dialog open={create} onOpenChange={setCreate}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>新建业务文档</DialogTitle>
+            <DialogTitle>
+              {kind === "excalidraw" ? "新建白板" : "新建业务文档"}
+            </DialogTitle>
             <DialogDescription>
               创建后可进入编辑器，所有修改先保存为 HCD 修订。
             </DialogDescription>
@@ -667,25 +875,29 @@ function BusinessFiles({
             className="space-y-5"
             onSubmit={(event) => void newDocument(event)}
           >
-            <Field label="文档名称">
+            <Field label={kind === "excalidraw" ? "白板名称" : "文档名称"}>
               <Input
                 required
                 value={name}
                 onChange={(event) => setName(event.target.value)}
               />
             </Field>
-            <Field label="文件格式">
-              <Select
-                value={kind}
-                onChange={(event) => setKind(event.target.value)}
-              >
-                <option value="txt">TXT 纯文本</option>
-                <option value="md">Markdown</option>
-                <option value="html">HTML</option>
-              </Select>
-            </Field>
+            {kind !== "excalidraw" && (
+              <Field label="文件格式">
+                <Select
+                  value={kind}
+                  onChange={(event) => setKind(event.target.value)}
+                >
+                  <option value="txt">TXT 纯文本</option>
+                  <option value="md">Markdown</option>
+                  <option value="html">HTML</option>
+                </Select>
+              </Field>
+            )}
             <ErrorMessage value={error} />
-            <Button disabled={busy || !name.trim()}>创建文档</Button>
+            <Button disabled={busy || !name.trim()}>
+              {kind === "excalidraw" ? "创建白板" : "创建文档"}
+            </Button>
           </form>
         </DialogContent>
       </Dialog>
@@ -704,7 +916,15 @@ type Version = {
   created_at: string;
   receipt: { revision: number } | null;
 };
-function FileDetails({ id, navigate }: { id: string; navigate: Navigate }) {
+function FileDetails({
+  id,
+  back,
+  navigate,
+}: {
+  id: string;
+  back: string;
+  navigate: Navigate;
+}) {
   const [file, setFile] = useState<BusinessFile | null>(null),
     [versions, setVersions] = useState<Version[]>([]),
     [access, setAccess] = useState<Access | null>(null),
@@ -769,10 +989,14 @@ function FileDetails({ id, navigate }: { id: string; navigate: Navigate }) {
         <Button
           variant="ghost"
           className="self-start"
-          onClick={() => navigate("documents")}
+          onClick={() => navigate(back)}
         >
           <ArrowLeft />
-          返回文档
+          {back === "boards"
+            ? "返回白板空间"
+            : back === "writing"
+              ? "返回文档空间"
+              : "返回文件管理"}
         </Button>
         <ErrorMessage value={error} />
         <EmptyState title={error ? "无法打开此文件" : "正在读取文件…"} />
@@ -783,10 +1007,14 @@ function FileDetails({ id, navigate }: { id: string; navigate: Navigate }) {
       <Button
         variant="ghost"
         className="self-start"
-        onClick={() => navigate("documents")}
+        onClick={() => navigate(back)}
       >
         <ArrowLeft />
-        返回文档
+        {back === "boards"
+          ? "返回白板空间"
+          : back === "writing"
+            ? "返回文档空间"
+            : "返回文件管理"}
       </Button>
       <PageHeader
         title={file.name}
@@ -797,6 +1025,21 @@ function FileDetails({ id, navigate }: { id: string; navigate: Navigate }) {
               <RefreshCw />
               刷新状态
             </Button>
+            {file.canManage && (
+              <Button variant="outline" asChild>
+                <a
+                  href={`/editor/?workspaceFile=${id}&share=1`}
+                  target="_blank"
+                  rel="noopener"
+                >
+                  <Share2 />
+                  {file.format === "excalidraw" ? "分享白板" : "分享文档"}
+                </a>
+              </Button>
+            )}
+            <Button asChild variant="outline">
+              <a href={`/workbench/?file=${encodeURIComponent(id)}`}><Layers2 />在工作台打开</a>
+            </Button>
             <Button asChild>
               <a
                 href={`/editor/?workspaceFile=${id}&locale=zh-CN`}
@@ -804,9 +1047,7 @@ function FileDetails({ id, navigate }: { id: string; navigate: Navigate }) {
                 rel="noopener"
               >
                 <ArrowUpRight />
-                {file.operations.includes("document.edit")
-                  ? "进入编辑器"
-                  : "打开只读预览"}
+                {file.format === "excalidraw" ? "打开白板" : "打开文档"}
               </a>
             </Button>
           </>

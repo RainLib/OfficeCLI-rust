@@ -38,7 +38,7 @@ async function upload() {
 }
 async function open(page: Page, doc: Awaited<ReturnType<typeof upload>>) {
   await page.addInitScript(item => { sessionStorage.setItem('hcd-editor-workspace-v1', JSON.stringify({ version: 1, tabs: [item], activeDocument: item.documentId })) }, doc)
-  await page.goto(uiUrl); await expect(page.getByRole('region', { name: '图片画布，滚轮缩放，空格拖动' })).toBeVisible()
+  await page.goto(uiUrl+'/?locale=zh-CN'); await expect(page.getByRole('region', { name: '图片画布，滚轮缩放，空格拖动' })).toBeVisible()
   await expect(page.locator('canvas.image-pixels')).toHaveJSProperty('width', 1080)
 }
 test.beforeAll(async () => {
@@ -73,19 +73,19 @@ test('image revisions, real encoding, canvas isolation, tabs and responsive desi
   const viewport = page.getByRole('region', { name: '图片画布，滚轮缩放，空格拖动' }), initialZoom = await page.getByRole('button', { name: '图片缩放比例' }).innerText()
   await viewport.hover(); await page.mouse.wheel(0, -150); await expect(page.getByRole('button', { name: '图片缩放比例' })).not.toHaveText(initialZoom)
   expect(await page.evaluate(() => window.visualViewport?.scale)).toBe(1)
-  const before = await viewport.boundingBox(); await page.getByRole('button', { name: '收起图片面板' }).click(); expect((await viewport.boundingBox())!.width).toBeGreaterThan(before!.width + 250)
-  await page.getByRole('button', { name: '面板', exact: true }).click()
+  const before = await viewport.boundingBox(); await page.getByRole('button', { name: '收起图片面板' }).click(); expect((await viewport.boundingBox())!.width - before!.width).toBeGreaterThan(250)
+  await page.getByRole('button', { name: '展开右侧栏', exact: true }).click()
   await page.screenshot({ path: resolve(root, 'preview-desktop.png') })
-  await page.getByLabel('界面与主题').click(); await page.locator('.im-profile-menu select').selectOption('dark'); await page.getByLabel('界面与主题').click()
-  await page.getByRole('button',{name:'收起图片面板'}).click(); await page.screenshot({path:resolve(root,'focus-dark.png')}); await page.getByRole('button',{name:'面板',exact:true}).click()
-  await page.getByLabel('界面与主题').click(); await page.locator('.im-profile-menu select').selectOption('light'); await page.getByLabel('界面与主题').click()
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题'}).selectOption('dark')
+  await page.getByRole('button',{name:'收起图片面板'}).click(); await page.screenshot({path:resolve(root,'focus-dark.png')}); await page.getByRole('button',{name:'展开右侧栏',exact:true}).click()
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题'}).selectOption('light')
 
-  await page.getByRole('button', { name: '开始编辑' }).click(); await page.getByRole('button', { name: '顺时针旋转' }).click(); await page.getByRole('button', { name: '光线与色彩', exact: true }).click()
+  await page.getByRole('navigation', { name: '图片工具', exact: true }).getByRole('button', { name: '裁剪与旋转', exact: true }).click(); await page.getByRole('button', { name: '顺时针旋转' }).click(); await page.getByRole('button', { name: '光线与色彩', exact: true }).click()
   await page.getByRole('slider', { name: '曝光', exact: true }).fill('12'); await page.getByRole('button', { name: '应用编辑', exact: true }).click()
   await expect.poll(async () => (await json(id, '/image')).revision).toBe(1)
   expect(await canvas.evaluate(el => el === (window as any).__imageCanvas)).toBe(true)
   expect((await json(id, '/image')).width).toBe(720)
-  await page.getByRole('button', { name: '预览', exact: true }).click(); await page.getByRole('button', { name: '转换格式', exact: true }).click()
+  await page.getByRole('button', { name: '转换格式', exact: true }).click()
   await page.getByRole('button', { name: 'JPEG', exact: true }).click(); await expect(page.getByLabel('JPEG 背景颜色')).toBeVisible()
   await page.getByRole('button', { name: 'PNG', exact: true }).click(); await expect(page.getByRole('slider', { name: '画质' })).toHaveCount(0)
   await page.getByRole('button', { name: 'WEBP', exact: true }).click(); await page.getByRole('button', { name: '转换为副本', exact: true }).click(); await expect(page.locator('.document-tab-panel:visible').getByText('转换完成。', { exact: true })).toBeVisible()
@@ -159,7 +159,7 @@ test('overlapping jobs wait, failures release leases, and copies validate actual
 
 test('image input journal restores offline adjustments and conversion parameters without changing its canvas or revision', async ({ page, context }, info) => {
   const doc = await upload(); await open(page, doc)
-  await page.getByRole('button', { name: '开始编辑', exact: true }).click()
+
   await page.getByRole('button', { name: '光线与色彩', exact: true }).click()
   await context.setOffline(true)
   await page.getByRole('slider', { name: '曝光', exact: true }).fill('17')
@@ -188,13 +188,18 @@ test('image input journal restores offline adjustments and conversion parameters
 })
 
 async function paintDraft(page: Page, prompt: string) {
-  await page.getByRole('button', { name: '用 AI 处理这张图片', exact: true }).click()
+  if (!await page.getByRole('textbox', { name: '重绘内容', exact: true }).isVisible()) await page.getByRole('navigation', { name: '图片工具', exact: true }).getByRole('button', { name: 'AI 修图', exact: true }).click()
   await page.getByRole('textbox', { name: '重绘内容', exact: true }).fill(prompt)
+  const compactPanel = !await page.locator('[data-image-plane]').isVisible()
+  if (compactPanel) await page.getByRole('button', { name: '收起图片面板', exact: true }).click()
+  await expect(page.locator('[data-image-plane]')).toBeVisible()
   const plane = (await page.locator('[data-image-plane]').boundingBox())!
   await page.mouse.move(plane.x + plane.width * .46, plane.y + plane.height * .63); await page.mouse.down()
   await page.mouse.move(plane.x + plane.width * .58, plane.y + plane.height * .74, { steps: 12 }); await page.mouse.up()
   await expect(page.getByLabel('图片草稿保护状态')).toHaveAttribute('data-protection', 'protected')
-  return page.locator('canvas.image-mask').evaluate(c => (c as HTMLCanvasElement).toDataURL())
+  const pixels = await page.locator('canvas.image-mask').evaluate(c => (c as HTMLCanvasElement).toDataURL())
+  if (compactPanel) await page.getByRole('button', { name: '展开右侧栏', exact: true }).click()
+  return pixels
 }
 
 test('image input journal restores an offline mask pixel for pixel without resubmitting generation', async ({ page, context }, info) => {
@@ -202,8 +207,7 @@ test('image input journal restores an offline mask pixel for pixel without resub
   const before = providerRequests, prompt = '找回蒙版与提示词，不自动生成'
   await page.getByRole('button', { name: '用 AI 处理这张图片', exact: true }).click()
   await context.setOffline(true)
-  // Return to info without discarding inputs, then use the same painting path.
-  await page.getByRole('button', { name: '预览', exact: true }).click()
+  // Continue painting in the same authorized editor while offline.
   const pixels = await paintDraft(page, prompt)
   await page.close(); await context.setOffline(false)
   const reopened = await context.newPage(); await open(reopened, doc)
@@ -241,7 +245,7 @@ test('image input journal reports storage failures and warns before unprotected 
     }
   })
   const doc = await upload(); await open(page, doc)
-  await page.getByRole('button', { name: '开始编辑', exact: true }).click(); await page.getByRole('button', { name: '光线与色彩', exact: true }).click()
+  await page.getByRole('button', { name: '光线与色彩', exact: true }).click()
   await page.getByRole('slider', { name: '曝光', exact: true }).fill('13')
   await expect(page.getByLabel('本地草稿保护不可用', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented })).toBe(true)

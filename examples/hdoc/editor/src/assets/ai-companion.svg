@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+  <path data-sticker-layer="quote-open" fill="#654783" d="M32 9C19 7 9 13 6 24C3 33 7 41 15 43C22 45 29 40 29 33C29 27 25 22 19 22C21 17 26 14 32 13C34 12 34 10 32 9Z"/>
+  <path data-sticker-layer="quote-close" fill="#AA88C6" d="M32 55C45 57 55 51 58 40C61 31 57 23 49 21C42 19 35 24 35 31C35 37 39 42 45 42C43 47 38 50 32 51C30 52 30 54 32 55Z"/>
+</svg>

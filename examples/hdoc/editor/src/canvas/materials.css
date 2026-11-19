@@ -1,0 +1,524 @@
+.canvas-material-library {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  overflow: auto;
+  min-height: 0;
+  padding: 16px;
+  color: var(--ink);
+  font: 13px/1.45 var(--ui-font, system-ui);
+}
+.canvas-material-library h2 {
+  margin: 0;
+  font-size: 17px;
+}
+.material-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--stage);
+  padding: 7px 10px;
+  border-radius: 10px;
+  color: var(--muted);
+}
+.material-search input {
+  width: 100%;
+  background: none;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  font: inherit;
+}
+.material-search:focus-within {
+  outline: 2px solid var(--accent);
+}
+.material-tabs {
+  display: flex;
+  gap: 4px;
+}
+.canvas-material-library button {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.material-tabs button,
+.material-back,
+.material-secondary {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 5px 10px;
+}
+.material-tabs button[aria-pressed='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.material-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.material-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  min-width: 0;
+  padding: 6px 6px 9px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.material-card:is(:hover, :focus-visible) {
+  border-color: var(--accent);
+}
+.material-card strong,
+.material-card small {
+  padding: 0 3px;
+}
+.material-card small,
+.material-detail p,
+.material-detail dt {
+  color: var(--muted);
+}
+.material-card small {
+  font-size: 10px;
+}
+.material-sample {
+  width: 100%;
+  height: 62px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #f6efe2;
+  color: #976349;
+}
+.material-sample[data-category='avatar'] {
+  background: #f0ebf3;
+}
+.material-sample[data-category='brush'] {
+  background: #fbf6ea;
+}
+.material-sample[data-category='reaction'] {
+  background: #edf1e8;
+}
+.material-sample svg {
+  width: 48px;
+  height: 48px;
+  overflow: visible;
+}
+.material-sample .brush-swatch {
+  width: 80%;
+  height: 22px;
+}
+.material-sample b {
+  font-size: 26px;
+}
+.material-sample.large {
+  height: 135px;
+}
+.material-sample.large svg {
+  width: 90px;
+  height: 90px;
+}
+.material-sample.large .brush-swatch {
+  width: 76%;
+  height: 28px;
+}
+.material-card:not(:hover):not(:focus-visible) :is(.canvas-sticker-motion, [data-sticker-layer]) {
+  animation-play-state: paused;
+}
+.material-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.material-detail p,
+.material-detail dl,
+.material-detail dd {
+  margin: 0;
+}
+.material-detail dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  font-size: 12px;
+}
+.material-detail details {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.material-detail details dl {
+  margin: 8px 0;
+}
+.material-detail summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.material-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+}
+.canvas-material-library .material-primary {
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+  border: 0;
+  border-radius: 10px;
+  padding: 9px;
+}
+.material-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.canvas-motion-only {
+  width: auto;
+}
+.canvas-self-avatar {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+}
+.canvas-peer-avatar {
+  position: absolute;
+  width: 25px;
+  height: 25px;
+  transform: translate(-100%, -70%);
+}
+.canvas-reactions {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+.canvas-reaction-badges {
+  position: absolute;
+  display: flex;
+  gap: 4px;
+  transform: translate(-100%, -110%);
+  pointer-events: auto;
+}
+.canvas-reaction-badges button,
+.canvas-react-tools button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  color: var(--ink);
+  background: var(--surface);
+  font: 600 12px var(--ui-font, system-ui);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.canvas-reaction-badges button[aria-pressed='true'],
+.canvas-react-tools button[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.canvas-react-tools {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+.hcd-surface .canvas-selection-actions .canvas-react-tools button {
+  min-width: 32px;
+  padding: 4px 8px;
+  color: var(--muted);
+  background: var(--stage);
+}
+.hcd-surface .canvas-selection-actions .canvas-react-tools button:is(:hover, [aria-pressed='true']) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.canvas-reaction-badges button span {
+  animation: feedback-pop 0.32s ease-out;
+}
+@keyframes feedback-pop {
+  0% {
+    transform: scale(0.86);
+  }
+  65% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .canvas-reaction-badges button span {
+    animation: none;
+  }
+}
+
+/* Keep the drawing palette in reach and the top edge open for the board. */
+@media (min-width: 1101px) {
+  .hcd-surface .canvas-surface .excalidraw:not(.excalidraw--mobile) .App-menu_top .shapes-section {
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    top: auto;
+    transform: translateX(-50%);
+    z-index: 4;
+    margin: 0;
+  }
+  .hcd-surface .canvas-surface .excalidraw:not(.excalidraw--mobile) .shapes-section .Island {
+    border-radius: 19px;
+    box-shadow:
+      0 4px 14px #37292115,
+      0 1px 3px #37292110;
+  }
+  .hcd-surface .canvas-surface > .canvas-selection-actions {
+    bottom: 82px;
+  }
+}
+/* The custom bottom dock frees the native toolbar's middle grid column. */
+.canvas-surface .excalidraw .App-menu_top > .layer-ui__wrapper__top-right {
+  grid-column: -2 / -1;
+  justify-self: end;
+}
+.canvas-stamp-tool {
+  position: relative;
+}
+.hcd-surface .board-dock-shell .stamp-trigger {
+  background: var(--stage);
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.hcd-surface
+  .board-dock-shell
+  .stamp-trigger:is(:hover, [aria-pressed='true'], [aria-expanded='true']) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.stamp-wheel,
+.stamp-instruction {
+  position: absolute;
+  z-index: 6;
+  left: 50%;
+  bottom: calc(100% + 12px);
+  transform: translateX(-50%);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  box-shadow: 0 7px 26px #40372c20;
+}
+.stamp-wheel {
+  width: 186px;
+  padding: 10px;
+  border-radius: 23px;
+}
+.stamp-modes {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 13px;
+  background: var(--stage);
+}
+.hcd-surface .board-dock-shell .stamp-modes button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 3px 5px;
+  min-height: 27px;
+  color: var(--muted);
+  background: transparent;
+}
+.hcd-surface .board-dock-shell .stamp-modes button[aria-pressed='true'] {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 1px 4px #33291b1a;
+}
+[data-kind='thumbsUp'] {
+  --stamp-paper: #e4eedf;
+  --stamp-ink: #47694e;
+}
+[data-kind='plusOne'] {
+  --stamp-paper: #efe5f3;
+  --stamp-ink: #775b7c;
+}
+[data-kind='loveIt'] {
+  --stamp-paper: #f9e3e1;
+  --stamp-ink: #a94f61;
+}
+[data-kind='insight'] {
+  --stamp-paper: #f9ebc4;
+  --stamp-ink: #8c691f;
+}
+.stamp-instruction {
+  border-radius: 12px;
+  padding: 5px 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+}
+.hcd-surface .board-dock-shell .stamp-instruction button {
+  background: transparent;
+  color: var(--ink);
+  padding: 2px;
+  min-height: 20px;
+  display: grid;
+  place-items: center;
+}
+.canvas-surface[data-stamp-pointer] :is(canvas.excalidraw__canvas.interactive, .canvas-emote-placement) {
+  cursor: url('./stamp-art/tool-cursor.svg') 4 30, crosshair !important;
+}
+.canvas-surface[data-stamp-pointer='pressed'] :is(canvas.excalidraw__canvas.interactive, .canvas-emote-placement) {
+  cursor: url('./stamp-art/tool-pressed.svg') 4 30, crosshair !important;
+}
+.stamp-feedback-layer { pointer-events: none; position: absolute; inset: 0; z-index: 5; overflow: hidden; }
+.board-stamp-preview { position: absolute; left: 0; top: 0; width: var(--stamp-diameter); height: var(--stamp-diameter); translate: -50% -50%; will-change: transform; }
+.stamp-proof { display: grid; opacity: .52; }
+.board-stamp-preview[data-pressed] .stamp-proof { opacity: .84; }
+.board-stamp-impression { position: absolute; display: grid; place-items: center; width: 0; height: 0; }
+.board-stamp-impression > span { position: absolute; display: grid; place-items:center; animation: board-stamp-print 400ms ease-out both; }
+.stamp-release-lines { position: absolute; overflow: visible; color: var(--accent); pointer-events: none; }
+.stamp-release-lines line { animation: stamp-line-out 380ms cubic-bezier(.16,.69,.3,1) both; }
+@keyframes stamp-line-out {
+  0% { transform: translateY(5px); opacity: 0; }
+  16% { opacity: .95; }
+  70% { opacity: .75; }
+  100% { transform: translateY(-10px); opacity: 0; }
+}
+@keyframes board-stamp-print {
+  0% { opacity: .98; transform: scale(.78,.72) rotate(-4deg); }
+  34% { opacity: 1; transform: scale(1.07,1.04); }
+  75% { opacity: .9; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .board-stamp-impression > span { animation: none; opacity: .72; }
+  .stamp-release-lines { display: none; }
+}
+.canvas-emotes {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+.canvas-emote-burst {
+  position: absolute;
+  pointer-events: none;
+}
+.canvas-emote-burst i {
+  --fly-x: 0px;
+  --tilt: 3deg;
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--stamp-paper);
+  color: var(--stamp-ink);
+  font: 700 18px system-ui;
+  box-shadow: 0 1px 4px #30231b16;
+  animation: stamp-burst 1.35s ease-out both;
+}
+.canvas-emote-burst i:first-child {
+  --fly-x: -23px;
+  --tilt: -14deg;
+  animation-delay: 0.04s;
+}
+.canvas-emote-burst i:last-child {
+  --fly-x: 23px;
+  --tilt: 17deg;
+  animation-delay: 0.08s;
+}
+@keyframes stamp-burst {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -30%) scale(0.65);
+  }
+  18% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--fly-x)), -72px) scale(0.85) rotate(var(--tilt));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .canvas-emote-burst i {
+    animation: none;
+    transform: translate(-50%, -50%);
+  }
+  .canvas-emote-burst i:not(:first-child) {
+    display: none;
+  }
+}
+@media (max-width: 600px) {
+  .stamp-wheel {
+    left: 0;
+    transform: none;
+  }
+  .stamp-instruction {
+    left: 0;
+    transform: none;
+  }
+}
+.canvas-emote-placement {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  cursor: crosshair;
+  touch-action: pan-x pan-y;
+}
+@media (min-width: 1101px) {
+  .canvas-surface .excalidraw:not(.excalidraw--mobile) .shapes-section .App-toolbar__extra-tools-dropdown {
+    bottom: calc(100% + 8px);
+    top: auto;
+    margin-top: 0;
+  }
+}
+.material-sample[data-material='petals'] {
+  background: #f5e2d5;
+}
+.material-sample[data-material='mascot'] {
+  background: #eee7f4;
+}
+.material-sample[data-material='butterfly'] {
+  background: #ddebe4;
+}
+.material-sample[data-material='paperPlane'] {
+  background: #deeaf0;
+}
+.material-sample[data-material='firefly'] {
+  background: #eae8ce;
+}
+.material-sample[data-material='moonPal'] {
+  background: #e7e6f0;
+}
+.material-sample[data-material='starPal'],
+.material-sample[data-material='insight'] {
+  background: #f4e8c6;
+}
+.material-sample[data-material='loveIt'] {
+  background: #f7e2e1;
+  color: #a94f61;
+}
+.material-sample[data-material='plusOne'] {
+  background: #ede4f1;
+  color: #775b7c;
+}
+.material-sample[data-material='thumbsUp'] {
+  background: #e3eddf;
+  color: #47694e;
+}

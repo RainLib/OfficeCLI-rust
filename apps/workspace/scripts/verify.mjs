@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
+import { verifySharing } from "./verify-sharing.mjs";
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   repo = resolve(app, "../.."),
@@ -538,7 +539,7 @@ try {
       .getByRole("button", { name: "登录工作空间", exact: true })
       .click();
     await page
-      .getByRole("heading", { name: "文档管理", exact: true })
+      .getByRole("heading", { name: "工作空间", exact: true })
       .waitFor();
     assert.equal(
       await page.getByText("连接管理令牌", { exact: true }).count(),
@@ -590,7 +591,7 @@ try {
     checks.push(
       "cookie session registers licensed local fonts and creates immutable themes without pasted tokens",
     );
-    await page.getByRole("link", { name: "文档管理", exact: true }).click();
+    await page.getByRole("link", { name: "全部文件", exact: true }).click();
     await page.getByLabel("上传业务文件", { exact: true }).setInputFiles({
       name: "浏览器上传.txt",
       mimeType: "text/plain",
@@ -627,7 +628,7 @@ try {
       fullPage: true,
     });
     const opened = context.waitForEvent("page");
-    await page.getByRole("link", { name: "进入编辑器", exact: true }).click();
+    await page.getByRole("link", { name: "打开文档", exact: true }).click();
     const editor = await opened;
     // Install before the navigation that schedules renewal; existing native
     // timers are not controlled by Playwright's clock installation.
@@ -744,9 +745,9 @@ try {
       path: join(artifacts, "settings-desktop.png"),
       fullPage: true,
     });
-    await page.getByRole("link", { name: "文档管理", exact: true }).click();
+    await page.getByRole("link", { name: "全部文件", exact: true }).click();
     await page
-      .getByRole("heading", { name: "文档管理", exact: true })
+      .getByRole("heading", { name: "全部文件", exact: true })
       .waitFor();
     await page.screenshot({
       path: join(artifacts, "documents-desktop.png"),
@@ -788,6 +789,7 @@ try {
     await memberPage
       .getByRole("button", { name: "登录工作空间", exact: true })
       .click();
+    await memberPage.getByRole("link", { name: "文件管理", exact: true }).click();
     await memberPage
       .getByRole("button", { name: "默认工作空间验收.txt", exact: false })
       .click();
@@ -799,7 +801,7 @@ try {
     );
     const memberOpened = memberContext.waitForEvent("page");
     await memberPage
-      .getByRole("link", { name: "打开只读预览", exact: true })
+      .getByRole("link", { name: "打开文档", exact: true })
       .click();
     const viewer = await memberOpened;
     await viewer
@@ -813,6 +815,7 @@ try {
       "member login lists only shared files and opens a real read-only editor",
     );
     assert.equal(blocked.length, 0);
+    await verifySharing({ call, admin, fileId: browserFileId, base, browser, ownerPage: page, artifacts, checks, restrictNetwork });
     await browser.close();
     browser = null;
   }

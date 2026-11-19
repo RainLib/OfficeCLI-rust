@@ -1,11 +1,14 @@
-import { Heading2, Languages, Layers2, List, Pilcrow, Plus, Sparkles, WandSparkles, X } from 'lucide-react'
+import { WorkspaceAgentProvider } from './WorkspaceAgent.tsx'
+import { Heading2, Languages, List, Pilcrow, Sparkles, WandSparkles } from 'lucide-react'
 import { LeftPanelShell } from './LeftPanelShell.tsx'
-import { WorkspaceLibrary, FormatIcon } from './WorkspaceLibrary.tsx'
-import { HostIntegrationBoundary } from './HostIntegration.tsx'
+import { WorkspaceLibrary } from './WorkspaceLibrary.tsx'
+import { DocumentTabs } from './DocumentTabs.tsx'
+import { HostIntegrationBoundary, permits } from './HostIntegration.tsx'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
+import { Selection } from '@tiptap/extensions'
 import { BubbleMenu } from '@tiptap/react/menus'
 import { boundedCollaboration } from './boundedCollaboration.ts'
 import { keepHistory, type TableHistoryStep, type TableHistoryRequest } from './editHistory.ts'
@@ -34,8 +37,11 @@ import { createSemanticResources } from './semanticResources.ts'
 import { WordPagePreview } from './WordPagePreview.tsx'
 import { collaborationCheckpoint } from './collaborationCheckpoint.ts'
 import { rebindCollaboration } from './rebindCollaboration.ts'
-import { authenticateWorkspaceTab, readWorkspaceSession, saveWorkspaceSession, type SavedTab } from './workspaceSession.ts'
+import { authenticateWorkspaceTab, maxRecentTabs, maxWorkspaceTabs, readWorkspaceSession, saveWorkspaceSession, type SavedTab, type TabGroup } from './workspaceSession.ts'
 import { CanvasZoomProvider, CanvasViewport } from './CanvasZoom.tsx'
+import { tabStateKey } from './tabState.ts'
+import { useEmbeddedTextSelection } from './embedSelection'
+import { useDocumentTabSelection } from './useDocumentTabSelection.ts'
 import { DocumentViewProvider, useDocumentViewState } from './DocumentViewState.tsx'
 import { RevisionWorkspace } from './RevisionWorkspace.tsx'
 import './style.css'
@@ -44,11 +50,17 @@ import './revision-workspace.css'
 import './workspace-appearance.css'
 import './panel-shells.css'
 import { AppearanceProvider, AppearanceSelect, useAppearance } from './Appearance.tsx'
+import { DocumentPanelTools } from './DocumentPanelTools.tsx'
+import { WorkspacePanel } from './WorkspacePanel.tsx'
 import { WorkspaceDrawers } from './WorkspaceDrawers.tsx'
 import { useAdminConnection } from './adminConnection.ts'
-import { WorkflowWorkspaceProvider } from './WorkflowWorkspace.tsx'
+import { WorkflowWorkspaceProvider, useWorkflowPreparation } from './WorkflowWorkspace.tsx'
+import { ResourceWorkspaceProvider, useResourceNavigation } from './resources/ResourceWorkspace.tsx'
+import { SelectionTransferProvider, useSelectionTransferWorkspace, useTransferNavigation } from './SelectionTransferWorkspace.tsx'
+import { captureDocumentTransfer, decodeTransferLink, locateDocumentTransfer, supportsTransfer } from './selectionTransfer.ts'
 
 const ImageWorkspace = lazy(() => import('./ImageWorkspace.tsx').then(module => ({ default: module.ImageWorkspace })))
+const CanvasWorkspace = lazy(() => import('./canvas/CanvasWorkspace.tsx').then(module => ({ default: module.CanvasWorkspace })))
 const UniverViewer = lazy(() => import('./UniverViewer.tsx').then(module => ({ default: module.UniverViewer })))
 
 const palette = ['#d84a54', '#3478c0', '#9a5abb', '#13866a', '#d17d20', '#7b65d8']
@@ -90,7 +102,7 @@ function rememberedConnection(key: string) {
 }
 
 export function App() {
-  return <AppearanceProvider persist><WorkspaceApp /></AppearanceProvider>
+  return <AppearanceProvider persist localControls={false}><WorkspaceApp /></AppearanceProvider>
 }
 
 function WorkspaceApp() {
@@ -99,10 +111,51 @@ function WorkspaceApp() {
   const [savedWorkspace] = useState(readWorkspaceSession)
   const [restoringWorkspace, setRestoringWorkspace] = useState(!!savedWorkspace?.tabs.length)
   const [unavailableTabs, setUnavailableTabs] = useState<Array<SavedTab & { error: string }>>([])
-  const [documentId, setDocumentId] = useState(() => rememberedConnection('hcd-document'))
+  const [linkedDocument] = useState(()=>new URLSearchParams(location.search).get('doc-id') || '')
+  const [documentId, setDocumentId] = useState(() => linkedDocument || rememberedConnection('hcd-document'))
   const [token, setToken] = useState(() => rememberedConnection('hcd-token'))
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeDocument, setActiveDocument] = useState<string | null>(null)
+  const [pinnedTabs, setPinnedTabs] = useState(() => savedWorkspace?.pinned || [])
+  const [recentTabs, setRecentTabs] = useState(() => savedWorkspace?.recent || [])
+  const [savingTabs, setSavingTabs] = useState<string[]>([])
+  const [tabGroups, setTabGroups] = useState(() => savedWorkspace?.groups || [])
+  const recentActivity = useRef<string[]>([])
+  const tabStack = useRef<HTMLDivElement>(null)
+  const foreground = useRef(activeDocument)
+  const tabScroll = useRef(new Map<string, { viewport: HTMLElement; left: number; top: number }[]>())
+  const displayTabs = useMemo(() => {
+    const grouped = new Set(tabGroups.flatMap(group => group.members))
+    return [
+      ...sessions.filter(session => pinnedTabs.includes(session.documentId)),
+      ...tabGroups.flatMap(group => sessions.filter(session => group.members.includes(session.documentId) && !pinnedTabs.includes(session.documentId))),
+      ...sessions.filter(session => !grouped.has(session.documentId) && !pinnedTabs.includes(session.documentId)),
+    ]
+  }, [sessions, pinnedTabs, tabGroups])
+  const liveWorkspace = useRef({ sessions, unavailableTabs, displayTabs })
+  liveWorkspace.current = { sessions, unavailableTabs, displayTabs }
+  const activate = useCallback((id: string | null) => {
+    const previous = foreground.current
+    if (previous && previous !== id) {
+      const panel = tabStack.current?.querySelector(`[data-document-id="${CSS.escape(previous)}"]`)
+      const scroll = [...(panel?.querySelectorAll<HTMLElement>('.canvas-viewport') || [])]
+        .filter(viewport => !viewport.hidden)
+        .map(viewport => ({ viewport, left: viewport.scrollLeft, top: viewport.scrollTop }))
+      tabScroll.current.set(previous, scroll)
+    }
+    if (id) recentActivity.current = [id, ...recentActivity.current.filter(previous => previous !== id)]
+    setActiveDocument(id)
+  }, [])
+  useLayoutEffect(() => {
+    foreground.current = activeDocument
+    if (activeDocument === null) return
+    for (const { viewport, top, left } of tabScroll.current.get(activeDocument) || []) {
+      if (viewport.isConnected) viewport.scrollTo({ top, left, behavior: 'instant' })
+    }
+    const frame = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
+    return () => cancelAnimationFrame(frame)
+  }, [activeDocument])
+
   const [error, setError] = useState('')
   const [samples, setSamples] = useState<Array<{ id: string; title: string; format: string; mode: string }>>([])
   const [openingSample, setOpeningSample] = useState<string | null>(null)
@@ -120,14 +173,14 @@ function WorkspaceApp() {
         else unavailable.push({ ...savedWorkspace.tabs[index], error: /401:|403:/.test(String(result.reason)) ? '访问已过期或无权限，请重新连接。' : '暂时无法恢复文档，请重试连接。' })
       })
       setSessions(opened); setUnavailableTabs(unavailable)
-      setActiveDocument(opened.some(item => item.documentId === savedWorkspace.activeDocument) ? savedWorkspace.activeDocument : null)
+      activate(linkedDocument ? (opened.some(item=>item.documentId===linkedDocument)?linkedDocument:null) : opened.some(item => item.documentId === savedWorkspace.activeDocument) ? savedWorkspace.activeDocument : null)
       setRestoringWorkspace(false)
     })
     return () => request.abort()
-  }, [savedWorkspace])
+  }, [savedWorkspace, activate])
   useEffect(() => {
-    if (!restoringWorkspace) saveWorkspaceSession([...sessions, ...unavailableTabs], activeDocument)
-  }, [sessions, unavailableTabs, activeDocument, restoringWorkspace])
+    if (!restoringWorkspace) saveWorkspaceSession([...displayTabs, ...unavailableTabs], activeDocument, pinnedTabs, recentTabs, tabGroups)
+  }, [displayTabs, unavailableTabs, activeDocument, restoringWorkspace, pinnedTabs, recentTabs, tabGroups])
   useEffect(() => {
     if (!import.meta.env.DEV) return
     let active = true
@@ -136,10 +189,15 @@ function WorkspaceApp() {
       .catch(() => {})
     return () => { active = false }
   }, [])
-  async function open(id: string, accessToken: string, remember = true, title?: string) {
+  async function open(id: string, accessToken: string, remember = true, title?: string, foreground = true) {
     setError('')
     try {
-      const opened = await authenticateWorkspaceTab({ documentId: id, token: accessToken, title: title || samples.find(sample => sample.id === id.trim())?.title })
+      const opened = await authenticateWorkspaceTab({ documentId: id, token: accessToken, title: title || samples.find(sample => sample.id === id.trim())?.title }, AbortSignal.timeout(15_000))
+      const known = liveWorkspace.current
+      if (known.sessions.length + known.unavailableTabs.length >= maxWorkspaceTabs
+        && ![...known.sessions, ...known.unavailableTabs].some(tab => tab.documentId === opened.documentId)) {
+        throw new Error('已达到标签页上限，请关闭一个文件后再打开。')
+      }
       if (remember) {
         try {
           sessionStorage.setItem('hcd-document', opened.documentId)
@@ -149,7 +207,8 @@ function WorkspaceApp() {
       setUnavailableTabs(previous => previous.filter(item => item.documentId !== opened.documentId))
       setSessions(previous => previous.some(item => item.documentId === opened.documentId)
         ? previous.map(item => item.documentId === opened.documentId ? opened : item) : [...previous, opened])
-      setActiveDocument(opened.documentId)
+      setRecentTabs(previous => previous.filter(tab => tab.documentId !== opened.documentId))
+      if (foreground) activate(opened.documentId)
       return true
     } catch (cause) { setError(String(cause)); return false }
   }
@@ -203,48 +262,101 @@ function WorkspaceApp() {
       setError(`HCD 导入失败：${String(cause)}`)
     }
   }
-  function closeTab(id: string) {
-    if (!window.confirm('关闭此文档标签？请先保存未提交的修改。切换标签可以保留编辑状态。')) return
-    setSessions(previous => previous.filter(item => item.documentId !== id))
-    if (documentId === id) {
+  function assignGroup(ids: string[], groupId: string | null, newName?: string) {
+    const members = ids.filter(id => !pinnedTabs.includes(id))
+    if (!members.length) return
+    setTabGroups(previous => {
+      const groups = previous.map(group => {
+        const remaining = group.members.filter(id => !members.includes(id))
+        return { ...group, members: group.id === groupId ? [...remaining, ...members] : remaining }
+      })
+      if (groupId && newName) groups.push({ id: groupId, name: newName, members, collapsed: false })
+      return groups.filter(group => group.members.length)
+    })
+  }
+
+  function closeTabs(closed: Session[]) {
+    const tabs = liveWorkspace.current.displayTabs
+    const removed = closed.filter(tab => tabs.some(current => current.documentId === tab.documentId && current.token === tab.token))
+    const ids = new Set(removed.map(tab => tab.documentId))
+    if (!ids.size) return
+    const remaining = tabs.filter(tab => !ids.has(tab.documentId))
+    for (const id of ids) tabScroll.current.delete(id)
+    recentActivity.current = recentActivity.current.filter(id => !ids.has(id))
+    const fallback = recentActivity.current.find(id => remaining.some(tab => tab.documentId === id))
+    setSessions(previous => previous.filter(tab => !ids.has(tab.documentId)))
+    setPinnedTabs(previous => previous.filter(id => !ids.has(id)))
+    setTabGroups(previous => previous.map(group => ({ ...group, members: group.members.filter(id => !ids.has(id)) })).filter(group => group.members.length))
+    const recent = removed.map(({ documentId, token, title }) => ({ documentId, token, title }))
+    setRecentTabs(previous => [...recent, ...previous.filter(tab => !ids.has(tab.documentId))].slice(0, maxRecentTabs))
+    setActiveDocument(previous => {
+      if (!previous || !ids.has(previous)) return previous
+      const index = tabs.findIndex(tab => tab.documentId === previous)
+      return fallback || remaining[Math.min(index, remaining.length - 1)]?.documentId || null
+    })
+    if (ids.has(documentId)) {
       setDocumentId(''); setToken('')
       try { sessionStorage.removeItem('hcd-document'); sessionStorage.removeItem('hcd-token') } catch { /* Browser storage is optional. */ }
     }
-    if (activeDocument === id) setActiveDocument(null)
   }
-  const library = <WorkspaceLibrary samples={samples} sessions={sessions} opening={openingSample} onOpen={id => void openSample(id)} onResume={setActiveDocument}>
+
+  const groupOf = (id: string) => tabGroups.find(group => group.members.includes(id))?.id || null
+  function reorderTab(id: string, target: string, after: boolean) {
+    if (id === target || pinnedTabs.includes(id) !== pinnedTabs.includes(target)) return
+    const destination = groupOf(target)
+    if (groupOf(id) !== destination) assignGroup([id], destination)
+    setSessions(previous => {
+      const moved = previous.find(tab => tab.documentId === id)
+      const next = previous.filter(tab => tab.documentId !== id)
+      const index = next.findIndex(tab => tab.documentId === target)
+      if (!moved || index < 0) return previous
+      next.splice(index + Number(after), 0, moved)
+      return next
+    })
+  }
+  function moveTab(id: string, direction: -1 | 1) {
+    const index = displayTabs.findIndex(tab => tab.documentId === id), target = displayTabs[index + direction]
+    if (index >= 0 && target && groupOf(id) === groupOf(target.documentId)) reorderTab(id, target.documentId, direction === 1)
+  }
+  function pinTab(id: string) {
+    if (!pinnedTabs.includes(id)) assignGroup([id], null)
+    setPinnedTabs(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id])
+  }
+  function updateGroup(id: string, update: Partial<Pick<TabGroup, 'name' | 'collapsed'>>) {
+    setTabGroups(previous => previous.map(group => group.id === id ? { ...group, ...update } : group))
+  }
+  const library = <WorkspaceLibrary samples={samples} sessions={sessions} opening={openingSample} onOpen={id => void openSample(id)} onResume={activate}>
     {!!unavailableTabs.length && <section className="manual-access workspace-restore-errors" aria-label={localizeSource(locale, '待恢复的文档')}><h3><LocalText source="待恢复的文档" /></h3>{unavailableTabs.map(item => <div key={item.documentId}><strong>{item.title || item.documentId}</strong><p role="status">{localizeSource(locale, item.error)}</p><button onClick={() => { setDocumentId(item.documentId); setToken(''); document.querySelector<HTMLInputElement>('.manual-access input')?.focus() }}><LocalText source="重新连接" /></button><button onClick={() => void open(item.documentId, item.token, false)}><LocalText source="重试" /></button><button onClick={() => setUnavailableTabs(previous => previous.filter(tab => tab.documentId !== item.documentId))}><LocalText source="移除" /></button></div>)}</section>}
     <section className="manual-access"><p><LocalText source={"输入文档 ID 和短期访问令牌。只读令牌无法提交修改。"} /></p><label><LocalText source={"文档 ID"} /><input value={documentId} onChange={event => setDocumentId(event.target.value)} placeholder="doc-…" /></label><label><LocalText source={"访问令牌"} /><textarea rows={4} value={token} onChange={event => setToken(event.target.value)} placeholder={localizeSource(locale, "粘贴短期令牌")} /></label><button onClick={() => void open(documentId, token)} disabled={!documentId || !token}><LocalText source={"打开文档"} /></button></section>
     <section className="manual-access portable-import"><p><LocalText source={"重新打开HCD 或独立图片。上传令牌用于导入。"} /></p><label><LocalText source={"HCD / 图片文件"} /><input type="file" accept=".hcd,.png,.jpg,.jpeg,.webp" onChange={event => setPortableFile(event.target.files?.[0] ?? null)} /></label><label><LocalText source={"上传令牌"} /><textarea rows={2} value={uploadToken} onChange={event => setUploadToken(event.target.value)} placeholder={localizeSource(locale, "粘贴短期上传令牌")} /></label><button onClick={() => void uploadPortable()} disabled={!portableFile || !uploadToken.trim() || uploadState === '上传中…'}><LocalText source={"导入文档 / 图片"} /></button>{uploadState && <p role="status">{localizeDynamic(locale, uploadState)}</p>}</section>
     {error && <p className="error">{localizeDynamic(locale, error)}</p>}
   </WorkspaceLibrary>
   if (restoringWorkspace) return <div className="hcd-surface multi-document-workspace" data-theme={theme} data-workspace-restoring="true"><p className="embedded-loading" role="status"><LocalText source="正在恢复工作空间…" /></p></div>
-  return <WorkflowWorkspaceProvider sessions={sessions} activate={setActiveDocument}><div className="hcd-surface multi-document-workspace" data-theme={theme} data-workspace-restoring="false">
-    <nav className="document-tabs" aria-label={localizeSource(locale, "已打开的文档")} hidden={!sessions.length}>
-      <button className="tabs-brand" aria-label={localizeSource(locale, '文档工作台')} onClick={() => setActiveDocument(null)}><Layers2 size={21} /><strong>office.</strong></button><button className={activeDocument === null ? 'active open-document-tab' : 'open-document-tab'} aria-label={localizeSource(locale, '打开其他文档')} onClick={() => setActiveDocument(null)}><Plus size={15} /><LocalText source="打开文档" /></button>
-      {sessions.map(item => <div className={`document-tab ${activeDocument === item.documentId ? 'active' : ''}`} key={item.documentId}>
-        <button aria-current={activeDocument === item.documentId ? 'page' : undefined} onClick={() => { setActiveDocument(item.documentId); requestAnimationFrame(() => window.dispatchEvent(new Event('resize'))) }} title={item.documentId}>
-          <FormatIcon format={item.format} size={14} /> <span>{item.title || item.documentId}</span><small>{item.format.toUpperCase()}</small>
-          {item.scope === 'read' && <span> · 只读</span>}
-        </button><button className="close-document-tab" aria-label={`关闭 ${item.documentId}`} onClick={() => closeTab(item.documentId)}><X size={13} /></button>
-      </div>)}
-    </nav>
+  return <WorkflowWorkspaceProvider sessions={sessions} activate={activate}><div className="hcd-surface multi-document-workspace" data-theme={theme} data-workspace-restoring="false"><WorkspaceAgentProvider><ResourceWorkspaceProvider sessions={sessions} activeDocument={activeDocument} activate={activate}>
+    <SelectionTransferProvider defaultUploadToken={uploadToken} register={(result, access, title) => open(result.documentId, access, false, title, false)}>
+    <DocumentTabs sessions={displayTabs} active={activeDocument} pinned={pinnedTabs} recent={recentTabs} groups={tabGroups} activate={activate}
+      pin={pinTab} move={moveTab} reorder={reorderTab} assignGroup={assignGroup} updateGroup={updateGroup}
+      onSaving={setSavingTabs} onClose={closeTabs} reopen={tab => open(tab.documentId, tab.token, false, tab.title)}
+      forget={id => setRecentTabs(previous => previous.filter(tab => tab.documentId !== id))} />
+    <div className="document-tab-stack" ref={tabStack}>
     <div className="document-tab-panel document-library" hidden={activeDocument !== null}>{library}</div>
-    {sessions.map(item => <div className="document-tab-panel" key={item.documentId} hidden={activeDocument !== item.documentId} data-document-id={item.documentId}>
-      <Workspace key={item.documentId} session={item} onOpenDocument={(id, token, title) => void open(id, token, false, title)} onClose={() => setActiveDocument(null)} onEpochChange={epoch => setSessions(previous => previous.map(value => value.documentId === item.documentId ? { ...value, collaborationEpoch: epoch } : value))} />
+    {sessions.map(item => <div className="document-tab-panel" key={item.documentId} hidden={activeDocument !== item.documentId} inert={activeDocument !== item.documentId || savingTabs.includes(item.documentId)} data-document-id={item.documentId}>
+      <Workspace key={item.documentId} session={item} onOpenDocument={(id, token, title) => void open(id, token, false, title)} onClose={() => activate(null)} onEpochChange={epoch => setSessions(previous => previous.map(value => value.documentId === item.documentId ? { ...value, collaborationEpoch: epoch } : value))} />
     </div>)}
-  </div></WorkflowWorkspaceProvider>
+    </div>
+  </SelectionTransferProvider></ResourceWorkspaceProvider></WorkspaceAgentProvider></div></WorkflowWorkspaceProvider>
 }
 
 type WorkspaceProps = { session: Session; onClose: () => void; onEpochChange?: (epoch: number) => void; embedded?: boolean; onOpenDocument?: (id: string, token: string, title?: string) => void }
 export function Workspace(props: WorkspaceProps) {
   const storageKey = `${props.session.apiUrl || ''}:${props.session.documentId}:${props.session.userId || browserUserId()}`
-  return <HostIntegrationBoundary session={props.session}>{effective => <DocumentViewProvider key={storageKey} storageKey={storageKey} initialPreview={effective.scope === 'read'}><CanvasZoomProvider storageKey={storageKey}>
+  return <HostIntegrationBoundary session={props.session}>{effective => <DocumentViewProvider key={JSON.stringify([storageKey, effective.serviceId])} storageKey={storageKey}><CanvasZoomProvider storageKey={storageKey}>
     <AgentActivityLayer session={effective}><EpochWorkspace {...props} session={effective} /></AgentActivityLayer>
   </CanvasZoomProvider></DocumentViewProvider>}</HostIntegrationBoundary>
 }
 
 function EpochWorkspace({ session, onClose, onEpochChange, onOpenDocument, embedded = false }: WorkspaceProps) {
+  if (session.format === 'excalidraw') return <Suspense fallback={<div className="embedded-loading">正在加载自由画布…</div>}><CanvasWorkspace session={session} onClose={onClose} /></Suspense>
   const semantic = ['docx', 'html', 'md', 'txt'].includes(session.format)
   if (['png', 'jpg', 'jpeg', 'webp'].includes(session.format)) return <Suspense fallback={<div className="embedded-loading">正在加载图片工作台…</div>}><ImageWorkspace session={session} onClose={onClose} onOpenDocument={onOpenDocument} /></Suspense>
   const content = semantic ? <SemanticEditor session={session} onClose={onClose} onEpochChange={onEpochChange} embedded={embedded} />
@@ -257,7 +369,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const { locale } = useI18n()
   const resourceSession = useRef(session); resourceSession.current = session
   const resources = useMemo(()=>createSemanticResources(()=>resourceSession.current), [session.documentId])
-  const { preview, setPreview: setReadOnly, focused, setFocused, wrapText, setWrapText, selectedRevision, setSelectedRevision, comparing, setComparing, rightPanel, setRightPanel, activeTab, setActiveTab } = useDocumentViewState()
+  const { focused, setFocused, wrapText, setWrapText, selectedRevision, setSelectedRevision, comparing, setComparing, rightPanel, setRightPanel, activeTab, setActiveTab } = useDocumentViewState()
   const [editorSynced, setEditorSynced] = useState(false)
   const [editorReady, setEditorReady] = useState(false)
   const [tableTextFocused, setTableTextFocused] = useState(false)
@@ -285,13 +397,15 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   const historyActive = selectedRevision !== null
   useEffect(() => () => historyRequest.current?.abort(), [])
   const [error, setError] = useState('')
-  const [menu, setMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; selectedText: string; section?: { from: number; to: number } } | null>(null)
   const [command, setCommand] = useState<{ x: number; y: number } | null>(null)
   const commandTrigger = useRef<(event: KeyboardEvent) => boolean>(() => false)
   const [linkOpen, setLinkOpen] = useState(false)
   const [linkHref, setLinkHref] = useState('')
   const [presence, setPresence] = useState<Array<{ id: string; name: string; color: string; connections: number }>>([])
   const { panelOpen, setPanelOpen, requestTask, operations: agentOperations } = useAgentWorkspace()
+  const transfers = useSelectionTransferWorkspace()
+  const canTransfer = !!transfers && supportsTransfer(session)
   const committedAgentRevision = Math.max(-1, ...agentOperations.filter(operation=>operation.status === 'applied').map(operation=>operation.revision))
   const [layout, setLayout] = useState<LayoutPreferences>(() => readLayout(session.documentId))
   function showRightPanel(panel: 'settings' | 'revisions') { setFocused(false); setPanelOpen(false); setRightPanel(panel) }
@@ -345,10 +459,10 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     localEdits.current++
     setStatus('已恢复本地草稿')
   })
-  const readOnly = session.scope === 'read' || preview || !editorSynced || !draftProtection.ready || epochDraft !== null || tableBusy
-  const wordPreview = session.format === 'docx' && (session.scope === 'read' || preview) && editorReady
+  const readOnly = session.scope === 'read' || !editorSynced || !draftProtection.ready || epochDraft !== null || tableBusy
+  const wordPreview = session.format === 'docx' && session.scope === 'read' && editorReady
   const editor = useEditor({
-    extensions: [...schemaExtensions.map(extension => extension.name === 'hcdOpaque' ? opaquePreviewExtension(session, locale, resources) : extension), wordPresentation, boundedCollaboration({ can: direction => historyBridge.current.can(direction), travel: direction => historyBridge.current.travel(direction), edited: () => historyBridge.current.edited() }).configure({ document: ydoc }),
+    extensions: [...schemaExtensions.map(extension => extension.name === 'hcdOpaque' ? opaquePreviewExtension(session, locale, resources) : extension), Selection.configure({ className: 'hcd-inactive-selection' }), wordPresentation, boundedCollaboration({ can: direction => historyBridge.current.can(direction), travel: direction => historyBridge.current.travel(direction), edited: () => historyBridge.current.edited() }).configure({ document: ydoc }),
       CollaborationCaret.configure({ provider, user: localUser, render: user => {
         const cursor = document.createElement('span')
         const samePerson = user.id === localUser.id
@@ -379,6 +493,9 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       if (serialized !== lastOutline.current) { lastOutline.current = serialized; setOutline(headings) }
     },
   }, [session.documentId])
+  const documentViewReady = editorSynced && draftProtection.ready && boundDocument.current === ydoc && revision !== null && !historyActive
+  useEmbeddedTextSelection(session, editor, documentViewReady && !readOnly, revision)
+  const rememberCheckpointSelection = useDocumentTabSelection(session, editor, documentViewReady, revision)
   useEffect(() => {
     if (!editor) return
     const tableFocus = (event: Event) => { setTableTextFocused(true); activeTableBlock.current = (event as CustomEvent<{ blockId: string }>).detail?.blockId || null }
@@ -495,7 +612,8 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     let alive = true
     const refresh = async () => {
       try {
-        const [revisionResponse, authResponse] = await Promise.all([api(session, '/revisions'), api(session, '/auth')])
+        const canViewHistory = permits(session, 'history.view')
+        const [revisionResponse, authResponse] = await Promise.all([api(session, canViewHistory ? '/revisions' : ''), api(session, '/auth')])
         const access = await authResponse.json() as { collaborationEpoch: number }
         if (!alive) return
         if (access.collaborationEpoch !== (session.collaborationEpoch ?? 0)) {
@@ -508,7 +626,8 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
           } else onEpochChange?.(access.collaborationEpoch)
           return
         }
-        const result = await revisionResponse.json() as { headRevision: number; revisions: RevisionItem[]; nextBefore: number | null }
+        const received = await revisionResponse.json()
+        const result = canViewHistory ? received as { headRevision: number; revisions: RevisionItem[]; nextBefore: number | null } : { headRevision: received.revision as number, revisions: [], nextBefore: null }
         if (!alive) return
         setRevision(previous => { if (previous !== null && result.headRevision > previous) setStatus('已保存'); return result.headRevision })
         setHistory(previous => Array.from(new Map([...previous, ...result.revisions].map(item => [item.revision, item])).values()).sort((a, b) => a.revision - b.revision))
@@ -570,7 +689,10 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       }), 'hcd-canonical-ids')
       setRevision(saved.revision)
       resources.remember(saved.projection)
-      if (localVersion === localEdits.current) checkpointedEdits.current = localVersion
+      if (localVersion === localEdits.current) {
+        checkpointedEdits.current = localVersion
+        rememberCheckpointSelection(saved.revision)
+      }
       setStatus('已保存')
       return saved.revision
     } catch (cause) { setStatus('保存失败'); setError(String(cause)); return null }
@@ -731,6 +853,13 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     editor.commands.setTextSelection(item.pos + 1)
     editor.view.domAtPos(item.pos + 1).node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }
+  function explainOutline(event: React.MouseEvent, item: typeof visibleOutline[number]) {
+    if (!canTransfer || historyActive || !editor || item.pos === null) return
+    event.preventDefault()
+    const pos = item.pos
+    const following = outline.find(heading => heading.pos > pos && heading.level <= item.level)
+    setMenu({ x: event.clientX, y: event.clientY, selectedText: '', section: { from: pos + 1, to: following?.pos ?? editor.state.doc.content.size } })
+  }
   async function restoreHistorical() {
     if (!historical || session.scope !== 'write' || restoring) return
     setRestoring(true)
@@ -844,7 +973,22 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     }
     const selectedText = menu?.selectedText || editor.state.doc.textBetween(selection.from, selection.to, '\n')
     setFocused(false)
-    requestTask(task, { ...(blockId ? { blockId } : {}), ...(selectedText ? { selectedText } : {}), format: session.format })
+    const targetVersion = revision !== null && session.collaborationEpoch !== undefined
+      ? { revision, collaborationEpoch: session.collaborationEpoch } : undefined
+    requestTask(task, { ...(blockId ? { blockId } : {}), ...(selectedText ? { selectedText } : {}), format: session.format }, { targetVersion })
+  }
+  const explainOnCanvas: MenuAction = {
+    label: '在白板讲解', icon: <Sparkles size={15} />, accent: true,
+    disabled: !canTransfer || !editor || !editorSynced || historyActive || (!menu?.section && editor.state.selection.empty),
+    action: () => {
+      const epoch = session.collaborationEpoch
+      if (!transfers || !editor || epoch === undefined) return
+      void captureDocumentTransfer(editor, menu?.section?.from, menu?.section?.to).then(selection => {
+        setFocused(false)
+        transfers.begin(session, selection, epoch)
+        setPanelOpen(true)
+      }).catch(cause => setError(String(cause)))
+    },
   }
   commandTrigger.current = event => {
     if (event.key !== '/' || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || readOnly || historyActive || !editor
@@ -853,7 +997,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     setMenu(null); setCommand({ x: point.left, y: point.bottom + 7 })
     return true
   }
-  const agentActions: MenuAction[] = [
+  const agentActions: MenuAction[] = session.hideNativeChat ? [] : [
     { label: '用 Agent 修改…', icon: <Sparkles size={15} />, accent: true, disabled: readOnly || historyActive, action: () => askAgent('请修改当前选中内容：') },
     { label: '润色当前段落', icon: <WandSparkles size={15} />, disabled: readOnly || historyActive, action: () => askAgent('润色当前选中内容；未选中文字时只润色当前段落。保留原意、所有数字、日期和格式。') },
     { label: '翻译为英文', icon: <Languages size={15} />, disabled: readOnly || historyActive, action: () => askAgent('将当前选中内容翻译为英文；未选中文字时只翻译当前段落。保留数字、日期和原有格式。') },
@@ -865,6 +1009,7 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
   ].filter(action => session.format !== 'txt' || !['二级标题', '项目符号'].includes(action.label))
   const actions: MenuAction[] = [
     ...agentActions,
+    ...(canTransfer ? [explainOnCanvas] : []),
     { label: '复制选中内容', separated: true, action: () => { if (editor) void navigator.clipboard.writeText(menu?.selectedText || editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, '\n')).catch(cause => setError(String(cause))) } },
     { label: '粘贴文本', disabled: readOnly, action: () => { if (editor) void navigator.clipboard.readText().then(text => editor.chain().focus().insertContent(text).run()).catch(cause => setError(String(cause))) } },
     { label: '新增段落', disabled: readOnly, separated: true, action: insertEmptyParagraph },
@@ -880,16 +1025,53 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
     { label: '撤销', secondary: true, disabled: readOnly || !editor?.can().undo(), separated: true, action: () => editor?.commands.undo() },
     { label: '重做', secondary: true, disabled: readOnly || !editor?.can().redo(), action: () => editor?.commands.redo() },
   ]
-  return <div data-format={session.format} data-hcd-history={historyActive ? 'true' : undefined} className={`workspace semantic-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(rightPanel || panelOpen) && !focused ? '' : 'right-hidden'} ${focused ? 'focus-mode' : ''}`}>
-    {layout.showHeader && <EditorHeader outlineOpen={layout.showOutline && !focused} onToggleOutline={() => { setFocused(false); setLayoutOption('showOutline', !layout.showOutline || focused) }} session={session} revision={selectedRevision ?? revision} status={historyActive ? '历史只读' : status} activeTab={activeTab}
-      onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} onClose={onClose}
-      onSettings={() => setRightPanel(previous => previous === 'settings' ? null : 'settings')} onSearch={() => setSearchOpen(true)} settingsOpen={rightPanel === 'settings' && !panelOpen && !focused} focused={focused} onFocus={() => setFocused(value => !value)} readOnly={readOnly || historyActive} onReadOnly={value => { if (historyActive) returnToCurrent(); if (session.scope === 'write') setReadOnly(value) }} beforeExport={historyActive ? async () => selectedRevision : save}
+  useResourceNavigation(session, !!editor && editorSynced, async ({ ref, preview, ai }) => {
+    if (!editor || ref.anchor.kind !== 'document') throw new Error('文档编辑器尚未就绪。')
+    if (historyActive) await returnToCurrent()
+    setFocused(false)
+    const blockId = ref.anchor.blockId
+    if (blockId) {
+      let position: number | null = null
+      editor.state.doc.descendants((node, pos) => { if (node.attrs.hcdBlockId === blockId) { position = pos; return false } })
+      if (position === null) throw new Error('引用段落已变化，请刷新白板预览。')
+      editor.commands.setTextSelection(Math.min(position + 1, editor.state.doc.content.size))
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+      const host = editor.view.dom.closest('.workspace')
+      let target = host?.querySelector<HTMLElement>(`[data-hcd-block-id="${CSS.escape(blockId)}"]`)
+      if (!target?.getClientRects().length) for (const frame of host?.querySelectorAll('iframe') || []) {
+        try { const found = frame.contentDocument?.querySelector<HTMLElement>(`[data-hcd-block-id="${CSS.escape(blockId)}"]`); if (found) { target = found; break } } catch { /* Isolated preview. */ }
+      }
+      target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
+    if (ai) requestTask('请结合这处白板引用，继续编辑源文档。', blockId ? { blockId } : undefined, {
+      targetVersion: session.collaborationEpoch === undefined ? undefined : { revision: preview.revision, collaborationEpoch: session.collaborationEpoch },
+    })
+  })
+  useTransferNavigation(session, revision, !!editor && editorSynced && boundDocument.current === ydoc, async location => {
+    if (!editor || location.kind === 'canvas') return
+    if (historyActive) await returnToCurrent()
+    setFocused(false)
+    locateDocumentTransfer(editor, location)
+  })
+  const prepareEdit = async () => {
+        if (epochDraft) throw new Error('请先核对本地草稿。')
+        if (session.hideNativeChat && hasSynced.current && localEdits.current === checkpointedEdits.current) return
+        const version = localEdits.current
+        const savedRevision = await collaborationCheckpoint(provider)
+        if (version === localEdits.current) {
+          checkpointedEdits.current = version
+          rememberCheckpointSelection(savedRevision)
+        }
+      }
+  useWorkflowPreparation(session, prepareEdit)
+  return <div data-format={session.format} data-document-scope={session.scope} data-hcd-history={historyActive ? 'true' : undefined} className={`workspace semantic-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(rightPanel || panelOpen) && !focused ? '' : 'right-hidden'} ${focused ? 'focus-mode' : ''}`}>
+    {layout.showHeader && <EditorHeader session={session} revision={selectedRevision ?? revision} status={historyActive ? '历史只读' : status} onClose={onClose} onSearch={() => setSearchOpen(true)} focused={focused} onFocus={() => setFocused(value => !value)} beforeExport={historyActive ? async () => selectedRevision : save}
       presence={layout.showCollaborators && <details className="presence"><summary aria-label={`${localizeSource(locale, "在线协作者")} · ${presence.length}`}><span className="presence-avatars">{presence.slice(0, 3).map(user => <span key={user.id} className="avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>)}</span><span>{presence.length} <LocalText source={" 人在线"} /></span></summary><div className="presence-menu"><strong><LocalText source={"在线协作者"} /></strong>{presence.map(user => <div key={user.id} className="presence-person"><span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><span>{user.name}{user.id === localUser.id ? localizeSource(locale, '（你）') : ''}</span>{user.connections > 1 && <small>{user.connections} <LocalText source={" 个窗口"} /></small>}</div>)}</div></details>} />}
-    {!layout.showHeader && <button className="floating-settings" aria-label={localizeSource(locale, "界面设置")} aria-expanded={rightPanel === 'settings'} onClick={() => { setFocused(false); setPanelOpen(false); setRightPanel(previous => previous === 'settings' ? null : 'settings') }}><LocalText source={"⚙ 界面设置"} /></button>}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={`${searchVersion}:${selectedRevision ?? 'current'}:${historyLoading}`} />
     <div className="layout editor-layout">
+      <DocumentPanelTools session={session} leftOpen={layout.showOutline && !focused} focused={focused} onExitFocus={() => setFocused(false)} onToggleLeft={() => { setFocused(false); setLayoutOption('showOutline', !layout.showOutline || focused) }} />
       <WorkspaceDrawers leftOpen={layout.showOutline && !focused} rightOpen={!focused && (panelOpen || !!rightPanel)} onCloseLeft={() => setLayoutOption('showOutline', false)} onCloseRight={() => { setPanelOpen(false); setRightPanel(null) }} />
-      <LeftPanelShell session={session} hidden={!layout.showOutline || focused} label="文档目录" onClose={() => setLayoutOption('showOutline', false)} onSearch={() => setSearchOpen(true)} onWorkspace={onClose} onSettings={() => showRightPanel('settings')}><div className="panel-head"><h2><LocalText source="文档大纲" /></h2></div>{visibleOutline.length ? <nav>{visibleOutline.map(item => <button key={item.key} className={`outline-level-${item.level}`} onClick={() => navigateOutline(item)}>{item.text}</button>)}</nav> : <p><LocalText source={historyActive ? historyLoading ? "正在加载历史版本…" : "此版本暂无标题" : "暂无标题。将段落设为标题后会显示在这里。"} /></p>}</LeftPanelShell>
+      <LeftPanelShell session={session} hidden={!layout.showOutline || focused} label="文档目录" onClose={() => setLayoutOption('showOutline', false)} onSearch={() => setSearchOpen(true)} onWorkspace={onClose} onSettings={() => showRightPanel('settings')}><div className="panel-head"><h2><LocalText source="文档大纲" /></h2></div>{visibleOutline.length ? <nav>{visibleOutline.map(item => <button key={item.key} className={`outline-level-${item.level}`} onClick={() => navigateOutline(item)} onContextMenu={event => explainOutline(event, item)}>{item.text}</button>)}</nav> : <p><LocalText source={historyActive ? historyLoading ? "正在加载历史版本…" : "此版本暂无标题" : "暂无标题。将段落设为标题后会显示在这里。"} /></p>}</LeftPanelShell>
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
         <DraftRecovery protection={draftProtection} currentText={editor?.getText() || ''} onError={setError} />
         {epochDraft && <section className="epoch-draft-conflict" role="alert" aria-label={localizeSource(locale, '协同版本变化，草稿已保留')}>
@@ -902,16 +1084,21 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
           }}><LocalText source="下载本地草稿" /></button><button onClick={() => { if (window.confirm(localizeSource(locale, '切换后将关闭这份本地草稿。请确认已下载或复制。'))) onEpochChange?.(epochDraft.epoch) }}><LocalText source="切换到最新版本" /></button>
         </section>}
         {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setActiveTab(tab); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={readOnly || historyActive} format={session.format} />}
-    {layout.showToolbar && !focused && session.scope === 'write' && !preview && !epochDraft && !historyActive && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
+    {layout.showToolbar && !focused && session.scope === 'write' && !epochDraft && !historyActive && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "编辑工具栏")}>
       {session.format !== 'txt' && activeTab === 'home' && <><div className="tool-group"><button onClick={() => editor?.commands.undo()} disabled={readOnly || !editor?.can().undo()}><LocalText source={"↶ 撤销"} /></button><button onClick={() => editor?.commands.redo()} disabled={readOnly || !editor?.can().redo()}><LocalText source={"↷ 重做"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().setParagraph().run()} disabled={readOnly || tableTextFocused}><LocalText source={"正文"} /></button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly || tableTextFocused}><LocalText source={"标题"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBold().run()} disabled={readOnly || tableTextFocused}><LocalText source={"𝐁 加粗"} /></button><button onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={readOnly || tableTextFocused}><LocalText source={"𝑰 斜体"} /></button><button onClick={openLink} disabled={readOnly || tableTextFocused}><LocalText source={"链接"} /></button></div><div className="tool-group"><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly || tableTextFocused}><LocalText source={"项目符号"} /></button><button onClick={() => editor?.chain().focus().toggleOrderedList().run()} disabled={readOnly || tableTextFocused}><LocalText source={"编号"} /></button></div><div className="tool-group"><button onClick={() => moveBlock(-1)} disabled={readOnly || tableTextFocused}><LocalText source={"段落上移"} /></button><button onClick={() => moveBlock(1)} disabled={readOnly || tableTextFocused}><LocalText source={"段落下移"} /></button></div></>}
       {!['txt', 'md'].includes(session.format) && activeTab === 'home' && <BlockFontPicker editor={editor} faces={themeFaces} disabled={readOnly || tableTextFocused || historical !== null} />}
       {session.format !== 'txt' && activeTab === 'insert' && <><div className="tool-group"><button disabled={readOnly || !editor?.can().undo()} onClick={() => editor?.commands.undo()}><LocalText source="↶ 撤销" /></button><button disabled={readOnly || !editor?.can().redo()} onClick={() => editor?.commands.redo()}><LocalText source="↷ 重做" /></button></div><div className="tool-group"><button onClick={insertEmptyParagraph} disabled={readOnly}><LocalText source={"＋ 新增段落"} /></button><InsertTable disabled={readOnly} onPrepare={() => { insertionBlock.current = selectedBlock() }} onInsert={(rows, columns) => void mutateTable({ rows, columns })} /><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()} disabled={readOnly || tableTextFocused}><LocalText source={"插入标题"} /></button><button onClick={() => editor?.chain().focus().toggleBulletList().run()} disabled={readOnly || tableTextFocused}><LocalText source={"插入列表"} /></button></div><div className="tool-group"><button onClick={openLink} disabled={readOnly || tableTextFocused}><LocalText source={"插入链接"} /></button><button onClick={deleteCurrentBlock} disabled={readOnly || tableTextFocused}><LocalText source={"删除段落"} /></button></div></>}
-      {activeTab === 'view' && <>{session.format === 'docx' ? <><label className="document-view-picker"><LocalText source="文档视图" /><select aria-label={localizeSource(locale, '文档视图')} value={preview ? 'pages' : 'continuous'} disabled={tableBusy || !editorSynced} onChange={event => setReadOnly(event.target.value === 'pages')}><option value="continuous">{localizeSource(locale, '连续编辑')}</option><option value="pages">{localizeSource(locale, '分页预览（只读）')}</option></select></label><span className="ribbon-note"><LocalText source="分页查看打印排版，返回连续编辑可继续修改。" /></span></> : <label className="mode"><input type="checkbox" checked={readOnly} disabled={tableBusy || !editorSynced} onChange={event => setReadOnly(event.target.checked)} /><LocalText source={"只读模式"} /></label>}<label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示大纲"} /></label><button onClick={() => showRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
+      {activeTab === 'view' && <><label className="mode"><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /><LocalText source={"显示大纲"} /></label><button onClick={() => showRightPanel('settings')}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><button onClick={() => void save()} disabled={readOnly}><LocalText source={"创建保存点"} /></button><button onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{revision ?? '…'}</span></>}
       {session.format === 'txt' && <div className="tool-group"><button disabled={readOnly || !editor?.can().undo()} onClick={() => editor?.commands.undo()}><LocalText source="↶ 撤销" /></button><button disabled={readOnly || !editor?.can().redo()} onClick={() => editor?.commands.redo()}><LocalText source="↷ 重做" /></button><button aria-pressed={wrapText} onClick={() => setWrapText(value => !value)}><LocalText source="自动换行" /></button><span className="ribbon-note"><LocalText source="纯文本 · 等宽显示" /></span></div>}
       {activeTab !== 'revisions' && <button className="primary save-trigger" onClick={() => void save()} disabled={readOnly}><LocalText source={"保存点"} /></button>}
     </nav>}
-      <CanvasViewport hidden={historyActive}><main hidden={wordPreview && revision !== null} className={`document ${session.format === 'txt' && !wrapText ? 'text-no-wrap' : ''}`} onContextMenu={event => {
+      <CanvasViewport hidden={historyActive} scrollStateKey={documentViewReady ? tabStateKey(session, 'document-scroll') : null}><main hidden={wordPreview && revision !== null} className={`document ${session.format === 'txt' && !wrapText ? 'text-no-wrap' : ''}`} onClickCapture={event => {
+        const link = (event.target instanceof HTMLElement ? event.target.closest('a') : null)?.getAttribute('href')
+        if (!link || !decodeTransferLink(link) || !transfers) return
+        event.preventDefault(); event.stopPropagation()
+        void transfers.openSource(session, link).catch(cause => setError(String(cause)))
+      }} onContextMenu={event => {
         event.preventDefault()
         const selection = window.getSelection()
         const selectedAtPoint = selection && selection.rangeCount > 0 && Array.from(selection.getRangeAt(0).getClientRects()).some(rect =>
@@ -925,21 +1112,17 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
       }}>{themeCss && <style>{themeCss}</style>}{session.format === 'docx' && editor && <WordRunningMargin editor={editor} session={session} kind="header" />}<EditorContent editor={editor} />{session.format === 'docx' && editor && <WordRunningMargin editor={editor} session={session} kind="footer" />}{editor && <BubbleMenu editor={editor} shouldShow={({ state }) => session.format !== 'txt' && !historyActive && !readOnly && !searchOpen && !state.selection.empty} className="selection-menu"><button onClick={() => editor.chain().focus().toggleBold().run()} aria-label={localizeSource(locale, "加粗")}>𝐁</button><button onClick={() => editor.chain().focus().toggleItalic().run()} aria-label={localizeSource(locale, "斜体")}>𝑰</button><button onClick={openLink} aria-label={localizeSource(locale, "设置链接")}>🔗</button></BubbleMenu>}</main>{wordPreview && editor && revision !== null && <WordPagePreview session={session} revision={revision} editor={editor} />}</CanvasViewport>
       {historyActive && <RevisionWorkspace session={session} selected={selectedRevision} historical={historical} current={comparisonCurrent} comparing={comparing} loading={historyLoading || (comparing && !editorSynced)} error={historyError} metadata={revisionMetadata} canRestore={session.scope === 'write' && selectedRevision < (revision ?? 0)} restoring={restoring} onCompare={setComparing} onReturn={returnToCurrent} onRetry={() => void showRevision(selectedRevision)} onRestore={() => void restoreHistorical()} />}
       </section>
-      <AgentPanel beforeRun={async () => {
-        const version = localEdits.current
-        await collaborationCheckpoint(provider)
-        if (version === localEdits.current) checkpointedEdits.current = version
-      }} />
-      {!panelOpen && !focused && rightPanel && <aside className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>{rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div><LocaleSelect /><AppearanceSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示文档目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset><button className="open-revisions" onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button></section>}
+      {!session.hideNativeChat && <AgentPanel beforeRun={prepareEdit} registerPreparation={false} />}
+      {!panelOpen && !focused && rightPanel && <WorkspacePanel side="right" className="workspace-sidebar" aria-label={localizeSource(locale, rightPanel === 'settings' ? '界面设置' : '修订历史')}>{rightPanel === 'settings' && <section className="appearance-panel"><div className="panel-head"><h2><LocalText source={"界面设置"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div><LocaleSelect /><AppearanceSelect /><label><LocalText source={"显示顶部栏"} /><input type="checkbox" checked={layout.showHeader} onChange={event => setLayoutOption('showHeader', event.target.checked)} /></label><label><LocalText source={"显示操作栏"} /><input type="checkbox" checked={layout.showToolbar} onChange={event => setLayoutOption('showToolbar', event.target.checked)} /></label><label><LocalText source={"显示协作者"} /><input type="checkbox" checked={layout.showCollaborators} onChange={event => setLayoutOption('showCollaborators', event.target.checked)} /></label><label><LocalText source={"显示文档目录"} /><input type="checkbox" checked={layout.showOutline} onChange={event => setLayoutOption('showOutline', event.target.checked)} /></label><fieldset><legend><LocalText source={"头部布局"} /></legend><label><input type="radio" name="header-density" checked={layout.compact} onChange={() => setLayoutOption('compact', true)} /><LocalText source={"紧凑"} /></label><label><input type="radio" name="header-density" checked={!layout.compact} onChange={() => setLayoutOption('compact', false)} /><LocalText source={"标准"} /></label></fieldset>{permits(session, 'history.view') && <button className="open-revisions" onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button>}</section>}
         {rightPanel === 'revisions' && <section className="revision-panel"><div className="panel-head"><h2><LocalText source={"◷ 修订历史"} /></h2><button className="panel-close" aria-label={localizeSource(locale, "隐藏右侧栏")} onClick={() => setRightPanel(null)}><CollapseSidebarIcon /></button></div><p><LocalText source="点击版本，在中央预览或与当前内容对比。" /></p>
         <div className="history">{history.slice().reverse().map(item => <button key={item.revision} data-revision={item.revision} aria-pressed={selectedRevision === item.revision} onClick={() => void showRevision(item.revision)} title={item.patchId}><span className="revision-avatar" title={item.authorName || (localizeSource(locale, item.revision === 0 ? '导入' : '作者未记录'))} style={item.authorId ? { background: presenceColor(item.authorId) } : undefined}>{item.authorName?.slice(0, 1) || (item.revision === 0 ? localizeSource(locale, '导入').slice(0, 1) : '?')}</span><span className="revision-detail"><strong>r{item.revision} <small>{item.createdAtEpochMs ? new Date(item.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</small></strong><small>{item.authorName || (localizeSource(locale, item.revision === 0 ? '初始导入' : '作者未记录'))} · {localizeSource(locale, item.revision === 0 ? '导入' : item.patchId?.startsWith('restore-') ? '恢复版本' : item.patchId === 'editor-projection' ? '编辑投影' : '内容更新')}</small><span><LocalText source={"查看版本"} /></span></span></button>)}
           {nextBefore !== null && nextBefore !== undefined && <button onClick={() => void loadOlderRevisions()}><LocalText source={"加载更早的修订"} /></button>}
         </div>
         {historyActive && <button className="return-current" onClick={returnToCurrent}><LocalText source="返回当前" /></button>}
-        </section>}</aside>}
+        </section>}</WorkspacePanel>}
     </div>
     <EditorStatusbar mode={localizeSource(locale, session.format === 'docx' && readOnly && !historyActive ? "分页预览" : "连续视图")} format={session.format} revision={selectedRevision ?? revision} readOnly={readOnly || historyActive} status={historyActive ? '历史只读' : status} draftProtection={session.scope === 'write' ? draftProtection.state.document === ydoc ? draftProtection.state.status : 'loading' : undefined} />
-    {menu && <ContextMenu title="文档选区" x={menu.x} y={menu.y} actions={actions} onClose={() => setMenu(null)} />}
+    {menu && <ContextMenu title="文档选区" x={menu.x} y={menu.y} actions={menu.section ? [explainOnCanvas] : actions} onClose={() => setMenu(null)} />}
     {command && <CommandMenu x={command.x} y={command.y} actions={commandActions} onClose={() => { setCommand(null); editor?.commands.focus() }} />}
     {linkOpen && <div className="hcd-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setLinkOpen(false) }}><div className="hcd-dialog" role="dialog" aria-modal="true" aria-label={localizeSource(locale, "设置链接")}><h2><LocalText source={"设置链接"} /></h2><label><LocalText source={"链接地址"} /><input autoFocus type="url" value={linkHref} onChange={event => setLinkHref(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyLink(); if (event.key === 'Escape') setLinkOpen(false) }} placeholder="https://example.com" /></label><div className="hcd-dialog-actions"><button onClick={() => setLinkOpen(false)}><LocalText source={"取消"} /></button><button className="primary" onClick={applyLink}><LocalText source={"应用链接"} /></button></div></div></div>}
     {error && <ErrorToast message={error} onClose={() => setError('')} />}

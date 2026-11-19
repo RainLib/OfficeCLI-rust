@@ -103,7 +103,7 @@
 .hcd-surface .im-job-history small { color:var(--muted); font-size:10px; }
 .hcd-surface .image-workspace .selected { background:var(--accent-soft); }
 .hcd-surface .image-agent-pointer { position:absolute; pointer-events:none; color:var(--pointer-color); transform:scale(var(--pointer-scale)); transform-origin:0 0; display:flex; align-items:flex-start; gap:2px; transition:opacity .2s; z-index:4; }
-.hcd-surface .image-agent-pointer>span { margin-top:18px; border-radius:6px; background:var(--pointer-color); color:white; white-space:nowrap; font-size:10px; padding:4px 8px; }
+.hcd-surface .image-agent-pointer>.agent-name-chip { margin-top:18px; border-radius:6px; background:var(--pointer-color); color:white; white-space:nowrap; font-size:10px; padding:4px 8px; }
 .hcd-surface .image-crop-selection { position:absolute; border:1px solid white; outline:1px solid #272d3b55; box-shadow:0 0 0 10000px #1116; pointer-events:none; background:linear-gradient(90deg,transparent 33.2%,#ffffff88 33.3%,transparent 33.5%,transparent 66.5%,#ffffff88 66.6%,transparent 66.8%),linear-gradient(0deg,transparent 33.2%,#ffffff88 33.3%,transparent 33.5%,transparent 66.5%,#ffffff88 66.6%,transparent 66.8%); }
 .hcd-surface .image-compare-line { position:absolute; top:0; bottom:0; width:2px; background:white; box-shadow:0 0 3px #1118; pointer-events:none; }
 .hcd-surface .image-workspace .image-compare-line>.image-compare-handle { position:absolute; top:50%; left:-14px; display:grid; place-items:center; background:white; color:#272d3b; border-radius:50%; width:30px; height:30px; transform-origin:center; padding:0; min-height:30px; pointer-events:auto; cursor:ew-resize; touch-action:none; }

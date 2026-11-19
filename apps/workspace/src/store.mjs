@@ -7,6 +7,7 @@ import {
   fsyncSync,
   closeSync,
   renameSync,
+  linkSync,
   unlinkSync,
   existsSync,
   readFileSync,
@@ -48,6 +49,7 @@ export const check = (condition, status, message) => {
 export const operations = [
   "document.view",
   "document.edit",
+  "document.ai",
   "document.publish",
   "document.download",
   "document.export",
@@ -75,8 +77,9 @@ export const publicUser = (user) => ({
   role: user.role,
   disabled: !!user.disabled,
   createdAt: user.created_at,
+  isGuest: !!user.is_guest,
 });
-export function atomic(path, bytes) {
+export function atomic(path, bytes, { exclusive = false } = {}) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
   let fd;
@@ -86,7 +89,11 @@ export function atomic(path, bytes) {
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
-    renameSync(temporary, path);
+    if (exclusive) {
+      // Two simultaneous initializations must never replace the winning identity.
+      linkSync(temporary, path);
+      unlinkSync(temporary);
+    } else renameSync(temporary, path);
     const parent = openSync(dirname(path), "r");
     try {
       fsyncSync(parent);
@@ -168,6 +175,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT, action TEXT NOT NULL, target_id TEXT, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS launches_browser ON launches(browser_hash);
       CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+      CREATE TABLE IF NOT EXISTS shares(file_id TEXT PRIMARY KEY REFERENCES files(id), visibility TEXT NOT NULL CHECK(visibility IN ('private','link','public')), permission TEXT NOT NULL CHECK(permission IN ('read','write')), secret_hash TEXT NOT NULL, secret_cipher TEXT NOT NULL, generation INTEGER NOT NULL, expires INTEGER, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS guest_identities(user_id TEXT PRIMARY KEY REFERENCES users(id), expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS share_grants(user_id TEXT NOT NULL REFERENCES guest_identities(user_id), file_id TEXT NOT NULL REFERENCES files(id), generation INTEGER NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(user_id,file_id));
     `);
     const schema = this.get(
       "SELECT value FROM metadata WHERE key=?",
@@ -232,7 +242,9 @@ export class Store {
   user(id) {
     const user = this.get("SELECT * FROM users WHERE id=?", id);
     check(user && !user.disabled, 403, "用户已停用或不存在。");
-    return user;
+    const guest = this.get("SELECT expires FROM guest_identities WHERE user_id=?", id);
+    check(!guest || guest.expires > now(), 403, "访客身份已过期，请重新打开分享链接。");
+    return { ...user, is_guest: !!guest };
   }
   file(id) {
     check(uuid(id), 400, "文件 ID 无效。");
@@ -241,6 +253,15 @@ export class Store {
     return file;
   }
   permissions(user, file) {
+    const guest = this.get("SELECT expires FROM guest_identities WHERE user_id=?", user.id);
+    if (guest) {
+      const grant = this.get(
+        "SELECT s.permission FROM share_grants g JOIN shares s ON s.file_id=g.file_id WHERE g.user_id=? AND g.file_id=? AND g.generation=s.generation AND g.expires>? AND s.visibility IN ('link','public') AND (s.expires IS NULL OR s.expires>?)",
+        user.id, file.id, now(), now(),
+      );
+      if (!grant || guest.expires <= now() || user.disabled) return [];
+      return ["document.view", "document.copy", ...(grant.permission === "write" ? ["document.edit"] : [])];
+    }
     if (user.role === "admin" || file.owner_id === user.id)
       return [...operations];
     const row = this.get(
@@ -261,13 +282,13 @@ export class Store {
   }
   manage(user, file) {
     check(
-      user.role === "admin" ||
+      !user.is_guest && (user.role === "admin" ||
         file.owner_id === user.id ||
         this.get(
           "SELECT profile FROM acl WHERE file_id=? AND user_id=?",
           file.id,
           user.id,
-        )?.profile === "manager",
+        )?.profile === "manager"),
       403,
       "仅文件负责人或管理员可以管理访问权限。",
     );

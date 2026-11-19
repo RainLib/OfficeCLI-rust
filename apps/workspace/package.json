@@ -11,6 +11,10 @@
     "start": "node cli.mjs start",
     "build": "node scripts/build.mjs",
     "test": "node --test src/*.test.mjs",
-    "test:acceptance": "node scripts/verify.mjs"
+    "test:acceptance": "node scripts/verify.mjs",
+    "test:canvas": "node scripts/verify-canvas.mjs",
+    "test:tenants": "node scripts/verify-tenants.mjs",
+    "test:workbench": "node ../../examples/hdoc/embed-host/verify-workbench.mjs",
+    "test:embed": "node ../../examples/hdoc/embed-host/verify.mjs"
   }
 }

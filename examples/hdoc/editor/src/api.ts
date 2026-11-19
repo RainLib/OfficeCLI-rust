@@ -11,16 +11,27 @@ export type Session = {
   apiUrl?: string
   collabUrl?: string
   userId?: string
+  serviceId?: string
+  openedRevision?: number
   displayName?: string
   collaborationEpoch?: number
   hostIntegration?: boolean
+  hideNativeChat?: boolean
+  canvasLayout?: 'panel' | 'fill'
   operations?: string[]
 }
 
+export class ApiResponseError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(`${status}: ${message}`)
+    this.status = status
+  }
+}
 export async function api(session: Session, route: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
   headers.set('Authorization', `Bearer ${session.accessToken?.() || session.token}`)
-  if ((route === '/patch' || route === '/node-patch' || route === '/node-patch-review') && init.method?.toUpperCase() === 'POST') {
+  if ((route === '/patch' || route === '/node-patch' || route === '/node-patch-review' || route === '/canvas/patch') && init.method?.toUpperCase() === 'POST') {
     const capabilities = await readCapabilities(session)
     if (typeof init.body !== 'string') throw new Error('无法核对编辑内容；本次修改尚未提交。')
     if (route === '/node-patch-review' && (capabilities.nodePatchReview?.protocolVersion !== 'hcd-node-patch-review/1'
@@ -33,6 +44,6 @@ export async function api(session: Session, route: string, init: RequestInit = {
     headers,
   })
   if (response.status === 409) forgetCapabilities(session)
-  if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`)
+  if (!response.ok) throw new ApiResponseError(response.status, await response.text())
   return response
 }

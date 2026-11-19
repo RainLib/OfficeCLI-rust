@@ -1,13 +1,13 @@
 import { AppearanceSelect } from './Appearance.tsx'
 import { useState, type ReactNode } from 'react'
-import { Image as ImageIcon, ArrowRight, ChevronRight, File, FileCode2, Files, FileText, FolderOpen, Layers2, Link2, List, PanelLeftClose, PanelLeftOpen, Presentation, Search, Sheet, Upload } from 'lucide-react'
+import { Image as ImageIcon, ArrowRight, ChevronRight, File, FileCode2, Files, FileText, FolderOpen, Layers2, Link2, List, PanelLeftClose, PanelLeftOpen, Presentation, Search, Shapes, Sheet, Upload } from 'lucide-react'
 import { LocaleSelect, useI18n } from './i18n.tsx'
 import { LocalText, localizeSource } from './sourceLocale.tsx'
 import type { Session } from './api.ts'
 
 export type LibraryDocument = { id: string; title: string; format: string; mode: string }
 export function FormatIcon({ format, size = 18 }: { format: string; size?: number }) {
-  const Icon = ['png', 'jpg', 'jpeg', 'webp'].includes(format.toLowerCase()) ? ImageIcon : format.toLowerCase() === 'xlsx' ? Sheet : format.toLowerCase() === 'pptx' ? Presentation : ['html', 'md', 'markdown'].includes(format.toLowerCase()) ? FileCode2 : format.toLowerCase() === 'pdf' ? File : FileText
+  const Icon = format.toLowerCase() === 'excalidraw' ? Shapes : ['png', 'jpg', 'jpeg', 'webp'].includes(format.toLowerCase()) ? ImageIcon : format.toLowerCase() === 'xlsx' ? Sheet : format.toLowerCase() === 'pptx' ? Presentation : ['html', 'md', 'markdown'].includes(format.toLowerCase()) ? FileCode2 : format.toLowerCase() === 'pdf' ? File : FileText
   return <span className={`format-icon format-${format.toLowerCase()}`}><Icon size={size} strokeWidth={1.6} /></span>
 }
 
@@ -42,7 +42,7 @@ export function WorkspaceLibrary({ samples, sessions, opening, onOpen, onResume,
           <div className={`document-art art-${document.format.toLowerCase()}`} aria-hidden="true"><FormatIcon format={document.format} size={32} /><span>{document.format.toUpperCase()}</span><i /><i /><i /></div>
           <div className="featured-document-info"><FormatIcon format={document.format} /><div><strong>{document.title}</strong><small><LocalText source={document.mode} /></small></div><ArrowRight size={16} /></div>
         </button>)}</div></section>}
-        <div className="library-filterbar"><nav aria-label={localizeSource(locale, '文档格式筛选')}>{['all', 'docx', 'xlsx', 'pptx', 'pdf', 'md', 'html', 'txt', 'png', 'jpg', 'webp'].map(item => <button key={item} aria-pressed={format === item} onClick={() => setFormat(item)}>{item === 'all' ? localizeSource(locale, '全部') : item.toUpperCase()}</button>)}</nav><List size={18} /></div>
+        <div className="library-filterbar"><nav aria-label={localizeSource(locale, '文档格式筛选')}>{['all', 'docx', 'xlsx', 'pptx', 'pdf', 'md', 'html', 'txt', 'png', 'jpg', 'webp', 'excalidraw'].map(item => <button key={item} aria-pressed={format === item} onClick={() => setFormat(item)}>{item === 'all' ? localizeSource(locale, '全部') : item === 'excalidraw' ? '自由画布' : item.toUpperCase()}</button>)}</nav><List size={18} /></div>
         <div className="library-document-list" role="table" aria-label={localizeSource(locale, '文档列表')}><div className="document-list-head" role="row"><span role="columnheader"><LocalText source="名称" /></span><span role="columnheader"><LocalText source="格式" /></span><span role="columnheader"><LocalText source="访问权限" /></span><span /></div>{filtered.map(document => <button role="row" className="library-document-row" key={document.id} onClick={() => openDocument(document.id)} disabled={opening !== null}><span role="cell"><FormatIcon format={document.format} /><strong>{document.title}</strong></span><span role="cell">{document.format.toUpperCase()}</span><span role="cell"><LocalText source={document.mode} /></span><ArrowRight size={16} /></button>)}</div>
         {!filtered.length && <div className="library-empty"><Files size={30} /><h2><LocalText source={query || format !== 'all' ? '没有找到匹配文档' : '在这里开始你的工作'} /></h2><p><LocalText source="连接已有文档，或导入 HCD 文件。" /></p><button onClick={showAccess}><LocalText source="连接文档" /></button></div>}
         <details className="document-access" id="document-access" open={accessOpen || !samples.length} onToggle={event => setAccessOpen(event.currentTarget.open)}><summary><Link2 size={16} /><LocalText source="连接文档 / 导入 HCD" /></summary><div className="access-forms">{children}</div></details>

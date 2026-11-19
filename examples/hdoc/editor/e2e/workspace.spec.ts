@@ -59,6 +59,25 @@ async function open(page: Page, id: string, scope = 'write') {
   await page.getByRole('button',{name:'打开文档',exact:true}).click()
   await expect(page.locator('.document-tab-panel:not([hidden]) .workspace')).toBeVisible({timeout:60_000})
 }
+// Access is granted by credentials; the document UI has no permission switch.
+async function reopenWithScope(page: Page, scope: 'read' | 'write') {
+  const active = page.locator('.document-tab-panel:not([hidden])')
+  const id = (await active.getAttribute('data-document-id'))!
+  const save = active.getByRole('button', { name: '保存点', exact: true })
+  if (scope === 'read' && await save.isVisible() && await save.isEnabled()) {
+    await save.click()
+    await expect(active.locator('.editor-statusbar')).toContainText('已保存')
+  }
+  await page.evaluate(({id, credential}) => {
+    const saved = JSON.parse(sessionStorage.getItem('hcd-editor-workspace-v1')!)
+    saved.tabs = saved.tabs.map((tab: {documentId: string}) => tab.documentId === id ? {...tab, token: credential} : tab)
+    sessionStorage.setItem('hcd-editor-workspace-v1', JSON.stringify(saved))
+  }, {id, credential: token(id, 'browser-user', scope)})
+  await page.reload()
+  await expect(page.locator('[data-workspace-restoring="false"]')).toBeVisible()
+  await expect(active.locator('[data-document-scope]')).toHaveAttribute('data-document-scope', scope)
+}
+
 // Chromium's HTTP offline switch alone can leave existing WebSockets alive.
 // Cut both sides explicitly so these tests cannot recover from a live server
 // room and accidentally call that local-journal recovery.
@@ -969,7 +988,7 @@ test('verified grid caches follow local and remote dependencies without extra wr
   expect(remote.ok(), await remote.text()).toBe(true)
   await copy(9, 0, '8')
   await copy(10, 0, '16')
-  await page.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
+  await expect(page.locator('.mode-switch')).toHaveCount(0)
   await copy(9, 0, '8')
   expect(await canvas.evaluate(element => (window as unknown as { formulaCanvas: Element }).formulaCanvas === element)).toBe(true)
   expect(writes).toBe(1)
@@ -1503,7 +1522,7 @@ test('workspace reload restores multiple tabs, active document, preview and inde
   await expect(page.locator('.hcd-editor-body')).toContainText('restore-text')
   await page.getByRole('button',{name:'放大文档',exact:true}).click()
   await expect(page.locator('.canvas-zoom-value')).toHaveText('110%')
-  await page.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
+  await reopenWithScope(page, 'read')
   await page.getByRole('button',{name:'打开其他文档',exact:true}).click()
   await page.getByPlaceholder('doc-…').fill('restore-pdf')
   await page.getByPlaceholder('粘贴短期令牌',{exact:true}).fill(token('restore-pdf','browser-user'))
@@ -1519,10 +1538,10 @@ test('workspace reload restores multiple tabs, active document, preview and inde
   await expect(active.locator('.canvas-zoom-value')).toHaveText(pdfZoom)
   await page.locator('.document-tab').filter({hasText:'restore-text'}).locator('button').first().click()
   await expect(active.locator('.canvas-zoom-value')).toHaveText('110%')
-  await expect(active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true})).toHaveAttribute('aria-pressed','true')
+  await expect(active.locator('.mode-switch')).toHaveCount(0)
   await expect(active.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','false')
-  page.once('dialog', dialog => dialog.accept())
   await page.getByRole('button',{name:'关闭 restore-pdf',exact:true}).click()
+  await expect(page.locator('.document-tab')).toHaveCount(1)
   await page.reload()
   await expect(page.locator('.document-tab')).toHaveCount(1)
   await expect(page.locator('.document-tab')).toContainText('restore-text')
@@ -1541,7 +1560,7 @@ test('workspace restoration reauthenticates every tab and isolates expired acces
   await expect(page.locator('.document-tab')).toHaveCount(1)
   const active = page.locator('.document-tab-panel:not([hidden])')
   await expect(active.locator('.workspace')).toHaveAttribute('data-format','txt')
-  await expect(active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true})).toBeDisabled()
+  await expect(active.locator('[data-document-scope]')).toHaveAttribute('data-document-scope', 'read')
   await expect(active.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','false')
   await page.getByRole('button',{name:'文档工作台',exact:true}).click()
   const unavailable = page.getByRole('region',{name:'待恢复的文档'})
@@ -1682,7 +1701,7 @@ test('Word table text editing checkpoints shared drafts and preserves source run
   await expect(table.locator('td').first()).toHaveText('ROW 中文🙂00')
   await expect(peer.locator('.hcd-opaque-preview iframe').first().contentFrame().locator('td').first()).toHaveText('ROW 中文🙂00')
   await expect(peer.locator('.hcd-editor-body')).toContainText('HUMAN_DRAFT')
-  await page.getByRole('button', {name:/^(预览|分页预览)$/,exact:true}).click()
+  await reopenWithScope(page, 'read')
   await expect(page.locator('.word-page-preview iframe').contentFrame().locator('body')).toContainText('ROW 中文🙂00')
   const auth = {Authorization:`Bearer ${token(id,'browser-user')}`}
   const response = await fetch(`${apiUrl}/v1/documents/${id}/export/docx?source=true`, {headers:auth})
@@ -1944,7 +1963,7 @@ test('Word typography survives text checkpoints, reload and historical compariso
   await page.screenshot({path:info.outputPath('word-presentation-comparison.png')})
 })
 
-test('Word pagination preserves sections, running regions, table rows and unsaved Unicode drafts', async ({page}, info) => {
+test('Word read access paginates saved Unicode content, sections, running regions and table rows', async ({page}, info) => {
   const id = 'word-pages', headers = {Authorization:`Bearer ${token('word-pages','pages-reader')}`}
   const get = async (path = '') => (await fetch(`${apiUrl}/v1/documents/${id}${path}`, {headers})).json()
   await open(page, id)
@@ -1954,7 +1973,7 @@ test('Word pagination preserves sections, running regions, table rows and unsave
   // Capture a baseline after the collaboration projection is established.
   const before = await get()
   await title.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' DRAFT 🙂 <script>window.injected=true</script>')
-  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
+  await reopenWithScope(page, 'read')
   const iframe = active.locator('.word-page-preview iframe'), body = iframe.contentFrame().locator('body')
   await expect(body).toHaveAttribute('data-hcd-page-count', /^\d+$/)
   const pages = body.locator('.hcd-virtual-page')
@@ -1991,15 +2010,15 @@ test('Word pagination preserves sections, running regions, table rows and unsave
   expect(metrics.fields.length).toBe((await pages.count())*2)
   for(const field of metrics.fields) expect(field.value).toBe(field.kind==='NUMPAGES'?String(await pages.count()):field.page)
   await expect(body).toContainText('DRAFT 🙂 <script>window.injected=true</script>')
-  expect((await get()).revision).toBe(before.revision)
+  expect((await get()).revision).toBeGreaterThan(before.revision)
   await page.screenshot({path:info.outputPath('word-paginated-cover.png')})
-  await active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true}).click()
+  await reopenWithScope(page, 'write')
   await expect(title).toContainText('DRAFT 🙂')
   await active.getByRole('button',{name:'保存点',exact:true}).click()
   await expect.poll(async()=> (await get('/editor')).blocks[0].content.inlines.map((run:{text:string})=>run.text).join('')).toContain('DRAFT 🙂')
   await open(page,id)
   await expect(title).toContainText('DRAFT 🙂')
-  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
+  await reopenWithScope(page, 'read')
   await expect(body).toHaveAttribute('data-hcd-page-count', /^\d+$/)
   await expect(body.locator('.hcd-page-header').first()).toHaveText('FIRST HEADER')
   const download = await page.request.get(`${apiUrl}/v1/documents/${id}/export/docx?source=true`,{headers})
@@ -2018,7 +2037,7 @@ test('Word source grids preserve font metrics, opt-outs, fixed lines and header 
   await expect.poll(()=>runningImage.evaluate(image=>(image as HTMLImageElement).naturalWidth)).toBe(64)
   const ink = await runningImage.evaluate(image=>{const page=image.closest('.word-running-page')!.getBoundingClientRect(),rect=image.getBoundingClientRect();return{top:rect.top-page.top+16,bottom:rect.top-page.top+48,left:rect.left-page.left}})
   expect(ink.left).toBe(0); expect(ink.top).toBeGreaterThanOrEqual(0); expect(ink.bottom).toBeLessThan(60)
-  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
+  await reopenWithScope(page, 'read')
   const body = active.locator('.word-page-preview iframe').contentFrame().locator('body')
   await expect(body).toHaveAttribute('data-hcd-page-count','3')
   const paragraph = (text:string) => body.locator('.hcd-virtual-page-content p').filter({hasText:new RegExp(`^${text}$`)})
@@ -2210,7 +2229,7 @@ test('Word remote edits patch paginated nodes without navigating or resetting sc
   } finally {await client.close()}
 })
 
-test('workspace drawers, focus mode and preview preserve document state', async ({ page }, info) => {
+test('workspace drawers, focus mode and export preserve document state', async ({ page }, info) => {
   await open(page, 'ui-text')
   const active = page.locator('.document-tab-panel:not([hidden])')
   const body = active.locator('.hcd-editor-body')
@@ -2219,7 +2238,8 @@ test('workspace drawers, focus mode and preview preserve document state', async 
   await active.getByRole('button', { name: '收起协作面板', exact: true }).click()
   await expect(active.locator('.panel-dock')).toHaveCount(0)
   const collapsedShell = await active.locator('.content-shell').boundingBox(), layout = await active.locator('.editor-layout').boundingBox()
-  expect(Math.abs(collapsedShell!.width - layout!.width)).toBeLessThan(2)
+  const rails = await active.locator('.workspace-panel-controls:visible').evaluateAll(items => items.reduce((width, element) => width + element.getBoundingClientRect().width, 0))
+  expect(Math.abs(collapsedShell!.width + rails + 2 * 10 - layout!.width)).toBeLessThan(3)
   await active.getByRole('button', { name: '收起工具栏', exact: true }).click()
   await active.getByRole('button', { name: '专注模式', exact: true }).click()
   await expect(active.locator('.content-toolbar')).toHaveCount(0)
@@ -2230,8 +2250,8 @@ test('workspace drawers, focus mode and preview preserve document state', async 
   await active.getByRole('button', { name: '展开左侧栏', exact: true }).click()
   await expect(active.locator('.outline-panel')).toBeVisible()
   await body.click(); await page.keyboard.press('ControlOrMeta+End'); await page.keyboard.insertText(' PREVIEW_PRESERVED')
-  await active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
-  await expect(body).toHaveAttribute('contenteditable', 'false')
+  await expect(active.locator('.mode-switch')).toHaveCount(0)
+  await expect(body).toHaveAttribute('contenteditable', 'true')
   await expect(body).toContainText('PREVIEW_PRESERVED')
   await active.locator('.export-control summary').click()
   await active.getByRole('combobox', { name: '导出格式', exact: true }).selectOption('txt')
@@ -2242,30 +2262,25 @@ test('workspace drawers, focus mode and preview preserve document state', async 
   expect(await exported.text()).toContain('PREVIEW_PRESERVED')
   await active.locator('.export-control summary').click()
   await expect(active.locator('.ribbon')).toHaveCount(0)
-  await expect(active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true })).toHaveAttribute('aria-pressed', 'true')
-  await active.getByRole('button', { name:/^(编辑|连续编辑)$/,exact:true }).click()
+  await expect(active.locator('.mode-switch')).toHaveCount(0)
   await expect(body).toHaveAttribute('contenteditable', 'true')
   await expect(active.getByRole('button', { name: '展开工具栏', exact: true })).toBeVisible()
   await page.screenshot({ path: info.outputPath('restored-workspace.png') })
 })
 
-test('workbook preview keeps its canvas and refuses to discard an unapplied formula', async ({ page }) => {
+test('workbook permissions are explicit and panel actions preserve an unapplied formula', async ({ page }) => {
   await open(page, 'ui-grid')
   const active = page.locator('.document-tab-panel:not([hidden])')
   const canvas = active.locator('canvas:visible').first()
   await expect(canvas).toBeVisible()
   await canvas.evaluate(element => { (window as unknown as { originalGrid: Element }).originalGrid = element })
-  const address = await active.locator('.xlsx-formula-address').innerText()
-  await active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
-  await expect(active.locator('.xlsx-formula-bar input')).toBeDisabled()
-  expect(await canvas.evaluate(element => (window as unknown as { originalGrid: Element }).originalGrid === element)).toBe(true)
-  await expect(active.locator('.xlsx-formula-address')).toHaveText(address)
-  await active.getByRole('button', { name:/^(编辑|连续编辑)$/,exact:true }).click()
+  await expect(active.locator('[data-document-scope]')).toHaveAttribute('data-document-scope', 'write')
+  await expect(active.locator('.mode-switch')).toHaveCount(0)
   await active.locator('.xlsx-formula-bar input').fill('UNAPPLIED_FORMULA_DRAFT')
-  await active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true }).click()
+  await active.getByRole('button',{name:'界面设置',exact:true}).click()
   await expect(active.locator('.xlsx-formula-bar input')).toBeEnabled()
   await expect(active.locator('.xlsx-formula-bar input')).toHaveValue('UNAPPLIED_FORMULA_DRAFT')
-  await expect(active.locator('.toast.error')).toContainText('请先应用当前公式并等待保存完成')
+  expect(await canvas.evaluate(element => (window as unknown as { originalGrid: Element }).originalGrid === element)).toBe(true)
 })
 
 test('all seven formats use the content shell and enforce read-only preview', async ({ page }, info) => {
@@ -2278,8 +2293,8 @@ test('all seven formats use the content shell and enforce read-only preview', as
     await open(page, id, 'read')
     const active = page.locator('.document-tab-panel:not([hidden])')
     await expect(active.locator(content).first()).toBeVisible()
-    await expect(active.getByRole('button', { name:/^(编辑|连续编辑)$/,exact:true })).toBeDisabled()
-    await expect(active.getByRole('button', { name:/^(预览|分页预览)$/,exact:true })).toHaveAttribute('aria-pressed', 'true')
+    await expect(active.locator('[data-document-scope]')).toHaveAttribute('data-document-scope', 'read')
+    await expect(active.locator('.mode-switch')).toHaveCount(0)
     await expect(active.locator('.ribbon')).toHaveCount(0)
     const shell = await active.locator('.content-shell').boundingBox()
     expect(shell!.height).toBeGreaterThan(400)
@@ -2459,7 +2474,7 @@ test('agent commits preserve preview, focus, zoom and the selected historical co
   const client=await agent(id,'View State Agent')
   try {
     const initial=(await call(client,'hcd_read',{document_id:id,resource:'editor'})).data
-    await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
+    await reopenWithScope(page, 'read')
     await active.getByRole('button',{name:'放大文档',exact:true}).click({clickCount:3})
     await expect(active.locator('.canvas-viewport')).toHaveAttribute('data-canvas-zoom','1.3')
     await active.getByRole('button',{name:'专注模式',exact:true}).click()
@@ -2475,7 +2490,7 @@ test('agent commits preserve preview, focus, zoom and the selected historical co
     await expect(active.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','false')
     await expect(active.locator('.workspace')).toHaveClass(/focus-mode/)
     await expect(active.locator('.canvas-viewport')).toHaveAttribute('data-canvas-zoom','1.3')
-    await expect(active.locator('.mode-switch').getByRole('button',{name:/^(预览|分页预览)$/,exact:true})).toHaveAttribute('aria-pressed','true')
+    await expect(active.locator('.mode-switch')).toHaveCount(0)
     await active.getByRole('button',{name:'退出专注模式',exact:true}).click()
     await active.getByRole('button',{name:'修订历史',exact:true}).first().click()
     await active.locator(`.history button[data-revision="${initial.revision}"]`).click()
@@ -2852,7 +2867,7 @@ test('fixed history saves drafts, pins even the latest revision read-only and re
   await expect(active.locator('.fixed-page-hitbox')).toHaveCount(0)
   await expect(active.locator('.ribbon')).toHaveCount(0)
   await expect(active.locator('.revision-preview-title')).toContainText('browser-user')
-  await active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true}).click()
+  await active.locator('.revision-preview-bar').getByRole('button',{name:'返回当前',exact:true}).click()
   await expect(active.locator('.revision-preview-bar')).toHaveCount(0)
   await active.getByRole('button',{name:'插入',exact:true}).click()
   const before=await active.locator('.slide-card').count()
@@ -2910,7 +2925,7 @@ test('fixed snapshot failures can retry and delayed requests cannot replace the 
   await expect(pdf.locator('.workspace')).toHaveAttribute('data-hcd-history','true')
   await expect(pdf.locator('.fixed-pages iframe').first()).toBeVisible()
   await expect(pdf.locator('.fixed-page-hitbox')).toHaveCount(0)
-  await expect(pdf.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true})).toBeDisabled()
+  await expect(pdf.locator('[data-document-scope]')).toHaveAttribute('data-document-scope', 'read')
   await page.screenshot({path:info.outputPath('pdf-history-preview.png')})
 })
 
@@ -2990,7 +3005,7 @@ test('Word high fidelity downloads preserve native parts and match every preview
     await frame.locator('tr').nth(6).locator('td').first().hover()
     await tools.getByRole('button',{name:'在右侧插入列',exact:true}).click()
     await expect(frame.locator('tr').nth(6).locator('td')).toHaveCount(3)
-    await page.getByRole('button',{name:'分页预览',exact:true}).click()
+    await reopenWithScope(page, 'read')
   }
   const word = page.locator('.word-page-preview iframe').contentFrame()
   await expect(word.locator('body')).toHaveAttribute('data-hcd-page-count',/^[1-9]\d*$/)
@@ -3147,7 +3162,7 @@ test('appearance follows the system, persists overrides and preserves the live e
   await page.emulateMedia({colorScheme:'light'})
   await open(page,'ui-text')
   const surface=page.locator('.multi-document-workspace'),active=page.locator('.document-tab-panel:not([hidden])')
-  const body=active.locator('.hcd-editor-body'),picker=active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true})
+  const body=active.locator('.hcd-editor-body'),picker=page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true})
   await expect(body).toBeVisible()
   await body.evaluate(element=>{(window as any).__appearanceEditor=element})
   await expect(surface).toHaveAttribute('data-theme','light')
@@ -3189,7 +3204,7 @@ test('dark workspace keeps all seven document surfaces and native canvas instanc
     const content=active.locator(selector).first()
     await expect(content).toBeVisible()
     await content.evaluate(element=>{(window as any).__themeSurface=element})
-    const theme=active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true})
+    const theme=page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true})
     await theme.selectOption('light');await theme.selectOption('dark')
     await expect(page.locator('.multi-document-workspace')).toHaveAttribute('data-theme','dark')
     expect(await content.evaluate(element=>(window as any).__themeSurface===element)).toBe(true)
@@ -3206,7 +3221,7 @@ test('context menu uses a themed viewport portal with keyboard navigation and fo
   await open(page,'ui-markdown')
   const active=page.locator('.document-tab-panel:not([hidden])'),body=active.locator('.hcd-editor-body')
   await expect(body).toBeVisible()
-  await active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
   await body.click();await page.keyboard.press('ControlOrMeta+Home')
   await active.locator('.document').evaluate(element=>element.dispatchEvent(new MouseEvent('contextmenu',{clientX:1430,clientY:1035,bubbles:true})))
   const menu=page.getByRole('menu',{name:'文档选区',exact:true})
@@ -3229,11 +3244,11 @@ test('context menu uses a themed viewport portal with keyboard navigation and fo
   await expect(menu).toBeVisible();await active.locator('.document-title').click();await expect(menu).toHaveCount(0)
 })
 
-test('mobile drawers dismiss with Escape and a scrim while retaining the composer draft', async ({page}, info) => {
+test('mobile docked panels replace the content column without a scrim and retain the composer draft', async ({page}, info) => {
   await page.setViewportSize({width:390,height:844})
   await open(page,'ui-html')
   const active=page.locator('.document-tab-panel:not([hidden])')
-  await active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
   await active.getByRole('button',{name:'展开左侧栏',exact:true}).click()
   await expect(active.locator('.outline-panel')).toBeVisible()
   await expect(active.getByRole('button',{name:'收起左侧面板',exact:true})).toBeFocused()
@@ -3246,7 +3261,10 @@ test('mobile drawers dismiss with Escape and a scrim while retaining the compose
   await active.getByRole('button',{name:'任务设置',exact:true}).click()
   await active.getByRole('combobox',{name:'协同人数',exact:true}).selectOption('3')
   await page.screenshot({animations:'disabled',path:info.outputPath('mobile-drawer-dark.png')})
-  await active.getByRole('button',{name:'关闭侧栏',exact:true}).click({position:{x:3,y:300}})
+  await expect(active.locator('.workspace-drawer-scrim')).toHaveCount(0)
+  await expect(active.locator('.content-shell')).toBeHidden()
+  await active.getByRole('button',{name:'收起协作面板',exact:true}).click()
+  await expect(active.locator('.content-shell')).toBeVisible()
   await expect(active.locator('.agent-activity-panel')).toBeHidden()
   await active.getByRole('button',{name:'展开右侧栏',exact:true}).click()
   await expect(input).toHaveValue('保留这份待发送草稿')
@@ -3258,14 +3276,14 @@ test('inline tables keep canonical appearance in dark mode and reject structural
   const id='table-appearance'
   await open(page,id)
   const active=page.locator('.document-tab-panel:not([hidden])')
-  await active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
   const table=active.locator('.hcd-opaque-preview iframe').first().contentFrame()
   await expect(table.locator('table')).toBeVisible()
   const field=table.locator('[data-hcd-inline-table-text]').first()
   await expect(field).toHaveAttribute('contenteditable','plaintext-only')
   await field.click()
   await expect(active.getByRole('button',{name:'𝐁 加粗',exact:true})).toBeDisabled()
-  await active.locator('.hcd-editor-body > p').first().click()
+  await active.locator('.hcd-editor-body > p').first().click({position:{x:10,y:8}})
   await expect(active.getByRole('button',{name:'𝐁 加粗',exact:true})).toBeEnabled()
   await field.click()
   await expect(field).toHaveCSS('outline-style','none')
@@ -3282,107 +3300,94 @@ test('inline tables keep canonical appearance in dark mode and reject structural
   expect(rejected.ok()).toBe(false)
   const unchanged=await (await page.request.get(`${apiUrl}/v1/documents/${id}/editor`,{headers})).json()
   expect(unchanged).toEqual(projection)
-  // Edit/view switching changes permissions in place, retaining the iframe.
   await field.evaluate(element=>{(window as unknown as {originalInline:Element}).originalInline=element})
-  await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
-  await expect(field).toHaveAttribute('contenteditable','false')
-  await active.getByRole('button',{name:/^(编辑|连续编辑)$/,exact:true}).click()
+  await expect(active.locator('.mode-switch')).toHaveCount(0)
+  const readPage = await page.context().newPage()
+  await open(readPage, id, 'read')
+  await expect(readPage.locator('.hcd-opaque-preview iframe').first().contentFrame().locator('[contenteditable="plaintext-only"]')).toHaveCount(0)
+  await readPage.close()
   await expect(field).toHaveAttribute('contenteditable','plaintext-only')
   expect(await field.evaluate(element=>(window as unknown as {originalInline:Element}).originalInline===element)).toBe(true)
   await page.screenshot({animations:'disabled',path:info.outputPath('table-inline-dark.png')})
 })
 
-test('collapsed sidebars release their entire width and the right toggle follows export',async({page},info)=>{
+test('docked panels never cover the document and restore space without replacing editors',async({page},info)=>{
+  await page.setViewportSize({width:1600,height:1040})
   for(const [id,format,selector] of [
     ['ui-markdown','md','.hcd-editor-body'],['ui-grid','xlsx','.hcd-univer-host canvas[id^="univer-sheet-main-canvas_"]'],['agents-slides','pptx','.fixed-pages iframe'],
   ]) {
     await open(page,id)
     const active=page.locator('.document-tab-panel:not([hidden])'),header=active.locator('.editor-header')
     const surface=active.locator(selector).first(),shell=active.locator('.content-shell'),layout=active.locator('.editor-layout')
+    const left=active.locator('.workspace-left-panel'),right=active.locator('.pen-agent-panel')
     await expect(surface).toBeVisible()
-    // Workbook bootstrapping can replace its temporary render surface. Capture
-    // the canvas only once the adapter has finished loading the document.
     if(format==='xlsx') await expect(header.getByRole('status')).toHaveText('已保存')
-    await surface.evaluate(element=>{(window as any).__drawerCanvas=element})
-    const expectFullWidth=async()=>{
-      const content=await shell.boundingBox(),bounds=await layout.boundingBox()
-      expect(Math.abs(content!.x-bounds!.x)).toBeLessThan(2)
-      expect(Math.abs(content!.width-bounds!.width)).toBeLessThan(2)
-      await expect(active.locator('.panel-dock')).toHaveCount(0)
-    }
-    const expectToggleAfterExport=async()=>{
-      const button=await header.locator('.right-sidebar-toggle').boundingBox(),exp=await header.locator('.export-control>summary').boundingBox()
-      expect(button!.x).toBeGreaterThanOrEqual(exp!.x+exp!.width)
-      await expect(header.locator('.right-sidebar-toggle')).toBeInViewport()
-    }
-    await header.getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
-    await expectToggleAfterExport()
-    await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-expanded-dark.png`)})
-    const initial=await shell.boundingBox(),outline=await active.locator('.outline-panel').boundingBox()
-    await header.getByRole('button',{name:'收起左侧栏',exact:true}).click()
-    await expect(active.locator('.outline-panel')).toBeHidden()
-    await expect(header.locator('.left-sidebar-toggle')).toHaveAttribute('aria-expanded','false')
-    let content=await shell.boundingBox(),bounds=await layout.boundingBox()
-    expect(Math.abs(content!.x-bounds!.x)).toBeLessThan(2)
-    expect(content!.width-initial!.width).toBeGreaterThanOrEqual(outline!.width-1)
-    await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-left-collapsed-dark.png`)})
-    const leftCollapsed=content!,sidebar=await active.locator('.workspace-sidebar:visible').boundingBox()
-    await header.getByRole('button',{name:'收起右侧栏',exact:true}).click()
-    await expect(active.locator('.workspace-sidebar:visible')).toHaveCount(0)
-    await expectFullWidth()
-    expect((await shell.boundingBox())!.width-leftCollapsed.width).toBeGreaterThanOrEqual(sidebar!.width-1)
-    await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-both-collapsed-dark.png`)})
-    await header.getByRole('button',{name:'展开左侧栏',exact:true}).click()
-    content=await shell.boundingBox();bounds=await layout.boundingBox()
-    expect(Math.abs(content!.x+content!.width-bounds!.x-bounds!.width)).toBeLessThan(2)
-    await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-right-collapsed-dark.png`)})
-    await header.getByRole('button',{name:'收起左侧栏',exact:true}).click()
-    await header.getByRole('combobox',{name:'界面主题',exact:true}).selectOption('light')
-    await expectFullWidth()
-    await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-both-collapsed-light.png`)})
-    await header.getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
-    await header.getByRole('button',{name:'界面设置',exact:true}).click()
-    await expect(active.getByRole('complementary',{name:'界面设置',exact:true})).toBeVisible()
-    await header.getByRole('button',{name:'协作',exact:true}).click()
-    await expect(active.locator('.agent-activity-panel')).toBeVisible()
-    await expect(active.getByRole('complementary',{name:'界面设置',exact:true})).toHaveCount(0)
-    await active.getByRole('button',{name:'收起协作面板',exact:true}).click()
-    await expect(active.locator('.workspace-sidebar:visible')).toHaveCount(0)
-    await expectFullWidth()
-    await header.getByRole('button',{name:'展开右侧栏',exact:true}).click()
-    await expect(active.locator('.agent-activity-panel')).toBeVisible()
-    await header.locator('.history-trigger').click()
-    await expect(active.locator('.workspace-sidebar:visible')).not.toHaveClass(/agent-activity-panel/)
-    await header.getByRole('button',{name:'收起右侧栏',exact:true}).click()
-    await expectFullWidth()
-    await header.getByRole('button',{name:'展开右侧栏',exact:true}).click()
-    await expect(active.locator('.workspace-sidebar:visible')).not.toHaveClass(/agent-activity-panel/)
-    const retained=await surface.evaluate(element=>{
-      const original=(window as any).__drawerCanvas as Element
-      return {same:original===element,originalConnected:original.isConnected,originalId:original.id,currentId:element.id}
-    })
-    expect(retained,`${format} canvas after drawer toggles`).toMatchObject({same:true,originalConnected:true})
-    await header.getByRole('button',{name:'收起右侧栏',exact:true}).click()
-    await page.reload()
-    await expect(header.locator('.left-sidebar-toggle')).toHaveAttribute('aria-expanded','false')
-    await expect(header.locator('.right-sidebar-toggle')).toHaveAttribute('aria-expanded','false')
-    await expectFullWidth()
-    await header.getByRole('button',{name:'展开右侧栏',exact:true}).click()
-    await expect(active.locator('.workspace-sidebar:visible')).not.toHaveClass(/agent-activity-panel/)
-    if(format==='md') {
-      await header.getByRole('button',{name:'收起右侧栏',exact:true}).click()
-      for(const width of [1024,820,390]) {
-        await page.setViewportSize({width,height:844})
-        await expectToggleAfterExport()
-        await expectFullWidth()
-        expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
-        await page.screenshot({animations:'disabled',path:info.outputPath(`collapsed-dark-${width}.png`)})
+    await surface.evaluate(element=>{(window as any).__dockedEditor=element})
+    const verifyDock=async()=>{
+      const content=await shell.boundingBox(),host=await layout.boundingBox()
+      for(const panel of [left,right]) if(await panel.isVisible()) {
+        const box=await panel.boundingBox()
+        expect(box!.y).toBeGreaterThanOrEqual(host!.y-1)
+        expect(box!.y+box!.height).toBeLessThanOrEqual(host!.y+host!.height+1)
+        expect(await panel.evaluate(element=>getComputedStyle(element).position)).toBe('static')
+        expect(await panel.evaluate(element=>getComputedStyle(element).boxShadow)).toBe('none')
+        if(panel===left) expect(box!.x+box!.width).toBeLessThanOrEqual(content!.x+1)
+        else expect(box!.x).toBeGreaterThanOrEqual(content!.x+content!.width-1)
       }
-      await page.setViewportSize({width:1440,height:1050})
+      await expect(header.locator('.sidebar-toggle,.settings-trigger,.history-trigger,.properties-trigger')).toHaveCount(0)
+      await expect(header).not.toContainText(/可编辑|可查看/)
     }
+    await expect(left).toBeVisible();await expect(right).toBeVisible();await verifyDock()
+    const leftClose=await left.getByRole('button',{name:'收起左侧面板',exact:true}).boundingBox()
+    const rightClose=await right.getByRole('button',{name:'收起协作面板',exact:true}).boundingBox()
+    expect(leftClose!.x).toBeGreaterThan((await left.boundingBox())!.x+150)
+    expect(rightClose!.x).toBeLessThan((await right.boundingBox())!.x+44)
+    await expect(active.locator('.left-sidebar-toggle')).toBeHidden();await expect(active.locator('.right-sidebar-toggle')).toBeHidden()
+    await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-docked-open-light.png`)})
+    const initial=(await shell.boundingBox())!.width
+    await left.getByRole('button',{name:'收起左侧面板',exact:true}).click()
+    await expect(left).toBeHidden();await expect(active.getByRole('button',{name:'展开左侧栏',exact:true})).toBeVisible()
+    expect((await shell.boundingBox())!.width).toBeGreaterThan(initial+150)
+    await right.getByRole('button',{name:'收起协作面板',exact:true}).click()
+    await expect(right).toBeHidden()
+    const expanded=(await shell.boundingBox())!.width
+    expect(expanded).toBeGreaterThan(initial+450)
+    await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+    await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-docked-closed-dark.png`)})
+    await active.getByRole('button',{name:'展开左侧栏',exact:true}).click()
+    await active.getByRole('button',{name:'展开右侧栏',exact:true}).click()
+    await verifyDock()
+    expect(Math.abs((await shell.boundingBox())!.width-initial)).toBeLessThan(1)
+    expect(await surface.evaluate(element=>(window as any).__dockedEditor===element)).toBe(true)
+    await active.getByRole('button',{name:'界面设置',exact:true}).click()
+    const settings=active.getByRole('complementary',{name:'界面设置',exact:true})
+    await expect(settings).toBeVisible()
+    const close=await settings.getByRole('button',{name:'隐藏右侧栏',exact:true}).boundingBox()
+    expect(close!.x).toBeLessThan((await settings.boundingBox())!.x+52)
+    await settings.getByRole('button',{name:'隐藏右侧栏',exact:true}).click()
+    await active.getByRole('button',{name:'展开右侧栏',exact:true}).click()
+    await expect(settings).toBeVisible()
+    await settings.getByRole('button',{name:'隐藏右侧栏',exact:true}).click()
+    await left.getByRole('button',{name:'收起左侧面板',exact:true}).click()
+    await page.reload()
+    await expect(active.getByRole('button',{name:'展开左侧栏',exact:true})).toBeVisible()
+    await expect(active.getByRole('button',{name:'展开右侧栏',exact:true})).toBeVisible()
+    if(format==='md') for(const width of [1024,820,390]) {
+      await page.setViewportSize({width,height:844})
+      await expect(shell).toBeVisible()
+      expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
+      if(width<=900) {
+        await active.getByRole('button',{name:'展开右侧栏',exact:true}).click()
+        await expect(settings).toBeVisible();await expect(shell).toBeHidden()
+        await expect(active.locator('.workspace-drawer-scrim')).toHaveCount(0)
+        await page.screenshot({animations:'disabled',path:info.outputPath(`docked-panel-${width}.png`)})
+        await settings.getByRole('button',{name:'隐藏右侧栏',exact:true}).click()
+        await expect(shell).toBeVisible()
+      }
+    }
+    await page.setViewportSize({width:1600,height:1040})
   }
 })
-
 
 test('PPT thumbnail drag saves the complete order in one revision with hover actions and undo',async({page},info)=>{
   await open(page,'ppt-panels')
@@ -3422,7 +3427,7 @@ test('PPT thumbnail drag saves the complete order in one revision with hover act
   await cards.nth(1).hover();await active.getByRole('button',{name:'删除幻灯片 2',exact:true}).click()
   await expect(cards).toHaveCount(4)
   await expect.poll(async()=>(await read()).ids).toEqual(after.ids)
-  await active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
   await cards.first().hover()
   await page.screenshot({animations:'disabled',path:info.outputPath('ppt-panels-dark-hover.png')})
   await page.reload();await expect(cards).toHaveCount(4)
@@ -3468,7 +3473,7 @@ test('PPT shape properties follow the design and commit real typography and geom
   await properties.getByRole('spinbutton',{name:'形状 X',exact:true}).fill('90')
   await commit(()=>properties.getByRole('button',{name:'应用布局',exact:true}).click(),'hcd-patch/17')
   await expect(properties.getByRole('spinbutton',{name:'形状 X',exact:true})).toHaveValue('90')
-  await active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+  await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
   await page.screenshot({animations:'disabled',path:info.outputPath('ppt-shape-properties-dark.png')})
   await properties.getByRole('button',{name:'协作',exact:true}).click()
   const drawer=active.locator('.agent-activity-panel')
@@ -3484,8 +3489,10 @@ test('PPT shape properties follow the design and commit real typography and geom
   await page.setViewportSize({width:390,height:844})
   await expect(properties).toBeVisible()
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
-  const toggle=await active.locator('.right-sidebar-toggle').boundingBox(),exp=await active.locator('.export-control>summary').boundingBox()
-  expect(toggle!.x).toBeGreaterThanOrEqual(exp!.x+exp!.width)
+  await expect(active.locator('.right-sidebar-toggle')).toBeHidden()
+  await expect(active.locator('.content-shell')).toBeHidden()
+  const close=await properties.locator('.panel-close').boundingBox(),bounds=await properties.boundingBox()
+  expect(close!.x).toBeLessThan(bounds!.x+52)
   await page.screenshot({animations:'disabled',path:info.outputPath('ppt-properties-mobile-dark.png')})
   await page.keyboard.press('Escape')
   await expect(properties).toBeHidden()
@@ -3493,40 +3500,37 @@ test('PPT shape properties follow the design and commit real typography and geom
 })
 
 test('shared side panels match the latest Pen components across document formats',async({page},info)=>{
-  const design=JSON.parse(readFileSync(resolve(repo,'docs/design/officecli-workspace-v2.pen'),'utf8'))
-  const find=(id:string):any=>{
-    const visit=(node:any):any=>node.id===id?node:(node.children||[]).map(visit).find(Boolean)
-    return design.children.map(visit).find(Boolean)
-  }
-  const leftDesign=find('VpLwm'),rightDesign=find('AUmlC')
+  let sharedMetrics: unknown = null
   await page.setViewportSize({width:1600,height:1040})
   await page.route('**/agent-runs',route=>route.fulfill({json:{available:true,model:'gpt-6.1-sol',runs:[{runId:'panel-design-example',agentId:'panel-agent',name:'Office Agent',task:'检查内容结构，并保留已有格式。',status:'completed',model:'gpt-6.1-sol',result:'已完成内容检查。\n\n- 保留现有文字与格式\n- 调整前可随时定位和核对内容',committedRevisions:[],events:[]}]}}))
   for(const [id,format] of [['ui-markdown','md'],['complex-word','docx'],['ui-grid','xlsx'],['ppt-panels-read','pptx'],['ui-pdf','pdf'],['ui-html','html'],['ui-text','txt']]) {
     await open(page,id)
     const active=page.locator('.document-tab-panel:not([hidden])'),left=active.locator('.workspace-left-panel'),right=active.locator('.pen-agent-panel')
-    await active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('light')
+    await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('light')
     await expect(left).toBeVisible();await expect(right).toBeVisible()
-    const expectShell=async(root:typeof left,mainSelector:string,bottomSelector:string,reference:any)=>{
-      const main=root.locator(mainSelector),bottom=root.locator(bottomSelector)
-      await expect(root).toHaveCSS('background-color','rgba(0, 0, 0, 0)')
-      await expect(root).toHaveCSS('gap',`${reference.gap}px`)
-      await expect(main).toHaveCSS('border-radius',`${reference.children[0].cornerRadius}px`)
-      // Read all rectangles in the same frame, including during drawer entry.
-      const {m,b,r}=await root.evaluate((element,{mainSelector,bottomSelector})=>({
-        m:element.querySelector(mainSelector)!.getBoundingClientRect().toJSON(),
-        b:element.querySelector(bottomSelector)!.getBoundingClientRect().toJSON(),
-        r:element.getBoundingClientRect().toJSON(),
-      }),{mainSelector,bottomSelector})
-      expect(Math.abs(b.y-m.y-m.height-reference.gap)).toBeLessThan(1)
-      expect(Math.abs(b.x-r.x)).toBeLessThan(1);expect(Math.abs(b.width-r.width)).toBeLessThan(1)
+    const metrics=await active.evaluate(element=>{
+      const left=element.querySelector('.workspace-left-panel')!,right=element.querySelector('.pen-agent-panel')!
+      const size=(root:Element,selector:string)=>root.querySelector(selector)!.getBoundingClientRect()
+      return {
+        leftWidth:left.getBoundingClientRect().width,rightWidth:right.getBoundingClientRect().width,
+        leftNavigation:size(left,'.left-panel-navigation').height,leftFooter:size(left,'.left-panel-footer').height,
+        rightNavigation:size(right,'.agent-panel-navigation').height,input:size(right,'.agent-compose-area>form').height,
+        leftGap:getComputedStyle(left).gap,rightGap:getComputedStyle(right).gap,
+        leftRadius:getComputedStyle(left.querySelector('.left-panel-main')!).borderRadius,
+        rightRadius:getComputedStyle(right.querySelector('.agent-panel-main')!).borderRadius,
+      }
+    })
+    expect(metrics.leftRadius).toBe('16px');expect(metrics.rightRadius).toBe('16px')
+    if(sharedMetrics===null)sharedMetrics=metrics
+    else for(const [key,value] of Object.entries(metrics)) {
+      const expected=(sharedMetrics as Record<string, unknown>)[key]
+      if(typeof value==='number') expect(value).toBeCloseTo(expected as number,2)
+      else expect(value).toBe(expected)
     }
-    await expectShell(left,'.left-panel-main','.left-panel-footer',leftDesign)
-    await expectShell(right,'.agent-panel-main','.agent-compose-area',rightDesign)
-    expect((await left.locator('.left-panel-navigation').boundingBox())!.height).toBe(find('mC2NP').height)
-    expect((await left.locator('.left-panel-footer').boundingBox())!.height).toBe(find('f2tJj').height)
-    expect((await right.locator('.agent-panel-navigation').boundingBox())!.height).toBe(find('b4pcp').height)
-    expect((await right.boundingBox())!.width).toBe(rightDesign.width)
-    expect((await right.locator('.agent-compose-area>form').boundingBox())!.height).toBe(find('nrKmJ').height)
+    for(const panel of [left,right]) await expect.poll(async()=>{
+      const canvasBounds=await active.locator('.editor-layout').boundingBox(),bounds=await panel.boundingBox()
+      return !!canvasBounds && !!bounds && bounds.y >= canvasBounds.y - 1 && bounds.y+bounds.height <= canvasBounds.y+canvasBounds.height+1
+    }).toBe(true)
     const input=right.getByRole('textbox',{name:'Agent 任务',exact:true}),feed=right.locator('.agent-task-feed')
     await input.fill(`保留 ${format} 文档的草稿`)
     await feed.evaluate(element=>{(window as any).__sharedChatFeed=element})
@@ -3548,11 +3552,12 @@ test('shared side panels match the latest Pen components across document formats
     const canvas=format==='docx'?'.hcd-editor-body:visible, .word-page-preview iframe:visible':format==='xlsx'?'.hcd-univer-host canvas[id^="univer-sheet-main-canvas_"]':['pptx','pdf'].includes(format)?'.fixed-pages iframe':'.hcd-editor-body'
     await expect(active.locator(canvas).first()).toBeVisible()
     await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-shared-panels-light.png`)})
-    await active.locator('.header-actions').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
-    const darkSurface=design.variables.surface.value.find((entry:any)=>entry.theme.mode==='dark').value
-    const rgb=darkSurface.match(/[a-f\d]{2}/gi).map((part:string)=>parseInt(part,16)).join(', ')
-    await expect(left.locator('.left-panel-main')).toHaveCSS('background-color',`rgb(${rgb})`)
-    await expect(right.locator('.agent-panel-main')).toHaveCSS('background-color',`rgb(${rgb})`)
+    await page.locator('.document-tabs').getByRole('combobox',{name:'界面主题',exact:true}).selectOption('dark')
+    const colors=await active.evaluate(element=>[
+      getComputedStyle(element.querySelector('.left-panel-main')!).backgroundColor,
+      getComputedStyle(element.querySelector('.agent-panel-main')!).backgroundColor,
+    ])
+    expect(colors[0]).toBe(colors[1]);expect(colors[0]).not.toBe('rgb(255, 255, 255)')
     await page.screenshot({animations:'disabled',path:info.outputPath(`${format}-shared-panels-dark.png`)})
     if(format==='pptx') {
       await right.getByRole('button',{name:'展开聊天区域',exact:true}).click()
@@ -3865,24 +3870,21 @@ test('single cell table menus preserve the last row and column and whole-table d
   await expect(body).toContainText('删除后继续编辑')
 })
 
-test('Word view controls expose continuous editing and paginated preview while preserving local edits', async ({page}, info) => {
+test('Word opens directly with granted permissions and read credentials show saved pages', async ({page}, info) => {
   await open(page,'word-view')
-  const body = page.locator('.hcd-editor-body'), modes = page.locator('.mode-switch')
+  const body = page.locator('.hcd-editor-body')
   await expect(body).toHaveAttribute('contenteditable','true')
-  await expect(modes.getByRole('button',{name:'连续编辑',exact:true})).toHaveAttribute('aria-pressed','true')
+  await expect(page.locator('.mode-switch')).toHaveCount(0)
   const paragraph = body.locator(':scope > p').filter({hasText:'COVER TITLE'}).first()
-  const paragraphId = await paragraph.getAttribute('data-hcd-block-id')
-  await paragraph.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' · 本地分页切换')
+  await paragraph.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' · 已授权直接编辑')
   await page.getByRole('button',{name:'视图',exact:true}).click()
-  await expect(page.getByLabel('文档视图',{exact:true})).toHaveValue('continuous')
-  await page.screenshot({path:info.outputPath('word-view-controls.png')})
-  await page.getByLabel('文档视图',{exact:true}).selectOption('pages')
-  await expect(modes.getByRole('button',{name:'分页预览',exact:true})).toHaveAttribute('aria-pressed','true')
-  await expect(page.locator('.word-page-preview iframe').contentFrame().locator('body')).toContainText('本地分页切换')
+  await expect(page.getByLabel('文档视图',{exact:true})).toHaveCount(0)
+  await page.screenshot({path:info.outputPath('word-access-controls.png')})
+  await page.getByRole('button',{name:'开始',exact:true}).click()
+  await reopenWithScope(page, 'read')
+  await expect(page.locator('.word-page-preview iframe').contentFrame().locator('body')).toContainText('已授权直接编辑')
   await expect(body).toHaveAttribute('contenteditable','false')
-  await modes.getByRole('button',{name:'连续编辑',exact:true}).click()
-  await expect(body).toHaveAttribute('contenteditable','true')
-  await expect(body.locator(`[data-hcd-block-id="${paragraphId}"]`)).toContainText('本地分页切换')
+  await expect(page.locator('.mode-switch')).toHaveCount(0)
 })
 
 test('insert ribbon creates blank paragraphs and editable tables that survive collaboration and DOCX export', async ({page, context}, info) => {
@@ -3929,7 +3931,7 @@ test('insert ribbon creates blank paragraphs and editable tables that survive co
   await expect(reloaded.locator('td')).toHaveCount(12); await expect(reloaded.locator('table')).toContainText('新建表格内容')
   await expect(page.locator('.hcd-editor-body')).toHaveAttribute('contenteditable','true')
   await page.screenshot({animations:'disabled',path:info.outputPath('inserted-table-edit.png')})
-  await page.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
+  await reopenWithScope(page, 'read')
   await expect(page.locator('.word-page-preview iframe').contentFrame().locator('body')).toContainText('新建表格内容')
   await peer.close()
 })
@@ -3962,7 +3964,7 @@ test('HTML and Markdown tables insert through guarded structure patches and hide
     await expect(frame.locator('tr')).toHaveCount(3)
     const tools = active.locator('[data-hcd-table-controls]')
     await field.hover(); await expect(tools.getByRole('button',{name:'表格操作',exact:true})).toBeVisible()
-    await active.getByRole('button',{name:/^(预览|分页预览)$/,exact:true}).click()
+    await reopenWithScope(page, 'read')
     await expect(tools).toBeHidden()
     await expect(field).toHaveAttribute('contenteditable','false')
   }

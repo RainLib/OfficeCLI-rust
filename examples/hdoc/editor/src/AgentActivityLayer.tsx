@@ -1,15 +1,22 @@
+import { AgentPointer } from './AgentPointer'
+import { WorkspacePanel } from './WorkspacePanel.tsx'
 import { createPortal } from 'react-dom'
 import { ImageProductionProvider, ImageStudio, ProductionCanvas } from './ImageProduction.tsx'
 import { useDocumentViewState } from './DocumentViewState.tsx'
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Blocks, Crosshair, Expand, GitBranch, History, Layers, MessagesSquare, PanelRightClose, Plus, MousePointer2, ShieldCheck, Sparkles, Check, Circle, LoaderCircle, RotateCcw } from 'lucide-react'
+import { ArrowLeftRight, Blocks, Crosshair, Expand, GitBranch, History, Layers, MessagesSquare, PanelRightClose, Plus, ShieldCheck, Sparkles, Check, Circle, LoaderCircle, RotateCcw } from 'lucide-react'
 import { LocalText, localizeSource } from './sourceLocale.tsx'
 import { useI18n } from './i18n.tsx'
 import { api, type Session } from './api.ts'
 import { operationView, type AgentOperation, type OperationPhase, type OperationTarget, type OperationView } from './agentOperations.ts'
-import { AgentTaskComposer, useAgentTasks, type AgentTasksState } from './AgentTasks.tsx'
+import { useWorkspaceAgentBusy, useWorkspaceAgentRegistration, useWorkspaceAgentTasks } from './WorkspaceAgent.tsx'
+import { agentRunKey, AgentTaskComposer, useAgentTasks, type AgentTasksState } from './AgentTasks.tsx'
+import { AgentCompanionMark } from './AgentCompanionMark.tsx'
 import { AgentWorkflowPanel } from './AgentWorkflowPanel.tsx'
 import { useWorkflowPreparation, useWorkflowWorkspace } from './WorkflowWorkspace.tsx'
+import type { TargetVersion } from './tabState.ts'
+import { SelectionTransferPanel, useSelectionTransferWorkspace, useTransferForm } from './SelectionTransferWorkspace.tsx'
+import { supportsTransfer } from './selectionTransfer.ts'
 
 export type AgentActivity = {
   agentId: string; name: string; status: string; nodeId: string | null; blockId: string | null
@@ -17,8 +24,9 @@ export type AgentActivity = {
   chunkSequence: number | null; message: string; revision: number; collaborationEpoch: number; updatedAtEpochMs: number; operationAtEpochMs?: number
 }
 export type AgentVisual = { key: string; agent: AgentActivity; target: OperationTarget; phase: OperationPhase; pointer: boolean; replay: boolean }
-type AgentWorkspace = { session?: Session; agents: AgentActivity[]; operations: AgentOperation[]; connected: boolean; panelOpen: boolean; setPanelOpen: (open: boolean) => void; locate: (agent: AgentActivity) => boolean; requestTask: (task: string, target?: Record<string, unknown>) => void }
-const AgentContext = createContext<AgentWorkspace>({ agents: [], operations: [], connected: true, panelOpen: false, setPanelOpen: () => {}, locate: () => false, requestTask: () => {} })
+type TaskOptions = { agentCount?: number; targetVersion?: TargetVersion }
+type AgentWorkspace = { busy: boolean; runTask: (task: string, target: Record<string, unknown>, agentCount: number, beforeRun?: () => Promise<unknown>) => Promise<void>; session?: Session; agents: AgentActivity[]; operations: AgentOperation[]; connected: boolean; panelOpen: boolean; setPanelOpen: (open: boolean) => void; locate: (agent: AgentActivity) => boolean; requestTask: (task: string, target?: Record<string, unknown>, options?: TaskOptions) => void }
+const AgentContext = createContext<AgentWorkspace>({ busy: false, runTask: async () => { throw new Error('AI 工作空间尚未就绪。') }, agents: [], operations: [], connected: true, panelOpen: false, setPanelOpen: () => {}, locate: () => false, requestTask: () => {} })
 const PlaybackContext = createContext<{ operations: OperationView[]; visuals: AgentVisual[]; replay: (id: string) => void }>({ operations: [], visuals: [], replay: () => {} })
 const TasksContext = createContext<AgentTasksState | null>(null)
 type PointerPosition = { x: number; y: number; target: string; at: number }
@@ -27,16 +35,19 @@ export function AgentProductionCanvas() { const tasks = useContext(TasksContext)
 export const useAgentWorkspace = () => useContext(AgentContext)
 export const useAgentActivities = () => useAgentWorkspace().agents
 export const useAgentVisuals = () => useContext(PlaybackContext).visuals
-
-export function AgentPanel({ onLocate, beforeRun, targetLabel }: { targetLabel?: (target: OperationTarget) => string; onLocate?: (agent: AgentActivity) => Promise<boolean>; beforeRun?: () => Promise<unknown> }) {
+export function AgentPanel({ onLocate, beforeRun, targetLabel, resourcePanel, registerPreparation = true }: { targetLabel?: (target: OperationTarget) => string; onLocate?: (agent: AgentActivity) => Promise<boolean>; beforeRun?: () => Promise<unknown>; resourcePanel?: ReactNode; registerPreparation?: boolean }) {
   const { session, agents, connected, panelOpen, setPanelOpen, locate } = useAgentWorkspace()
   const workspace = useWorkflowWorkspace()
-  useWorkflowPreparation(session, beforeRun)
+  useWorkflowPreparation(session, beforeRun, registerPreparation)
   const { operations, replay } = useContext(PlaybackContext)
-  const tasks = useContext(TasksContext)
+  const localTasks = useContext(TasksContext)
+  const { tasks, targetBar, openRun } = useWorkspaceAgentTasks(session, localTasks)
   const { locale } = useI18n()
   const { focused } = useDocumentViewState()
-  const [studioTab, setStudioTab] = useState<'chat' | 'images' | 'tools' | 'history' | 'workflow'>('chat')
+  const transfers = useSelectionTransferWorkspace()
+  const { form: transferForm, wasRequested: transferRequested } = useTransferForm(session)
+  const canTransfer = !!transfers && !!session && supportsTransfer(session)
+  const [studioTab, setStudioTab] = useState<'chat' | 'images' | 'tools' | 'history' | 'workflow' | 'transfer'>(() => canTransfer && transferForm ? 'transfer' : 'chat')
   const [workflowMounted, setWorkflowMounted] = useState(false)
   const [chatExpanded, setChatExpanded] = useState(false)
   const panel = useRef<HTMLElement>(null)
@@ -45,6 +56,9 @@ export function AgentPanel({ onLocate, beforeRun, targetLabel }: { targetLabel?:
   useEffect(() => {
     if (requested && requested.documentId === session?.documentId) { setWorkflowMounted(true); setStudioTab('workflow'); setPanelOpen(true) }
   }, [requested, session?.documentId, setPanelOpen])
+  useEffect(() => {
+    if (transferRequested && transferForm?.id) { setStudioTab('transfer'); setPanelOpen(true) }
+  }, [transferRequested, transferForm?.id, setPanelOpen])
   const operationsForRun = (run: { agentId: string; team?: { units: { agentId: string }[] } }) => {
     const members = new Set([run.agentId, ...(run.team?.units.map(unit => unit.agentId) || [])])
     return operations.filter(operation => members.has(operation.agentId))
@@ -72,24 +86,26 @@ export function AgentPanel({ onLocate, beforeRun, targetLabel }: { targetLabel?:
   </>
   const header = <div className="agent-panel-navigation">
     <div className="panel-tool-row" role="toolbar" aria-label={localizeSource(locale, 'Agent 工作区')}>
-      <button className="agent-chat-tab" aria-label={localizeSource(locale, '对话')} aria-pressed={studioTab === 'chat'} onClick={() => setStudioTab('chat')}><MessagesSquare size={16} /><LocalText source="聊天" /></button><span className="panel-tool-spacer" />
+      <button className="agent-chat-tab" aria-label={localizeSource(locale, '对话')} aria-pressed={studioTab === 'chat'} onClick={() => setStudioTab('chat')}><AgentCompanionMark size={20} /><LocalText source="聊天" /></button><span className="panel-tool-spacer" />
       <button aria-label={localizeSource(locale, '任务与工具')} title={localizeSource(locale, '任务与工具')} aria-pressed={studioTab === 'tools'} onClick={() => setStudioTab(previous => previous === 'tools' ? 'chat' : 'tools')}><Blocks size={16} /></button>
-      {workspace && session && !session.hostIntegration && <button aria-label="多文档工作流" title="多文档工作流" aria-pressed={studioTab === 'workflow'} onClick={() => { setWorkflowMounted(true); setStudioTab(previous => previous === 'workflow' ? 'chat' : 'workflow') }}><GitBranch size={16} /></button>}
+      {canTransfer && <button aria-label={localizeSource(locale, '跨文件生成')} title={localizeSource(locale, '跨文件生成')} aria-pressed={studioTab === 'transfer'} onClick={() => setStudioTab(previous => previous === 'transfer' ? 'chat' : 'transfer')}><ArrowLeftRight size={16} /></button>}
+      {workspace && session && !session.hostIntegration && session.format !== 'excalidraw' && <button aria-label="多文档工作流" title="多文档工作流" aria-pressed={studioTab === 'workflow'} onClick={() => { setWorkflowMounted(true); setStudioTab(previous => previous === 'workflow' ? 'chat' : 'workflow') }}><GitBranch size={16} /></button>}
       <button aria-label={localizeSource(locale, '图片与资源')} title={localizeSource(locale, '图片与资源')} aria-pressed={studioTab === 'images'} onClick={() => setStudioTab(previous => previous === 'images' ? 'chat' : 'images')}><Layers size={16} /></button>
       <button aria-label={localizeSource(locale, '对话历史')} title={localizeSource(locale, '对话历史')} aria-pressed={studioTab === 'history'} onClick={() => setStudioTab(previous => previous === 'history' ? 'chat' : 'history')}><History size={16} /></button>
       <button className="panel-close" aria-label={localizeSource(locale, '收起协作面板')} title={localizeSource(locale, '收起协作面板')} onClick={() => setPanelOpen(false)}><PanelRightClose size={16} /></button>
     </div>
-    <div className="agent-session-row"><span><LocalText source="当前文档会话" /></span><button aria-label={localizeSource(locale, '新建任务')} title={localizeSource(locale, '在当前会话新建任务，保留已有记录')} onClick={() => { tasks?.requestTask(''); setStudioTab('chat'); panel.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus() }}><Plus size={12} /><LocalText source="新建" /></button><button aria-label={localizeSource(locale, '展开聊天区域')} title={localizeSource(locale, '展开聊天区域')} aria-pressed={chatExpanded} onClick={() => { setStudioTab('chat'); setChatExpanded(value => !value) }}><Expand size={14} /></button></div>
+    <div className="agent-session-row"><span>墨点 · <LocalText source={workspace ? '工作空间 AI' : '当前文档会话'} /></span><button aria-label={localizeSource(locale, '新建任务')} title={localizeSource(locale, '在当前会话新建任务，保留已有记录')} onClick={() => { tasks?.requestTask(''); setStudioTab('chat'); panel.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus() }}><Plus size={12} /><LocalText source="新建" /></button><button aria-label={localizeSource(locale, '展开聊天区域')} title={localizeSource(locale, '展开聊天区域')} aria-pressed={chatExpanded} onClick={() => { setStudioTab('chat'); setChatExpanded(value => !value) }}><Expand size={14} /></button></div>
   </div>
   const toolContent = <div className="agent-panel-tool-content" hidden={studioTab === 'chat'}>
-    <div hidden={studioTab !== 'images'}><ImageStudio beforeInsert={beforeRun} /></div>
+    <div hidden={studioTab !== 'images'}>{resourcePanel ?? <ImageStudio beforeInsert={beforeRun} />}</div>
     <div hidden={studioTab !== 'tools'}>{activity}</div>
+    {canTransfer && session && (transferForm || studioTab === 'transfer') && <div hidden={studioTab !== 'transfer'}><SelectionTransferPanel session={session} /></div>}
     {workflowMounted && session && <div hidden={studioTab !== 'workflow'}><AgentWorkflowPanel key={`${session.userId}:${session.documentId}`} session={session} active={studioTab === 'workflow' && panelOpen && !focused} requestedId={requested?.documentId === session.documentId ? `${requested.workflowId}` : undefined} /></div>}
-    <div hidden={studioTab !== 'history'} className="agent-session-history">{tasks?.runs.length ? tasks.runs.map(run => <button key={run.runId} onClick={() => { setStudioTab('chat'); requestAnimationFrame(() => panel.current?.querySelector(`[data-agent-run="${CSS.escape(run.runId)}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })) }}><MessagesSquare size={13} /><span>{run.task}</span><small>{run.committedRevisions.length ? `r${run.committedRevisions.at(-1)}` : run.model}</small></button>) : <p><LocalText source="当前文档暂无任务记录" /></p>}</div>
+    <div hidden={studioTab !== 'history'} className="agent-session-history">{tasks?.runs.length ? tasks.runs.map(run => <button key={agentRunKey(run)} onClick={() => { setStudioTab('chat'); requestAnimationFrame(() => panel.current?.querySelector(`[data-agent-run-key="${CSS.escape(agentRunKey(run))}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })) }}><MessagesSquare size={13} /><span>{run.origin && <small>{run.origin.title} · </small>}{run.task}</span><small>{run.committedRevisions.length ? `r${run.committedRevisions.at(-1)}` : run.model}</small></button>) : <p><LocalText source="当前文档暂无任务记录" /></p>}</div>
   </div>
-  return <aside ref={panel} hidden={!panelOpen || focused} className={`workspace-sidebar agent-activity-panel pen-agent-panel${chatExpanded ? ' chat-expanded' : ''}${studioTab === 'workflow' ? ' workflow-open' : ''}`} aria-label={localizeSource(locale, 'Agent 协作动态')}>
-    {tasks ? <AgentTaskComposer state={tasks} beforeRun={beforeRun} header={header} toolPanel={toolContent} onOpenWorkflow={id => { if (session && !workspace?.openWorkflow(session, id)) { setNotice('请在创建计划的文档中打开多文档工作流，核对后继续。'); setStudioTab('tools') } }} renderOperations={run => renderQueues(operationsForRun(run))} externalOperations={renderQueues(operations.filter(operation => !runOperations.has(operation.operationId)))} /> : <div className="agent-panel-main">{header}{toolContent}{renderQueues(operations)}<p className="drawer-footer"><ShieldCheck size={15} /><LocalText source="每次修改保留独立修订" /></p></div>}
-  </aside>
+  return <WorkspacePanel side="right" ref={panel} hidden={!panelOpen || focused} className={`workspace-sidebar agent-activity-panel pen-agent-panel${chatExpanded ? ' chat-expanded' : ''}${studioTab === 'workflow' ? ' workflow-open' : ''}${studioTab === 'transfer' ? ' transfer-open' : ''}`} aria-label={localizeSource(locale, 'Agent 协作动态')}>
+    {tasks ? <AgentTaskComposer state={tasks} beforeRun={beforeRun} targetBar={targetBar} onOpenRun={openRun} header={header} toolPanel={toolContent} onOpenWorkflow={(id, run) => { const source = run?.origin ? workspace?.sessions.find(item => item.documentId === run.origin?.documentId && item.userId === session?.userId) : session; if (source && !workspace?.openWorkflow(source, id)) { setNotice('请在创建计划的文档中打开多文档工作流，核对后继续。'); setStudioTab('tools') } }} renderOperations={run => renderQueues(operationsForRun(run))} externalOperations={renderQueues(operations.filter(operation => !runOperations.has(operation.operationId)))} /> : <div className="agent-panel-main">{header}{toolContent}{renderQueues(operations)}<p className="drawer-footer"><ShieldCheck size={15} /><LocalText source="每次修改保留独立修订" /></p></div>}
+  </WorkspacePanel>
 }
 
 export function agentColor(id: string) {
@@ -126,6 +142,8 @@ function activityTargets(host: HTMLElement, selector: string) {
  * Each workspace owns its own poll, DOM lookup and cursor coordinates. */
 export function AgentActivityLayer({ session, children }: { session: Session; children: ReactNode }) {
   const tasks = useAgentTasks(session)
+  const globalTasks = useWorkspaceAgentRegistration(session, tasks)
+  const busy = useWorkspaceAgentBusy(session, tasks)
   const root = useRef<HTMLDivElement>(null)
   const [agents, setAgents] = useState<AgentActivity[]>([])
   const [operationRecords, setOperationRecords] = useState<AgentOperation[]>([])
@@ -134,11 +152,17 @@ export function AgentActivityLayer({ session, children }: { session: Session; ch
   tasksRef.current = tasks
   const [connected, setConnected] = useState(true)
   const { agentPanelOpen, setAgentPanelOpen } = useDocumentViewState()
-  const panelOpen = !session.hostIntegration && agentPanelOpen
-  const setPanelOpen = useCallback((open: boolean) => { setAgentPanelOpen(!session.hostIntegration && open) }, [session.hostIntegration, setAgentPanelOpen])
-  const requestTask = useCallback((task: string, target?: Record<string, unknown>) => {
-    tasksRef.current.requestTask(task, target); setPanelOpen(true)
-  }, [setPanelOpen])
+  const panelAllowed = !session.hideNativeChat && (!session.hostIntegration || session.format === 'excalidraw' && !!session.operations?.includes('document.ai'))
+  const panelOpen = panelAllowed && agentPanelOpen
+  const setPanelOpen = useCallback((open: boolean) => { setAgentPanelOpen(panelAllowed && open) }, [panelAllowed, setAgentPanelOpen])
+  const requestTask = useCallback((task: string, target?: Record<string, unknown>, options?: TaskOptions) => {
+    if (options?.agentCount !== undefined) tasksRef.current.setAgentCount(options.agentCount)
+    globalTasks?.select(session); tasksRef.current.requestTask(task, target, options?.targetVersion); setPanelOpen(true)
+  }, [setPanelOpen, globalTasks, session])
+  const runTask = useCallback(async (task: string, target: Record<string, unknown>, agentCount: number, beforeRun?: () => Promise<unknown>) => {
+    globalTasks?.select(session); setPanelOpen(true)
+    await tasksRef.current.submitTask({ task, target, agentCount }, beforeRun)
+  }, [globalTasks, session, setPanelOpen])
   useEffect(() => {
     if (session.hostIntegration) return
     let alive = true
@@ -179,7 +203,7 @@ export function AgentActivityLayer({ session, children }: { session: Session; ch
     } else target.element.scrollIntoView({ block: 'center', behavior })
     return true
   }, [])
-  const workspace = useMemo(() => ({ session, agents, operations: operationRecords, connected, panelOpen, setPanelOpen, locate, requestTask }), [session, agents, operationRecords, connected, panelOpen, setPanelOpen, locate, requestTask])
+  const workspace = useMemo(() => ({ session, busy, agents, operations: operationRecords, connected, panelOpen, setPanelOpen, locate, requestTask, runTask }), [session, busy, agents, operationRecords, connected, panelOpen, setPanelOpen, locate, requestTask, runTask])
   return <AgentContext.Provider value={workspace}><TasksContext.Provider value={tasks}><MotionContext.Provider value={positions.current}>
     <AgentPlayback session={session} agents={agents} records={operationRecords}>
       <ImageProductionProvider session={session}><div className="agent-workspace" ref={root}>{children}<CanvasAgentOverlay session={session} host={root} /></div></ImageProductionProvider>
@@ -378,7 +402,7 @@ function AgentCanvasMark({ mark, grid = false, labelOffset = 0 }: { mark: AgentM
     {pointer && <svg ref={trail} className="agent-motion-trail" aria-hidden="true" style={{ color: agentColor(agent.agentId) }}><path ref={path} pathLength="1" /></svg>}
     <div ref={element} className={`agent-region phase-${phase}${pointer ? ` agent-cursor${grid ? ' agent-grid-cursor' : ''}` : ''}`} data-agent-id={pointer ? agent.agentId : undefined} data-agent-region-id={!pointer ? agent.agentId : undefined} data-agent-node-id={mark.target.nodeId || undefined} data-operation-phase={phase} data-agent-grid-row={grid ? mark.target.row : undefined} data-agent-grid-column={grid ? mark.target.column : undefined} data-operation-replay={replay} style={{ left:0, top:0, transform:`translate3d(${x}px,${y}px,0)`, width, height, color:agentColor(agent.agentId) }}>
       {!pointer && (phase === 'active' || phase === 'done') && <i className={phase === 'active' ? 'agent-operation-sweep' : 'agent-complete-glow'} />}
-      {pointer && <><i className="agent-cursor-halo" /><MousePointer2 className="agent-pointer" size={23} fill="currentColor" stroke="white" strokeWidth={1.5} /><span className="agent-pointer-label" style={{transform:`translateY(${-labelOffset}px)`}}>{agent.name}</span></>}
+      {pointer && <><AgentPointer className="agent-pointer" phase={phase === 'pending' ? 'idle' : phase === 'done' ? 'done' : ['idle','planning','reading','locating','pending'].includes(agent.status) ? 'idle' : 'writing'} /><span className="agent-pointer-label agent-name-chip" style={{transform:`translateY(${-labelOffset}px)`}}>{agent.name}</span></>}
     </div>
   </>
 }

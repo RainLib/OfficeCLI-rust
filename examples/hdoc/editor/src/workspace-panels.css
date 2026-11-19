@@ -1,0 +1,71 @@
+/* Panels and their restore rails occupy the current editor's layout. */
+.hcd-surface[data-theme] .workspace.semantic-workspace .layout.editor-layout,
+.hcd-surface .image-workspace .image-body {
+  display:flex; flex-direction:row; position:relative; isolation:isolate;
+  gap:10px; min-width:0; min-height:0; overflow:hidden;
+  background:transparent; border:0; border-radius:0;
+}
+.hcd-surface .workspace-panel-layer { display:contents; }
+.hcd-surface[data-theme] .workspace.semantic-workspace .editor-layout>.content-shell,
+.hcd-surface .image-workspace .image-body>.image-stage-panel {
+  order:2; flex:1 1 0; min-width:0; border-radius:26px; box-shadow:none;
+}
+.hcd-surface[data-theme] .workspace.semantic-workspace .editor-layout>.workspace-panel,
+.hcd-surface .image-workspace .image-body>.workspace-panel {
+  position:static; inset:auto; order:3; z-index:auto; flex:0 0 var(--workspace-panel-width,280px);
+  width:var(--workspace-panel-width,280px); max-width:none; height:100%; max-height:none;
+  min-height:0; min-width:0; margin:0; border:0;
+  border-radius:16px; background:var(--surface); box-shadow:none; animation:none; overflow:auto;
+}
+.hcd-surface[data-theme] .workspace.semantic-workspace .editor-layout>.workspace-panel[data-panel-side=left] {
+  order:1; --workspace-panel-width:204px;
+}
+.hcd-surface[data-theme] .workspace.semantic-workspace .editor-layout>.workspace-left-panel,
+.hcd-surface[data-theme] .workspace.semantic-workspace .editor-layout>.pen-agent-panel {
+  display:flex; gap:10px; padding:0; background:transparent; overflow:hidden;
+}
+.hcd-surface .workspace-panel.pen-agent-panel { --workspace-panel-width:344px; }
+.hcd-surface .workspace-panel.pen-agent-panel.chat-expanded { --workspace-panel-width:480px; }
+.hcd-surface .workspace-panel.image-drawer { --workspace-panel-width:320px; }
+.hcd-surface .workspace-panel[hidden] { display:none!important; }
+.hcd-surface[data-theme] .workspace-panel :is(.left-panel-main,.left-panel-footer,.agent-panel-main) { border-radius:16px; }
+.hcd-surface[data-theme] .workspace-panel.pen-agent-panel .agent-tasks form { border:1px solid var(--line); border-radius:16px; background:var(--surface); }
+.hcd-surface[data-theme] .workspace-panel[data-panel-side=right] .panel-head,
+.hcd-surface[data-theme] .workspace-panel .image-drawer-head { justify-content:flex-start; gap:10px; }
+.hcd-surface[data-theme] .workspace-panel[data-panel-side=right] :is(.panel-head,.panel-tool-row)>.panel-close,
+.hcd-surface[data-theme] .workspace-panel .image-drawer-head>button { order:-1; }
+.hcd-surface[data-theme] .workspace-panel[data-panel-side=right] .panel-head>h2,
+.hcd-surface[data-theme] .workspace-panel .image-drawer-head>h2 { flex:1; }
+.hcd-surface .workspace-panel-controls {
+  position:static; flex:0 0 40px; display:flex; flex-direction:column; align-items:center;
+  gap:6px; padding:10px 4px; border:0; border-radius:16px; background:var(--surface); box-shadow:none;
+}
+.hcd-surface .left-panel-controls { order:0; }
+.hcd-surface .left-panel-controls[data-panel-open=true] { display:none; }
+.hcd-surface .right-panel-controls { order:4; }
+.hcd-surface[data-theme] .workspace-panel-controls button {
+  display:flex; flex:none; align-items:center; justify-content:center; width:30px; height:30px;
+  min-height:0; padding:6px; border:0; border-radius:6px; background:transparent; color:var(--muted);
+}
+.hcd-surface .workspace-panel-controls button[hidden] { display:none; }
+.hcd-surface[data-theme] .workspace-panel-controls button:is(:hover,[aria-pressed=true]) { color:var(--accent); background:var(--accent-soft); }
+.hcd-surface .workspace-panel-controls button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.hcd-surface[data-theme] .workspace.semantic-workspace>header.editor-header { grid-template-columns:minmax(0,1fr) auto; }
+.hcd-surface[data-theme] .workspace.semantic-workspace>header.editor-header .header-actions { grid-column:2; grid-row:1; }
+.hcd-surface .document-visitor-identity { color:var(--muted); white-space:nowrap; }
+/* On phones a panel uses the content column; the editor remains mounted. */
+@media(max-width:900px) {
+  .hcd-surface[data-theme] .workspace.semantic-workspace .layout.editor-layout,
+  .hcd-surface .image-workspace .image-body { gap:6px; }
+  .hcd-surface[data-theme] .workspace.semantic-workspace .editor-layout:has(>.workspace-panel:not([hidden]))>.content-shell,
+  .hcd-surface .image-workspace .image-body:has(>.workspace-panel:not([hidden]))>.image-stage-panel { display:none; }
+  .hcd-surface[data-theme] .workspace.semantic-workspace .editor-layout>.workspace-panel:is(.workspace-sidebar,.workspace-left-panel),
+  .hcd-surface .image-workspace .image-body>.workspace-panel.image-drawer {
+    flex:1 1 0; width:0; max-width:none; border:0; border-radius:16px; box-shadow:none;
+  }
+}
+@media(max-width:760px) {
+  .hcd-surface[data-theme] .workspace.semantic-workspace>header.editor-header { min-height:76px; }
+  .hcd-surface[data-theme] .workspace.semantic-workspace>header.editor-header .document-identity { grid-column:1 / 3; }
+  .hcd-surface[data-theme] .workspace.semantic-workspace>header.editor-header .header-actions { grid-column:1 / 3; grid-row:2; justify-content:flex-end; }
+}

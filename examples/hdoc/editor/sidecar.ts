@@ -17,11 +17,12 @@ function room(name: string): { documentId: string; epoch: number } {
   return { documentId: match[1], epoch }
 }
 
+type Contributor = { id: string; name: string }
 function serviceToken(documentId: string): string {
   const now = Math.floor(Date.now() / 1000)
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
-  // A checkpoint may contain updates from several people. Attribute it to the
-  // collaboration service rather than claiming a single person authored it.
+  // Authors come from engine-authenticated connections, never client awareness.
+  // A checkpoint with several writers retains the collaboration service identity.
   const payload = Buffer.from(JSON.stringify({ doc: documentId, scope: 'write', sub: 'hcd-collaboration', name: 'Collaboration autosave', aud: 'hcd-core', iat: now, exp: now + 60 })).toString('base64url')
   const signed = `${header}.${payload}`
   return `${signed}.${createHmac('sha256', secret).update(signed).digest('base64url')}`
@@ -96,9 +97,9 @@ async function persistRoom(documentName: string, document: Y.Doc) {
   if (!response.ok) throw new Error(`HCD collaboration persistence failed: ${response.status}`)
 }
 
-type Pending = { document: Y.Doc; first: number; last: number; version: number; timer: ReturnType<typeof setTimeout> | null; saving: boolean }
+type Pending = { document: Y.Doc; first: number; last: number; version: number; timer: ReturnType<typeof setTimeout> | null; saving: boolean; authors: Map<string, { name: string; version: number }>; unknownVersion: number }
 const pending = new Map<string, Pending>()
-type HostContext = { token?: string; hostIntegration?: boolean; scope?: string }
+type HostContext = { token?: string; hostIntegration?: boolean; scope?: string; author?: Contributor }
 const hostConnections = new Map<HostContext, ReturnType<typeof setInterval>>()
 
 async function reauthorizeHost(documentName: string, token: string) {
@@ -130,10 +131,12 @@ function announceSave(documentId: string, status: 'editing' | 'saving' | 'saved'
   }))
 }
 
-function schedule(documentId: string, document: Y.Doc) {
+function schedule(documentId: string, document: Y.Doc, author?: Contributor) {
   const now = Date.now()
-  const item = pending.get(documentId) || { document, first: now, last: now, version: 0, timer: null, saving: false }
+  const item: Pending = pending.get(documentId) || { document, first: now, last: now, version: 0, timer: null, saving: false, authors: new Map(), unknownVersion: 0 }
   item.version++
+  if (author) item.authors.set(author.id, { name: author.name, version: item.version })
+  else item.unknownVersion = item.version
   item.document = document
   item.last = now
   if (item.timer) clearTimeout(item.timer)
@@ -172,15 +175,19 @@ async function storeCheckpoint(documentId: string): Promise<number> {
   if (item.timer) clearTimeout(item.timer)
   item.timer = null
   announceSave(documentId, 'saving')
-  const version = item.version
   try {
     const selected = room(documentId)
     const revision = await currentRevision(selected.documentId)
+    // Capture content and contributors in one synchronous turn. Changes that
+    // arrive while fetching the head must be included in both or neither.
+    const version = item.version
+    const authors = [...item.authors]
+    const author = !item.unknownVersion && authors.length === 1 ? { id: authors[0][0], name: authors[0][1].name } : undefined
     const json = TiptapTransformer.fromYdoc(item.document, 'default')
     const blocks = jsonToSnapshot(json)
     const response = await request(selected.documentId, '/checkpoints', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(author ? { 'X-HCD-Checkpoint-Author': Buffer.from(JSON.stringify(author)).toString('base64url') } : {}) },
       body: JSON.stringify({ expectedRevision: revision, blocks }),
     }, selected.epoch)
     if (response.status === 409) {
@@ -200,6 +207,8 @@ async function storeCheckpoint(documentId: string): Promise<number> {
       }, 'hcd-canonical-ids')
     }
     await persistRoom(documentId, item.document)
+    for (const [id, contributor] of item.authors) if (contributor.version <= version) item.authors.delete(id)
+    if (item.unknownVersion <= version) item.unknownVersion = 0
     item.first = Date.now()
     if (item.version === version) await markPending(documentId, false)
     announceSave(documentId, 'saved', saved.revision)
@@ -225,19 +234,20 @@ const server = new Server({
     const selected = room(documentName)
     const response = await fetch(`${api}/v1/documents/${encodeURIComponent(selected.documentId)}/auth`, { headers: { Authorization: `Bearer ${token}` } })
     if (!response.ok) throw new Error('Unauthorized HCD collaboration connection')
-    const access = await response.json() as { scope: string; collaborationEpoch: number; hostIntegration?: boolean }
+    const access = await response.json() as { scope: string; collaborationEpoch: number; hostIntegration?: boolean; userId?: string; displayName?: string }
     if (access.collaborationEpoch !== selected.epoch) throw new Error('Stale HCD collaboration room')
     connectionConfig.readOnly = access.scope !== 'write'
-    return { scope: access.scope, token, hostIntegration: access.hostIntegration === true }
+    return { scope: access.scope, token, hostIntegration: access.hostIntegration === true,
+      author: access.userId ? { id: access.userId, name: access.displayName || access.userId } : undefined }
   },
   async onTokenSync({ documentName, token, connection, context }) {
     const selected = room(documentName)
     const response = await fetch(`${api}/v1/documents/${encodeURIComponent(selected.documentId)}/auth`, { headers: { Authorization: `Bearer ${token}` } })
     if (!response.ok) throw new Error('Expired HCD collaboration token')
-    const access = await response.json() as { scope: string; collaborationEpoch: number }
+    const access = await response.json() as { scope: string; collaborationEpoch: number; userId?: string; displayName?: string }
     if (access.collaborationEpoch !== selected.epoch) throw new Error('Stale HCD collaboration room')
     connection.readOnly = access.scope !== 'write'
-    Object.assign(context as HostContext, { token, scope: access.scope })
+    Object.assign(context as HostContext, { token, scope: access.scope, author: access.userId ? { id: access.userId, name: access.displayName || access.userId } : undefined })
   },
   async connected({ documentName, connection, context }) {
     const host = context as HostContext
@@ -296,14 +306,14 @@ const server = new Server({
       throw error
     }
   },
-  async onChange({ documentName, document, transactionOrigin }) {
+  async onChange({ documentName, document, transactionOrigin, context }) {
     // Hocuspocus invokes onChange without awaiting its promise. A stale room
     // during reconnect must not become an unhandled rejection and terminate
     // collaboration for every document served by this process.
     try {
       if (isFixed(await documentFormat(room(documentName).documentId))) return
       if (transactionOrigin === 'hcd-canonical-ids') return
-      schedule(documentName, document)
+      schedule(documentName, document, (context as HostContext | undefined)?.author)
       await markPending(documentName, true)
     } catch (error) {
       announceSave(documentName, 'failed')

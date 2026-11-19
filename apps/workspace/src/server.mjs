@@ -1,3 +1,6 @@
+import { planWorkbench } from "./workbench-planner.mjs";
+import { createRequire } from "node:module";
+import { createSelectionGrants, supportsSelectionFormat } from "./selection-grants.mjs";
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createHmac, randomUUID } from "node:crypto";
@@ -25,9 +28,11 @@ import {
   unseal,
   documentId,
 } from "./provider.mjs";
+import { Sharing, GUEST_COOKIE } from "./sharing.mjs";
 
 const COOKIE = "officecli_workspace";
 const formats = {
+  excalidraw: "application/vnd.excalidraw+json",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -102,25 +107,39 @@ export function createWorkspaceServer({
   keys,
   adminAssets,
   editorAssets,
+  modelIds = [],
+  workbenchModel = null,
 }) {
-  const provider = createProvider(store, config, keys),
+  const provider = createProvider(store, config, keys, { modelIds }),
     pending = new Map();
-  const cookie = (request) => {
+  const sharing = new Sharing(store, config, keys);
+  const grants = createSelectionGrants({ store, config, engine });
+  const workspace = {
+    tenantId: config.tenantId,
+    name: config.name,
+    workbenchModel: workbenchModel?.name ?? null,
+    appId: config.appId,
+    publicUrl: config.publicUrl,
+    aiEnabled: modelIds.length > 0,
+    selectionMcp: config.selectionMcp === true,
+  };
+  const cookie = (request, name = COOKIE) => {
     const values = (request.headers.cookie || "")
       .split(";")
       .map((s) => s.trim())
-      .filter((s) => s.startsWith(`${COOKIE}=`));
-    return values.length === 1 ? values[0].slice(COOKIE.length + 1) : "";
+      .filter((s) => s.startsWith(`${name}=`));
+    return values.length === 1 ? values[0].slice(name.length + 1) : "";
   };
   function session(request) {
     const value = cookie(request);
-    check(/^[A-Za-z0-9_-]{43}$/.test(value), 401, "请登录工作空间。");
-    const record = store.get(
+    const record = /^[A-Za-z0-9_-]{43}$/.test(value) && store.get(
       "SELECT * FROM sessions WHERE hash=?",
       hash(value),
     );
-    check(record && record.expires > now(), 401, "登录已过期，请重新登录。");
-    return { ...record, user: store.user(record.user_id) };
+    if (record && record.expires > now()) return { ...record, user: store.user(record.user_id) };
+    const guest = sharing.account(cookie(request, GUEST_COOKIE));
+    check(guest, 401, "请登录工作空间，或通过分享链接打开文档。");
+    return guest;
   }
   const admin = (account) =>
     check(account.user.role === "admin", 403, "需要工作空间管理员权限。");
@@ -134,8 +153,8 @@ export function createWorkspaceServer({
       "会话校验已过期，请刷新页面。",
     );
   };
-  const setCookie = (value, age) =>
-    `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${new URL(config.publicUrl).protocol === "https:" ? "; Secure" : ""}`;
+  const setCookie = (value, age, name = COOKIE) =>
+    `${name}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${new URL(config.publicUrl).protocol === "https:" ? "; Secure" : ""}`;
   const send = (response, status, value, headers = {}) => {
     response.writeHead(status, {
       "Content-Type": "application/json; charset=utf-8",
@@ -145,6 +164,7 @@ export function createWorkspaceServer({
     response.end(status === 204 ? undefined : JSON.stringify(value));
   };
   const summary = (user, file) => {
+    const selectionPermissions = config.selectionMcp === true ? store.permissions(user, file) : [];
     const version = store.get(
       "SELECT * FROM versions WHERE file_id=? AND version=?",
       file.id,
@@ -164,7 +184,9 @@ export function createWorkspaceServer({
       size: version.size,
       createdAt: file.created_at,
       modifiedAt: file.modified_at,
-      operations: store.permissions(user, file),
+      operations: provider.permissions(user, file),
+      canDelegateSelection: config.selectionMcp === true && supportsSelectionFormat(file.format) && !user.is_guest &&
+        ["document.view", "document.edit", "document.ai"].every(op => selectionPermissions.includes(op)),
       canManage:
         user.role === "admin" ||
         file.owner_id === user.id ||
@@ -319,6 +341,34 @@ export function createWorkspaceServer({
         schemaVersion: "officecli-workspace/1",
         name: config.name,
       });
+    if (path === "/public/files" && method === "GET")
+      return send(response, 200, { files: sharing.publicFiles() });
+    const shared = /^\/shared\/([a-f0-9-]{36})\/open$/.exec(path);
+    if (shared && method === "POST") {
+      origin(request);
+      const data = await jsonBody(request);
+      check(data && Object.keys(data).every(key => key === "sessionId") && uuid(data.sessionId), 400, "打开文档的参数无效。");
+      const file = store.file(shared[1]);
+      let account;
+      try { account = session(request); } catch (error) { if (!(error instanceof HttpError)) throw error; }
+      let joined;
+      if (!account || account.user.is_guest || !store.permissions(account.user, file).includes("document.view")) {
+        const policy = store.get("SELECT visibility FROM shares WHERE file_id=?", file.id);
+        if ((!policy || policy.visibility === "private") && !request.headers["x-workspace-share"])
+          throw new HttpError(account && !account.user.is_guest ? 403 : 401, "此文档仅对受邀成员开放，请使用有权限的账号登录。");
+        joined = sharing.join(file, request.headers["x-workspace-share"], cookie(request, GUEST_COOKIE));
+        account = joined.account;
+        if (joined.cookie) response.setHeader("Set-Cookie", setCookie(joined.cookie, account.expires - now(), GUEST_COOKIE));
+      }
+      const previous = store.get("SELECT * FROM launches WHERE id=?", data.sessionId);
+      if (previous?.closed && previous.user_id === account.user.id && previous.file_id === file.id && previous.browser_hash === account.hash)
+        return send(response, 409, { error: "分享权限已更新，正在重新打开。", retrySession: true }, joined?.cookie
+          ? { "Set-Cookie": setCookie(joined.cookie, account.expires - now(), GUEST_COOKIE) } : {});
+      const result = await launch(account, file, data.sessionId);
+      return send(response, 200, { ...result, actor: publicUser(account.user), canManage: summary(account.user, file).canManage,
+        sharing: sharing.settings(file), guestExpiresAt: account.user.is_guest ? account.expires : null }, joined?.cookie
+          ? { "Set-Cookie": setCookie(joined.cookie, account.expires - now(), GUEST_COOKIE) } : {});
+    }
     if (path === "/login" && method === "POST") {
       origin(request);
       const data = await jsonBody(request),
@@ -342,7 +392,7 @@ export function createWorkspaceServer({
         429,
         "登录失败次数较多，请 15 分钟后重试。",
       );
-      const user = store.get("SELECT * FROM users WHERE username=?", username);
+      const user = store.get("SELECT * FROM users WHERE username=? AND id NOT IN (SELECT user_id FROM guest_identities)", username);
       const encoded = user?.password || keys.dummyPassword;
       const valid = await verifyPassword(data.password, encoded);
       if (!user || user.disabled || !valid) {
@@ -383,7 +433,7 @@ export function createWorkspaceServer({
       return send(
         response,
         200,
-        { user: publicUser(current), csrf: csrfToken, expiresAt: expiry },
+        { user: publicUser(current), csrf: csrfToken, expiresAt: expiry, workspace },
         { "Set-Cookie": setCookie(value, 8 * 3600) },
       );
     }
@@ -394,7 +444,78 @@ export function createWorkspaceServer({
         user: publicUser(account.user),
         csrf: account.csrf,
         expiresAt: account.expires,
+        workspace,
       });
+    check(!account.user.is_guest, 403, "访客仅可访问分享给自己的文档，请通过分享链接打开。");
+    if (path === "/embed/selection" && method === "PUT")
+      return send(response, 200, await grants.set(account, await jsonBody(request)));
+    if (path === "/agent-plan" && method === "POST") {
+      const { prompt, tokens } = await jsonBody(request);
+      check(
+        typeof prompt === "string" &&
+          prompt.trim() &&
+          prompt.length <= 4000 &&
+          Array.isArray(tokens) &&
+          tokens.length > 0 &&
+          tokens.length <= 12,
+        400,
+        "请选择任务文件并输入指令。",
+      );
+      const targets = await Promise.all(
+        tokens.map(async (token) => {
+          const grant = grants.authenticate("Bearer " + token);
+          check(
+            grant.userId === account.user.id && grant.browser === account.hash,
+            403,
+            "文件选区属于其他会话。",
+          );
+          return { fileId: grant.fileId, ...(await grants.call(grant, "read_selection", {})) };
+        }),
+      );
+      check(
+        new Set(targets.map((t) => t.fileId)).size === targets.length,
+        400,
+        "目标文件不能重复。",
+      );
+      const stops=tokens.map(token=>grants.planning(grants.authenticate("Bearer "+token)));
+      let plan;
+      try {
+        plan=await planWorkbench(prompt.trim(), targets, workbenchModel);
+        return send(response,200,plan);
+      } finally {
+        stops.forEach((stop,i)=>stop(!plan?.actions?.some(a=>a.fileId===targets[i].fileId)));
+      }
+    }
+    if (path === "/agent-activity/stream" && method === "GET") {
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store, no-transform",
+        "X-Accel-Buffering": "no",
+        "X-Content-Type-Options": "nosniff",
+      });
+      const deliver = () => {
+        try {
+          const current = session(request);
+          if (!current || current.hash !== account.hash || current.user.is_guest)
+            return response.end();
+          const payload = JSON.stringify({ activity: grants.recentActivity(current) });
+          if (response.writableLength > 256 * 1024) return response.end();
+          response.write("data: " + payload + "\n\n");
+        } catch {
+          response.end();
+        }
+      };
+      const unsubscribe = grants.subscribe(account.user.id, deliver);
+      const heartbeat = setInterval(deliver, 15000);
+      response.once("close", () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      });
+      deliver();
+      return;
+    }
+    if (path === "/agent-activity" && method === "GET")
+      return send(response, 200, { activity: grants.recentActivity(account) });
     if (path === "/logout" && method === "POST") {
       store.transaction(() => {
         store.run("DELETE FROM sessions WHERE hash=?", account.hash);
@@ -410,7 +531,7 @@ export function createWorkspaceServer({
       admin(account);
       return send(response, 200, {
         users: store
-          .all("SELECT * FROM users ORDER BY created_at")
+          .all("SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM guest_identities) ORDER BY created_at")
           .map(publicUser),
       });
     }
@@ -455,7 +576,7 @@ export function createWorkspaceServer({
       admin(account);
       const data = await jsonBody(request),
         user = store.get("SELECT * FROM users WHERE id=?", userMatch[1]);
-      check(user, 404, "用户不存在。");
+      check(user && !store.get("SELECT 1 FROM guest_identities WHERE user_id=?", user.id), 404, "用户不存在。");
       const role = data.role ?? user.role,
         disabled =
           data.disabled === undefined ? user.disabled : Number(!!data.disabled),
@@ -531,18 +652,29 @@ export function createWorkspaceServer({
         const data = await jsonBody(request);
         name = String(data.name || "").trim();
         check(
-          /\.(txt|md|html)$/i.test(name),
+          /\.(docx|xlsx|pptx|txt|md|html|excalidraw)$/i.test(name),
           400,
-          "新建文档请选择 TXT、Markdown 或 HTML。",
+          "请选择文档、表格、演示或白板格式。",
         );
         const extension = name.split(".").at(-1).toLowerCase();
-        bytes = Buffer.from(
-          extension === "html"
-            ? '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body><p>开始编写文档。</p></body></html>'
-            : extension === "md"
-              ? "# 新文档\n\n开始编写文档。\n"
-              : "开始编写文档。\n",
-        );
+        bytes = ["docx", "xlsx", "pptx"].includes(extension)
+          ? readFileSync(join(adminAssets, "../blank/blank." + extension))
+          : Buffer.from(
+              extension === "excalidraw"
+                ? JSON.stringify({
+                    type: "excalidraw",
+                    version: 2,
+                    source: "OfficeCLI",
+                    elements: [],
+                    appState: { viewBackgroundColor: "#ffffff" },
+                    files: {},
+                  })
+                : extension === "html"
+                  ? '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body><p>开始编写文档。</p></body></html>'
+                  : extension === "md"
+                    ? "# 新文档\n\n开始编写文档。\n"
+                    : "开始编写文档。\n",
+            );
       } else {
         name = url.searchParams.get("filename") || "";
         bytes = await body(request, 256 * 1024 * 1024);
@@ -574,7 +706,16 @@ export function createWorkspaceServer({
       if (action === "/editor-session" && method === "POST") {
         const data = await jsonBody(request);
         const result = await launch(account, file, data.sessionId);
-        return send(response, 200, result);
+        return send(response, 200, { ...result, actor: publicUser(account.user), canManage: summary(account.user, file).canManage });
+      }
+      if (action === "/sharing" && method === "GET") {
+        store.manage(account.user, file);
+        return send(response, 200, { sharing: sharing.settings(file) });
+      }
+      if (action === "/sharing" && method === "PUT") {
+        const result = sharing.update(account.user, file, await jsonBody(request));
+        await Promise.allSettled(result.revokedSessions.map(id => engine(`/integration/v1/sessions/${id}`, { method: "DELETE" })));
+        return send(response, 200, { sharing: result.sharing });
       }
       if (action === "/themes" && method === "GET") {
         store.permit(account.user, file, "theme.assign");
@@ -675,7 +816,7 @@ export function createWorkspaceServer({
           ownerId: file.owner_id,
           users: store
             .all(
-              "SELECT id,username,display_name FROM users WHERE disabled=0 ORDER BY username",
+              "SELECT id,username,display_name FROM users WHERE disabled=0 AND id NOT IN (SELECT user_id FROM guest_identities) ORDER BY username",
             )
             .map((user) => ({
               id: user.id,
@@ -704,7 +845,7 @@ export function createWorkspaceServer({
           400,
           "权限主体或角色无效。",
         );
-        store.user(data.userId);
+        check(!store.user(data.userId).is_guest, 400, "临时访客不能作为受邀成员分配权限。");
         const granted = data.operations ?? profiles[data.profile];
         check(
           Array.isArray(granted) &&
@@ -773,7 +914,7 @@ export function createWorkspaceServer({
       return send(response, 200, {
         name: config.name,
         schemaVersion: "officecli-workspace/1",
-        ai: { enabled: false },
+        ai: { enabled: workspace.aiEnabled },
         storage: {
           business: "SQLite + immutable objects",
           editing: "OfficeCLI HCD root",
@@ -788,13 +929,18 @@ export function createWorkspaceServer({
     throw new HttpError(404, "接口不存在。");
   }
   function proxy(request, response, target, headers = {}) {
-    const url = new URL(request.url, target);
+    const url = new URL(target);
     const forwarded = { ...request.headers, ...headers, host: url.host };
+    // Agent attribution for delegated edits is set by the grant handler on
+    // its private engine call; a browser proxy request is a human action.
+    delete forwarded["x-hcd-agent-edit"];
+    delete forwarded["x-hcd-agent-presence-id"];
+    delete forwarded["x-hcd-agent-name"];
     delete forwarded.origin;
     delete forwarded.connection;
     const outgoing = (url.protocol === "https:" ? httpsRequest : httpRequest)(
       url,
-      { method: request.method, headers: forwarded },
+      { method: request.method, path: request.url, headers: forwarded },
       (upstream) => {
         const sanitized = { ...upstream.headers };
         delete sanitized["set-cookie"];
@@ -812,21 +958,23 @@ export function createWorkspaceServer({
     });
     request.pipe(outgoing);
   }
-  const server = createServer(async (request, response) => {
+  async function handleRequest(request, response, publicIngress = false) {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "same-origin");
     response.setHeader("X-Frame-Options", "SAMEORIGIN");
     try {
+      check(typeof request.url === "string" && /^\/(?!\/)/.test(request.url) && !request.url.includes("\\"), 400, "请求路径无效。");
       const url = new URL(request.url, config.publicUrl);
       const internal =
         url.pathname.startsWith("/officecli-provider/") ||
         url.pathname === "/officecli-events/v1/events" ||
         url.pathname.startsWith("/workspace/objects/");
+      check(!(publicIngress && internal), 404, "接口不存在。");
       check(
         [
           new URL(config.publicUrl).host,
           ...(internal ? [new URL(config.callbackUrl).host] : []),
-        ].includes(request.headers.host),
+        ].includes(request.headers.host?.toLowerCase()),
         421,
         "服务域名不匹配。",
       );
@@ -874,10 +1022,24 @@ export function createWorkspaceServer({
         } else send(response, 200, await provider.callback(url.pathname, data));
         return;
       }
+      if (url.pathname === "/workspace/mcp/selection") {
+        if (request.headers.origin) origin(request);
+        const grant = grants.authenticate(request.headers.authorization);
+        if (request.method !== "POST") return send(response, 405, { error: "MCP 使用 POST。" }, { Allow: "POST" });
+        const { handleSelectionMcp } = createRequire(import.meta.url)(join(adminAssets, "../selection-mcp.cjs"));
+        return await handleSelectionMcp(request, response, await jsonBody(request), grant, grants.call);
+      }
       if (url.pathname.startsWith("/workspace/api/"))
         return await business(request, response, url);
       if (url.pathname.startsWith("/v1/")) {
         const account = session(request);
+        if ((account.user.is_guest || sharing.guestToken(request.headers.authorization)) && url.pathname !== "/v1/capabilities") {
+          const guest = sharing.account(cookie(request, GUEST_COOKIE));
+          check(guest, 401, "访客会话已失效，请重新打开分享链接。");
+          const document = /^\/v1\/documents\/([A-Za-z0-9_-]+)(?:\/|$)/.exec(url.pathname);
+          check(document, 403, "访客仅可访问当前分享文档。");
+          sharing.authorizeProxy(guest, request.headers.authorization, document[1]);
+        }
         const global =
           /^\/v1\/(catalog|themes|admin)(\/|$)/.test(url.pathname) ||
           url.pathname === "/v1/documents";
@@ -912,11 +1074,23 @@ export function createWorkspaceServer({
         "请求方法无效。",
       );
       let path;
-      if (url.pathname === "/" || url.pathname === "/admin")
+      if (url.pathname === "/" || url.pathname === "/admin" || url.pathname === "/public")
         path = adminAssets && join(adminAssets, "index.html");
-      else if (url.pathname === "/editor/" || url.pathname === "/editor")
+      else if (url.pathname === "/workbench" || url.pathname === "/workbench/")
+        path = join(adminAssets, "../embed-example/index.html");
+      else if (url.pathname === "/embed-example" || url.pathname.startsWith("/embed-example/")) {
+        const base = resolve(adminAssets, "../embed-example");
+        const relative =
+          decodeURIComponent(url.pathname.slice("/embed-example/".length)) || "index.html";
+        path = resolve(base, relative);
+        check(path.startsWith(base + sep), 400, "资源路径无效。");
+      } else if (
+        url.pathname === "/editor/" ||
+        url.pathname === "/editor" ||
+        /^\/(s|p)\/[a-f0-9-]{36}$/.test(url.pathname)
+      )
         path = editorAssets && join(editorAssets, "index.html");
-      else if (url.pathname.startsWith("/assets/")) {
+      else if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/canvas-assets/")) {
         const relative = decodeURIComponent(url.pathname.slice(1)),
           base = editorAssets && resolve(editorAssets);
         path = base && resolve(base, relative);
@@ -955,21 +1129,19 @@ export function createWorkspaceServer({
             : "业务服务暂时不可用，请稍后重试。",
       });
     }
-  });
-  server.on("upgrade", (request, socket, head) => {
+  }
+  function handleUpgrade(request, socket, head) {
     try {
       check(
-        new URL(request.url, config.publicUrl).pathname === "/collaboration" &&
+        request.url?.split("?")[0] === "/collaboration" &&
           request.headers.origin === config.publicUrl &&
-          request.headers.host === new URL(config.publicUrl).host,
+          request.headers.host?.toLowerCase() === new URL(config.publicUrl).host,
         403,
         "WebSocket 来源无效。",
       );
       session(request);
       const target = new URL(config.collabUrl),
-        outgoing = httpRequest({
-          hostname: target.hostname,
-          port: target.port,
+        outgoing = httpRequest(target, {
           path: "/",
           headers: { ...request.headers, host: target.host },
         });
@@ -989,6 +1161,7 @@ export function createWorkspaceServer({
         other.pipe(socket);
         socket.on("error", () => other.destroy());
         other.on("error", () => socket.destroy());
+        other.on("close", () => socket.destroy());
         socket.on("close", () => other.destroy());
       });
       outgoing.on("response", () => socket.destroy());
@@ -997,8 +1170,10 @@ export function createWorkspaceServer({
     } catch {
       socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
     }
-  });
+  }
+  const server = createServer(handleRequest);
+  server.on("upgrade", handleUpgrade);
   server.requestTimeout = 180_000;
   server.headersTimeout = 30_000;
-  return { server, provider, engine, session };
+  return { server, handleRequest, handleUpgrade, provider, engine, session };
 }

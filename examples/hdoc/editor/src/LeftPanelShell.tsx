@@ -1,3 +1,4 @@
+import { WorkspacePanel } from './WorkspacePanel.tsx'
 import { useState, type ReactNode } from 'react'
 import { ChevronDown, FileText, FolderTree, Layers, PanelLeftClose, PanelsTopLeft, Search, Settings2 } from 'lucide-react'
 import type { Session } from './api.ts'
@@ -11,7 +12,7 @@ export function LeftPanelShell({ session, hidden, className = '', label, onClose
 }) {
   const { locale } = useI18n()
   const [files, setFiles] = useState(false)
-  return <aside hidden={hidden} className={`outline-panel workspace-left-panel ${className}`} aria-label={localizeSource(locale, label)}>
+  return <WorkspacePanel side="left" hidden={hidden} className={`outline-panel workspace-left-panel ${className}`} aria-label={localizeSource(locale, label)}>
     <div className="left-panel-main">
       <div className="left-panel-navigation">
         <div className="panel-tool-row" role="toolbar" aria-label={localizeSource(locale, '左侧工具')}>
@@ -30,5 +31,5 @@ export function LeftPanelShell({ session, hidden, className = '', label, onClose
       <div className="left-panel-content">{children}</div>
     </div>
     <footer className="left-panel-footer"><button onClick={onWorkspace}><PanelsTopLeft size={16} /><LocalText source="工作空间" /></button><button className="left-panel-settings" aria-label={localizeSource(locale, '外观与设置')} title={localizeSource(locale, '外观与设置')} onClick={onSettings}><Settings2 size={16} /></button></footer>
-  </aside>
+  </WorkspacePanel>
 }

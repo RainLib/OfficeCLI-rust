@@ -1,0 +1,22 @@
+.hcd-surface .selection-transfer { display:grid; gap:12px; padding:12px; min-width:0; }
+.hcd-surface .transfer-heading,.hcd-surface .transfer-source,.hcd-surface .transfer-actions,.hcd-surface .transfer-progress { display:flex; align-items:center; gap:8px; }
+.hcd-surface .transfer-heading h3,.hcd-surface .transfer-preview h3,.hcd-surface .transfer-preview h4 { margin:0; color:var(--ink); }
+.hcd-surface .transfer-heading h3,.hcd-surface .transfer-preview h3 { font-size:15px; }
+.hcd-surface .transfer-preview h4 { font-size:13px; }
+.hcd-surface .transfer-source,.hcd-surface .transfer-preview article { border:1px solid var(--line); border-radius:14px; background:var(--surface); padding:10px; }
+.hcd-surface .transfer-source div,.hcd-surface .selection-transfer form label { display:grid; gap:4px; min-width:0; }
+.hcd-surface .transfer-source strong { font-size:12px; overflow-wrap:anywhere; }
+.hcd-surface .transfer-source small,.hcd-surface .transfer-preview small,.hcd-surface .transfer-actions span { color:var(--muted); font-size:11px; }
+.hcd-surface .selection-transfer form { display:grid; gap:10px; padding:10px; box-shadow:none; }
+.hcd-surface .selection-transfer label { color:var(--muted); font-size:11px; }
+.hcd-surface .selection-transfer form :is(input,select,textarea) { box-sizing:border-box; min-width:0; width:100%; border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:6px 8px; font-size:12px; }
+.hcd-surface .selection-transfer textarea { min-height:60px; resize:vertical; }
+.hcd-surface .selection-transfer button { display:inline-flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line); border-radius:10px; padding:6px 9px; background:var(--surface); color:var(--ink); font-size:12px; }
+.hcd-surface .selection-transfer button.transfer-primary { background:var(--ink); color:var(--surface); }
+.hcd-surface .transfer-preview { display:grid; gap:8px; }
+.hcd-surface .transfer-preview p,.hcd-surface .transfer-preview li { font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
+.hcd-surface .transfer-preview article > header,.hcd-surface .transfer-actions { justify-content:space-between; display:flex; gap:8px; }
+.hcd-surface .transfer-preview-nodes { margin:8px 0; padding:0; display:grid; gap:6px; list-style:none; }
+.hcd-surface .transfer-preview-nodes li { padding:6px 8px; border-radius:8px; background:var(--accent-soft); }
+.hcd-surface .transfer-preview-nodes p,.hcd-surface .transfer-preview-edges { margin:3px 0; }
+.hcd-surface .transfer-progress { color:var(--muted); font-size:12px; }

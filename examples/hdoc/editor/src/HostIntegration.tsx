@@ -121,6 +121,7 @@ export function HostPublicationControl({ session, revision, beforeSave }: { sess
   }
   if (!session.hostIntegration) return null
   const canExport = permits(session, 'document.download') || permits(session, 'document.export')
+  if (!writable && !canExport && !permits(session, 'history.view')) return null
   return <details className="host-publication" data-publication-state={result?.state || (status?.pending ? 'pending' : 'saved')}>
     <summary><CloudUpload size={15} /><span>{busy ? '回写中' : status?.pending ? '待回写' : '业务版本'}</span></summary>
     <div className="host-publication-popover">
@@ -129,7 +130,7 @@ export function HostPublicationControl({ session, revision, beforeSave }: { sess
       <p>{status?.lastPublishedRevision === null ? '尚未回写业务系统' : `最近回写工作区 r${status?.lastPublishedRevision ?? '…'}`}</p>
       {writable && <><label>回写方式<select aria-label="回写方式" value={attempt?.exportMode || mode} disabled={busy || !!attempt} onChange={event => setMode(event.target.value)}>
         <option value="source-backed">保留原结构</option>
-        {!['pdf', 'png', 'jpg', 'jpeg', 'webp'].includes(session.format) && <option value="semantic">按内容重新生成</option>}
+        {!['pdf', 'png', 'jpg', 'jpeg', 'webp', 'excalidraw'].includes(session.format) && <option value="semantic">按内容重新生成</option>}
         {session.format === 'pdf' && <option value="visual">按页面视觉生成</option>}
       </select></label><small>重新生成可能改变复杂排版；回写成功仅确认本次修订。</small>
       <button disabled={busy} onClick={() => void publish()}>{busy && <LoaderCircle className="host-publish-spinner" size={14} />}{attempt ? `重试回写 r${attempt.expectedRevision}` : '回写业务系统'}</button></>}

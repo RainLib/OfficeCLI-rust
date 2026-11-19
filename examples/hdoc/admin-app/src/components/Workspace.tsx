@@ -7,6 +7,7 @@ import {
   FileText,
   Info,
   LoaderCircle,
+  PanelsTopLeft,
   Presentation,
   Sheet,
 } from "lucide-react";
@@ -33,26 +34,80 @@ export function FormatIcon({ format }: { format: string }) {
       ? Sheet
       : f === "pptx"
         ? Presentation
-        : ["png", "jpg", "jpeg", "webp"].includes(f)
-          ? FileImage
-          : ["md", "markdown", "html"].includes(f)
-            ? FileCode2
-            : FileText;
+        : f === "excalidraw"
+          ? PanelsTopLeft
+          : ["png", "jpg", "jpeg", "webp"].includes(f)
+            ? FileImage
+            : ["md", "markdown", "html"].includes(f)
+              ? FileCode2
+              : FileText;
   return (
     <span
       className={cn(
         "inline-flex size-10 shrink-0 items-center justify-center rounded-[10px] bg-muted",
-        f === "xlsx"
-          ? "text-success"
-          : f === "pptx"
-            ? "text-warning"
-            : f === "pdf"
-              ? "text-destructive"
-              : "text-accent-foreground",
+        f === "excalidraw"
+          ? "bg-[#eee6f3] text-[#644873] dark:bg-[#362a40] dark:text-[#ecdff4]"
+          : f === "xlsx"
+            ? "text-success"
+            : f === "pptx"
+              ? "text-warning"
+              : f === "pdf"
+                ? "text-destructive"
+                : "text-accent-foreground",
       )}
     >
       <Icon className="size-5" />
     </span>
+  );
+}
+
+export function WorkspaceShelfArt({
+  board,
+  className,
+}: {
+  board: boolean;
+  className?: string;
+}) {
+  return (
+    <svg
+      viewBox="0 0 92 62"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+      className={className}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {board ? (
+        <g stroke="#634d71" strokeWidth="1.8">
+          <path d="M24 25c1 18 14 22 29 17" strokeDasharray="3 4" />
+          <path d="m49 38 6 3-4 5" />
+          <g transform="rotate(-8 25 24)">
+            <rect x="7" y="8" width="34" height="29" rx="5" fill="#e0cce7" />
+            <path d="M15 18h12m-12 6h17" />
+          </g>
+          <g transform="rotate(6 65 38)">
+            <rect x="55" y="26" width="29" height="26" rx="5" fill="#f8df9c" />
+            <path d="m63 39 4 4 8-9" />
+          </g>
+          <path d="M66 10v5m-2.5-2.5h5" stroke="#9874aa" />
+        </g>
+      ) : (
+        <g stroke="#466273" strokeWidth="1.8">
+          <g transform="rotate(-10 34 30)">
+            <rect x="15" y="9" width="39" height="45" rx="5" fill="#bed3dc" />
+          </g>
+          <g transform="rotate(6 51 30)">
+            <path
+              d="M35 5h26l9 10v34a4 4 0 0 1-4 4H35a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4Z"
+              fill="#fffdf6"
+            />
+            <path d="M60 6v7a3 3 0 0 0 3 3h6M39 31h22m-22 6h17m-17 6h12" />
+            <path d="M39 5h8v15l-4-3-4 3Z" fill="#edce87" />
+          </g>
+        </g>
+      )}
+    </svg>
   );
 }
 

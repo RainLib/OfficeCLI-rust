@@ -1,7 +1,7 @@
-import type { FUniver, ICellData, IObjectMatrixPrimitiveType, IStyleData } from '@univerjs/presets';
+import type { FUniver, ICellData, IObjectMatrixPrimitiveType, IRange, IStyleData } from '@univerjs/presets';
 import { CellValueType, LifecycleStages } from '@univerjs/presets';
-import type { FWorkbook, FWorksheet } from '@univerjs/preset-sheets-core';
-import { ScrollToRangeOperation, SetFormulaCalculationResultMutation } from '@univerjs/preset-sheets-core';
+import type { FWorkbook, FWorksheet, IScrollState } from '@univerjs/preset-sheets-core';
+import { ScrollToRangeOperation, SetFormulaCalculationResultMutation, SetScrollOperation } from '@univerjs/preset-sheets-core';
 import { HcdBundleClient, type ChunkDescriptor } from './hcd.ts';
 import { parseGridChunk, type NodeLink, type ParsedGridChunk, type ParsedVisual } from './hcd-parser.ts';
 import { documentFromInlineRuns, editedInlineRuns, validateInlineRuns, type XlsxInlineRun } from './rich-text.ts';
@@ -324,7 +324,7 @@ export class HcdUniverAdapter {
     range.setValue(numericText === undefined ? input : Number(numericText));
   }
 
-  async scrollCell(sheetId: string, row: number, column: number): Promise<void> {
+  async waitForRendered(): Promise<void> {
     if (this.univerAPI.getCurrentLifecycleStage() < LifecycleStages.Rendered) {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => { listener.dispose(); reject(new Error('工作表画布尚未就绪，请稍后重试')); }, 10_000);
@@ -336,6 +336,22 @@ export class HcdUniverAdapter {
         });
       });
     }
+  }
+
+  async restoreViewport(sheet: FWorksheet, scroll: IScrollState, range: IRange | null, zoom: number): Promise<void> {
+    await this.waitForRendered();
+    this.workbook.setActiveSheet(sheet);
+    sheet.zoom(zoom);
+    const row = scroll.sheetViewStartRow;
+    const sheetId = sheet.getSheetId(), unitId = this.workbook.getId();
+    await this.loadRange(sheetId, Math.max(0, row - 128), Math.min(sheet.getMaxRows() - 1, row + 128));
+    if (range) sheet.setActiveRange(sheet.getRange({ ...range, sheetId, unitId }));
+    await this.univerAPI.executeCommand(SetScrollOperation.id, { ...scroll, unitId, sheetId });
+    await this.ensureVisible(sheet);
+  }
+
+  async scrollCell(sheetId: string, row: number, column: number): Promise<void> {
+    await this.waitForRendered();
     const sheet = this.workbook.getSheetBySheetId(sheetId);
     if (!sheet) throw new Error('工作表不存在');
     this.workbook.setActiveSheet(sheet);

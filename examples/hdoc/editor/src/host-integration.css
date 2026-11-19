@@ -18,3 +18,8 @@
 .hcd-surface[data-theme] .host-publication .host-publication-popover>button:hover{filter:brightness(.95)}
 .hcd-surface[data-theme] .host-publication .host-fidelity{margin-top:12px;color:var(--muted)}
 .host-fidelity>summary{cursor:pointer}
+.hcd-embedded[data-host-back="hidden"] .back-library{display:none}
+
+.hcd-surface.hcd-embedded[data-host-chat="open"]{display:grid;grid-template-columns:minmax(0,1fr) clamp(250px,25%,330px);gap:8px;align-items:stretch}
+.hcd-embed-chat{min-width:0;min-height:0;overflow:auto;background:var(--panel,#fff);border:1px solid var(--line,#dedbd6);border-radius:16px}
+@media(max-width:760px){.hcd-surface.hcd-embedded[data-host-chat="open"]{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(300px,1fr) minmax(170px,36%)}}

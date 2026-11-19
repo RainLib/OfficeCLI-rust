@@ -66,6 +66,17 @@ function fixture(t) {
   return { store, config, keys, context, file, provider };
 }
 
+test("model use defaults to denied and only deployment-configured IDs are returned", async (t) => {
+  const { store, config, keys, context, file, provider } = fixture(t);
+  const request = { context, externalFileId: file.id, operations: ["document.view", "document.edit", "document.ai"] };
+  const denied = await provider.callback("/officecli-provider/v1/permissions/resolve", request);
+  assert.deepEqual(denied.constraints.modelIds, []);
+  const configured = createProvider(store, config, keys, { modelIds: ["canvas-fixture"] });
+  const allowed = await configured.callback("/officecli-provider/v1/permissions/resolve", request);
+  assert(allowed.granted.includes("document.ai"));
+  assert.deepEqual(allowed.constraints.modelIds, ["canvas-fixture"]);
+});
+
 test("competing publications preserve the immutable source and reject a stale business head", async (t) => {
   const { store, config, context, file, provider } = fixture(t);
   const path = (action) =>

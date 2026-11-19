@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { BusinessWorkspace } from "@/views/BusinessWorkspace";
+import { PublicLibrary } from "@/views/PublicLibrary";
 import { AppShell } from "@/components/AppShell";
 import { ToastProvider } from "@/components/Toast";
 import { useRoute } from "@/lib/router";
@@ -137,5 +138,5 @@ export default function App() {
     return () => controller.abort();
   }, []);
   if (workspace === undefined) return <div className="grid h-dvh place-items-center bg-background text-xs text-muted-foreground">正在连接服务…</div>;
-  return workspace ? <BusinessWorkspace name={workspace.name} /> : <LegacyApp />;
+  return workspace ? location.pathname === "/public" ? <PublicLibrary name={workspace.name} /> : <BusinessWorkspace name={workspace.name} /> : <LegacyApp />;
 }

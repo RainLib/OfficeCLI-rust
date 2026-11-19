@@ -5,12 +5,20 @@ export type BusinessUser = {
   displayName: string;
   role: "admin" | "member";
   disabled: boolean;
+  isGuest?: boolean;
   createdAt: string;
 };
 export type BusinessSession = {
   user: BusinessUser;
   csrf: string;
   expiresAt: number;
+  workspace?: {
+    tenantId: string;
+    appId: string;
+    publicUrl: string;
+    aiEnabled: boolean;
+    selectionMcp?: boolean;
+  };
 };
 export type BusinessFile = {
   id: string;
@@ -76,6 +84,7 @@ export const roleLabels: Record<string, string> = {
 export const operationLabels: Record<string, string> = {
   "document.view": "查看",
   "document.edit": "编辑",
+  "document.ai": "AI 协作",
   "document.publish": "业务回写",
   "document.download": "下载原格式",
   "document.export": "转换导出",

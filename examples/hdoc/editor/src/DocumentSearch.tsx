@@ -37,7 +37,7 @@ export function DocumentSearch({ open, onOpen, onClose, search, onSelect, refres
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
-      if (!anchor.current?.parentElement?.getClientRects().length) return
+      if (!anchor.current?.parentElement?.getClientRects().length || anchor.current.closest(".document-tab-panel[hidden]")) return
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault()
         onOpen()

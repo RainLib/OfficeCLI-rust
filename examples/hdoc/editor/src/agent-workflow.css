@@ -1,8 +1,8 @@
-.hcd-surface[data-theme] .workflow-open .agent-conversation-body,
-.hcd-surface[data-theme] .workflow-open .agent-compose-area,
-.hcd-surface[data-theme] .workflow-open .agent-session-row { display:none; }
-.hcd-surface[data-theme] .workflow-open .agent-panel-navigation { height:56px; }
-.hcd-surface[data-theme] .workflow-open .agent-panel-tool-content { flex:1; max-height:none; padding:0 15px 20px; border-bottom:0; overscroll-behavior:contain; }
+.hcd-surface[data-theme] :is(.workflow-open,.transfer-open) .agent-conversation-body,
+.hcd-surface[data-theme] :is(.workflow-open,.transfer-open) .agent-compose-area,
+.hcd-surface[data-theme] :is(.workflow-open,.transfer-open) .agent-session-row { display:none; }
+.hcd-surface[data-theme] :is(.workflow-open,.transfer-open) .agent-panel-navigation { height:56px; }
+.hcd-surface[data-theme] :is(.workflow-open,.transfer-open) .agent-panel-tool-content { flex:1; max-height:none; padding:0 15px 20px; border-bottom:0; overscroll-behavior:contain; }
 .hcd-surface[data-theme] .agent-workflows { min-width:0; padding:6px 0; color:var(--ink); font-size:12px; line-height:1.6; }
 .hcd-surface[data-theme] .agent-workflows button { cursor:pointer; font:inherit; font-size:11px; color:var(--ink); background:var(--stage); border:0; border-radius:9px; padding:7px 10px; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
 .hcd-surface[data-theme] .agent-workflows button:disabled { cursor:default; opacity:.5; }

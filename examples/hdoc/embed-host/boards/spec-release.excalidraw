@@ -1,0 +1,109 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "OfficeCLI",
+  "appState": {
+    "viewBackgroundColor": "#fafafa"
+  },
+  "elements": [
+    {
+      "id": "spec-release",
+      "type": "rectangle",
+      "x": 0,
+      "y": 0,
+      "width": 590,
+      "height": 460,
+      "groupIds": [
+        "spec-release-group"
+      ],
+      "roughness": 0,
+      "roundness": {
+        "type": 3
+      },
+      "strokeWidth": 1,
+      "strokeColor": "#d7d8dc",
+      "fillStyle": "solid",
+      "backgroundColor": "#ffffff",
+      "customData": {
+        "officeBoard": {
+          "kind": "spec",
+          "root": "spec-release",
+          "part": "paper"
+        }
+      }
+    },
+    {
+      "id": "spec-release-title",
+      "type": "text",
+      "x": 34,
+      "y": 32,
+      "width": 520,
+      "height": 40,
+      "groupIds": [
+        "spec-release-group"
+      ],
+      "roughness": 0,
+      "text": "发布评审 · 协作 Spec",
+      "originalText": "发布评审 · 协作 Spec",
+      "strokeColor": "#24272c",
+      "fontFamily": 2,
+      "fontSize": 29,
+      "lineHeight": 1.25,
+      "textAlign": "left",
+      "verticalAlign": "top",
+      "autoResize": false,
+      "containerId": null,
+      "customData": {
+        "officeBoard": {
+          "kind": "spec",
+          "root": "spec-release",
+          "part": "title"
+        }
+      }
+    },
+    {
+      "id": "spec-release-body",
+      "type": "text",
+      "x": 35,
+      "y": 96,
+      "width": 518,
+      "height": 170,
+      "groupIds": [
+        "spec-release-group"
+      ],
+      "roughness": 0,
+      "text": "发布范围\n我们计划春季发布，首批面向三个试点团队。\n评审前的准备\n设计组确认首轮试点的入口和退回路径。\n研发组保留一周观察期，再扩大开放范围。\n试点结束时，每个团队提交一条可复现的反馈。\n交付记录\n统一使用 release-note 记录上线日期与版本。",
+      "originalText": "发布范围\n我们计划春季发布，首批面向三个试点团队。\n评审前的准备\n设计组确认首轮试点的入口和退回路径。\n研发组保留一周观察期，再扩大开放范围。\n试点结束时，每个团队提交一条可复现的反馈。\n交付记录\n统一使用 release-note 记录上线日期与版本。",
+      "strokeColor": "#34383f",
+      "fontFamily": 2,
+      "fontSize": 17,
+      "lineHeight": 1.25,
+      "textAlign": "left",
+      "verticalAlign": "top",
+      "autoResize": false,
+      "containerId": null,
+      "customData": {
+        "officeBoard": {
+          "kind": "spec",
+          "root": "spec-release",
+          "part": "body"
+        },
+        "officeSpec": {
+          "version": 1,
+          "update": "AScRAAcBBHNwZWMDB2hlYWRpbmcoABEABWxldmVsAX0CBwARAAYEABECDOWPkeW4g+iMg+WbtIcRAAMJcGFyYWdyYXBoBwARBwYEABEIJ+aIkeS7rOiuoeWIkuaYpeWto+WPkeW4g++8jOmmluaJuemdouWQkYYRFQRib2xkAnt9hBEWEuS4ieS4quivleeCueWboumYn4YRHARib2xkBG51bGyEER0D44CChxEHAwdoZWFkaW5nKAARHwVsZXZlbAF9AwcAER8GBAARIRLor4TlrqHliY3nmoTlh4blpIeHER8DCmJ1bGxldExpc3QHABEoAwhsaXN0SXRlbQcAESkDCXBhcmFncmFwaAcAESoGBAARKzborr7orqHnu4Tnoa7orqTpppbova7or5XngrnnmoTlhaXlj6PlkozpgIDlm57ot6/lvoTjgIKHESkDCGxpc3RJdGVtBwARPgMJcGFyYWdyYXBoBwARPwYEABFAOeeglOWPkee7hOS/neeVmeS4gOWRqOinguWvn+acn++8jOWGjeaJqeWkp+W8gOaUvuiMg+WbtOOAgocRKAMKYmxvY2txdW90ZQcAEVQDCXBhcmFncmFwaAcAEVUGBAARVj/or5Xngrnnu5PmnZ/ml7bvvIzmr4/kuKrlm6LpmJ/mj5DkuqTkuIDmnaHlj6/lpI3njrDnmoTlj43ppojjgIKHEVQDB2hlYWRpbmcoABFsBWxldmVsAX0DBwARbAYEABFuDOS6pOS7mOiusOW9lYcRbAMJcGFyYWdyYXBoBwARcwYEABF0Dee7n+S4gOS9v+eUqCCGEXkEY29kZQJ7fYQRegxyZWxlYXNlLW5vdGWGEYYBBGNvZGUEbnVsbIQRhwEfIOiusOW9leS4iue6v+aXpeacn+S4jueJiOacrOOAggA=",
+          "blocks": [
+            "发布范围",
+            "我们计划春季发布，首批面向三个试点团队。",
+            "评审前的准备",
+            "设计组确认首轮试点的入口和退回路径。",
+            "研发组保留一周观察期，再扩大开放范围。",
+            "试点结束时，每个团队提交一条可复现的反馈。",
+            "交付记录",
+            "统一使用 release-note 记录上线日期与版本。"
+          ]
+        }
+      }
+    }
+  ],
+  "files": {}
+}

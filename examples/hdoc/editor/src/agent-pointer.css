@@ -1,0 +1,32 @@
+.agent-nib {
+  display:inline-block; width:24px; height:24px; overflow:visible; pointer-events:none; flex:none;
+}
+@property --agent-glide-angle {
+  syntax:"<angle>";
+  inherits:false;
+  initial-value:0deg;
+}
+@keyframes agent-idle-glide {
+  from { --agent-glide-angle:0deg; }
+  to { --agent-glide-angle:360deg; }
+}
+/* One clock per participant. Both children translate in CSS pixels, including the smaller Spec nib. */
+@media (prefers-reduced-motion:no-preference) {
+  :is(.canvas-peer-agent,.spec-peer-caret,.image-agent-pointer,.hcd-surface .agent-region):has(> .agent-nib[data-phase='idle']) {
+    animation:agent-idle-glide 3.2s linear infinite;
+    --agent-shift:calc(4px * cos(var(--agent-glide-angle))) calc(1.7px * sin(var(--agent-glide-angle)));
+  }
+  .agent-nib[data-phase='idle'], .agent-nib[data-phase='idle'] + .agent-name-chip,
+  .spec-peer-caret:has(> .agent-nib[data-phase='idle'])::after { translate:var(--agent-shift, none); }
+}
+[data-paused='true'] :is(.canvas-peer-agent,.spec-peer-caret,.image-agent-pointer,.hcd-surface .agent-region):has(> .agent-nib) {
+  animation:none; --agent-shift:none;
+}
+.agent-name-chip, .hcd-surface .agent-region > .agent-pointer-label, .hcd-surface .image-agent-pointer > .agent-name-chip {
+  --chip-ink:currentColor;
+  display:inline-flex; align-items:center; gap:4px; width:max-content; max-width:16em; padding:2px 7px;
+  background:color-mix(in srgb,var(--chip-ink) 9%,var(--panel,#fffdfb)); color:inherit;
+  border:1px solid color-mix(in srgb,var(--chip-ink) 32%,transparent); border-radius:999px;
+  font:600 10px/1.35 system-ui,sans-serif; white-space:nowrap; box-shadow:0 1px 3px #29203512;
+}
+.agent-name-chip::before { content:'AI'; font:650 8px/1 ui-monospace,monospace; padding-right:4px; border-right:1px solid color-mix(in srgb,currentColor 34%,transparent); }

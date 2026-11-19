@@ -504,8 +504,12 @@ components:
             exportFormats:
               type: array
               uniqueItems: true
-              items: {type: string, enum: [docx, xlsx, pptx, pdf, html, md, txt, png, jpeg, webp, hcd]}
+              items: {type: string, enum: [docx, xlsx, pptx, pdf, html, md, txt, png, jpeg, webp, excalidraw, hcd]}
               description: Empty denies conversion/HCD export; source download is a separate operation
+            selectionAgent:
+              type: boolean
+              default: false
+              description: Permit host-delegated canvas edits and presence. Does not grant a model or a native Agent run.
             modelIds:
               type: array
               uniqueItems: true
