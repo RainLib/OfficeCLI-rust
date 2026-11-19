@@ -4,7 +4,7 @@ use hcd_core::{Bundle, HcdError, HtmlPresentationOptions, HtmlPresentationReport
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
-pub(crate) fn render(
+pub fn render_hcd_html(
     bundle: &Bundle,
     options: &HtmlPresentationOptions,
     output: &mut impl Write,
@@ -109,12 +109,12 @@ mod tests {
         let assets = bundle.read_asset_index().unwrap();
         assert!(!assets.is_empty());
         let mut output = Vec::new();
-        render(&bundle, &HtmlPresentationOptions::default(), &mut output).unwrap();
+        render_hcd_html(&bundle, &HtmlPresentationOptions::default(), &mut output).unwrap();
         let html = String::from_utf8(output).unwrap();
         assert!(html.contains("data:image/png;base64,"));
         assert!(!html.contains("asset://"));
         std::fs::write(bundle.resolve_href(&assets[0].href).unwrap(), b"tampered").unwrap();
-        assert!(render(
+        assert!(render_hcd_html(
             &bundle,
             &HtmlPresentationOptions::default(),
             &mut Vec::new()

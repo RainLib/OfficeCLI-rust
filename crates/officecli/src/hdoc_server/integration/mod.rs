@@ -98,7 +98,12 @@ impl Integration {
         )?;
         if !managed
             || session.document_id != actor.doc
-            || actor.sub.as_deref() != Some(session.subject().as_str())
+            || (actor.sub.as_deref() != Some(session.subject().as_str())
+                && !(actor.worker_generation.is_some()
+                    && actor
+                        .sub
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("agent-"))))
             || actor.exp as u64 > session.expires_at
             || actor.exp as u64 <= now()
         {

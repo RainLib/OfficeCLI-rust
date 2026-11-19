@@ -1,5 +1,6 @@
 mod archive;
 mod bundle;
+pub mod canvas;
 mod catalog;
 mod docx_inline;
 mod error;

@@ -33,6 +33,56 @@ pub(super) async fn call(
     args: Value,
 ) -> Result<Value, ApiError> {
     authorize(&state, &headers, &id, false)?;
+    canvas::authorize_ai(&state, &id, &headers).await?;
+    if name == "hcd_read" && args["resource"] == "canvas_materials" {
+        if args["document_id"] != id { return Err(bad("canvas document mismatch")); }
+        let query = canvas_core::materials::MaterialQuery {
+            category: args["category"].as_str().map(String::from),
+            q: args["query"].as_str().map(String::from),
+            id: args["material_id"].as_str().map(String::from),
+            page: args["number"].as_u64().and_then(|p| usize::try_from(p).ok()),
+        };
+        return canvas_materials::browse(State(state), Path(id), headers, Query(query)).await.map(|response| response.0);
+    }
+    if name == "hcd_read" && args["resource"] == "canvas" {
+        return canvas::agent_read(&state, &id, &headers, &args).await;
+    }
+    if name == "hcd_help"
+        && open(&state, &id)?
+            .manifest()
+            .map_err(hcd_error)?
+            .source
+            .format
+            == "excalidraw"
+    {
+        return Ok(
+            json!({"canvas":canvas::AGENT_INSTRUCTIONS,"protocol":canvas_core::PROTOCOL,"capabilities":crate::capabilities::runtime()}),
+        );
+    }
+    if name == "hcd_canvas_plan" {
+        if args["document_id"] != id { return Err(bad("canvas document mismatch")); }
+        if let Some(material) = args["material_id"].as_str() {
+            if args.get("composition").is_some() { return Err(bad("supply exactly one of composition and material_id")); }
+            let request=serde_json::from_value(json!({"expectedRevision":number(&args,"expected_revision")?,"patchId":string(&args,"patch_id")?,"materialId":material,"region":args.get("region")})).map_err(bad)?;
+            return canvas_materials::plan(State(state),Path(id),headers,Json(request)).await.map(|v|v.0);
+        }
+        let request = serde_json::from_value(json!({"expectedRevision":number(&args,"expected_revision")?,"patchId":string(&args,"patch_id")?,"composition":args["composition"],"region":args.get("region")})).map_err(bad)?;
+        return canvas::plan(State(state),Path(id),headers,Json(request)).await.map(|v|v.0);
+    }
+    if name == "hcd_patch" && args["mode"] == "canvas" {
+        if args["document_id"] != id || args["patch"]["baseRevision"] != args["expected_revision"] {
+            return Err(bad("canvas document/revision mismatch"));
+        }
+        headers.insert(
+            "x-hcd-collaboration-epoch",
+            number(&args, "collaboration_epoch")?.into(),
+        );
+        headers.insert("x-hcd-agent-edit", header::HeaderValue::from_static("true"));
+        let batch = serde_json::from_value(args["patch"].clone()).map_err(bad)?;
+        return canvas::patch(State(state), Path(id), headers, Json(batch))
+            .await
+            .map(|v| v.0);
+    }
     if args.get("token_env").is_some() {
         return Err(bad(
             "HTTP tools use the authenticated session, not token_env",
@@ -148,7 +198,7 @@ pub(super) async fn call(
                     agent_operations::record(
                         &state,
                         &id,
-                        &actor,
+                        &agent_identity::for_presence(&actor, &headers),
                         "editing",
                         manifest.revision,
                         epoch,

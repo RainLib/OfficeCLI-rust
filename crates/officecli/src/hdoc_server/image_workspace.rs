@@ -564,14 +564,14 @@ pub(super) async fn start(
         f64::from(region[1] + region[3] / 2) / f64::from(source.height()),
     ];
     let roles = if r.agents == 1 {
-        vec![("修图 Agent", "局部重绘")]
+        vec![("拾色", "局部重绘")]
     } else {
-        let mut v = vec![("规划 Agent", "读取与规划"), ("修图 Agent", "局部重绘")];
+        let mut v = vec![("折线", "读取与规划"), ("拾色", "局部重绘")];
         if r.agents >= 3 {
-            v.push(("核对 Agent", "边界检查"));
+            v.push(("尺规", "边界检查"));
         }
         if r.agents == 4 {
-            v.push(("视觉 Agent", "视觉核对"));
+            v.push(("映光", "视觉核对"));
         }
         v
     };

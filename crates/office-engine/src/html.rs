@@ -36,7 +36,7 @@ const SEMANTIC_PDF_CONTENT_WIDTH: f32 = 487.0;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct HtmlConversionSummary {
+pub struct HtmlConversionSummary {
     pub engine: &'static str,
     pub fidelity: &'static str,
     pub block_count: usize,
@@ -139,7 +139,7 @@ enum ImageTarget {
 }
 
 #[derive(Clone)]
-pub(crate) struct SemanticAsset {
+pub struct SemanticAsset {
     pub path: PathBuf,
     pub format: String,
 }
@@ -577,7 +577,7 @@ fn canonical_node_id(value: &str) -> bool {
     })
 }
 
-pub(crate) fn convert_html(
+pub fn convert_html(
     input: &Path,
     output: &Path,
     output_format: &str,
@@ -591,13 +591,21 @@ pub(crate) fn convert_html(
 /// the catalog for this target. Only the PDF path reads it, to lay the body
 /// text out in the theme's own face; the other formats carry the plan through
 /// the exporter that writes their font tables.
-pub(crate) fn convert_html_with_assets(
+pub fn convert_html_with_assets(
     input: &Path,
     output: &Path,
     output_format: &str,
     assets: HashMap<String, SemanticAsset>,
     theme_faces: &[hcd_core::ThemeFontDecision],
 ) -> Result<HtmlConversionSummary, HandlerError> {
+    let registration = crate::registry::format_for_extension(output_format)
+        .filter(|format| format.can_convert_html())
+        .ok_or_else(|| {
+            HandlerError::UnsupportedMode(format!(
+                "HTML semantic conversion does not support .{output_format}"
+            ))
+        })?;
+    let output_format = registration.id;
     let metadata = std::fs::metadata(input).map_err(HandlerError::IoError)?;
     if metadata.len() > MAX_HTML_BYTES {
         return Err(HandlerError::InvalidArgument(format!(
@@ -641,25 +649,16 @@ pub(crate) fn convert_html_with_assets(
             .is_ok_and(|mode| mode.eq_ignore_ascii_case("semantic"));
     let mut pinning = SemanticFontPinning::default();
     let mut body_face = PdfBodyFaceChoice::default();
-    let conversion = match output_format {
-        "docx" => export_docx(&document, &temporary, &mut pinning),
-        "xlsx" => export_xlsx(&document, &temporary),
-        "pptx" => export_pptx(&document, &temporary, &mut pinning),
-        "pdf" if legacy_pdf => export_pdf(&mut document, &temporary),
-        "pdf" => export_pdf_css(
-            &source,
-            input,
-            &document,
-            &temporary,
-            theme_faces,
-            &mut body_face,
-        ),
-        "md" => export_textual(&document, &temporary, true),
-        "txt" => export_textual(&document, &temporary, false),
-        other => Err(HandlerError::UnsupportedMode(format!(
-            "HTML semantic conversion does not support .{other}"
-        ))),
-    };
+    let conversion = registration.html_writer.expect("HTML writer was checked")(&mut HtmlExport {
+        document: &mut document,
+        source: &source,
+        input,
+        output: &temporary,
+        theme_faces,
+        pinning: &mut pinning,
+        body_face: &mut body_face,
+        legacy_pdf,
+    });
     let embedded_image_count = match conversion {
         Ok(count) => count,
         Err(error) => {
@@ -730,6 +729,54 @@ pub(crate) fn convert_html_with_assets(
         pdf_body_face_note: body_face.note,
         warnings: document.warnings.into_iter().collect(),
     })
+}
+
+/// Shared writer context. Format registrations own dispatch; format-specific
+/// writers retain their existing layout and fidelity behavior.
+pub(crate) struct HtmlExport<'a> {
+    document: &'a mut SemanticHtml,
+    source: &'a str,
+    input: &'a Path,
+    output: &'a Path,
+    theme_faces: &'a [hcd_core::ThemeFontDecision],
+    pinning: &'a mut SemanticFontPinning,
+    body_face: &'a mut PdfBodyFaceChoice,
+    legacy_pdf: bool,
+}
+
+pub(crate) fn write_docx(context: &mut HtmlExport<'_>) -> Result<usize, HandlerError> {
+    export_docx(context.document, context.output, context.pinning)
+}
+
+pub(crate) fn write_xlsx(context: &mut HtmlExport<'_>) -> Result<usize, HandlerError> {
+    export_xlsx(context.document, context.output)
+}
+
+pub(crate) fn write_pptx(context: &mut HtmlExport<'_>) -> Result<usize, HandlerError> {
+    export_pptx(context.document, context.output, context.pinning)
+}
+
+pub(crate) fn write_pdf(context: &mut HtmlExport<'_>) -> Result<usize, HandlerError> {
+    if context.legacy_pdf {
+        export_pdf(context.document, context.output)
+    } else {
+        export_pdf_css(
+            context.source,
+            context.input,
+            context.document,
+            context.output,
+            context.theme_faces,
+            context.body_face,
+        )
+    }
+}
+
+pub(crate) fn write_markdown(context: &mut HtmlExport<'_>) -> Result<usize, HandlerError> {
+    export_textual(context.document, context.output, true)
+}
+
+pub(crate) fn write_text(context: &mut HtmlExport<'_>) -> Result<usize, HandlerError> {
+    export_textual(context.document, context.output, false)
 }
 
 /// What the print engine decided about the pinned theme's body face.
@@ -2967,13 +3014,10 @@ fn pdf_image_dimensions(geometry: ImageGeometry) -> (f32, f32) {
 }
 
 fn validate_output(path: &Path, format: &str) -> Result<(), HandlerError> {
-    let path = path.to_string_lossy();
-    let issues = match format {
-        "docx" => WordHandler::open(&path, false)?.validate()?,
-        "xlsx" => ExcelHandler::open(&path, false)?.validate()?,
-        "pptx" => PptxHandler::open(&path, false)?.validate()?,
-        "pdf" => PdfHandler::open(&path, false)?.validate()?,
-        _ => Vec::new(),
+    let issues = match crate::registry::format_for_extension(format).and_then(|format| format.open)
+    {
+        Some(open) => open(crate::utf8_path(path)?, false)?.validate()?,
+        None => Vec::new(),
     };
     if !issues.is_empty() {
         return Err(HandlerError::ValidationError(format!(

@@ -357,7 +357,7 @@ fn render_page_raster(
         }))
         .map_err(|_| format!("Hayro panicked while rendering page {}", page_index + 1))?;
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
-        for pixel in pixmap.data_as_u8_slice().chunks_exact(4) {
+        for pixel in pixmap.data_as_u8_slice().as_chunks::<4>().0 {
             let alpha = u16::from(pixel[3]);
             for channel in &pixel[..3] {
                 rgb.push((u16::from(*channel) + 255 - alpha).min(255) as u8);

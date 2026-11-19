@@ -142,7 +142,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
     }
     if !matches!(
         manifest.profile.as_str(),
-        "semantic-flow" | "grid" | "slide-canvas" | "fixed-layout"
+        "semantic-flow" | "grid" | "slide-canvas" | "fixed-layout" | "canvas"
     ) {
         issues.push(issue(
             "PROFILE_UNSUPPORTED",
@@ -159,6 +159,15 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
     }
     validate_manifest_fields(&manifest, &mut issues);
     validate_revision_chain(bundle, &manifest, &mut issues);
+    if manifest.source.format == "excalidraw" {
+        if let Err(error) = crate::canvas::read_scene(bundle, None) {
+            issues.push(issue(
+                "CANVAS_SCENE_INVALID",
+                error.to_string(),
+                "manifest.json",
+            ));
+        }
+    }
 
     let styles_path = match bundle.resolve_href(&manifest.styles_href) {
         Ok(path) => path,
@@ -620,7 +629,18 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
     }
     if !matches!(
         manifest.source.format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "png" | "jpg" | "jpeg" | "webp"
+        "docx"
+            | "xlsx"
+            | "pptx"
+            | "pdf"
+            | "html"
+            | "md"
+            | "txt"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "excalidraw"
     ) {
         issues.push(issue(
             "SOURCE_FORMAT_INVALID",
@@ -1116,6 +1136,7 @@ fn validate_descriptor(
             | "slide"
             | "note"
             | "page"
+            | "canvas"
     ) {
         issues.push(issue(
             "CHUNK_REGION_INVALID",
@@ -1466,7 +1487,8 @@ fn valid_source_part(value: &str) -> bool {
         || value.starts_with("html/")
         || value.starts_with("markdown/")
         || value.starts_with("text/")
-        || value.starts_with("image/");
+        || value.starts_with("image/")
+        || value.starts_with("canvas/");
     allowed_prefix
         && !value.is_empty()
         && value.len() <= 1024

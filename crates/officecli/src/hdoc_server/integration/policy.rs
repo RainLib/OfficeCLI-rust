@@ -4,10 +4,11 @@ use super::*;
 fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>, ApiError> {
     let read = matches!(method, "GET" | "HEAD");
     let parts: Vec<_> = route.trim_start_matches('/').split('/').collect();
-    if matches!(
-        parts[0],
-        "agent-runs" | "agent-workflows" | "image-jobs" | "mcp"
-    ) || route.starts_with("/image/jobs")
+    if parts[0] == "agent-runs" {
+        return Ok(vec!["document.view", "document.edit", "document.ai"]);
+    }
+    if matches!(parts[0], "agent-workflows" | "image-jobs" | "mcp")
+        || route.starts_with("/image/jobs")
         || route.starts_with("/image/copies")
     {
         return Err(denied(
@@ -39,10 +40,13 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
             | "agents"
             | "collaboration"
             | "image" => {}
+            "canvas" => {}
             _ => return Err(denied("unclassified host document route")),
         }
     } else {
         match (method, parts[0]) {
+            ("POST", "canvas") if matches!(route, "/canvas/presence" | "/canvas/layout") => {}
+            ("POST", "canvas") if matches!(route, "/canvas/patch" | "/canvas/spec-undo") => required.push("document.edit"),
             ("POST", "project" | "patch" | "node-patch" | "checkpoints" | "collaboration") => {
                 required.push("document.edit")
             }
@@ -58,6 +62,17 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
         }
     }
     Ok(required)
+}
+
+#[cfg(test)]
+mod canvas_layout_tests {
+    use super::*;
+    #[test]
+    fn planning_never_grants_write_permissions() {
+        assert_eq!(operation_requirements("POST", "/canvas/layout").unwrap(), vec!["document.view"]);
+        assert_eq!(operation_requirements("POST", "/canvas/patch").unwrap(), vec!["document.view", "document.edit"]);
+        assert!(operation_requirements("POST", "/canvas/unknown").is_err());
+    }
 }
 
 async fn authorize_request(
@@ -129,6 +144,18 @@ async fn authorize_request(
             };
         }
         let session = integration.session(state, headers, id)?;
+        if route.starts_with("/agent-runs")
+            && open(state, id)?
+                .manifest()
+                .map_err(hcd_error)?
+                .source
+                .format
+                != "excalidraw"
+        {
+            return Err(denied(
+                "host AI delegation is currently supported for canvas documents",
+            ));
+        }
         let decision = integration.provider.permissions(&session).await?;
         decision.require(&operation_requirements(method, &route)?)?;
         if let Some(query) = query {

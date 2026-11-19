@@ -351,6 +351,7 @@ fn revision_record(
     structural_change: bool,
 ) -> Result<RevisionRecord, HcdError> {
     Ok(RevisionRecord {
+        canvas_rewrite: None,
         schema_version: manifest.schema_version.clone(),
         document_id: manifest.document_id.clone(),
         revision,

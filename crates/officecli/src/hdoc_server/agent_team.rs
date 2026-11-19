@@ -3,6 +3,13 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "canvas_team.rs"]
+mod canvas_team;
+
+pub(super) async fn execute_canvas(state: &ServerState, id: &str, run_id: &str, headers: &HeaderMap, config: &agent_runs::Config, task: &str, target: Option<Value>, count: usize, cancelled: &AtomicBool) -> Result<String, ApiError> {
+    canvas_team::execute(state,id,run_id,headers,config,task,target,count,cancelled).await
+}
+
 const LEASE_MS: u64 = 30_000;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -31,12 +38,18 @@ struct Unit {
     resources: Vec<String>,
     status: String,
     agent_id: String,
+    #[serde(default)]
+    agent_name: String,
     #[serde(skip)]
     lease_id: Option<String>,
     lease_expires_at_epoch_ms: Option<u64>,
     result: String,
     draft: Option<SlideDraft>,
     image_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canvas_draft: Option<canvas_core::Composition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canvas_region: Option<canvas_core::Region>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -94,6 +107,9 @@ impl Team {
         }
         for (unit, lease) in checkpoint.team.units.iter_mut().zip(checkpoint.leases) {
             unit.lease_id = lease;
+            if unit.agent_name.is_empty() {
+                unit.agent_name = unit.agent_id.rsplit('-').next().and_then(|n|n.parse::<usize>().ok()).and_then(|n|n.checked_sub(1)).map(agent_identity::worker).unwrap_or(agent_identity::REVIEWER).into();
+            }
         }
         checkpoint.team.resources = checkpoint.resources;
         Ok(checkpoint.team)
@@ -259,7 +275,7 @@ fn string_schema() -> Value {
 }
 
 /// Force a typed planning/drafting tool. Planning has no document write tool.
-async fn structured(
+pub(super) async fn structured(
     config: &agent_runs::Config,
     name: &str,
     schema: Value,
@@ -1193,11 +1209,14 @@ pub(super) async fn execute(
                     },
                     status: "pending".into(),
                     agent_id: format!("agent-{run_id}-{}", i % count + 1),
+                    agent_name: agent_identity::worker(i % count).into(),
                     lease_id: None,
                     lease_expires_at_epoch_ms: None,
                     result: String::new(),
                     draft: None,
                     image_job_id: None,
+                    canvas_draft: None,
+                    canvas_region: None,
                 })
                 .collect();
         }
@@ -1220,7 +1239,7 @@ pub(super) async fn execute(
             if state.agent_runs.lock().await[run_id].team.as_ref().unwrap().units[index].status != "pending" { continue; }
             claim(state,run_id,index).await?;
             let unit={state.agent_runs.lock().await[run_id].team.as_ref().unwrap().units[index].clone()};
-            let mut member_headers=delegate(state,id,headers,&unit.agent_id,&format!("协作 Agent {}",worker+1))?;
+            let mut member_headers=delegate(state,id,headers,&unit.agent_id,agent_identity::worker(worker))?;
             let attempt=state.agent_runs.lock().await[run_id].invocation.as_ref().map(|i|i.attempt).unwrap_or(0);
             member_headers.insert("x-hcd-agent-run-id",run_id.parse().map_err(internal)?);
             member_headers.insert("x-hcd-resume-attempt",attempt.to_string().parse().map_err(internal)?);
@@ -1435,15 +1454,16 @@ async fn replay_deck(
             .ok_or_else(|| bad("missing staged author"))?;
         {
             let mut runs = state.agent_runs.lock().await;
-            runs.get_mut(run_id).unwrap().team.as_mut().unwrap().units[saved.unit_index].agent_id =
-                author.into();
+            let unit = &mut runs.get_mut(run_id).unwrap().team.as_mut().unwrap().units[saved.unit_index];
+            unit.agent_id = author.into();
+            unit.agent_name = prepared["name"].as_str().unwrap_or(agent_identity::EDITOR).into();
         }
         let member_headers = delegate(
             state,
             id,
             headers,
             author,
-            prepared["name"].as_str().unwrap_or("协作 Agent"),
+            prepared["name"].as_str().unwrap_or(agent_identity::EDITOR),
         )?;
         let mut args = prepared["args"].clone();
         args["collaboration_epoch"] = json!(collaboration_epoch(state, id).await?);
@@ -1609,16 +1629,19 @@ async fn prepare_deck(
             resources: vec!["document".into()],
             status: "pending".into(),
             agent_id: agent.clone(),
+            agent_name: agent_identity::REVIEWER.into(),
             lease_id: None,
             lease_expires_at_epoch_ms: None,
             result: String::new(),
             draft: None,
             image_job_id: None,
+                    canvas_draft: None,
+                    canvas_region: None,
         });
     }
     let commit_index = drafts.len();
     claim(state, run_id, commit_index).await?;
-    let commit_headers = delegate(state, id, headers, &agent, "整稿审核 Agent")?;
+    let commit_headers = delegate(state, id, headers, &agent, agent_identity::REVIEWER)?;
     let mut revision = initial_revision;
     let mut new_pages = vec![];
     for (index, draft) in drafts.iter().enumerate() {
@@ -1628,6 +1651,7 @@ async fn prepare_deck(
             let mut runs = state.agent_runs.lock().await;
             let team = runs.get_mut(run_id).unwrap().team.as_mut().unwrap();
             let author = team.units[index].agent_id.clone();
+            team.units[commit_index].agent_name = team.units[index].agent_name.clone();
             team.units[commit_index].agent_id = author.clone();
             author
         };
@@ -1636,10 +1660,7 @@ async fn prepare_deck(
             id,
             headers,
             &author,
-            &format!(
-                "协作 Agent {}",
-                index % state.agent_runs.lock().await[run_id].agent_count + 1
-            ),
+            agent_identity::worker(index % state.agent_runs.lock().await[run_id].agent_count),
         )?;
         revision = commit_patch(
             state,
@@ -1789,7 +1810,9 @@ async fn prepare_deck(
     }
     {
         let mut runs = state.agent_runs.lock().await;
-        runs.get_mut(run_id).unwrap().team.as_mut().unwrap().units[commit_index].agent_id = agent;
+        let unit = &mut runs.get_mut(run_id).unwrap().team.as_mut().unwrap().units[commit_index];
+        unit.agent_id = agent;
+        unit.agent_name = agent_identity::REVIEWER.into();
     }
     for original in &originals {
         let Some(chunk) = original.key.strip_prefix("chunk:") else {
@@ -1991,11 +2014,13 @@ mod tests {
                     resources: vec![resource.into()],
                     status: "pending".into(),
                     agent_id,
-                    lease_id: None,
+                    agent_name: agent_identity::worker(0).into(),                    lease_id: None,
                     lease_expires_at_epoch_ms: None,
                     result: String::new(),
                     draft: None,
                     image_job_id: None,
+                    canvas_draft: None,
+                    canvas_region: None,
                 }],
             }),
         }
@@ -2610,11 +2635,14 @@ mod tests {
             resources: vec![],
             status: "running".into(),
             agent_id: "a".into(),
+            agent_name: agent_identity::worker(0).into(),
             lease_id: Some("fence-1".into()),
             lease_expires_at_epoch_ms: Some(100),
             result: String::new(),
             draft: None,
             image_job_id: None,
+                    canvas_draft: None,
+                    canvas_region: None,
         };
         assert!(unit_live(&unit, 99));
         assert!(!unit_live(&unit, 100));

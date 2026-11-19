@@ -3234,24 +3234,18 @@ where
         if segment.text.is_empty() {
             return Ok(());
         }
-        if self.table.is_some() {
-            if self
-                .table
-                .as_ref()
-                .is_some_and(|table| table.cell.is_none())
-            {
+        if let Some(table) = self.table.as_mut() {
+            if table.cell.is_none() {
                 return Ok(());
             }
             self.text_ordinal = self.text_ordinal.saturating_add(1);
-            let paragraph_id = self.table.as_ref().and_then(|table| {
-                table.row.as_ref().map(|row| {
-                    format!(
-                        "table-{}-row-{}-cell-{}",
-                        table.table_ordinal,
-                        table.total_rows + 1,
-                        row.cells
-                    )
-                })
+            let paragraph_id = table.row.as_ref().map(|row| {
+                format!(
+                    "table-{}-row-{}-cell-{}",
+                    table.table_ordinal,
+                    table.total_rows + 1,
+                    row.cells
+                )
             });
             let (html, entry) = render_source_text_node(
                 self.document_id,
@@ -3263,10 +3257,7 @@ where
                 "html-table-cell-text",
                 paragraph_id,
             )?;
-            self.table
-                .as_mut()
-                .expect("checked table")
-                .push_text(self.inline.wrap(html), entry);
+            table.push_text(self.inline.wrap(html), entry);
             return Ok(());
         }
         if self.block.is_none() {
@@ -4175,7 +4166,7 @@ mod tests {
             .flat_map(|block| &block.content.inlines)
             .collect();
         assert_eq!(inlines.len(), 600);
-        for pair in inlines.chunks_exact(2) {
+        for pair in inlines.as_chunks::<2>().0 {
             assert!(pair[0].bold);
             assert!(!pair[1].bold);
         }

@@ -297,23 +297,20 @@ pub fn run_dump_reader(source_path: &str, out_path: &str) -> Result<DumpResult, 
 
     // Create a blank native skeleton of the right family.
     let target_ext = manifest.target.as_deref().unwrap_or("docx");
-    match target_ext {
-        "docx" => {
-            let _ = super::create::create_blank_docx(out_path)?;
-        }
-        "xlsx" => {
-            let _ = super::create::create_blank_xlsx(out_path)?;
-        }
-        "pptx" => {
-            let _ = super::create::create_blank_pptx(out_path)?;
-        }
-        other => {
-            return Err(HandlerError::OperationFailed(format!(
-                "dump-reader plugin '{}' declared invalid target '{}'",
-                manifest.name, other
-            )));
-        }
+    if !matches!(target_ext, "docx" | "xlsx" | "pptx") {
+        return Err(HandlerError::OperationFailed(format!(
+            "dump-reader plugin '{}' declared invalid target '{}'",
+            manifest.name, target_ext
+        )));
     }
+    office_engine::create_document(
+        out_path,
+        Some(target_ext),
+        &office_engine::CreateOptions {
+            overwrite: true,
+            ..Default::default()
+        },
+    )?;
 
     let idle = resolve_idle_timeout(&manifest, "dump");
     let opts = RunOptions {

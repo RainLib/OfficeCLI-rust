@@ -59,6 +59,8 @@ pub enum HdocSubcommand {
     RenderHtml(HdocRenderHtmlCommand),
     /// Apply a text/annotation patch and append a revision
     Apply(HdocApplyCommand),
+    /// Read a native canvas scene or apply an object transaction
+    Canvas(HdocCanvasCommand),
     /// Create a revision that enables semantic block editing while preserving the original view
     ProjectEditor(HdocProjectEditorCommand),
     /// Read bounded semantic blocks and precondition hashes for an editor
@@ -71,6 +73,19 @@ pub enum HdocSubcommand {
     Restore(HdocRestoreCommand),
     /// Export one HCD revision by source-backed rewrite or pure-Rust semantic conversion
     Export(HdocExportCommand),
+}
+
+#[derive(Args)]
+pub struct HdocCanvasCommand {
+    #[arg(long)]
+    pub bundle: String,
+    /// JSON canvas transaction; omit to read the scene
+    #[arg(long)]
+    pub patch: Option<String>,
+    #[arg(long)]
+    pub revision: Option<u64>,
+    #[arg(long)]
+    pub author: Option<String>,
 }
 
 #[derive(Args)]
@@ -445,6 +460,7 @@ pub fn handle_hdoc(
         HdocSubcommand::PutAsset(command) => put_asset(command, format),
         HdocSubcommand::RenderHtml(command) => render_html(command, format),
         HdocSubcommand::Apply(command) => apply(command, format),
+        HdocSubcommand::Canvas(command) => canvas(command, format),
         HdocSubcommand::ProjectEditor(command) => project_editor(command, format),
         HdocSubcommand::EditorState(command) => editor_state(command, format),
         HdocSubcommand::Serve(command) => {
@@ -1190,6 +1206,46 @@ fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, boo
     )
 }
 
+fn canvas(
+    command: HdocCanvasCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    if let Some(path) = command.patch {
+        if command.revision.is_some() {
+            return Err(HandlerError::InvalidArgument(
+                "--revision is read-only; a patch carries baseRevision".into(),
+            ));
+        }
+        let bytes = std::fs::read(&path)?;
+        if bytes.len() > 34 * 1024 * 1024 {
+            return Err(HandlerError::InvalidArgument(
+                "canvas patch exceeds size limit".into(),
+            ));
+        }
+        let batch = serde_json::from_slice(&bytes)?;
+        let mut author = std::collections::BTreeMap::new();
+        if let Some(id) = command.author {
+            author.insert("id".into(), id);
+        }
+        let result =
+            hcd_core::canvas::apply_batch(&bundle, &batch, None, &author).map_err(handler_error)?;
+        render(
+            &result,
+            format,
+            format!("Canvas committed at revision {}", result.revision),
+        )
+    } else {
+        let scene =
+            hcd_core::canvas::read_scene(&bundle, command.revision).map_err(handler_error)?;
+        render(
+            &scene,
+            format,
+            format!("Canvas contains {} elements", scene.elements.len()),
+        )
+    }
+}
+
 fn project_editor(
     command: HdocProjectEditorCommand,
     format: OutputFormat,
@@ -1252,6 +1308,40 @@ fn export(
 ) -> Result<(String, bool), HandlerError> {
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
     let head = bundle.manifest().map_err(handler_error)?;
+    if head.source.format == "excalidraw"
+        && Path::new(&command.output)
+            .extension()
+            .and_then(|s| s.to_str())
+            == Some("excalidraw")
+    {
+        if command
+            .to
+            .as_deref()
+            .is_some_and(|format| format != "excalidraw")
+        {
+            return Err(HandlerError::InvalidArgument(
+                "canvas output format mismatch".into(),
+            ));
+        }
+        let report = hcd_formats::export_document(
+            &command.bundle,
+            command.source.as_deref().unwrap_or(""),
+            &command.output,
+            &hcd_formats::ExportOptions {
+                revision: command.revision,
+                fidelity_report: command.fidelity_report.clone(),
+            },
+        )
+        .map_err(handler_error)?;
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported canvas to {}", command.output),
+        );
+    }
     let target = semantic_target(&command.output, command.to.as_deref())?;
     if hcd_formats::images::is_image_format(&head.source.format)
         && hcd_formats::images::is_image_format(&target)
@@ -1330,7 +1420,7 @@ fn export(
             .unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        super::hdoc_html::render(
+        office_engine::render_hcd_html(
             &bundle,
             &HtmlPresentationOptions {
                 revision: command.revision,
@@ -1489,10 +1579,13 @@ fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, Hand
         }
     }
     let target = requested.unwrap_or(extension);
-    if !matches!(
-        target.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "png" | "jpg" | "jpeg" | "webp"
-    ) {
+    if !office_engine::registry::capabilities()
+        .iter()
+        .any(|format| {
+            format.format == target
+                && (format.html_conversion || format.canonical_html_export || format.raster_image)
+        })
+    {
         return Err(HandlerError::UnsupportedMode(format!(
             "HCD export supports .docx, .xlsx, .pptx, .pdf, .html, .md/.markdown, or .txt; found .{target}"
         )));
@@ -1501,16 +1594,12 @@ fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, Hand
 }
 
 fn normalize_format(value: &str) -> String {
-    match value
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "htm" => "html".to_string(),
-        "markdown" => "md".to_string(),
-        format => format.to_string(),
-    }
+    let value = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    office_engine::registry::format_for_extension(&value)
+        .map(|format| format.id)
+        .or_else(|| hcd_formats::registry::format_for_extension(&value).map(|format| format.id))
+        .unwrap_or(&value)
+        .to_string()
 }
 
 /// Rebuild a revision as an Office or PDF file from its canonical HCD HTML.
@@ -1527,7 +1616,9 @@ fn semantic_export(
     fidelity_report: Option<&Path>,
     theme: &mut ThemeExport,
 ) -> Result<FidelityReport, HandlerError> {
-    if !matches!(target, "docx" | "xlsx" | "pptx" | "pdf" | "md" | "txt") {
+    if !office_engine::registry::format_for_extension(target)
+        .is_some_and(|format| format.can_convert_html())
+    {
         return Err(HandlerError::UnsupportedMode(format!(
             "source-free semantic export supports .docx, .xlsx, .pptx, .pdf, .md, or .txt; .{target} requires its immutable source"
         )));
@@ -1600,7 +1691,7 @@ fn semantic_export(
     let chunk_count = presentation.chunk_count;
     materialized.as_file_mut().flush()?;
     let assets = semantic_assets(bundle, revision).map_err(handler_error)?;
-    let summary = super::html_convert::convert_html_with_assets(
+    let summary = office_engine::convert_html_with_assets(
         materialized.path(),
         output_path,
         target,
@@ -1703,7 +1794,7 @@ fn semantic_export(
 fn semantic_assets(
     bundle: &Bundle,
     revision: u64,
-) -> Result<HashMap<String, super::html_convert::SemanticAsset>, HcdError> {
+) -> Result<HashMap<String, office_engine::SemanticAsset>, HcdError> {
     let records = bundle.read_asset_index_for_revision(revision)?;
     let mut total = 0u64;
     let mut assets = HashMap::with_capacity(records.len());
@@ -1740,7 +1831,7 @@ fn semantic_assets(
         let format = semantic_asset_format(&path)?;
         assets.insert(
             format!("asset://sha256/{}", record.hash),
-            super::html_convert::SemanticAsset { path, format },
+            office_engine::SemanticAsset { path, format },
         );
     }
     Ok(assets)

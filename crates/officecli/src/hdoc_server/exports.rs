@@ -1,7 +1,5 @@
 use super::*;
 
-const FORMATS: [&str; 8] = ["docx", "xlsx", "pptx", "pdf", "html", "md", "txt", "hcd"];
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ExportCapabilities {
@@ -98,8 +96,31 @@ fn build_capabilities(
         other => other,
     }
     .to_string();
+    if source_format == "excalidraw" {
+        return Ok(ExportCapabilities {
+            document_id: id.into(),
+            source_format,
+            revision,
+            head_revision: head.revision,
+            default_format: "excalidraw".into(),
+            formats: vec![
+                FormatCapability {
+                    format: "excalidraw".into(),
+                    available: true,
+                    recommended_mode: "source".into(),
+                    modes: vec![ExportMode::new("source", vec![])],
+                },
+                FormatCapability {
+                    format: "hcd".into(),
+                    available: revision == head.revision,
+                    recommended_mode: "archive".into(),
+                    modes: vec![ExportMode::new("archive", vec![])],
+                },
+            ],
+        });
+    }
     if hcd_formats::images::is_image_format(&source_format) {
-        let formats = ["png", "jpeg", "webp", "hcd"]
+        let formats = office_engine::registry::image_export_formats()
             .into_iter()
             .map(|format| FormatCapability {
                 format: format.into(),
@@ -146,7 +167,7 @@ fn build_capabilities(
         )
     };
     let mut formats = Vec::new();
-    for format in FORMATS {
+    for format in office_engine::registry::document_export_formats() {
         let mut warnings = Vec::new();
         let mode_id = match format {
             "hcd" => "archive",
@@ -191,7 +212,10 @@ fn build_capabilities(
                 "portable HCD includes history through the current revision".into(),
             );
         }
-        if format == source_format && matches!(format, "docx" | "xlsx" | "pptx" | "pdf") {
+        if format == source_format
+            && office_engine::registry::format_for_extension(format)
+                .is_some_and(|registration| registration.can_open())
+        {
             let mut source = ExportMode::new(
                 "source",
                 if format == "pdf" && revision > 0 {
@@ -560,6 +584,15 @@ async fn export_document_inner(
             "portable HCD includes history through the current revision",
         ));
     }
+    if head.source.format == "excalidraw" && format == "excalidraw" {
+        let scene = hcd_core::canvas::read_scene(&bundle, Some(requested)).map_err(hcd_error)?;
+        return export_response(
+            &filename,
+            &format,
+            serde_json::to_vec(&scene).map_err(internal)?,
+            false,
+        );
+    }
     if hcd_formats::images::is_image_format(&head.source.format)
         && hcd_formats::images::is_image_format(&format)
     {
@@ -581,10 +614,7 @@ async fn export_document_inner(
         let bytes = tokio::fs::read(output.path()).await.map_err(internal)?;
         return export_response(&filename, &format, bytes, false);
     }
-    if !matches!(
-        format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
-    ) {
+    if !office_engine::registry::document_export_formats().contains(&format.as_str()) {
         return Err(bad("unsupported export format"));
     }
     let plan_state = state.clone();
@@ -641,7 +671,7 @@ async fn export_document_inner(
         let theme_stylesheet =
             hcd_core::theme_presentation_css(&state.catalog, &bundle, Some(requested))
                 .map_err(hcd_error)?;
-        crate::commands::hdoc_html::render(
+        office_engine::render_hcd_html(
             &bundle,
             &hcd_core::HtmlPresentationOptions {
                 revision: Some(requested),

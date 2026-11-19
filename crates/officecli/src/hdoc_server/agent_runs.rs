@@ -42,12 +42,20 @@ pub(super) struct StartRequest {
     name: Option<String>,
     /// Explicit editor target supplied by a menu. It is data, not instructions.
     target: Option<Value>,
+    target_version: Option<TargetVersion>,
     #[serde(default = "one_agent")]
     agent_count: usize,
     #[serde(default)]
     mode: TaskMode,
     #[serde(default)]
     generate_images: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetVersion {
+    revision: u64,
+    collaboration_epoch: u64,
 }
 
 fn one_agent() -> usize {
@@ -223,6 +231,7 @@ pub(super) async fn cancel(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    canvas::authorize_ai(&state, &id, &headers).await?;
     let owner = owner(&actor)?;
     let mut runs = state.agent_runs.lock().await;
     let run = runs
@@ -263,7 +272,7 @@ pub(super) async fn start_identified(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(request): Json<StartRequest>,
+    Json(mut request): Json<StartRequest>,
     run_id: String,
     workflow_id: Option<String>,
     shared_facts: Option<Value>,
@@ -271,16 +280,47 @@ pub(super) async fn start_identified(
     state.agent_runs.ensure_healthy()?;
     let actor = write_claims(&state, &headers, &id)?;
     let owner = owner(&actor)?;
+    let target_guard = match &request.target_version {
+        Some(_) => Some(state.collaboration_lock.lock().await),
+        None => None,
+    };
     let bundle = open(&state, &id)?;
     let initial = bundle.manifest().map_err(hcd_error)?;
+    if let Some(version) = &request.target_version {
+        if request.target.is_none() {
+            return Err(bad("targetVersion requires an editor target"));
+        }
+        if initial.revision != version.revision
+            || collaboration_epoch(&state, &id).await? != version.collaboration_epoch
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "AI 编辑目标所在版本已变化，请重新确认选区。".into(),
+            ));
+        }
+    }
     let format = initial.source.format;
     if !matches!(
         format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "excalidraw"
     ) {
         return Err(bad("unsupported Agent document format"));
     }
     let task = request.task.trim().to_string();
+    if format == "excalidraw" {
+        canvas::validate_target(&bundle, request.target.as_ref())?;
+        if let Some(sentence) = canvas_spec::target(request.target.as_ref())? {
+            if request.agent_count != 1 || request.mode == TaskMode::Rebuild {
+                return Err(bad("选句改写需要单个 Agent。"));
+            }
+            let cursor = sentence.validate(&bundle, collaboration_epoch(&state, &id).await?)?;
+            if let Some(value) = request.target.as_mut().and_then(|v|v.get_mut("specSentence")) {
+                value["anchor"] = cursor.anchor.into();
+                value["head"] = cursor.head.into();
+            }
+        }
+    }
+    drop(target_guard);
     if !(1..=4).contains(&request.agent_count) {
         return Err(bad("协同 Agent 数量必须为 1–4。"));
     }
@@ -288,6 +328,9 @@ pub(super) async fn start_identified(
         return Err(bad("整稿重建目前用于 PPTX；其他格式请选择编辑。"));
     }
     let rebuild = rebuild_requested(&request.mode, &task, &format);
+    if rebuild && request.target_version.is_some() {
+        return Err(bad("请先清除原选区，再启动整稿重建。"));
+    }
     let target = if rebuild {
         None
     } else {
@@ -302,17 +345,12 @@ pub(super) async fn start_identified(
         ));
     }
     let config = Config::load()?;
+    canvas::authorize_model(&state, &id, &headers, &config.model).await?;
     agent_execution::task_with_facts(&task, shared_facts.as_ref())?;
     let agent_id = format!("agent-{}", run_id);
-    let name = request
-        .name
-        .unwrap_or_else(|| format!("编辑 Agent {}", &run_id[..4]))
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(48)
-        .collect::<String>();
+    let name = agent_identity::clean(request.name.as_deref()).unwrap_or_else(|| agent_identity::EDITOR.into());
     let now = agent_now();
-    let run = Run {
+    let mut run = Run {
         run_id: run_id.clone(),
         document_id: id.clone(),
         agent_id: agent_id.clone(),
@@ -340,7 +378,7 @@ pub(super) async fn start_identified(
         owner,
         cancelled: Arc::new(AtomicBool::new(false)),
     };
-    let response = serde_json::to_value(&run).map_err(internal)?;
+    let response;
     {
         let mut runs = state.agent_runs.lock().await;
         runs.retain(|_, run| {
@@ -368,6 +406,13 @@ pub(super) async fn start_identified(
                 "最多同时运行 4 个 Agent，请稍后重试。".into(),
             ));
         }
+        let base = run.name.clone();
+        let mut ordinal = 1;
+        while runs.values().any(|r| r.document_id == id && r.status == "running" && r.name == run.name) {
+            ordinal += 1;
+            run.name = format!("{base} {ordinal}");
+        }
+        response = serde_json::to_value(&run).map_err(internal)?;
         runs.insert(run_id.clone(), run);
     }
     state.agent_runs.ensure_healthy()?;
@@ -401,6 +446,13 @@ pub(super) async fn launch(
         .ok_or_else(|| bad("This task has no durable continuation data"))?;
     let task = agent_execution::task_with_facts(&task, invocation.shared_facts.as_ref())?;
     let target = invocation.target;
+    let cursor = canvas_spec::target(target.as_ref())?.map(|s| s.cursor());
+    let region: Option<canvas_core::Region> = target.as_ref().and_then(|v| v.pointer("/canvas/region"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok()).filter(canvas_core::Region::valid);
+    if cursor.is_some() || region.is_some() {
+        let point = region.map(|r| (r.x, r.y));
+        canvas_spec::announce_run(state.clone(), id.clone(), run_id.clone(), agent_id.clone(), name.clone(), cursor, point);
+    }
     let generate_images = invocation.generate_images;
     let now = agent_now();
     let fence = format!(
@@ -438,7 +490,9 @@ pub(super) async fn launch(
         .insert(fence.clone());
     tokio::spawn(async move {
         let execute = async {
-            if rebuild || count > 1 {
+            if count > 1 && open(&state,&id)?.manifest().map_err(hcd_error)?.source.format == "excalidraw" {
+                agent_team::execute_canvas(&state,&id,&run_id,&delegated_headers,&config,&task,target,count,&cancelled).await
+            } else if rebuild || count > 1 {
                 agent_team::execute(
                     &state,
                     &id,
@@ -582,7 +636,10 @@ fn mutation_targets(args: &Value) -> HashSet<String> {
         .into_iter()
         .flatten()
         .filter_map(|op| {
-            ["nodeId", "blockId", "chunkId", "sheetId"]
+            if op["op"] == "element.add" {
+                return op["element"]["id"].as_str().map(str::to_string);
+            }
+            ["nodeId", "blockId", "chunkId", "sheetId", "id"]
                 .iter()
                 .find_map(|key| op[key].as_str().map(str::to_string))
         })
@@ -597,6 +654,14 @@ fn read_targets(resource: &str, value: &Value) -> HashSet<String> {
         }
     };
     match resource {
+        "canvas" => {
+            for element in value["scene"]["elements"].as_array().into_iter().flatten() {
+                add(&element["id"]);
+            }
+            for id in value["verifiedElementIds"].as_array().into_iter().flatten() {
+                add(id);
+            }
+        }
         "node" => add(&value["nodeId"]),
         "sheet" => {
             add(&value["sheetId"]);
@@ -645,7 +710,7 @@ impl ConflictRecovery {
         if args.get("revision").is_none_or(Value::is_null)
             && matches!(
                 args["resource"].as_str(),
-                Some("node" | "sheet" | "chunk" | "editor")
+                Some("node" | "sheet" | "chunk" | "editor" | "canvas")
             )
         {
             self.content_read = true;
@@ -671,7 +736,18 @@ pub(super) async fn drive(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(internal)?;
-    let tools: Vec<_> = agent_tools::definitions().into_iter().filter(|tool| tool["name"]!="hcd_agent_run" && tool["name"]!="hcd_workflow").map(|tool| json!({"type":"function","name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"],"strict":false})).collect();
+    let canvas_document = open(state, id)?
+        .manifest()
+        .map_err(hcd_error)?
+        .source
+        .format
+        == "excalidraw";
+    let instructions = if canvas_document {
+        canvas::AGENT_INSTRUCTIONS
+    } else {
+        INSTRUCTIONS
+    };
+    let tools: Vec<_> = agent_tools::definitions().into_iter().filter(|tool| tool["name"]!="hcd_agent_run" && tool["name"]!="hcd_workflow" && (!canvas_document || matches!(tool["name"].as_str(),Some("hcd_help"|"hcd_read"|"hcd_patch"|"hcd_canvas_plan")))).map(|tool| json!({"type":"function","name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"],"strict":false})).collect();
     let execution_key = agent_execution::key(task, &target)?;
     let actor_id = claims(state, &headers, id)?
         .sub
@@ -715,6 +791,7 @@ pub(super) async fn drive(
             return Ok(String::new());
         }
         if cursor.output.is_empty() {
+            canvas::authorize_model(state, id, &headers, &config.model).await?;
             if cursor.needs_resume_read {
                 resume_read_barrier(&mut cursor);
             }
@@ -725,13 +802,13 @@ pub(super) async fn drive(
                 json!({"type":"thinking","agentId":actor_id,"step":cursor.step,"at":agent_now()}),
             )
             .await?;
-            let mut request = json!({"model":config.model,"instructions":INSTRUCTIONS,"input":cursor.input,"tools":tools,"parallel_tool_calls":false,"max_output_tokens":6000,"store":false});
+            let mut request = json!({"model":config.model,"instructions":instructions,"input":cursor.input,"tools":tools,"parallel_tool_calls":false,"max_output_tokens":6000,"store":false});
             if let Some(pending) = &cursor.recovery {
                 request["tool_choice"] = pending.choice();
                 request["instructions"] = json!(if pending.verify_only {
-                    format!("{INSTRUCTIONS}\nThis is an explicitly reauthorized continuation, not a new task. The preserved transcript contains already committed operations. Do not repeat them. Mandatory first step: reread current auth and current content for {:?}, then verify earlier commits and execute only genuinely unfinished steps. Auth read={}, content read={}. Do not write merely to refresh, verify or recreate an acknowledgement.",pending.targets,pending.auth_read,pending.content_read)
+                    format!("{instructions}\nThis is an explicitly reauthorized continuation, not a new task. The preserved transcript contains already committed operations. Do not repeat them. Mandatory first step: reread current auth and current content for {:?}, then verify earlier commits and execute only genuinely unfinished steps. Auth read={}, content read={}. Do not write merely to refresh, verify or recreate an acknowledgement.",pending.targets,pending.auth_read,pending.content_read)
                 } else {
-                    format!("{INSTRUCTIONS}\nMandatory conflict recovery for YOUR still-uncommitted work only: auth read={}, content read={}, unread target IDs={:?}. First read current auth and current source for EVERY listed target (no historical revision). Then recompute and submit only assigned, uncommitted changes with fresh hashes/revision/epoch. Do not take over peers' work or replay committed changes.",pending.auth_read,pending.content_read,pending.targets)
+                    format!("{instructions}\nMandatory conflict recovery for YOUR still-uncommitted work only: auth read={}, content read={}, unread target IDs={:?}. First read current auth and current source for EVERY listed target (no historical revision). Then recompute and submit only assigned, uncommitted changes with fresh hashes/revision/epoch. Do not take over peers' work or replay committed changes.",pending.auth_read,pending.content_read,pending.targets)
                 });
             }
             if let Some(effort) = &config.reasoning_effort {
@@ -811,7 +888,7 @@ pub(super) async fn drive(
             let verifies_content = name == "hcd_read"
                 && matches!(
                     args["resource"].as_str(),
-                    Some("editor" | "chunk" | "node" | "sheet" | "index")
+                    Some("editor" | "chunk" | "node" | "sheet" | "index" | "canvas")
                 );
             event(state,run_id,json!({"type":"tool","agentId":actor_id,"name":name,"step":cursor.step,"patchId":args.pointer("/patch/patchId"),"expectedRevision":args.get("expected_revision"),"at":agent_now()})).await?;
             let mut call_headers = headers.clone();

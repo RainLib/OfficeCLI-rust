@@ -1,11 +1,13 @@
 //! Streaming/source-backed HCD adapters for Office, PDF, HTML, Markdown and plain text.
 
+mod canvas;
 mod common;
 pub mod images;
 mod mermaid;
 mod native_images;
 mod pdf;
 mod pptx;
+pub mod registry;
 mod textual;
 mod theme_fonts;
 mod xlsx;
@@ -29,33 +31,17 @@ pub fn import_document<F>(
     source: impl AsRef<Path>,
     output: impl AsRef<Path>,
     options: &ImportOptions,
-    emit: F,
+    mut emit: F,
 ) -> Result<HcdManifest, HcdError>
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
     let source = source.as_ref();
-    match extension(source)?.as_str() {
-        "docx" => {
-            let mut docx_options = hcd_docx::ImportOptions::new(&options.document_id);
-            docx_options.chunk_soft_bytes = options.chunk_soft_bytes;
-            docx_options.chunk_blocks = options.chunk_blocks;
-            docx_options.storage_codec = options.storage_codec;
-            hcd_docx::import_docx(source, output, &docx_options, emit)
-        }
-        "xlsx" => xlsx::import_xlsx(source, output.as_ref(), options, emit),
-        "pptx" => pptx::import_pptx(source, output.as_ref(), options, emit),
-        "pdf" => pdf::import_pdf(source, output.as_ref(), options, emit),
-        "html" | "htm" => textual::import_html(source, output.as_ref(), options, emit),
-        "md" | "markdown" => textual::import_markdown(source, output.as_ref(), options, emit),
-        "png" | "jpg" | "jpeg" | "webp" => {
-            images::import_image(source, output.as_ref(), options, emit)
-        }
-        "txt" => textual::import_text(source, output.as_ref(), options, emit),
-        extension => Err(HcdError::Unsupported(format!(
-            "HCD import does not support .{extension}"
-        ))),
-    }
+    let extension = extension(source)?;
+    let format = registry::format_for_extension(&extension).ok_or_else(|| {
+        HcdError::Unsupported(format!("HCD import does not support .{extension}"))
+    })?;
+    (format.import)(source, output.as_ref(), options, &mut emit)
 }
 
 pub fn export_document(
@@ -66,27 +52,13 @@ pub fn export_document(
 ) -> Result<hcd_core::FidelityReport, HcdError> {
     let opened = hcd_core::Bundle::open(bundle.as_ref())?;
     let manifest = opened.manifest()?;
-    let mut report = match manifest.source.format.as_str() {
-        "docx" => hcd_docx::export_docx(
-            bundle.as_ref(),
-            source.as_ref(),
-            target.as_ref(),
-            &hcd_docx::ExportOptions {
-                revision: options.revision,
-                fidelity_report: options.fidelity_report.clone(),
-            },
-        ),
-        "xlsx" => xlsx::export_xlsx(&opened, source.as_ref(), target.as_ref(), options),
-        "pptx" => pptx::export_pptx(&opened, source.as_ref(), target.as_ref(), options),
-        "pdf" => pdf::export_pdf(&opened, source.as_ref(), target.as_ref(), options),
-        "html" => textual::export_html(&opened, source.as_ref(), target.as_ref(), options),
-        "md" => textual::export_markdown(&opened, source.as_ref(), target.as_ref(), options),
-        "png" | "jpg" | "jpeg" | "webp" => images::export_image(&opened, target.as_ref(), options),
-        "txt" => textual::export_text(&opened, source.as_ref(), target.as_ref(), options),
-        format => Err(HcdError::Unsupported(format!(
-            "HCD export does not support source format {format}"
-        ))),
-    }?;
+    let format = registry::format_for_extension(&manifest.source.format).ok_or_else(|| {
+        HcdError::Unsupported(format!(
+            "HCD export does not support source format {}",
+            manifest.source.format
+        ))
+    })?;
+    let mut report = (format.export)(&opened, source.as_ref(), target.as_ref(), options)?;
     let images = native_images::apply(&opened, target.as_ref(), options.revision)?;
     if images > 0 {
         if report.level == hcd_core::FidelityLevel::Exact {
@@ -118,34 +90,14 @@ pub fn validate_source_export(
     source: &Path,
     revision: Option<u64>,
 ) -> Result<(), HcdError> {
-    use common::{checked_export_state, checked_export_state_with_restores, RunFontSupport};
-    let options = ExportOptions {
-        revision,
-        ..Default::default()
-    };
-    match bundle.manifest()?.source.format.as_str() {
-        "png" | "jpg" | "jpeg" | "webp" => {
-            images::image_content(bundle, revision)?;
-        }
-        "pdf" | "xlsx" => {
-            checked_export_state_with_restores(bundle, source, &options, RunFontSupport::Rejects)?;
-        }
-        "pptx" => {
-            checked_export_state_with_restores(bundle, source, &options, RunFontSupport::Rewrites)?;
-        }
-        "docx" => {
-            hcd_docx::validate_source_export(bundle, source, revision)?;
-        }
-        "html" | "md" | "txt" => {
-            checked_export_state(bundle, source, &options, RunFontSupport::Rejects)?;
-        }
-        format => {
-            return Err(HcdError::Unsupported(format!(
-                "source-backed export does not support {format}"
-            )))
-        }
-    }
-    Ok(())
+    let manifest = bundle.manifest()?;
+    let format = registry::format_for_extension(&manifest.source.format).ok_or_else(|| {
+        HcdError::Unsupported(format!(
+            "source-backed export does not support {}",
+            manifest.source.format
+        ))
+    })?;
+    (format.validate_export)(bundle, source, revision)
 }
 
 fn extension(path: &Path) -> Result<String, HcdError> {

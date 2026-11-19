@@ -1807,6 +1807,7 @@ fn commit_document_theme(
     let root_hash = finalize_root_hash(bundle, root_hasher, &asset_index_href, &new_styles_href)?;
 
     let record = crate::RevisionRecord {
+        canvas_rewrite: None,
         schema_version: manifest.schema_version.clone(),
         document_id: manifest.document_id.clone(),
         revision: new_revision,

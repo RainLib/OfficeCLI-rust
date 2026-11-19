@@ -12,7 +12,7 @@ use std::{io::Cursor, path::Path};
 
 pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 pub fn is_image_format(format: &str) -> bool {
-    matches!(format, "png" | "jpg" | "jpeg" | "webp")
+    crate::registry::format_for_extension(format).is_some_and(|format| format.raster_image)
 }
 
 /// Reject animation explicitly: static editing must never silently drop frames.

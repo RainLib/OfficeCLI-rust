@@ -37,7 +37,7 @@ pub(crate) fn export(
     let pdf = temp.path().join("output.pdf");
     let log = temp.path().join("browser.log");
     let mut source = Vec::new();
-    super::hdoc_html::render(
+    office_engine::render_hcd_html(
         bundle,
         &HtmlPresentationOptions {
             revision: Some(revision),

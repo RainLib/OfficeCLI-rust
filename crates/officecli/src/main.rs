@@ -518,6 +518,9 @@ pub(crate) fn open_handler_direct(
     file: &str,
     editable: bool,
 ) -> Result<Box<dyn DocumentHandler>, HandlerError> {
+    if let Some(handler) = office_engine::try_open_document(file, editable)? {
+        return Ok(handler);
+    }
     let path = PathBuf::from(file);
     let ext = path
         .extension()
@@ -525,41 +528,12 @@ pub(crate) fn open_handler_direct(
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    match ext.as_str() {
-        // Macro-enabled OOXML packages share the same WordprocessingML model.
-        // OxmlPackage preserves unknown parts (including vbaProject.bin), so
-        // routing .docm here enables safe structured edits without stripping
-        // the macro payload.
-        "docx" | "docm" => {
-            let handler = docx_handler::WordHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        // .xlsm uses the same SpreadsheetML handler; macro parts are retained
-        // untouched by the package read/write cycle.
-        "xlsx" | "xlsm" => {
-            let handler = xlsx_handler::ExcelHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        // .pptm likewise shares PresentationML with .pptx.
-        "pptx" | "pptm" => {
-            let handler = pptx_handler::PptxHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        "pdf" => {
-            let handler = pdf_handler::PdfHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        other => {
-            // Last-resort: any installed format-handler plugin that owns
-            // this extension (e.g. .hwpx). See plugins/plugin-protocol.md §2.3.
-            if commands::resolve_format_handler(other).is_some() {
-                let proxy = commands::FormatHandlerProxy::open(file)?;
-                return Ok(Box::new(proxy));
-            }
-            Err(HandlerError::OpenError(format!(
-                "unsupported format: {}",
-                other
-            )))
-        }
+    // External format-handler plugins remain the host's fallback.
+    if commands::resolve_format_handler(&ext).is_some() {
+        let proxy = commands::FormatHandlerProxy::open(file)?;
+        return Ok(Box::new(proxy));
     }
+    Err(HandlerError::OpenError(format!(
+        "unsupported format: {ext}"
+    )))
 }

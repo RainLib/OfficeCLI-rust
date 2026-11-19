@@ -105,10 +105,13 @@ pub fn runtime() -> &'static Value {
                 }),
             );
         }
+        schemas.insert(canvas_core::PROTOCOL.into(),json!({"route":"/canvas/patch","operations":["element.add","element.update","element.remove","file.add","scene.update","spec.update","spec.splice"]}));
         let mut result = json!({
             "protocolVersion": "hcd-api/1",
             "build": {"version":env!("CARGO_PKG_VERSION")},
+            "documentFormats": office_engine::registry::capabilities(),
             "patchSchemas": schemas,
+            "canvas":{"schema":serde_json::from_str::<Value>(canvas_core::SCHEMA_JSON).expect("canvas schema"),"protocolVersion":canvas_core::PROTOCOL,"nativeFormat":"excalidraw","events":"/canvas/events","fieldCompareAndSet":true,"serverEnforcedSelection":true,"appendOnlyLayouts":{"endpoint":"/canvas/layout","tool":"hcd_canvas_plan","schema":canvas_core::composition_schema(),"vacantRegionGuards":true,"preservesExistingLayout":true,"automaticVisualPlanning":true,"nativeJournal":true,"stickerCatalogVersion":canvas_core::materials::CATALOG_VERSION,"materialLibrary":{"resource":"canvas_materials","disclosure":["overview","candidates","detail"]},"elementReactions":["thumbsUp","plusOne","loveIt","insight","done","favorite","fire","watch","celebrate","smile","launch","action","okay","thumbsDown","question","dot","profile"],"emojiCatalog":"Unicode 16.0","maxStickersPerComposition":4,"maxMotionStickersPerComposition":2,"staticExportFallback":true},"partitionedAgents":{"maxConcurrent":4,"maxSections":8,"stagedDrafts":true,"atomicAppend":true},"maxElements":canvas_core::MAX_ELEMENTS},
             "calculation": xlsx_handler::formula::calculation_capabilities(),
             "targetValidationRequired": true,
             "docxInlineEdits": {"protocolVersion":"hcd-docx-inline/1","marks":["bold","italic"],"stableSourceAnchors":true,"sourceBackedExport":true,"hyperlinkChangesRequireSemanticRebuild":true},

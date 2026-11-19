@@ -925,7 +925,18 @@ pub struct ApplyResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CanvasRewriteReceipt {
+    pub owner: String,
+    pub epoch: u64,
+    pub cursor: canvas_core::spec::SpecCursor,
+    pub inverse_href: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevisionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_rewrite: Option<CanvasRewriteReceipt>,
     pub schema_version: String,
     pub document_id: String,
     pub revision: u64,

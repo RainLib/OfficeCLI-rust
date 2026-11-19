@@ -10,6 +10,7 @@ pub(super) struct McpSession {
     protocol: String,
     expires: Instant,
     initialized: bool,
+    agent_name: String,
 }
 
 const VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
@@ -185,6 +186,7 @@ pub(super) async fn post(
                     protocol: protocol.into(),
                     expires: Instant::now() + Duration::from_secs(3600),
                     initialized: false,
+                    agent_name: agent_identity::clean(request.pointer("/params/clientInfo/title").and_then(Value::as_str)).or_else(||agent_identity::clean(request.pointer("/params/clientInfo/name").and_then(Value::as_str))).unwrap_or_else(|| "外部助手".into()),
                 },
             );
         }
@@ -242,6 +244,14 @@ pub(super) async fn post(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            let mut headers = headers;
+            if matches!(name, "hcd_patch" | "hcd_activity" | "hcd_read") {
+                if let Some(session) = state.mcp_sessions.lock().await.get(&key) {
+                    headers.insert("x-hcd-agent-name", agent_identity::encode_name(&session.agent_name));
+                    headers.insert("x-hcd-agent-presence-id", key.parse().map_err(internal)?);
+                    if name == "hcd_patch" { headers.insert("x-hcd-agent-edit", "true".parse().map_err(internal)?); }
+                }
+            }
             let result = if name == "hcd_workflow" {
                 agent_workflows::call(state, id, headers, args).await
             } else if name == "hcd_agent_run" {

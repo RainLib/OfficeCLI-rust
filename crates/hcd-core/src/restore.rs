@@ -34,6 +34,7 @@ pub fn restore_revision(
     let patch_id = format!("restore-{target}-{revision}");
     let patch_hash = hash_bytes(format!("restore:{target}:{expected_head}").as_bytes());
     let record = RevisionRecord {
+        canvas_rewrite: None,
         schema_version: head.schema_version.clone(),
         document_id: head.document_id.clone(),
         revision,

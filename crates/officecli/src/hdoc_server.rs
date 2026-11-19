@@ -7,11 +7,16 @@ mod agent_continuation;
 mod agent_execution;
 mod agent_operations;
 mod agent_run_store;
+mod agent_identity;
 mod agent_runs;
 mod agent_team;
 mod agent_tools;
 mod agent_workflow_store;
 mod agent_workflows;
+mod canvas;
+mod canvas_spec;
+mod canvas_materials;
+mod canvas_reactions;
 mod exports;
 mod grid_drafts;
 mod identity;
@@ -21,6 +26,7 @@ mod image_workspace;
 mod integration;
 mod mcp_http;
 mod spreadsheet;
+mod selection_transfers;
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -75,6 +81,9 @@ struct ServerState {
     image_edits: image_workspace::Store,
     image_slots: Arc<tokio::sync::Semaphore>,
     mcp_sessions: mcp_http::SessionStore,
+    canvas_rooms: canvas::Rooms,
+    transfer_slots: Arc<tokio::sync::Semaphore>,
+    transfer_cancellations: Arc<Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>>>,
     integration: Option<Arc<integration::Integration>>,
 }
 
@@ -108,6 +117,7 @@ struct AgentFocus {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone)]
 struct Claims {
     doc: String,
     scope: String,
@@ -235,10 +245,22 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         image_edits,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         mcp_sessions: Default::default(),
+        canvas_rooms: Default::default(),
+        transfer_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+        transfer_cancellations: Default::default(),
         integration,
     };
     integration::start_events(&state);
     let router = Router::new()
+        .route("/v1/documents/{id}/canvas", get(canvas::read))
+        .route("/v1/documents/{id}/canvas/layout", post(canvas::plan))
+        .route("/v1/documents/{id}/canvas/materials", get(canvas_materials::browse))
+        .route("/v1/documents/{id}/canvas/materials/plan", post(canvas_materials::plan))
+        .route("/v1/documents/{id}/canvas/reactions", get(canvas_reactions::read).put(canvas_reactions::set))
+        .route("/v1/documents/{id}/canvas/patch", post(canvas::patch).layer(DefaultBodyLimit::max(34 * 1024 * 1024)))
+        .route("/v1/documents/{id}/canvas/spec-undo", post(canvas_spec::undo))
+        .route("/v1/documents/{id}/canvas/events", get(canvas::events))
+        .route("/v1/documents/{id}/canvas/presence", post(canvas::presence))
         .route("/v1/documents/{id}/agent-workflows", get(agent_workflows::list).post(agent_workflows::create))
         .route("/v1/documents/{id}/agent-workflows/{workflow_id}", get(agent_workflows::read).delete(agent_workflows::cancel))
         .route("/v1/documents/{id}/agent-workflows/{workflow_id}/review", get(agent_workflows::review))
@@ -303,6 +325,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/jobs/{job_id}", get(job_status))
         .route("/v1/documents/{id}/editor", get(editor))
         .route("/v1/documents/{id}/project", post(project))
+        .route("/v1/documents/{id}/selection-transfers", post(selection_transfers::start))
+        .route("/v1/documents/{id}/selection-transfers/{run_id}", get(selection_transfers::read).delete(selection_transfers::cancel))
+        .route("/v1/documents/{id}/selection-transfers/{run_id}/apply", post(selection_transfers::apply))
+        .route("/v1/documents/{id}/selection-transfers/{run_id}/source", get(selection_transfers::source))
         .route("/v1/documents/{id}/patch", post(patch))
         .route("/v1/documents/{id}/node-patch", post(node_patch))
         .route("/v1/documents/{id}/node-patch-review", post(grid_drafts::review))
@@ -607,6 +633,7 @@ async fn import_document(
             | "jpg"
             | "jpeg"
             | "webp"
+            | "excalidraw"
     ) {
         return Err(bad("unsupported import extension"));
     }
@@ -1524,6 +1551,7 @@ async fn agent_focus(
     Json(mut focus): Json<AgentFocus>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let actor = agent_identity::for_presence(&actor, &headers);
     let agent_id = actor
         .sub
         .clone()
@@ -1665,7 +1693,8 @@ async fn agent_result(
     revision: u64,
     target: Option<Value>,
 ) -> Result<(), ApiError> {
-    let Some(agent) = &actor.sub else {
+    let display = agent_identity::for_presence(actor, headers);
+    let Some(agent) = &display.sub else {
         return Ok(());
     };
     let epoch = collaboration_epoch(state, id).await?;
@@ -1674,7 +1703,7 @@ async fn agent_result(
         .and_then(|value| value.to_str().ok())
         == Some("true")
     {
-        agent_operations::result(state, id, actor, status, revision, epoch, target.as_ref()).await;
+        agent_operations::result(state, id, &display, status, revision, epoch, target.as_ref()).await;
     }
     if let Some(activity) = state
         .agents
@@ -1848,7 +1877,18 @@ async fn patch(
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
     let _guard = state.collaboration_lock.lock().await;
-    check_agent_patch(&state, &id, &headers, &actor).await?;
+    let result = patch_structure_locked(&state, &id, &headers, &actor, patch).await?;
+    Ok(Json(serde_json::to_value(result).map_err(internal)?))
+}
+
+async fn patch_structure_locked(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+    actor: &Claims,
+    patch: StructurePatchBatch,
+) -> Result<hcd_core::ApplyResult, ApiError> {
+    check_agent_patch(state, id, headers, actor).await?;
     if patch.operations.iter().any(|op| {
         matches!(
             op,
@@ -1858,28 +1898,28 @@ async fn patch(
                 | hcd_core::StructureOperation::TableRestore { .. }
         )
     }) {
-        require_clean_collaboration(&state, &id, &headers).await?;
+        require_clean_collaboration(state, id, headers).await?;
     }
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
     agent_team::check_write(
-        &state,
-        &id,
-        &actor,
-        &headers,
+        state,
+        id,
+        actor,
+        headers,
         &serde_json::to_value(&patch.operations).map_err(internal)?,
     )
     .await?;
-    let bundle = open(&state, &id)?;
+    let bundle = open(state, id)?;
     let result = match apply_structure_patch(&bundle, &patch, patch.base_revision) {
         Ok(result) => result,
         Err(error) => {
             agent_result(
-                &state,
-                &id,
-                &actor,
-                &headers,
+                state,
+                id,
+                actor,
+                headers,
                 "conflict",
                 bundle.manifest().map_err(hcd_error)?.revision,
                 None,
@@ -1889,21 +1929,21 @@ async fn patch(
         }
     };
     if !result.idempotent_replay {
-        stamp_revision_author(&bundle, result.revision, &actor)?;
-        publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
-        reset_collaboration_locked(&state, &id).await?;
+        stamp_revision_author(&bundle, result.revision, actor)?;
+        publish_mutation(state, id, &bundle, patch.base_revision).await?;
+        reset_collaboration_locked(state, id).await?;
     }
     agent_result(
-        &state,
-        &id,
-        &actor,
-        &headers,
+        state,
+        id,
+        actor,
+        headers,
         "applied",
         result.revision,
         serde_json::to_value(&patch.operations).ok(),
     )
     .await?;
-    Ok(Json(serde_json::to_value(result).map_err(internal)?))
+    Ok(result)
 }
 
 async fn node_patch(
@@ -2024,13 +2064,56 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
     content
 }
 
+/// The trusted sidecar reports an author only when all accepted changes since
+/// the previous checkpoint came from that authenticated connection identity.
+/// Ordinary document sessions cannot override their own revision attribution.
+fn checkpoint_author(mut actor: Claims, headers: &HeaderMap) -> Result<Claims, ApiError> {
+    use base64::Engine;
+    let Some(header) = headers.get("x-hcd-checkpoint-author") else {
+        return Ok(actor);
+    };
+    if actor.sub.as_deref() != Some("hcd-collaboration") {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "collaboration service identity required".into(),
+        ));
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Author {
+        id: String,
+        name: String,
+    }
+    let encoded = header
+        .to_str()
+        .map_err(|_| bad("invalid checkpoint author"))?;
+    if encoded.len() > 2048 {
+        return Err(bad("checkpoint author limit exceeded"));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| bad("invalid checkpoint author"))?;
+    let author: Author =
+        serde_json::from_slice(&bytes).map_err(|_| bad("invalid checkpoint author"))?;
+    if [&author.id, &author.name].iter().any(|value| {
+        value.trim().is_empty()
+            || value.chars().count() > 128
+            || value.chars().any(char::is_control)
+    }) {
+        return Err(bad("invalid checkpoint author identity"));
+    }
+    actor.sub = Some(author.id);
+    actor.name = Some(author.name);
+    Ok(actor)
+}
+
 async fn checkpoint(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<SnapshotRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let actor = write_claims(&state, &headers, &id)?;
+    let actor = checkpoint_author(write_claims(&state, &headers, &id)?, &headers)?;
     let _guard = state.collaboration_lock.lock().await;
     check_collaboration_epoch(&state, &id, &headers).await?;
     if request.blocks.len() > 1_000_000 {
@@ -3578,6 +3661,57 @@ mod tests {
     use super::*;
     use hcd_core::FontRef;
 
+    #[test]
+    fn checkpoint_authors_require_the_sidecar_and_valid_identity() {
+        use base64::Engine;
+        let actor = |id: &str| -> Claims {
+            serde_json::from_value(json!({
+                "doc":"example", "scope":"write", "sub":id, "name":"Original",
+                "aud":"hcd-core", "iat":0, "exp":1
+            }))
+            .unwrap()
+        };
+        let mut headers = HeaderMap::new();
+        let guest = json!({"id":"host-guest-7f2a", "name":"访客 7F2A"});
+        headers.insert(
+            "x-hcd-checkpoint-author",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&guest).unwrap())
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            checkpoint_author(actor("ordinary-editor"), &headers)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let accepted = checkpoint_author(actor("hcd-collaboration"), &headers).unwrap();
+        assert_eq!(accepted.sub.as_deref(), Some("host-guest-7f2a"));
+        assert_eq!(accepted.name.as_deref(), Some("访客 7F2A"));
+        for value in [
+            json!({"id":"", "name":"Visitor"}),
+            json!({"id":"guest", "name":"bad\nname"}),
+            json!({"id":"guest", "name":"Visitor", "scope":"admin"}),
+        ] {
+            headers.insert(
+                "x-hcd-checkpoint-author",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&value).unwrap())
+                    .parse()
+                    .unwrap(),
+            );
+            assert_eq!(
+                checkpoint_author(actor("hcd-collaboration"), &headers)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let unchanged = checkpoint_author(actor("hcd-collaboration"), &HeaderMap::new()).unwrap();
+        assert_eq!(unchanged.sub.as_deref(), Some("hcd-collaboration"));
+    }
+
     const TTF: &[u8] = b"\x00\x01\x00\x00glyh font";
 
     async fn export_plan(
@@ -4659,6 +4793,9 @@ mod tests {
             image_edits: Default::default(),
             image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             mcp_sessions: Default::default(),
+            canvas_rooms: Default::default(),
+            transfer_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            transfer_cancellations: Default::default(),
             integration: None,
         }
     }

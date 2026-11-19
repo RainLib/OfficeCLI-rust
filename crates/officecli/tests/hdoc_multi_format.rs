@@ -191,23 +191,23 @@ fn pdf_contains_image_xobject(path: &Path) -> bool {
 }
 
 fn pdf_contains_image_placement(path: &Path, width: f32, height: f32) -> bool {
+    use pdf_handler::content_stream::{
+        parse_page_content_stream_text_only_bounded, PdfXObjectKind,
+    };
+
     let document = lopdf::Document::load(path).unwrap();
     document.get_pages().into_values().any(|page| {
-        let Ok(bytes) = document.get_page_content(page) else {
-            return false;
-        };
-        let Ok(content) = lopdf::content::Content::decode(&bytes) else {
-            return false;
-        };
-        content.operations.iter().any(|operation| {
-            operation.operator == "cm"
-                && operation.operands.len() == 6
-                && operation.operands[0]
-                    .as_float()
-                    .is_ok_and(|value| (value.abs() - width).abs() < 0.5)
-                && operation.operands[3]
-                    .as_float()
-                    .is_ok_and(|value| (value.abs() - height).abs() < 0.5)
+        let bytes = document.get_page_content(page).unwrap();
+        // Chromium splits page units and image sizing across multiple `cm`
+        // operators. Check the effective CTM at an actual image `Do`, including
+        // q/Q restores, rather than matching an arbitrary matrix instruction.
+        let parsed =
+            parse_page_content_stream_text_only_bounded(&bytes, page, &document, 16 * 1024 * 1024)
+                .unwrap();
+        parsed.image_blocks.iter().any(|image| {
+            image.xobject_kind == PdfXObjectKind::Image
+                && (image.bbox.width - width).abs() < 0.5
+                && (image.bbox.height - height).abs() < 0.5
         })
     })
 }
@@ -1711,14 +1711,22 @@ fn hcd_content_addressed_image_exports_to_all_rust_targets_without_source() {
             _ => unreachable!(),
         }
         let report: Value = serde_json::from_slice(&std::fs::read(&fidelity).unwrap()).unwrap();
-        assert!(report["preserved"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item
-                .as_str()
-                .unwrap_or("")
-                .contains("1 of 1 content-addressed")));
+        // DOCX -> PDF uses the measured Word preview, while Office rebuilds
+        // report image counts from the semantic writer. Verify each writer's
+        // fidelity contract as well as the native image and physical geometry.
+        let preserved_media = if extension == "pdf" {
+            "source section geometry, running headers and footers, table widths, fonts, colors and embedded media"
+        } else {
+            "1 of 1 content-addressed"
+        };
+        assert!(
+            report["preserved"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item.as_str().unwrap_or("").contains(preserved_media)),
+            "{report}"
+        );
     }
 
     let href = asset_index[0]["href"].as_str().unwrap();

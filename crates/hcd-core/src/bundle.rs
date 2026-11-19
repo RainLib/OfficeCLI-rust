@@ -836,6 +836,7 @@ impl BundleWriter {
         manifest.state = "COMPLETE".to_string();
 
         let record = RevisionRecord {
+        canvas_rewrite: None,
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             document_id: manifest.document_id.clone(),
             revision: 0,

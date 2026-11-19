@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/canvas-core",
     "crates/officecli",
+    "crates/office-engine",
     "crates/oxml",
     "crates/hcd-core",
     "crates/hcd-docx",

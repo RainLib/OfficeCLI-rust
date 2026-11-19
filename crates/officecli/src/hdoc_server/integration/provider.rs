@@ -7,6 +7,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 pub(super) const OPERATIONS: &[&str] = &[
     "document.view",
     "document.edit",
+    "document.ai",
     "document.publish",
     "document.download",
     "document.export",
@@ -98,7 +99,17 @@ impl Descriptor {
         };
         if !matches!(
             format,
-            "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "png" | "jpeg" | "webp"
+            "docx"
+                | "xlsx"
+                | "pptx"
+                | "pdf"
+                | "html"
+                | "md"
+                | "txt"
+                | "png"
+                | "jpeg"
+                | "webp"
+                | "excalidraw"
         ) {
             return Err(bad("Provider file format is not supported"));
         }
@@ -127,11 +138,26 @@ pub(in crate::hdoc_server) struct Decision {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(in crate::hdoc_server) struct Constraints {
+    #[serde(default)]
+    pub selection_agent: bool,
     pub export_formats: Vec<String>,
     pub model_ids: Vec<String>,
 }
 
 impl Decision {
+    pub fn require_model(&self, model: &str) -> Result<(), ApiError> {
+        self.require(&["document.view", "document.edit", "document.ai"])?;
+        if !self
+            .constraints
+            .model_ids
+            .iter()
+            .any(|allowed| allowed == model)
+        {
+            return Err(denied("model is not authorized by the business Provider"));
+        }
+        Ok(())
+    }
+
     pub fn require(&self, operations: &[&str]) -> Result<(), ApiError> {
         if operations
             .iter()
@@ -140,6 +166,29 @@ impl Decision {
             return Err(denied("business permission denied"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod model_constraint_tests {
+    use super::*;
+
+    #[test]
+    fn empty_or_unlisted_models_are_denied_even_with_ai_permission() {
+        let mut decision: Decision = serde_json::from_value(json!({
+            "granted":["document.view","document.edit","document.ai"],
+            "permissionVersion":"acl-1","expiresAt":"2026-11-18T00:00:00Z",
+            "constraints":{"exportFormats":[],"modelIds":[]}
+        }))
+        .unwrap();
+        assert!(decision.require_model("allowed-model").is_err());
+        decision.constraints.model_ids.push("allowed-model".into());
+        assert!(decision.require_model("allowed-model").is_ok());
+        assert!(decision.require_model("other-model").is_err());
+        decision
+            .granted
+            .retain(|operation| operation != "document.ai");
+        assert!(decision.require_model("allowed-model").is_err());
     }
 }
 

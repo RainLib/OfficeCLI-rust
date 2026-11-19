@@ -34,7 +34,8 @@
         "semantic-flow",
         "grid",
         "slide-canvas",
-        "fixed-layout"
+        "fixed-layout",
+        "canvas"
       ]
     },
     "revision": {
@@ -69,8 +70,13 @@
     },
     "stylesHref": {
       "anyOf": [
-        { "const": "styles.css" },
-        { "type": "string", "pattern": "^styles/[A-Za-z0-9._-]+\\.css$" }
+        {
+          "const": "styles.css"
+        },
+        {
+          "type": "string",
+          "pattern": "^styles/[A-Za-z0-9._-]+\\.css$"
+        }
       ]
     },
     "themeRevisionId": {
@@ -128,7 +134,8 @@
             "png",
             "jpg",
             "jpeg",
-            "webp"
+            "webp",
+            "excalidraw"
           ]
         },
         "sha256": {
@@ -207,7 +214,8 @@
             "sheet",
             "slide",
             "note",
-            "page"
+            "page",
+            "canvas"
           ]
         },
         "htmlHref": {

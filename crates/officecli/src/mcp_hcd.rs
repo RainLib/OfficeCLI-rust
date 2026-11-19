@@ -23,12 +23,17 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
     };
     vec![
         ToolDefinition { name: "hcd_help".into(), description: "HCD agent workflow and concrete patch examples. Read before editing. No credential required.".into(), input_schema: json!({"type":"object","properties":{},"additionalProperties":false}) },
-        make("hcd_read", "Read a served HCD document. Start with manifest and auth, then editor (semantic blocks) or index/chunk (fixed/grid nodes). For XLSX read resource=sheet with number=0 (zero-based worksheet index) for cell addresses, formula expressions, formulaEditable, hashes and freshly calculated values. A formula result with textEditable=false can still have formulaEditable=true. For XLSX string-cell rich formatting, node reads include xlsxRuns; preserve unrelated run properties and use xlsx.richText.set with hcd-patch/49 after capability negotiation. For atomic mixed XLSX content use hcd-patch/50: xlsx.richText.create targets an empty sheet/row/column; xlsx.richText.set can also replace a writable numeric or formula cell with rich text. Numeric/formula operations retain their native types in the same batch. Read current node/block hashes before editing. Each call names its document and credential, enabling independent multi-document and multi-agent work.", json!({
-            "resource":{"type":"string","enum":["manifest","capabilities","auth","editor","index","chunk","node","sheet","search","revisions","revision","agents"]},
+        make("hcd_read", "For whiteboard art read resource=canvas_materials with no filter for categories, then category or query for summaries, use number for zero-based candidate pages, then material_id for a selected detail. Read a served HCD document. Start with manifest and auth, then editor (semantic blocks) or index/chunk (fixed/grid nodes). For XLSX read resource=sheet with number=0 (zero-based worksheet index) for cell addresses, formula expressions, formulaEditable, hashes and freshly calculated values. A formula result with textEditable=false can still have formulaEditable=true. For XLSX string-cell rich formatting, node reads include xlsxRuns; preserve unrelated run properties and use xlsx.richText.set with hcd-patch/49 after capability negotiation. For atomic mixed XLSX content use hcd-patch/50: xlsx.richText.create targets an empty sheet/row/column; xlsx.richText.set can also replace a writable numeric or formula cell with rich text. Numeric/formula operations retain their native types in the same batch. Read current node/block hashes before editing. Each call names its document and credential, enabling independent multi-document and multi-agent work.", json!({
+            "resource":{"type":"string","enum":["manifest","capabilities","auth","editor","index","chunk","node","sheet","search","revisions","revision","agents","canvas","canvas_materials"]},
             "revision":{"type":"integer","minimum":0},
             "number":{"type":"integer","minimum":0,"description":"Index page, chunk sequence or revision number"},
-            "node_id":{"type":"string","pattern":"^n_[0-9a-f]{32}$","description":"Mapped nodeId from node/sheet/chunk read; never a sheetId or resource key"}, "query":{"type":"string"}
+            "category":{"type":"string","enum":["brush","sticker","avatar","reaction","emoji"]},"material_id":{"type":"string","maxLength":128},"node_id":{"type":"string","pattern":"^[A-Za-z0-9_.:-]{1,256}$","description":"Mapped text node ID, or a canvas element ID when resource=canvas"}, "query":{"type":"string"}
         }), &["document_id","resource"]),
+        make("hcd_canvas_plan", "Plan an append-only native canvas layout or catalog material without writing. Supply either a composition or a material_id for a sticker, avatar or emoji, using the current revision. Provide generated content; the service arranges editable bubbles/cards/notes or semantic flowcharts, architecture diagrams, mind maps and teaching boards with the OfficeCLI palette and finds empty space. Graph layouts use items:[], diagram:{nodes,edges,groups}; card layouts use items and diagram:null. Plan visual style, palette, paper, brush and semantic stickers yourself when requested; visual is optional for legacy layouts. Choose watercolor, fountain or pastel for textured marks and motion auto for motif-specific gestures such as drifting petals, butterfly wings or a paper plane. Journal decoration stays native, with at most 4 stickers and 2 motion accents. Select a suitable layout when the request does not specify one. Diagram node IDs are local content identifiers, not existing canvas object IDs. Commit the returned batch unchanged with hcd_patch mode=canvas. vacantRegions reject a concurrent human moving into that space. On conflict reread, use a NEW patch_id and replan; never move existing content to make room.", json!({
+            "expected_revision":{"type":"integer","minimum":0},"patch_id":{"type":"string","maxLength":96},
+            "composition":canvas_core::composition_schema(),"material_id":{"type":"string","maxLength":128},
+            "region":{"type":"object","additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"},"width":{"type":"number"},"height":{"type":"number"}},"required":["x","y","width","height"]}
+        }), &["document_id","expected_revision","patch_id"]),
         make("hcd_project", "Initialize the editable semantic projection for a newly imported DOCX/HTML/MD/TXT document when manifest.capabilities.structurePatch is false. Creates a baseline revision without changing content. Requires a write token, the current revision and collaboration epoch. Read fresh manifest/editor after success; do not call for fixed/grid formats or an already initialized document.", json!({
             "expected_revision":{"type":"integer","minimum":0},
             "collaboration_epoch":{"type":"integer","minimum":0}
@@ -47,14 +52,14 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
             "plan":crate::capabilities::agent_workflow_plan_schema()
         }), &["document_id","action"]),
         make("hcd_patch", "Commit one HCD patch through the service. Supply expected_revision and collaboration_epoch from fresh reads. Use structure mode and block hashes for semantic blocks. hcd-patch/4 also supports table.insert {afterBlockId,rows,columns} and table.edit {blockId,tableIndex,action,index,precondition:{blockHash}}; action is insertRow/deleteRow/insertColumn/deleteColumn; tableIndex and index are zero-based logical positions. Merges adjust; fragmented tables and last-row/column deletion reject. Structural DOCX export uses semantic mode; node mode and node hashes for mapped text, including DOCX table cells and other opaque blocks. Semantic node mode accepts mapped text.splice and image.insert/replace/geometry operations, protects pending human drafts and changes the collaboration epoch. PDF/PPTX/XLSX also support format-specific node operations. XLSX formula results reject text.splice: use xlsx.formula.set with nodeId,sheetId,formula starting =,precondition.nodeHash. To multiply an existing formula use =(OLD_EXPRESSION_WITHOUT_EQUAL)*2. For native numeric arithmetic use xlsx.number.set with nodeId,sheetId,value as a numeric string,precondition.nodeHash in hcd-patch/29. String text.splice-only batches use hcd-patch/1. hcd-patch/22 batches require at least one formula operation; xlsx.formula.create uses sheetId,row,column (1-based),formula, without a guessed nodeId. Read sheet again to verify expressions and calculated values; unavailable calculations must not be reported as verified totals. 409 means reread and replan, never retry with a guessed revision. One document per commit; cross-document commits are independent.", json!({
-            "mode":{"type":"string","enum":["structure","node"]},
+            "mode":{"type":"string","enum":["structure","node","canvas"]},
             "expected_revision":{"type":"integer","minimum":0},
             "collaboration_epoch":{"type":"integer","minimum":0},
             "patch":{"type":"object","description":"Full versioned HCD patch with documentId, patchId, baseRevision and operations. Use block.replace/insert/move/delete for structure; text.splice/font and format-specific operations for nodes. Preserve all unedited properties."}
         }), &["document_id","mode","expected_revision","collaboration_epoch","patch"]),
         make("hcd_activity", "Show this agent's focus and operation in document previews. The service derives agent identity from its token. Use ONLY node IDs matching n_[0-9a-f]{32} from a fresh node/sheet/chunk read. A sheetId or sheet-column resource key is NOT a node ID. Call when moving between nodes/blocks, then reading or editing. Heartbeat at least every 10 seconds; idle removes the cursor. For batches, announce status=planning with targets (camelCase nodeId/blockId/chunkSequence and label) so pending areas are visible. Actual patch targets and outcomes are recorded automatically and survive idle for a clearly labeled replay. Activity does not modify document content or lock out other agents.", json!({
             "status":{"type":"string","enum":["locating","reading","planning","editing","idle"]},
-            "node_id":{"type":"string","pattern":"^n_[0-9a-f]{32}$","description":"Mapped nodeId from node/sheet/chunk read; never a sheetId or resource key"}, "block_id":{"type":"string"},
+            "category":{"type":"string","enum":["brush","sticker","avatar","reaction","emoji"]},"material_id":{"type":"string","maxLength":128},"node_id":{"type":"string","pattern":"^[A-Za-z0-9_.:-]{1,256}$","description":"Mapped text node ID, or a canvas element ID when resource=canvas"}, "block_id":{"type":"string"},
             "chunk_sequence":{"type":"integer","minimum":0},
             "expected_revision":{"type":"integer","minimum":0},
             "collaboration_epoch":{"type":"integer","minimum":0},
@@ -62,7 +67,7 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
             "targets":{"type":"array","maxItems":128,"description":"Declare read targets before a batch. status=planning displays a real pending plan; submission and results are tracked automatically. CamelCase fields inside targets.","items":{"type":"object","properties":{"nodeId":{"type":"string","pattern":"^n_[0-9a-f]{32}$"},"blockId":{"type":"string"},"chunkSequence":{"type":"integer","minimum":0},"label":{"type":"string","maxLength":80}},"additionalProperties":false}}
         }), &["document_id","status","expected_revision","collaboration_epoch"]),
         make("hcd_export", "Download a selected immutable revision to a new local file. Uses the same export endpoint as preview. Inspect fidelity warnings before delivery; semantic conversion does not guarantee Office pixel parity.", json!({
-            "format":{"type":"string","enum":["docx","xlsx","pptx","pdf","html","md","txt","hcd"]},
+            "format":{"type":"string","enum":office_engine::registry::hcd_export_formats()},
             "revision":{"type":"integer","minimum":0}, "output":{"type":"string"}
         }), &["document_id","format","revision","output"]),
     ]
@@ -240,6 +245,8 @@ pub(super) fn execute(name: &str, params: &HashMap<String, Value>) -> Result<Val
                 "capabilities" => "/capabilities".into(),
                 "auth" => "/auth".into(),
                 "editor" => "/editor".into(),
+                "canvas" => "/canvas".into(),
+                "canvas_materials" => "/canvas/materials".into(),
                 "index" => format!("/index/{}", number(params, "number")?),
                 "chunk" => format!("/chunks/{}", number(params, "number")?),
                 "sheet" => format!("/sheets/{}", number(params, "number")?),
@@ -260,11 +267,27 @@ pub(super) fn execute(name: &str, params: &HashMap<String, Value>) -> Result<Val
             if let Some(revision) = params.get("revision") {
                 request = request.query(&[("revision", revision.to_string())]);
             }
+            if resource == "canvas_materials" {
+                if let Some(page) = params.get("number").and_then(Value::as_u64) {request = request.query(&[("page",page)]);}
+                for (key, query_key) in [("material_id","id"),("category","category"),("query","q")] {
+                    if let Some(value) = params.get(key).and_then(Value::as_str) { request = request.query(&[(query_key,value)]); }
+                }
+            }
             if resource == "search" {
                 request = request.query(&[("q", string(params, "query")?)]);
             }
             send(request)
         }
+        "hcd_canvas_plan" => {
+            let (path,field,value) = match (params.get("composition"),params.get("material_id").and_then(Value::as_str)) {
+                (Some(layout),None) => ("/canvas/layout","composition",layout.clone()),
+                (None,Some(material)) => ("/canvas/materials/plan","materialId",json!(material)),
+                _ => return Err("supply exactly one of composition and material_id".into()),
+            };
+            let mut body = json!({"expectedRevision":number(params,"expected_revision")?,"patchId":string(params,"patch_id")?,"region":params.get("region")});
+            body[field]=value;
+            send(client.post(route(path)).bearer_auth(token).json(&body))
+        },
         "hcd_patch" => {
             let expected = number(params, "expected_revision")?;
             let epoch = number(params, "collaboration_epoch")?;
@@ -285,7 +308,11 @@ pub(super) fn execute(name: &str, params: &HashMap<String, Value>) -> Result<Val
                         .map_err(|e| e.to_string())?;
                     "/node-patch"
                 }
-                _ => return Err("mode must be structure or node".into()),
+                "canvas" => {
+                    serde_json::from_value::<hcd_core::canvas::Batch>(patch.clone()).map_err(|e|e.to_string())?;
+                    "/canvas/patch"
+                }
+                _ => return Err("mode must be structure, node or canvas".into()),
             };
             if serde_json::to_vec(patch).map_err(|e| e.to_string())?.len() as u64
                 > hcd_core::MAX_PATCH_JSON_BYTES
@@ -320,7 +347,7 @@ pub(super) fn execute(name: &str, params: &HashMap<String, Value>) -> Result<Val
         }
         "hcd_export" => {
             let format = string(params, "format")?;
-            if !["docx", "xlsx", "pptx", "pdf", "html", "md", "txt", "hcd"].contains(&format) {
+            if !office_engine::registry::hcd_export_formats().contains(&format) {
                 return Err("unsupported export format".into());
             }
             let output = std::path::Path::new(string(params, "output")?);
