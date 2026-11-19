@@ -314,7 +314,11 @@ pub(super) async fn start_identified(
                 return Err(bad("选句改写需要单个 Agent。"));
             }
             let cursor = sentence.validate(&bundle, collaboration_epoch(&state, &id).await?)?;
-            if let Some(value) = request.target.as_mut().and_then(|v|v.get_mut("specSentence")) {
+            if let Some(value) = request
+                .target
+                .as_mut()
+                .and_then(|v| v.get_mut("specSentence"))
+            {
                 value["anchor"] = cursor.anchor.into();
                 value["head"] = cursor.head.into();
             }
@@ -348,7 +352,8 @@ pub(super) async fn start_identified(
     canvas::authorize_model(&state, &id, &headers, &config.model).await?;
     agent_execution::task_with_facts(&task, shared_facts.as_ref())?;
     let agent_id = format!("agent-{}", run_id);
-    let name = agent_identity::clean(request.name.as_deref()).unwrap_or_else(|| agent_identity::EDITOR.into());
+    let name = agent_identity::clean(request.name.as_deref())
+        .unwrap_or_else(|| agent_identity::EDITOR.into());
     let now = agent_now();
     let mut run = Run {
         run_id: run_id.clone(),
@@ -408,7 +413,10 @@ pub(super) async fn start_identified(
         }
         let base = run.name.clone();
         let mut ordinal = 1;
-        while runs.values().any(|r| r.document_id == id && r.status == "running" && r.name == run.name) {
+        while runs
+            .values()
+            .any(|r| r.document_id == id && r.status == "running" && r.name == run.name)
+        {
             ordinal += 1;
             run.name = format!("{base} {ordinal}");
         }
@@ -447,11 +455,22 @@ pub(super) async fn launch(
     let task = agent_execution::task_with_facts(&task, invocation.shared_facts.as_ref())?;
     let target = invocation.target;
     let cursor = canvas_spec::target(target.as_ref())?.map(|s| s.cursor());
-    let region: Option<canvas_core::Region> = target.as_ref().and_then(|v| v.pointer("/canvas/region"))
-        .and_then(|v| serde_json::from_value(v.clone()).ok()).filter(canvas_core::Region::valid);
+    let region: Option<canvas_core::Region> = target
+        .as_ref()
+        .and_then(|v| v.pointer("/canvas/region"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .filter(canvas_core::Region::valid);
     if cursor.is_some() || region.is_some() {
         let point = region.map(|r| (r.x, r.y));
-        canvas_spec::announce_run(state.clone(), id.clone(), run_id.clone(), agent_id.clone(), name.clone(), cursor, point);
+        canvas_spec::announce_run(
+            state.clone(),
+            id.clone(),
+            run_id.clone(),
+            agent_id.clone(),
+            name.clone(),
+            cursor,
+            point,
+        );
     }
     let generate_images = invocation.generate_images;
     let now = agent_now();
@@ -490,8 +509,24 @@ pub(super) async fn launch(
         .insert(fence.clone());
     tokio::spawn(async move {
         let execute = async {
-            if count > 1 && open(&state,&id)?.manifest().map_err(hcd_error)?.source.format == "excalidraw" {
-                agent_team::execute_canvas(&state,&id,&run_id,&delegated_headers,&config,&task,target,count,&cancelled).await
+            if count > 1
+                && open(&state, &id)?
+                    .manifest()
+                    .map_err(hcd_error)?
+                    .source
+                    .format
+                    == "excalidraw"
+            {
+                agent_team::execute_canvas(
+                    &state,
+                    &run_id,
+                    &delegated_headers,
+                    &config,
+                    &task,
+                    target,
+                    &cancelled,
+                )
+                .await
             } else if rebuild || count > 1 {
                 agent_team::execute(
                     &state,

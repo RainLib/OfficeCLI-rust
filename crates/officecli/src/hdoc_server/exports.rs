@@ -54,7 +54,7 @@ impl ExportMode {
 pub(super) async fn capabilities(
     State(state): State<ServerState>,
     Path(id): Path<String>,
-    Query(query): Query<RevisionQuery>,
+    Query(query): Query<ExportQuery>,
     headers: HeaderMap,
 ) -> Result<Json<ExportCapabilities>, ApiError> {
     authorize(&state, &headers, &id, false)?;
@@ -62,7 +62,10 @@ pub(super) async fn capabilities(
     let plan_state = state.clone();
     let plan_id = id.clone();
     let mut plan = tokio::task::spawn_blocking(move || {
-        build_capabilities(&plan_state, &plan_id, query.revision)
+        let bundle = open(&plan_state, &plan_id)?;
+        let head = bundle.manifest().map_err(internal)?;
+        let range = checked_pdf_range(&bundle, &head, "pdf", &query)?;
+        build_capabilities_with_range(&plan_state, &plan_id, query.revision, range)
     })
     .await
     .map_err(internal)??;
@@ -82,10 +85,32 @@ pub(super) async fn capabilities(
     Ok(Json(plan))
 }
 
-fn build_capabilities(
+pub(super) async fn format_capabilities(
+    State(state): State<ServerState>,
+    Path((id, format)): Path<(String, String)>,
+    Query(query): Query<ExportQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    if query.pdf_pages.is_some() && format != "pdf" {
+        return Err(bad("pdfPages requires PDF-to-PDF export"));
+    }
+    let Json(plan) = capabilities(State(state), Path(id), Query(query), headers).await?;
+    let selected = plan.formats.iter().find(|item| item.format == format);
+    let source = selected.and_then(|item| item.modes.iter().find(|mode| mode.source));
+    Ok(Json(json!({
+        "revision": plan.revision,
+        "source": {
+            "available": source.is_some_and(|mode| mode.available),
+            "reason": source.and_then(|mode| mode.reason.as_deref()).or_else(|| source.is_none().then_some("Source-backed export requires the original format")),
+        }
+    })))
+}
+
+fn build_capabilities_with_range(
     state: &ServerState,
     id: &str,
     revision: Option<u64>,
+    range: Option<PdfPageRange>,
 ) -> Result<ExportCapabilities, ApiError> {
     let bundle = open(state, id)?;
     let head = bundle.manifest().map_err(internal)?;
@@ -155,19 +180,28 @@ fn build_capabilities(
             "immutable source is unavailable".to_string(),
         ))
     } else {
-        hcd_formats::validate_source_export(&bundle, &source_path, Some(revision)).map_err(
-            |error| {
-                let code = match &error {
-                    HcdError::SourceMismatch(_) => "source_mismatch",
-                    HcdError::Unsupported(_) => "source_revision_unsupported",
-                    _ => "source_unreadable",
-                };
-                (code, error.to_string())
-            },
-        )
+        let result = if source_format == "pdf" {
+            hcd_formats::validate_pdf_source_export(
+                &bundle,
+                &source_path,
+                revision,
+                range.map(|range| range.start..=range.end),
+            )
+        } else {
+            hcd_formats::validate_source_export(&bundle, &source_path, Some(revision))
+        };
+        result.map_err(|error| {
+            let code = match &error {
+                HcdError::SourceMismatch(_) => "source_mismatch",
+                HcdError::Unsupported(_) => "source_revision_unsupported",
+                _ => "source_unreadable",
+            };
+            (code, error.to_string())
+        })
     };
     let mut formats = Vec::new();
-    for format in office_engine::registry::document_export_formats() {
+    for format in office_engine::registry::document_export_formats(manifest.source.is_spreadsheet())
+    {
         let mut warnings = Vec::new();
         let mode_id = match format {
             "hcd" => "archive",
@@ -299,11 +333,56 @@ fn build_capabilities(
     })
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub(super) struct ExportQuery {
-    revision: Option<u64>,
-    source: Option<bool>,
-    filename: Option<String>,
+    pub(super) revision: Option<u64>,
+    pub(super) source: Option<bool>,
+    pub(super) filename: Option<String>,
+    #[serde(rename = "pdfPages", default)]
+    pub(super) pdf_pages: Option<String>,
+    #[serde(default)]
+    pub(super) sheet: Option<String>,
+}
+
+fn checked_pdf_range(
+    bundle: &Bundle,
+    head: &hcd_core::HcdManifest,
+    format: &str,
+    query: &ExportQuery,
+) -> Result<Option<PdfPageRange>, ApiError> {
+    let Some(pages) = query.pdf_pages.as_deref() else {
+        return Ok(None);
+    };
+    if format != "pdf" || head.source.format != "pdf" {
+        return Err(bad("pdfPages requires PDF-to-PDF export"));
+    }
+    let range: PdfPageRange = pages.parse().map_err(bad)?;
+    let (manifest, _) = manifest_at_revision(bundle, head, query.revision).map_err(bad)?;
+    let layout = hcd_core::pdf_page_layout(bundle, &manifest).map_err(bad)?;
+    let page_count = if layout.is_empty() {
+        hcd_core::pdf_page_count(bundle, &manifest).map_err(bad)?
+    } else {
+        layout.len()
+    };
+    if range.end > page_count {
+        return Err(bad(format!(
+            "PDF page range exceeds the {page_count}-page revision"
+        )));
+    }
+    Ok(Some(range))
+}
+
+fn download_filename_with_range(
+    name: Option<&str>,
+    id: &str,
+    format: &str,
+    revision: u64,
+    range: Option<PdfPageRange>,
+) -> String {
+    let filename = download_filename(name, id, format, revision);
+    let Some(range) = range else { return filename };
+    let stem = filename.strip_suffix(".pdf").unwrap_or(&filename);
+    format!("{stem}-pages-{}-{}.pdf", range.start, range.end)
 }
 
 fn download_filename(name: Option<&str>, id: &str, format: &str, revision: u64) -> String {
@@ -423,9 +502,12 @@ async fn prepare_download_untracked(
             "export workers are busy; retry shortly".into(),
         )
     })?;
-    let head = open(&state, &id)?.manifest().map_err(internal)?;
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(internal)?;
     let revision = query.revision.unwrap_or(head.revision);
-    let filename = download_filename(query.filename.as_deref(), &id, &format, revision);
+    let range = checked_pdf_range(&bundle, &head, &format, &query)?;
+    let filename =
+        download_filename_with_range(query.filename.as_deref(), &id, &format, revision, range);
     // Generate now, so a ready link always refers to a materialized immutable file.
     let response = tokio::time::timeout(
         Duration::from_secs(90),
@@ -575,7 +657,12 @@ async fn export_document_inner(
     let bundle = open(&state, &id)?;
     let head = bundle.manifest().map_err(internal)?;
     let requested = query.revision.unwrap_or(head.revision);
-    let filename = download_filename(query.filename.as_deref(), &id, &format, requested);
+    let range = checked_pdf_range(&bundle, &head, &format, &query)?;
+    let filename =
+        download_filename_with_range(query.filename.as_deref(), &id, &format, requested, range);
+    if query.sheet.is_some() && !matches!(format.as_str(), "csv" | "tsv") {
+        return Err(bad("sheet requires CSV or TSV output"));
+    }
     if requested > head.revision {
         return Err(bad("revision ahead of head"));
     }
@@ -614,13 +701,13 @@ async fn export_document_inner(
         let bytes = tokio::fs::read(output.path()).await.map_err(internal)?;
         return export_response(&filename, &format, bytes, false);
     }
-    if !office_engine::registry::document_export_formats().contains(&format.as_str()) {
+    if !office_engine::registry::document_export_formats(true).contains(&format.as_str()) {
         return Err(bad("unsupported export format"));
     }
     let plan_state = state.clone();
     let plan_id = id.clone();
     let plan = tokio::task::spawn_blocking(move || {
-        build_capabilities(&plan_state, &plan_id, Some(requested))
+        build_capabilities_with_range(&plan_state, &plan_id, Some(requested), range)
     })
     .await
     .map_err(internal)??;
@@ -708,6 +795,14 @@ async fn export_document_inner(
             }
             command.arg("--source").arg(source);
         }
+        if let Some(range) = range {
+            command
+                .arg("--pdf-pages")
+                .arg(format!("{}-{}", range.start, range.end));
+        }
+        if let Some(sheet) = &query.sheet {
+            command.arg("--sheet").arg(sheet);
+        }
         let result = command.output().await.map_err(internal)?;
         if !result.status.success() {
             return Err(bad(format!(
@@ -735,6 +830,8 @@ fn export_response(
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "pdf" => "application/pdf",
+        "csv" => "text/csv; charset=utf-8",
+        "tsv" => "text/tab-separated-values; charset=utf-8",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",

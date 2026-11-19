@@ -83,7 +83,7 @@ async function documentFormat(documentId: string): Promise<string> {
   return manifest.source.format
 }
 
-function isFixed(format: string) { return format === 'pdf' || format === 'pptx' || format === 'xlsx' }
+function isFixed(format: string) { return ['pdf','pptx','xlsx','csv','tsv'].includes(format) }
 
 /** Persist the CRDT identities before acknowledging a room or checkpoint.
  * Rebuilding identical-looking paragraphs with new Yjs IDs after a restart
@@ -279,7 +279,8 @@ const server = new Server({
   },
   async onLoadDocument({ documentName }) {
     const selected = room(documentName)
-    if (isFixed(await documentFormat(selected.documentId))) return new Y.Doc()
+    const format = await documentFormat(selected.documentId)
+    if (isFixed(format)) return new Y.Doc()
     const response = await request(selected.documentId, '/collaboration/state', {}, selected.epoch)
     if (response.ok) {
       // Upgrade existing rooms once, on the server, so two opening browsers

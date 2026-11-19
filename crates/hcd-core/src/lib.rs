@@ -8,6 +8,7 @@ mod hash;
 mod html;
 mod image_insert;
 mod patch;
+mod pdf_layout;
 mod presentation;
 mod restore;
 mod search;
@@ -41,7 +42,12 @@ pub use html::{
     is_safe_hyperlink, validate_css_text, HtmlFontNode, HtmlImageNode,
 };
 pub use patch::{
-    apply_patch, extract_image_page, extract_text_page, get_image_node, get_text_node,
+    apply_patch, extract_image_page, extract_text_page, get_image_node, get_text_node, sort_grid,
+    worksheet_filter, GridFilterView, GridSortDirection, GridSortRequest,
+};
+pub use pdf_layout::{
+    pdf_page_count, pdf_page_layout, validate_pdf_placements, PDF_BLANK_HEIGHT_PT,
+    PDF_BLANK_WIDTH_PT,
 };
 pub use presentation::{
     manifest_at_revision, render_standalone_html, render_standalone_html_with_transform,
@@ -51,9 +57,10 @@ pub use restore::restore_revision;
 pub use search::{search_bundle, SearchHit, SearchResult};
 pub use stats::{bundle_stats, remove_orphan_objects, BundleStats, StorageCategory};
 pub use structure::{
-    apply_structure_patch, editor_projection, project_editor, BlockPrecondition,
+    apply_structure_patch, editor_projection, project_editor, BlockPrecondition, EditorAlignment,
     EditorBlockContent, EditorBlockKind, EditorBlockView, EditorInline, EditorProjection,
-    StructureOperation, StructurePatchBatch, TableEditAction, TableRestorePrecondition,
+    EditorTextFormat, StructureOperation, StructurePatchBatch, TableEditAction,
+    TableRestorePrecondition,
 };
 pub use types::*;
 pub use validate::validate_bundle;
@@ -174,6 +181,15 @@ pub const MAX_CONTROL_PART_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PATCH_JSON_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_STAGED_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_REVISION: u64 = 100_000;
+
+pub const HCD_PATCH_SCHEMA_VERSION_51: &str = "hcd-patch/51";
+pub const HCD_PATCH_SCHEMA_V51_JSON: &str = include_str!("../schemas/hcd-patch-51.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_52: &str = "hcd-patch/52";
+pub const HCD_PATCH_SCHEMA_V52_JSON: &str = include_str!("../schemas/hcd-patch-52.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_53: &str = "hcd-patch/53";
+pub const HCD_PATCH_SCHEMA_V53_JSON: &str = include_str!("../schemas/hcd-patch-53.schema.json");
 
 #[cfg(test)]
 mod schema_tests {

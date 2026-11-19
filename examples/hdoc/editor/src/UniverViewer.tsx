@@ -36,6 +36,7 @@ import { GridAgentOverlay } from './GridAgentOverlay.tsx'
 import { InputDraftRecovery, useInputDraft } from './useInputDraft.tsx'
 import type { InputDraft } from './inputDraftJournal.ts'
 import { gridBatchDraft, parseGridBatch, type GridBatchDraft } from './gridBatchDraft.ts'
+import { GridDataTools, type GridAutoFilter, type GridDataSelection, type GridFilterCriterion, type GridFilterView, type GridSortDirection } from './GridDataTools.tsx'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-drawing/lib/index.css'
 
@@ -108,6 +109,8 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   const { locale } = useI18n()
   const [status, setStatus] = useState('正在加载工作簿')
   const [revision, setRevision] = useState<number | null>(null)
+  const [exportSheetName, setActiveSheetName] = useState<string>()
+  const [activeSheetId, setActiveSheetId] = useState<string>()
   const [history, setHistory] = useState<EditHistory>({ head: null, past: [], future: [] })
   const [historyBusy, setHistoryBusy] = useState(false)
   const [collaborationEpoch, setCollaborationEpoch] = useState(session.collaborationEpoch)
@@ -178,6 +181,11 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       ? {documentId:session.documentId, revision, collaborationEpoch, target:hostRange} : null)
     return () => reportSelection(null)
   }, [reportSelection,editing,formulaDirty,batchInput,hostRange,revision,collaborationEpoch,session.documentId])
+  const [dataSelection, setDataSelection] = useState<GridDataSelection | null>(null)
+  const [dataBusy, setDataBusy] = useState(false)
+  const [gridFilter, setGridFilter] = useState<{ selection: GridDataSelection; matched: number; total: number } | null>(null)
+  const [savedFilter, setSavedFilter] = useState<{ selection: GridDataSelection; view: GridFilterView } | null>(null)
+  const [loadingSavedFilter, setLoadingSavedFilter] = useState(false)
   const formulaInput = useRef<HTMLInputElement>(null)
   const updateFormulaBarRef = useRef<() => void>(() => {})
   const host = useRef<HTMLDivElement>(null)
@@ -315,7 +323,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     setHistory({ head: nextRevision, past: [], future: [] })
   }
   const historyLocked = historyBusy || mergeBusy || rowBusy || columnBusy || columnWidthBusy || rowHeightBusy || renameBusy
-    || addBusy || formatBusy || deleteBusy || freezeBusy || !!batchInput || batchBusy || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
+    || addBusy || formatBusy || deleteBusy || freezeBusy || !!batchInput || batchBusy || dataBusy || status === '保存中…' || !!runtime.current?.adapter.hasPendingPatch()
   async function travelHistory(direction: 'undo' | 'redo') {
     const current = runtime.current
     const steps = direction === 'undo' ? history.past : history.future
@@ -385,6 +393,31 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       .catch(cause => { if (live) setError(String(cause)) })
     return () => { live = false }
   }, [session])
+  useEffect(() => { setGridFilter(null) }, [session, revision, editing])
+
+  useEffect(() => {
+    const current = runtime.current
+    if (!current || session.format !== 'xlsx' || revision === null || !activeSheetId) return
+    const controller = new AbortController()
+    const query = new URLSearchParams({ sheetId: activeSheetId, revision: String(revision) })
+    setLoadingSavedFilter(true)
+    void api(session, `/grid-filter?${query}`, { signal: controller.signal })
+      .then(response => response.json() as Promise<GridFilterView | null>)
+      .then(view => {
+        if (controller.signal.aborted || runtime.current !== current) return
+        const sheet = current.adapter.workbook.getActiveSheet()
+        if (sheet.getSheetId() !== activeSheetId) return
+        if (!view) { setSavedFilter(null); return }
+        const { startRow, endRow, startColumn, endColumn } = view.filter
+        const address = sheet.getRange(startRow - 1, startColumn - 1, endRow - startRow + 1,
+          endColumn - startColumn + 1).getA1Notation()
+        current.adapter.applySavedFilter(activeSheetId, view.hiddenRows)
+        setSavedFilter({ selection: { sheetId: activeSheetId, address, startRow, endRow, startColumn, endColumn }, view })
+      })
+      .catch(cause => { if (!controller.signal.aborted) setError(`读取已保存筛选失败：${String(cause)}`) })
+      .finally(() => { if (!controller.signal.aborted) setLoadingSavedFilter(false) })
+    return () => controller.abort()
+  }, [session, revision, activeSheetId, editing])
   function confirmDeletion(message: string): Promise<boolean> {
     return new Promise(resolve => {
       if (deletionResolver.current) { resolve(false); return }
@@ -454,6 +487,9 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
   useEffect(() => {
     let alive = true
     const client = new ServiceGridClient(session)
+    setRevision(null)
+    setSavedFilter(null)
+    setLoadingSavedFilter(false)
     let disposeUniver: (() => void) | undefined
     let removePatchListener: (() => void) | undefined
     let stopTrackingView: (() => void) | undefined
@@ -509,9 +545,17 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       const updateFormulaBar = () => {
         if (!alive) return
         const sheet = workbook.getActiveSheet()
+        setActiveSheetName(sheet.getSheetName())
+        setActiveSheetId(sheet.getSheetId())
         const selection = sheet.getActiveRange()
-        if (!selection || !alive) return
-        setGridSelectionKind(selectionKind(sheet))
+        if (!selection) return
+        const kind = selectionKind(sheet)
+        setGridSelectionKind(kind)
+        setDataSelection(kind === 'cell' ? {
+          sheetId: sheet.getSheetId(), address: selection.getA1Notation(),
+          startRow: selection.getRow() + 1, endRow: selection.getRow() + selection.getHeight(),
+          startColumn: selection.getColumn() + 1, endColumn: selection.getColumn() + selection.getWidth(),
+        } : null)
         if (reportSelection) {
           const bounds=selection.getRange(), sheetId=sheet.getSheetId()
           const target={kind:'sheet' as const,sheetId,sheetIndex:client.sheets().findIndex(s=>s.sheetId===sheetId),
@@ -557,7 +601,15 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
           }
         })
       })
-      univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, updateFormulaBar)
+      let currentSheetId = workbook.getActiveSheet().getSheetId()
+      univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, ({ activeSheet }) => {
+        if (currentSheetId !== activeSheet.getSheetId()) {
+          currentSheetId = activeSheet.getSheetId()
+          runtime.current?.adapter.clearRowFilter()
+          if (alive) { setGridFilter(null); setSavedFilter(null) }
+        }
+        updateFormulaBar()
+      })
       const adapter = new HcdUniverAdapter(client, univerAPI, workbook, editingRef.current ? 'editable' : 'readonly', message => {
         if (alive) setStatus(message)
       }, styleCatalog, message => { if (alive) setError(message) })
@@ -687,6 +739,133 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     void boot().catch(cause => { if (alive) setError(String(cause)) })
     return () => { alive = false; runtime.current = null; localeApi.current = null; updateFormulaBarRef.current = () => {}; stopTrackingView?.(); removePatchListener?.(); disposeUniver?.(); client.dispose() }
   }, [session])
+
+  async function sortSelection(sortColumn: number, hasHeader: boolean, direction: GridSortDirection) {
+    const current = runtime.current
+    const selection = dataSelection
+    if (!current || !selection || !editing || session.scope !== 'write' || gridFilter || savedFilter || loadingSavedFilter
+      || historyLocked || gridBusy.current || syncing.current || current.adapter.hasPendingPatch()) return
+    gridBusy.current = true
+    current.adapter.lockCellWrites(true)
+    setDataBusy(true)
+    setStatus('正在排序…')
+    setError('')
+    try {
+      const { address: _address, ...range } = selection
+      const response = await api(session, '/grid-sort', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...range, sortColumn, hasHeader, direction,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision }),
+      })
+      const saved = await response.json() as { revision: number; changed: boolean }
+      if (runtime.current !== current) return
+      if (!saved.changed) { setStatus('选区已按指定顺序排列'); return }
+      recordEdit(saved.revision, '排序选区')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      try {
+        await current.adapter.refreshFromServer()
+        updateFormulaBarRef.current()
+        setStatus(`revision ${saved.revision} · 选区已排序`)
+      } catch (cause) {
+        setError(`排序已保存为 r${saved.revision}，视图同步失败：${String(cause)}`)
+      }
+    } catch (cause) {
+      if (runtime.current === current) {
+        setError(`排序失败：${String(cause)}`)
+        setStatus(`revision ${current.client.manifest.revision}`)
+      }
+    } finally {
+      current.adapter.lockCellWrites(false)
+      gridBusy.current = false
+      setDataBusy(false)
+    }
+  }
+
+  async function filterSelection(criteria: GridFilterCriterion[], hasHeader: boolean) {
+    const current = runtime.current
+    const selection = gridFilter?.selection ?? dataSelection
+    if (!current || !selection || savedFilter || loadingSavedFilter || historyLocked || gridBusy.current || syncing.current || current.adapter.hasPendingPatch()) return
+    gridBusy.current = true
+    current.adapter.lockCellWrites(true)
+    setDataBusy(true)
+    try {
+      const result = await current.adapter.filterRows(selection.sheetId,
+        selection.startRow - 1 + Number(hasHeader), selection.endRow - 1,
+        criteria.map(({ column, query }) => ({ column: column - 1, query })))
+      if (runtime.current === current) {
+        setGridFilter({ selection, ...result })
+        setError('')
+      }
+    } catch (cause) {
+      if (runtime.current === current) setError(`筛选失败：${String(cause)}`)
+    } finally {
+      current.adapter.lockCellWrites(false)
+      gridBusy.current = false
+      setDataBusy(false)
+    }
+  }
+
+  async function saveGridFilter(selection: GridDataSelection, filter: GridAutoFilter | null) {
+    const current = runtime.current
+    if (!current || !editing || session.scope !== 'write' || session.format !== 'xlsx'
+      || historyLocked || gridBusy.current || loadingSavedFilter || syncing.current || current.adapter.hasPendingPatch()) return
+    gridBusy.current = true
+    current.adapter.lockCellWrites(true)
+    setDataBusy(true)
+    setError('')
+    try {
+      const response = await api(session, '/node-patch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/51', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: current.client.manifest.revision,
+          operations: [{ op: 'xlsx.auto-filter.set', sheetId: selection.sheetId, filter }] }),
+      })
+      const saved = await response.json() as { revision: number }
+      if (runtime.current !== current) return
+      recordEdit(saved.revision, filter ? '保存筛选' : '移除已保存筛选')
+      collaboration.announceRevision(saved.revision)
+      setRevision(saved.revision)
+      try {
+        await current.adapter.refreshFromServer()
+        const sheet = current.adapter.workbook.getActiveSheet()
+        if (!filter && sheet.getSheetId() === selection.sheetId) {
+          sheet.setActiveRange(sheet.getRange(selection.startRow - 1, selection.startColumn - 1,
+            selection.endRow - selection.startRow + 1, selection.endColumn - selection.startColumn + 1))
+        }
+        updateFormulaBarRef.current()
+      } catch (cause) {
+        setError(`筛选已保存为 r${saved.revision}，视图同步失败：${String(cause)}`)
+      }
+    } catch (cause) {
+      if (runtime.current === current) setError(`保存筛选失败：${String(cause)}`)
+    } finally {
+      current.adapter.lockCellWrites(false)
+      gridBusy.current = false
+      setDataBusy(false)
+    }
+  }
+
+  function saveSelectedFilter([primary, ...additionalCriteria]: GridFilterCriterion[]) {
+    const selection = savedFilter?.selection ?? gridFilter?.selection ?? dataSelection
+    if (!selection || !primary) return
+    const { startRow, endRow, startColumn, endColumn } = selection
+    void saveGridFilter(selection, { startRow, endRow, startColumn, endColumn, ...primary,
+      additionalCriteria: additionalCriteria.length ? additionalCriteria : undefined })
+  }
+
+  function clearGridFilter() {
+    if (savedFilter) { void saveGridFilter(savedFilter.selection, null); return }
+    const adapter = runtime.current?.adapter
+    adapter?.clearRowFilter()
+    const selection = gridFilter?.selection
+    const sheet = adapter?.workbook.getActiveSheet()
+    if (selection && sheet?.getSheetId() === selection.sheetId) {
+      sheet.setActiveRange(sheet.getRange(selection.startRow - 1, selection.startColumn - 1,
+        selection.endRow - selection.startRow + 1, selection.endColumn - selection.startColumn + 1))
+    }
+    setGridFilter(null)
+  }
 
   async function mergeSelection() {
     const current = runtime.current
@@ -1608,7 +1787,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         <div className="hcd-dialog-actions"><button autoFocus onClick={() => answerDeletion(false)}><LocalText source={"取消"} /></button><button className="primary" onClick={() => answerDeletion(true)}><LocalText source={"删除"} /></button></div>
       </div>
     </div>}
-    {layout.showHeader && <EditorHeader session={session} revision={revision} status={headerStatus} onClose={onClose} onSearch={() => setSearchOpen(true)} focused={focused} onFocus={() => setFocused(value => !value)} presence={layout.showCollaborators ? collaboration.avatars : null} />}
+    {layout.showHeader && <EditorHeader activeSheetName={exportSheetName} session={session} revision={revision} status={headerStatus} onClose={onClose} onSearch={() => setSearchOpen(true)} focused={focused} onFocus={() => setFocused(value => !value)} presence={layout.showCollaborators ? collaboration.avatars : null} />}
     <DocumentSearch open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} search={searchContent} onSelect={navigateSearch} refreshKey={revision} />
     <div className="layout editor-layout">
       <DocumentPanelTools session={session} leftOpen={layout.showOutline && !focused} focused={focused} onExitFocus={() => setFocused(false)} onToggleLeft={() => { setFocused(false); setLayoutOption('showOutline', !layout.showOutline || focused) }} />
@@ -1616,7 +1795,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
       <LeftPanelShell session={session} hidden={!layout.showOutline || focused} label="工作表" onClose={() => setLayoutOption('showOutline', false)} onSearch={() => setSearchOpen(true)} onWorkspace={onClose} onSettings={openSettings}><div className="panel-head"><h2><LocalText source="工作表" /></h2></div><nav>{runtime.current?.client.sheets().filter(sheet => sheet.sheetState === 'visible').map(sheet => <button key={sheet.sheetId} onClick={() => { const workbook = runtime.current?.adapter.workbook; const target = workbook?.getSheetBySheetId(sheet.sheetId); if (target) workbook?.setActiveSheet(target) }}>{sheet.sheetName}</button>)}</nav></LeftPanelShell>
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
         {!focused && <ContentToolbar onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setActiveTab(tab); if (tab === 'revisions') setRightPanel('revisions') }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={!editing} format="xlsx" />}
-    {layout.showToolbar && editing && !focused && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
+    {layout.showToolbar && (editing || activeTab === 'data') && !focused && <nav className="toolbar ribbon" aria-label={localizeSource(locale, "工作簿工具栏")}>
       {activeTab === 'home' && <><div className="tool-group" onMouseDown={event => { if (runtime.current?.adapter.workbook.isCellEditing() && (event.target as Element).closest('button')) event.preventDefault() }}><button title={localizeSource(locale, "撤销上一步（⌘/Ctrl+Z）")} disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"↷ 重做"} /></button><button className={selectedCellLink()?.bold ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.bold} onClick={() => void saveCellFormat({ bold: !selectedCellLink()?.bold })}><LocalText source={"加粗"} /></button><button className={selectedCellLink()?.italic ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.italic} onClick={() => void saveCellFormat({ italic: !selectedCellLink()?.italic })}><LocalText source={"斜体"} /></button><button className={selectedCellLink()?.underline ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.underline} onClick={() => void saveCellFormat({ underline: !selectedCellLink()?.underline })}><LocalText source={"下划线"} /></button><label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="409" step="0.5" value={cellFontSize} disabled={!editing || formatBusy} onChange={event => setCellFontSize(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || formatBusy || !Number.isFinite(Number(cellFontSize)) || Number(cellFontSize) < 1 || Number(cellFontSize) > 409} onClick={() => void saveCellFormat({ fontSizePt: Number(cellFontSize) })}><LocalText source={"应用字号"} /></button><label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={cellFontColor} disabled={!editing || formatBusy} onChange={event => setCellFontColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ color: cellFontColor })}><LocalText source={"应用颜色"} /></button></div></>}
       {activeTab === 'format' && <><div className="tool-group"><label><LocalText source={"填充"} /><input aria-label={localizeSource(locale, "填充")} type="color" value={cellFillColor} disabled={!editing || formatBusy} onChange={event => setCellFillColor(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellFormat({ fill: cellFillColor })}><LocalText source={"应用填充"} /></button><button className={selectedCellLink()?.horizontal === 'left' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'left'} onClick={() => void saveCellLayout({ horizontal: 'left' })}><LocalText source={"左对齐"} /></button><button className={selectedCellLink()?.horizontal === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'center'} onClick={() => void saveCellLayout({ horizontal: 'center' })}><LocalText source={"居中"} /></button><button className={selectedCellLink()?.horizontal === 'right' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.horizontal === 'right'} onClick={() => void saveCellLayout({ horizontal: 'right' })}><LocalText source={"右对齐"} /></button><button className={selectedCellLink()?.vertical === 'top' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'top'} onClick={() => void saveCellLayout({ vertical: 'top' })}><LocalText source={"顶端对齐"} /></button><button className={selectedCellLink()?.vertical === 'center' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'center'} onClick={() => void saveCellLayout({ vertical: 'center' })}><LocalText source={"垂直居中"} /></button><button className={selectedCellLink()?.vertical === 'bottom' ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={selectedCellLink()?.vertical === 'bottom'} onClick={() => void saveCellLayout({ vertical: 'bottom' })}><LocalText source={"底端对齐"} /></button><button className={selectedCellLink()?.wrap ? 'primary' : ''} disabled={!editing || formatBusy} aria-pressed={!!selectedCellLink()?.wrap} onClick={() => void saveCellLayout({ wrap: !selectedCellLink()?.wrap })}><LocalText source={"自动换行"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'thin' })}><LocalText source={"所有框线"} /></button><button disabled={!editing || formatBusy} onClick={() => void saveCellLayout({ border: 'none' })}><LocalText source={"无框线"} /></button><label><LocalText source={"数字格式 "} /><select aria-label={localizeSource(locale, "数字格式")} value={cellNumberFormat} disabled={!editing || formatBusy} onChange={event => setCellNumberFormat(event.target.value)}><option value="General">{localizeSource(locale, "常规")}</option><option value="0.00">{localizeSource(locale, "数值")}</option><option value="#,##0.00">{localizeSource(locale, "会计数值")}</option><option value="0%">{localizeSource(locale, "百分比")}</option><option value="0.00E+00">{localizeSource(locale, "科学计数")}</option><option value="yyyy-mm-dd">{localizeSource(locale, "日期")}</option><option value="@">{localizeSource(locale, "文本")}</option></select></label><label><LocalText source={"格式代码 "} /><input aria-label={localizeSource(locale, "格式代码")} value={cellNumberFormat} disabled={!editing || formatBusy} maxLength={1024} onChange={event => setCellNumberFormat(event.target.value)} /></label><button disabled={!editing || formatBusy} onClick={() => void saveCellNumberFormat(cellNumberFormat)}><LocalText source={"应用数字格式"} /></button></div></>}
       {activeTab === 'sheet' && <><div className="tool-group"><label><LocalText source={"工作表名 "} /><input aria-label={localizeSource(locale, "工作表名")} value={sheetNameDraft} disabled={!editing || renameBusy} maxLength={31} onFocus={() => setSheetNameDraft(previous => previous || activeSheetName())} onChange={event => setSheetNameDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "重命名当前工作表，公式与内部链接会跟随新名称")} disabled={!editing || renameBusy || addBusy || formatBusy || !sheetNameDraft.trim()} onClick={() => void renameActiveSheet(sheetNameDraft)}><LocalText source={"重命名工作表"} /></button><label><LocalText source={"新增工作表名 "} /><input aria-label={localizeSource(locale, "新增工作表名")} value={sheetAddDraft} disabled={!editing || addBusy} maxLength={31} onChange={event => setSheetAddDraft(event.target.value)} style={{ width: 120 }} /></label><button title={localizeSource(locale, "在工作簿末尾新增一个空白工作表")} disabled={!editing || addBusy || renameBusy || formatBusy || !sheetAddDraft.trim()} onClick={() => void addWorksheet(sheetAddDraft)}><LocalText source={"新增工作表"} /></button><button title={localizeSource(locale, "删除当前工作表，它的单元格一并删除，引用它的公式变为 #REF!")} disabled={!editing || deleteBusy || addBusy || renameBusy || formatBusy} onClick={() => void deleteActiveSheet()}><LocalText source={"删除工作表"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并单元格"} /></button><button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void unmergeSelection()}><LocalText source={"拆分单元格"} /></button><label><LocalText source={"列宽 "} /><input aria-label={localizeSource(locale, "选中列宽度")} type="number" min="1" max="255" step="0.5" value={columnWidthChars} disabled={!editing} onChange={event => setColumnWidthChars(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || columnWidthBusy} onClick={() => void setSelectedColumnWidth()}><LocalText source={"设置列宽"} /></button><label><LocalText source={"行高 "} /><input aria-label={localizeSource(locale, "选中行高度")} type="number" min="1" max="409" step="0.5" value={rowHeightPoints} disabled={!editing} onChange={event => setRowHeightPoints(event.target.value)} style={{ width: 68 }} /></label><button disabled={!editing || rowHeightBusy} onClick={() => void setSelectedRowHeight()}><LocalText source={"设置行高"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一行，已经冻结的列保持不变")} className={currentFreeze().rows > 0 ? 'primary' : ''} aria-pressed={currentFreeze().rows > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(1, currentFreeze().columns)}><LocalText source={"冻结首行"} /></button><button title={localizeSource(locale, "冻结当前工作表的第一列，已经冻结的行保持不变")} className={currentFreeze().columns > 0 ? 'primary' : ''} aria-pressed={currentFreeze().columns > 0} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={() => void freezeActiveSheet(currentFreeze().rows, 1)}><LocalText source={"冻结首列"} /></button><button title={localizeSource(locale, "在选中单元格的上方和左侧冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy} onClick={freezeAtSelection}><LocalText source={"冻结窗格"} /></button><button title={localizeSource(locale, "取消当前工作表的冻结窗格")} disabled={!editing || freezeBusy || formatBusy || renameBusy || addBusy || deleteBusy || !currentFreeze().rows && !currentFreeze().columns} onClick={() => void freezeActiveSheet(0, 0)}><LocalText source={"取消冻结"} /></button></div><span className="ribbon-note"><LocalText source={"双击单元格或按 F2 编辑 · 右键显示操作菜单 · "} />{localizeDynamic(locale, status)}</span></>}
@@ -1636,6 +1815,12 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
         </>}
         {gridSelectionKind === 'cell' && <button disabled={!editing || mergeBusy || rowBusy || columnBusy} onClick={() => void mergeSelection()}><LocalText source={"合并选中单元格"} /></button>}
       </div><span className="ribbon-note"><LocalText source={"整行只显示行操作，整列只显示列操作；普通单元格可选择两种操作 · "} />{localizeDynamic(locale, status)}</span></>}
+      {activeTab === 'data' && <GridDataTools key={savedFilter ? JSON.stringify([savedFilter.selection.sheetId, savedFilter.view.filter]) : 'grid-data'}
+        selection={savedFilter?.selection ?? gridFilter?.selection ?? dataSelection} busy={historyLocked || loadingSavedFilter} editing={editing}
+        filter={savedFilter ? { matched: savedFilter.view.total - savedFilter.view.hiddenRows.length, total: savedFilter.view.total } : gridFilter}
+        savedFilter={savedFilter?.view.filter} canSaveFilter={session.format === 'xlsx' && editing && session.scope === 'write'}
+        onSort={(column, header, direction) => void sortSelection(column, header, direction)} onSaveFilter={saveSelectedFilter}
+        onFilter={(criteria, header) => void filterSelection(criteria, header)} onClearFilter={clearGridFilter} />}
       {activeTab === 'view' && <><button onClick={() => openSettings()}><LocalText source={"界面设置"} /></button></>}
       {activeTab === 'revisions' && <><div className="tool-group"><button disabled={!editing || historyLocked || !history.past.length} onClick={() => void travelHistory('undo')}><LocalText source={"撤销 "} />{history.past.length} <LocalText source={" 步"} /></button><button disabled={!editing || historyLocked || !history.future.length} onClick={() => void travelHistory('redo')}><LocalText source={"重做 "} />{history.future.length} <LocalText source={" 步"} /></button></div><span className="ribbon-note"><LocalText source={"当前修订 r"} />{revision ?? '…'} · {localizeDynamic(locale, history.past.length ? `下一步可撤销：${history.past.at(-1)?.label}` : '当前会话无可撤销步骤')} <LocalText source={" · 协作者更新后将清空本地步骤"} /></span></>}
     </nav>}
@@ -1720,7 +1905,7 @@ export function UniverViewer({ session, onClose, embedded }: { session: Session;
     {contextMenu && <ContextMenu title="单元格与选区" x={contextMenu.x} y={contextMenu.y} actions={contextActions}
       count={showRowContext ? { label: '插入行数', value: rowInsertCount, onChange: value => { setRowInsertCount(value); if (error.includes('插入行数必须')) setError('') } } : undefined}
       onClose={() => setContextMenu(null)} />}
-    <EditorStatusbar mode={localizeSource(locale, "工作簿视图")} format="xlsx" revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} draftProtection={session.scope === 'write' ? inputProtection.status : undefined} />
+    <EditorStatusbar mode={localizeSource(locale, "工作簿视图")} format={session.format} revision={revision} readOnly={!editing} status={editing ? headerStatus : '已同步'} draftProtection={session.scope === 'write' ? inputProtection.status : undefined} />
     {error && <ErrorToast message={error} onClose={() => setError('')} />}
   </div>
 }

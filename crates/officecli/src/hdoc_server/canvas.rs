@@ -21,34 +21,99 @@ pub(super) struct LayoutRequest {
 
 /// Read-only layout planning. The returned immutable batch goes through the
 /// existing patch endpoint; its vacantRegions are rechecked at the actual commit.
-pub(super) async fn plan(State(state): State<ServerState>, Path(id): Path<String>, headers: HeaderMap, Json(request): Json<LayoutRequest>) -> Result<Json<Value>, ApiError> {
+pub(super) async fn plan(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<LayoutRequest>,
+) -> Result<Json<Value>, ApiError> {
     let actor = access(&state, &id, &headers, false).await?;
     let _lock = state.collaboration_lock.lock().await;
     let bundle = open(&state, &id)?;
     let revision = bundle.manifest().map_err(hcd_error)?.revision;
-    if request.expected_revision != revision { return Err(ApiError(StatusCode::CONFLICT, "画布已更新，请重新读取后排版。".into())); }
+    if request.expected_revision != revision {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "画布已更新，请重新读取后排版。".into(),
+        ));
+    }
     let scene = hcd_core::canvas::read_scene(&bundle, None).map_err(hcd_error)?;
     let scope = agent_selection(&state, &id, &headers, &actor, &scene).await?;
-    if let Some(run_id)=headers.get("x-hcd-agent-run-id").and_then(|v|v.to_str().ok()) {
-        let runs=state.agent_runs.lock().await;
-        let visual_planning=runs.get(run_id).and_then(|r|r.invocation.as_ref()).and_then(|i|i.target.as_ref()).is_some_and(|t|t["composition"]["visualPlanning"]==true);
-        if visual_planning && request.composition.visual.is_none() {return Err(bad("请先完成视觉规划，再生成白板内容。"));}
-        let requested=runs.get(run_id).and_then(|r|r.invocation.as_ref()).and_then(|i|i.target.as_ref()).and_then(|t|t["composition"].get("layout"));
-        if requested.is_some_and(|layout|serde_json::to_value(request.composition.layout).ok().as_ref()!=Some(layout)) {return Err(bad("生成类型与用户选择不一致，请按指定类型生成。"));}
+    if let Some(run_id) = headers
+        .get("x-hcd-agent-run-id")
+        .and_then(|v| v.to_str().ok())
+    {
+        let runs = state.agent_runs.lock().await;
+        let visual_planning = runs
+            .get(run_id)
+            .and_then(|r| r.invocation.as_ref())
+            .and_then(|i| i.target.as_ref())
+            .is_some_and(|t| t["composition"]["visualPlanning"] == true);
+        if visual_planning && request.composition.visual.is_none() {
+            return Err(bad("请先完成视觉规划，再生成白板内容。"));
+        }
+        let requested = runs
+            .get(run_id)
+            .and_then(|r| r.invocation.as_ref())
+            .and_then(|i| i.target.as_ref())
+            .and_then(|t| t["composition"].get("layout"));
+        if requested.is_some_and(|layout| {
+            serde_json::to_value(request.composition.layout)
+                .ok()
+                .as_ref()
+                != Some(layout)
+        }) {
+            return Err(bad("生成类型与用户选择不一致，请按指定类型生成。"));
+        }
     }
-    let batch = compose_scoped(&scene, &id, revision, &request.patch_id, &request.composition, scope.as_ref(), request.region)?;
-    Ok(Json(json!({"batch":batch,"appendOnly":true,"title":request.composition.title,"collaborationEpoch":collaboration_epoch(&state,&id).await?})))
+    let batch = compose_scoped(
+        &scene,
+        &id,
+        revision,
+        &request.patch_id,
+        &request.composition,
+        scope.as_ref(),
+        request.region,
+    )?;
+    Ok(Json(
+        json!({"batch":batch,"appendOnly":true,"title":request.composition.title,"collaborationEpoch":collaboration_epoch(&state,&id).await?}),
+    ))
 }
 
-pub(super) fn compose_scoped(scene: &Scene, id: &str, revision: u64, patch_id: &str, composition: &canvas_core::Composition, scope: Option<&Selection>, requested: Option<Region>) -> Result<Batch, ApiError> {
-    if requested.is_some_and(|area| scope.and_then(|s| s.region).is_some_and(|scope| !scope.contains(&area))) {
+pub(super) fn compose_scoped(
+    scene: &Scene,
+    id: &str,
+    revision: u64,
+    patch_id: &str,
+    composition: &canvas_core::Composition,
+    scope: Option<&Selection>,
+    requested: Option<Region>,
+) -> Result<Batch, ApiError> {
+    if requested.is_some_and(|area| {
+        scope
+            .and_then(|s| s.region)
+            .is_some_and(|scope| !scope.contains(&area))
+    }) {
         return Err(bad("排版区域超出任务授权范围。"));
     }
-    let mut batch = canvas_core::compose(scene,id,revision,patch_id,composition,requested).map_err(bad)?;
-    if requested.is_none() && scope.and_then(|s| s.region).is_some_and(|r| !batch.vacant_regions.iter().all(|area| r.contains(area))) {
-        batch = canvas_core::compose(scene,id,revision,patch_id,composition,scope.and_then(|s| s.region)).map_err(bad)?;
+    let mut batch =
+        canvas_core::compose(scene, id, revision, patch_id, composition, requested).map_err(bad)?;
+    if requested.is_none()
+        && scope
+            .and_then(|s| s.region)
+            .is_some_and(|r| !batch.vacant_regions.iter().all(|area| r.contains(area)))
+    {
+        batch = canvas_core::compose(
+            scene,
+            id,
+            revision,
+            patch_id,
+            composition,
+            scope.and_then(|s| s.region),
+        )
+        .map_err(bad)?;
     }
-    canvas_core::apply(scene,&batch,scope).map_err(bad)?;
+    canvas_core::apply(scene, &batch, scope).map_err(bad)?;
     Ok(batch)
 }
 
@@ -310,7 +375,9 @@ pub(super) async fn patch(
     Json(batch): Json<Batch>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = access(&state, &id, &headers, true).await?;
-    if batch.patch_id.starts_with("spec-undo-") { return Err(bad("reserved Spec undo patch ID")); }
+    if batch.patch_id.starts_with("spec-undo-") {
+        return Err(bad("reserved Spec undo patch ID"));
+    }
     if actor.worker_generation.is_some() {
         authorize_ai(&state, &id, &headers).await?;
     } else if headers.get("x-hcd-agent-edit").is_some_and(|v| v == "true") {
@@ -334,31 +401,67 @@ pub(super) async fn patch_locked(
     // Selection grants are bound to the exact scene the user selected. Regular
     // collaborative canvas edits still merge independent field changes.
     if let Some(expected) = headers.get("x-hcd-expected-revision") {
-        let expected = expected.to_str().map_err(bad)?.parse::<u64>().map_err(bad)?;
+        let expected = expected
+            .to_str()
+            .map_err(bad)?
+            .parse::<u64>()
+            .map_err(bad)?;
         if expected != base {
-            return Err(ApiError(StatusCode::CONFLICT, "canvas revision changed".into()));
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "canvas revision changed".into(),
+            ));
         }
     }
     let scene = hcd_core::canvas::read_scene(&bundle, None).map_err(hcd_error)?;
     let scope = agent_selection(state, id, headers, actor, &scene).await?;
-    if let Some(run_id) = headers.get("x-hcd-agent-run-id").and_then(|v| v.to_str().ok()) {
+    if let Some(run_id) = headers
+        .get("x-hcd-agent-run-id")
+        .and_then(|v| v.to_str().ok())
+    {
         let runs = state.agent_runs.lock().await;
-        if runs.get(run_id).is_some_and(|run| run.agent_count > 1 || run.invocation.as_ref().and_then(|i| i.target.as_ref()).is_some_and(|t| t["composition"]["appendOnly"] == true))
-            && (batch.vacant_regions.is_empty() || batch.operations.iter().any(|op| !matches!(op, canvas_core::Operation::Add { .. }))) {
-            return Err(bad("追加任务只能在经过空位检查的区域新增内容，不能改变已有布局。"));
+        if runs.get(run_id).is_some_and(|run| {
+            run.agent_count > 1
+                || run
+                    .invocation
+                    .as_ref()
+                    .and_then(|i| i.target.as_ref())
+                    .is_some_and(|t| t["composition"]["appendOnly"] == true)
+        }) && (batch.vacant_regions.is_empty()
+            || batch
+                .operations
+                .iter()
+                .any(|op| !matches!(op, canvas_core::Operation::Add { .. })))
+        {
+            return Err(bad(
+                "追加任务只能在经过空位检查的区域新增内容，不能改变已有布局。",
+            ));
         }
     }
-    let agent = actor.worker_generation.is_some() || headers.get("x-hcd-agent-edit").is_some_and(|v| v == "true") || headers.contains_key("x-hcd-agent-run-id");
+    let agent = actor.worker_generation.is_some()
+        || headers.get("x-hcd-agent-edit").is_some_and(|v| v == "true")
+        || headers.contains_key("x-hcd-agent-run-id");
     let epoch = collaboration_epoch(state, id).await?;
     let mut owner = actor.sub.clone();
-    if let Some(run_id) = headers.get("x-hcd-agent-run-id").and_then(|v| v.to_str().ok()) {
+    if let Some(run_id) = headers
+        .get("x-hcd-agent-run-id")
+        .and_then(|v| v.to_str().ok())
+    {
         let runs = state.agent_runs.lock().await;
         if let Some(run) = runs.get(run_id) {
             owner = Some(run.owner.clone());
-            if let Some(sentence) = canvas_spec::target(run.invocation.as_ref().and_then(|i| i.target.as_ref()))? {
+            if let Some(sentence) =
+                canvas_spec::target(run.invocation.as_ref().and_then(|i| i.target.as_ref()))?
+            {
                 sentence.guard(&batch, epoch)?;
                 if let Some(prior) = run.committed_revisions.first() {
-                    if bundle.revision(*prior).map_err(hcd_error)?.patch_id.as_ref() != Some(&batch.patch_id) {
+                    if bundle
+                        .revision(*prior)
+                        .map_err(hcd_error)?
+                        .patch_id
+                        .as_ref()
+                        != Some(&batch.patch_id)
+                    {
                         return Err(bad("这次选句改写已经提交。"));
                     }
                 }
@@ -379,7 +482,13 @@ pub(super) async fn patch_locked(
     let work_batch = batch.clone();
     let record_owner = if agent { owner.clone() } else { None };
     let result = tokio::task::spawn_blocking(move || {
-        hcd_core::canvas::apply_batch_with_rewrite(&work_bundle, &work_batch, scope.as_ref(), &author, record_owner.as_deref().map(|who| (who, epoch)))
+        hcd_core::canvas::apply_batch_with_rewrite(
+            &work_bundle,
+            &work_batch,
+            scope.as_ref(),
+            &author,
+            record_owner.as_deref().map(|who| (who, epoch)),
+        )
     })
     .await
     .map_err(internal)?
@@ -410,10 +519,23 @@ pub(super) async fn patch_locked(
                 }
             })
             .collect();
-        let rewrite = bundle.revision(result.revision).map_err(hcd_error)?.canvas_rewrite;
-        let ai_client = headers.get("x-hcd-agent-presence-id").and_then(|s| s.to_str().ok()).and_then(|s| uuid::Uuid::parse_str(s).ok());
-        let undo_revision = batch.patch_id.strip_prefix("spec-undo-").and_then(|id| id.parse::<u64>().ok());
-        let name = if agent { agent_identity::visible(actor, headers) } else { actor.name.clone().unwrap_or_default() };
+        let rewrite = bundle
+            .revision(result.revision)
+            .map_err(hcd_error)?
+            .canvas_rewrite;
+        let ai_client = headers
+            .get("x-hcd-agent-presence-id")
+            .and_then(|s| s.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+        let undo_revision = batch
+            .patch_id
+            .strip_prefix("spec-undo-")
+            .and_then(|id| id.parse::<u64>().ok());
+        let name = if agent {
+            agent_identity::visible(actor, headers)
+        } else {
+            actor.name.clone().unwrap_or_default()
+        };
         let _=room(state,id).await.send(json!({"type":"commit","actorKind":if agent {"agent"} else {"person"},"revision":result.revision,"patchId":result.patch_id,"actorId":actor.sub,"name":name,"agentPhase":agent.then_some("writing"),"specSeq":rewrite.as_ref().map(|_|9_007_199_254_740_991u64),"clientId":ai_client,"specCursor":rewrite.as_ref().map(|r| &r.cursor),"rewriteOwner":rewrite.as_ref().map(|r| &r.owner),"undoRevision":undo_revision,"collaborationEpoch":epoch,"elements":elements,"removedIds":removed,"files":files,"appState":current.app_state}));
     }
     Ok(result)
@@ -438,7 +560,10 @@ pub(super) struct PresenceRequest {
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum AgentPhase { Idle, Writing }
+enum AgentPhase {
+    Idle,
+    Writing,
+}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Viewport {
@@ -462,7 +587,10 @@ struct Emote {
 }
 impl Emote {
     fn valid(&self) -> bool {
-        self.x.is_finite() && self.y.is_finite() && self.x.abs() <= 100_000_000.0 && self.y.abs() <= 100_000_000.0
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.x.abs() <= 100_000_000.0
+            && self.y.abs() <= 100_000_000.0
             && canvas_core::materials::is_reaction(&self.kind)
     }
 }
@@ -487,14 +615,24 @@ pub(super) async fn presence(
         access(&state, &id, &headers, true).await?;
         canvas_spec::authorize_marker(&state, &id, &headers).await?;
     }
-    if value.spec_cursor.as_ref().is_some_and(|c| !canvas_spec::valid_cursor(c) || value.spec_seq.is_none())
-        || value.chat.as_ref().is_some_and(|chat| chat.text.chars().count() > 100 || chat.text.chars().any(char::is_control))
+    if value
+        .spec_cursor
+        .as_ref()
+        .is_some_and(|c| !canvas_spec::valid_cursor(c) || value.spec_seq.is_none())
+        || value.chat.as_ref().is_some_and(|chat| {
+            chat.text.chars().count() > 100 || chat.text.chars().any(char::is_control)
+        })
         || value.viewport.as_ref().is_some_and(|v| {
-            !v.x.is_finite() || !v.y.is_finite() || v.x.abs() > 100_000_000.0
-                || v.y.abs() > 100_000_000.0 || !(0.05..=30.0).contains(&v.zoom)
+            !v.x.is_finite()
+                || !v.y.is_finite()
+                || v.x.abs() > 100_000_000.0
+                || v.y.abs() > 100_000_000.0
+                || !(0.05..=30.0).contains(&v.zoom)
         })
         || value.emote.as_ref().is_some_and(|emote| !emote.valid())
-        || value.avatar.as_ref().is_some_and(|id| canvas_core::materials::material(id).is_none_or(|m| m["category"] != "avatar"))
+        || value.avatar.as_ref().is_some_and(|id| {
+            canvas_core::materials::material(id).is_none_or(|m| m["category"] != "avatar")
+        })
         || uuid::Uuid::parse_str(&value.client_id).is_err()
         || value.selected_ids.len() > 2000
         || value.selected_ids.iter().any(|id| id.len() > 256)

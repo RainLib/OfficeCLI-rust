@@ -46,7 +46,9 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
     } else {
         match (method, parts[0]) {
             ("POST", "canvas") if matches!(route, "/canvas/presence" | "/canvas/layout") => {}
-            ("POST", "canvas") if matches!(route, "/canvas/patch" | "/canvas/spec-undo") => required.push("document.edit"),
+            ("POST", "canvas") if matches!(route, "/canvas/patch" | "/canvas/spec-undo") => {
+                required.push("document.edit")
+            }
             ("POST", "project" | "patch" | "node-patch" | "checkpoints" | "collaboration") => {
                 required.push("document.edit")
             }
@@ -62,17 +64,6 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
         }
     }
     Ok(required)
-}
-
-#[cfg(test)]
-mod canvas_layout_tests {
-    use super::*;
-    #[test]
-    fn planning_never_grants_write_permissions() {
-        assert_eq!(operation_requirements("POST", "/canvas/layout").unwrap(), vec!["document.view"]);
-        assert_eq!(operation_requirements("POST", "/canvas/patch").unwrap(), vec!["document.view", "document.edit"]);
-        assert!(operation_requirements("POST", "/canvas/unknown").is_err());
-    }
 }
 
 async fn authorize_request(
@@ -244,5 +235,22 @@ pub(in crate::hdoc_server) async fn guard(
     match authorize_request(&state, &method, &path, query.as_deref(), &headers).await {
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod canvas_layout_tests {
+    use super::*;
+    #[test]
+    fn planning_never_grants_write_permissions() {
+        assert_eq!(
+            operation_requirements("POST", "/canvas/layout").unwrap(),
+            vec!["document.view"]
+        );
+        assert_eq!(
+            operation_requirements("POST", "/canvas/patch").unwrap(),
+            vec!["document.view", "document.edit"]
+        );
+        assert!(operation_requirements("POST", "/canvas/unknown").is_err());
     }
 }

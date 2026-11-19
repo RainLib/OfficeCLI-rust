@@ -207,6 +207,8 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
 
     let mut root_hasher = Sha256::new();
     let mut expected_sequence = 0usize;
+    let mut pdf_page_count = 0usize;
+    let mut pdf_layout_max_source_page = None;
     let mut node_ids = NodeIdTracker::new()?;
     let mut table_fragments = HcdTableFragmentTracker::default();
     let mut textual_range_end = 0u64;
@@ -248,6 +250,22 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
         }
         for descriptor in page.chunks {
             validate_descriptor(&descriptor, manifest.storage_codec, &mut issues);
+            if manifest.source.format == "pdf"
+                && descriptor.region == "page"
+                && !descriptor.continuation
+            {
+                pdf_page_count += 1;
+            }
+            if !descriptor.pdf_layout.is_empty() {
+                pdf_layout_max_source_page = Some(
+                    descriptor
+                        .pdf_layout
+                        .iter()
+                        .filter_map(|page| page.source_page)
+                        .max()
+                        .unwrap_or(0) as usize,
+                );
+            }
             if descriptor.sequence != expected_sequence {
                 issues.push(issue(
                     "CHUNK_SEQUENCE",
@@ -554,6 +572,15 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             }
         }
     }
+    if pdf_layout_max_source_page
+        .is_some_and(|maximum| manifest.source.format != "pdf" || maximum > pdf_page_count)
+    {
+        issues.push(issue(
+            "PDF_PAGE_LAYOUT_SOURCE_MISMATCH",
+            "PDF layout references pages outside its source PDF".to_string(),
+            &manifest.index_prefix,
+        ));
+    }
     if expected_sequence != manifest.chunk_count {
         issues.push(issue(
             "CHUNK_COUNT_MISMATCH",
@@ -631,6 +658,8 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
         manifest.source.format.as_str(),
         "docx"
             | "xlsx"
+            | "csv"
+            | "tsv"
             | "pptx"
             | "pdf"
             | "html"
@@ -822,6 +851,8 @@ fn validate_revision_chain(
                 || !record.dirty_chunk_ids.is_empty()
                 || !record.dirty_source_parts.is_empty()
                 || !record.dirty_grid_parts.is_empty()
+                || record.grid_filter_changed
+                || record.pdf_layout_changed
                 || record.index_prefix != "indexes/rev-00000000000000000000"
             {
                 issues.push(issue(
@@ -998,7 +1029,9 @@ fn validate_patch_revision(
         || !record.slide_additions.is_empty()
         || !record.slide_removals.is_empty()
         || !record.slide_reorders.is_empty()
-        || !record.slide_copies.is_empty();
+        || !record.slide_copies.is_empty()
+        || record.grid_filter_changed
+        || record.pdf_layout_changed;
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
             || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())
@@ -1175,7 +1208,28 @@ fn validate_descriptor(
             path,
         ));
     }
+    if !descriptor.pdf_layout.is_empty()
+        && (descriptor.sequence != 0
+            || descriptor.region != "page"
+            || descriptor.continuation
+            || crate::validate_pdf_placements(&descriptor.pdf_layout, 100_000).is_err())
+    {
+        issues.push(issue(
+            "PDF_PAGE_LAYOUT_INVALID",
+            "PDF layout must be valid and appear on the first page chunk".into(),
+            path,
+        ));
+    }
     if let Some(grid) = &descriptor.grid {
+        if let Some(filter) = &grid.auto_filter {
+            if grid.kind != crate::GridChunkKind::Cells || filter.validate().is_err() {
+                issues.push(issue(
+                    "GRID_AUTOFILTER_INVALID",
+                    "grid AutoFilter schema or chunk kind is invalid".to_string(),
+                    path,
+                ));
+            }
+        }
         if descriptor.region != "sheet" {
             issues.push(issue(
                 "GRID_CHUNK_REGION_INVALID",
@@ -1306,11 +1360,14 @@ fn validate_map_entry(
         }
     }
     if entry.source.source_cell_ref.is_some()
-        && (source.format != "xlsx" || entry.source.node_kind != "cell")
+        && (!source.is_spreadsheet() || entry.source.node_kind != "cell")
     {
         issues.push(issue(
             "SOURCE_CELL_REF_INVALID",
-            format!("node {} has XLSX-only source metadata", entry.node_id),
+            format!(
+                "node {} has spreadsheet-only source metadata",
+                entry.node_id
+            ),
             path,
         ));
     }
@@ -1321,7 +1378,7 @@ fn validate_map_entry(
                 .text_id
                 .as_deref()
                 .is_some_and(|v| v.starts_with("hcd:image:")))
-            || (source.format == "xlsx" && entry.source.node_kind == "cell")
+            || (source.is_spreadsheet() && entry.source.node_kind == "cell")
             || (source.format == "pptx"
                 && entry.source.node_kind == "slide-text"
                 && entry

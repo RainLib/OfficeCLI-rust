@@ -2,7 +2,9 @@
 //! preview; only canvas transactions may change the authoritative scene.
 mod storage;
 pub use canvas_core::{Batch, CanvasError, Operation, Region, Scene, Selection, PROTOCOL};
-pub use storage::{apply_batch, apply_batch_with_rewrite, rewrite_inverse, read_scene, store_initial_scene};
+pub use storage::{
+    apply_batch, apply_batch_with_rewrite, read_scene, rewrite_inverse, store_initial_scene,
+};
 
 pub fn node_id(document_id: &str, element_id: &str) -> String {
     crate::stable_node_id(&[document_id, "canvas", element_id])

@@ -3302,7 +3302,7 @@ fn add_hyperlink(
             .filter(|(k, _)| {
                 matches!(
                     k.as_str(),
-                    "bold" | "italic" | "underline" | "color" | "font" | "size"
+                    "bold" | "italic" | "underline" | "color" | "font" | "font.eastAsia" | "size"
                 )
             })
             .map(|(k, v)| (k.clone(), v.clone()))

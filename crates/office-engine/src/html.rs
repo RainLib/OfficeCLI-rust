@@ -169,6 +169,8 @@ struct SemanticHtml {
     merges: Vec<SemanticMerge>,
     block_fonts: Vec<SemanticBlockFont>,
     inline_styles: HashMap<InlineKey, Vec<InlineSpan>>,
+    word_block_ids: HashMap<usize, String>,
+    word_formats: HashMap<String, hcd_core::EditorBlockContent>,
     table_row_heights: HashMap<usize, HashMap<usize, f64>>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
@@ -294,6 +296,7 @@ struct PendingBlock {
     text: String,
     links: Vec<PendingLink>,
     styles: Vec<InlineSpan>,
+    word_block_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +324,8 @@ struct TableBuilder {
     links: Vec<TablePendingLink>,
     fragment: Option<HcdTableFragment>,
     hcd_grid: bool,
+    preserve_cell_text: bool,
+    grid_row_offset: usize,
     row_open: bool,
     cell_column: Option<usize>,
     merges: Vec<SemanticMerge>,
@@ -372,6 +377,9 @@ struct HtmlParser {
     pending: Option<PendingBlock>,
     table: Option<TableBuilder>,
     logical_table: Option<LogicalTableBuilder>,
+    previous_grid_window: Option<(usize, usize)>,
+    in_hcd_sheet: bool,
+    grid_row_offset: usize,
     lists: Vec<ListState>,
     links: Vec<ActiveLink>,
     image_geometry_stack: Vec<Option<ImageGeometry>>,
@@ -598,6 +606,24 @@ pub fn convert_html_with_assets(
     assets: HashMap<String, SemanticAsset>,
     theme_faces: &[hcd_core::ThemeFontDecision],
 ) -> Result<HtmlConversionSummary, HandlerError> {
+    convert_html_with_word_formats(
+        input,
+        output,
+        output_format,
+        assets,
+        theme_faces,
+        HashMap::new(),
+    )
+}
+
+pub fn convert_html_with_word_formats(
+    input: &Path,
+    output: &Path,
+    output_format: &str,
+    assets: HashMap<String, SemanticAsset>,
+    theme_faces: &[hcd_core::ThemeFontDecision],
+    word_formats: HashMap<String, hcd_core::EditorBlockContent>,
+) -> Result<HtmlConversionSummary, HandlerError> {
     let registration = crate::registry::format_for_extension(output_format)
         .filter(|format| format.can_convert_html())
         .ok_or_else(|| {
@@ -617,6 +643,7 @@ pub fn convert_html_with_assets(
     let source = String::from_utf8_lossy(&bytes);
     let mut document = parse_html(&source)?;
     document.assets = assets;
+    document.word_formats = word_formats;
     if document.blocks.is_empty() {
         document
             .blocks
@@ -1228,7 +1255,13 @@ impl HtmlParser {
         let style = self.inline_style();
         if let Some(table) = &mut self.table {
             if let Some(cell) = &mut table.cell {
-                rich_text::append(cell, &mut table.cell_styles, &decoded, false, style)?;
+                rich_text::append(
+                    cell,
+                    &mut table.cell_styles,
+                    &decoded,
+                    table.preserve_cell_text,
+                    style,
+                )?;
             }
             return Ok(());
         }
@@ -1238,6 +1271,7 @@ impl HtmlParser {
                 text: String::new(),
                 links: Vec::new(),
                 styles: Vec::new(),
+                word_block_id: None,
             });
         }
         if let Some(pending) = &mut self.pending {
@@ -1348,6 +1382,25 @@ impl HtmlParser {
             "section" | "main" => {
                 self.flush_pending()?;
                 self.flush_pdf_line()?;
+                self.in_hcd_sheet = tag.attributes.contains_key("data-hcd-sheet-index");
+                self.grid_row_offset = 0;
+                if let (Some(sheet), Some(last_row)) = (
+                    tag.attributes
+                        .get("data-hcd-sheet-index")
+                        .and_then(|value| value.parse().ok()),
+                    tag.attributes
+                        .get("data-hcd-row-end")
+                        .and_then(|value| value.parse().ok()),
+                ) {
+                    if let Some((previous_sheet, previous_end)) = self.previous_grid_window {
+                        if previous_sheet == sheet {
+                            self.grid_row_offset = previous_end;
+                        }
+                    }
+                    self.previous_grid_window = Some((sheet, last_row));
+                } else {
+                    self.previous_grid_window = None;
+                }
                 if semantic_section_starts_new_page(&tag.attributes) {
                     self.push_section_break()?;
                 }
@@ -1388,13 +1441,22 @@ impl HtmlParser {
                         .warnings
                         .insert("nested HTML tables were flattened".to_string());
                 } else {
+                    let hcd_grid = tag.attributes.get("class").is_some_and(|classes| {
+                        classes
+                            .split_ascii_whitespace()
+                            .any(|class| class == "hcd-grid")
+                    });
                     self.table = Some(TableBuilder {
                         fragment: hcd_table_fragment(&tag.attributes)?,
-                        hcd_grid: tag.attributes.get("class").is_some_and(|classes| {
-                            classes
-                                .split_ascii_whitespace()
-                                .any(|class| class == "hcd-grid")
-                        }),
+                        grid_row_offset: self.grid_row_offset,
+                        hcd_grid,
+                        preserve_cell_text: hcd_grid
+                            && (self.in_hcd_sheet
+                                || tag
+                                    .attributes
+                                    .get("data-hcd-literal-types")
+                                    .map(String::as_str)
+                                    == Some("1")),
                         ..TableBuilder::default()
                     });
                 }
@@ -1404,7 +1466,8 @@ impl HtmlParser {
                     finish_table_row(table)?;
                     if table.hcd_grid {
                         let source_row =
-                            hcd_table_usize(&tag.attributes, "data-hcd-row", MAX_EXCEL_ROWS)?;
+                            hcd_table_usize(&tag.attributes, "data-hcd-row", MAX_EXCEL_ROWS)?
+                                .saturating_sub(table.grid_row_offset);
                         if source_row == 0 || source_row <= table.rows.len() {
                             return Err(HandlerError::InvalidArgument(
                                 "HCD grid rows are not strictly increasing".to_string(),
@@ -1452,6 +1515,8 @@ impl HtmlParser {
                         if let Some(reference) = tag.attributes.get("data-hcd-merge") {
                             let (start_row, start_column, end_row, end_column) =
                                 parse_xlsx_merge(reference)?;
+                            let start_row = start_row.saturating_sub(table.grid_row_offset);
+                            let end_row = end_row.saturating_sub(table.grid_row_offset);
                             let area = (end_row - start_row + 1)
                                 .checked_mul(end_column - start_column + 1)
                                 .ok_or_else(|| {
@@ -1538,6 +1603,18 @@ impl HtmlParser {
             }
             _ => {}
         }
+        if matches!(
+            tag.name.as_str(),
+            "p" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+        ) && tag.attributes.get("class").is_some_and(|classes| {
+            classes
+                .split_ascii_whitespace()
+                .any(|class| class == "hcd-editor-block")
+        }) {
+            if let Some(pending) = self.pending.as_mut() {
+                pending.word_block_id = tag.attributes.get("data-hcd-id").cloned();
+            }
+        }
         Ok(())
     }
 
@@ -1597,6 +1674,8 @@ impl HtmlParser {
                 }
             }
             "section" | "main" => {
+                self.in_hcd_sheet = false;
+                self.grid_row_offset = 0;
                 self.flush_pending()?;
                 self.flush_pdf_line()?;
             }
@@ -1808,6 +1887,7 @@ impl HtmlParser {
             text: String::new(),
             links: Vec::new(),
             styles: Vec::new(),
+            word_block_id: None,
         });
         Ok(())
     }
@@ -1842,6 +1922,7 @@ impl HtmlParser {
                 text: String::new(),
                 links: Vec::new(),
                 styles: Vec::new(),
+                word_block_id: None,
             });
         }
         let pending = self.pending.as_mut().expect("created pending block");
@@ -1928,6 +2009,9 @@ impl HtmlParser {
         };
         let block_index = self.document.blocks.len();
         self.push_block(block)?;
+        if let Some(id) = pending.word_block_id {
+            self.document.word_block_ids.insert(block_index, id);
+        }
         let styles = rich_text::trim_spans(pending.styles, trim_start, trim_end);
         if !styles.is_empty() {
             self.document
@@ -4180,7 +4264,11 @@ fn finish_table_cell(table: &mut TableBuilder) {
         if let Some(column) = table.cell_column.take() {
             table.row.resize(column - 1, String::new());
         }
-        let trimmed = cell.trim();
+        let trimmed = if table.preserve_cell_text {
+            cell.as_str()
+        } else {
+            cell.trim()
+        };
         let start = trimmed.as_ptr() as usize - cell.as_ptr() as usize;
         let end = start + trimmed.len();
         let position = (table.rows.len(), table.row.len());
@@ -4613,6 +4701,25 @@ mod tests {
         );
         assert!(xml.contains("<row r=\"3\"></row>"), "{xml}");
         assert!(xml.contains("<c r=\"A4\" t=\"inlineStr\""), "{xml}");
+    }
+
+    #[test]
+    fn semantic_xlsx_preserves_addresses_and_text_across_grid_windows() {
+        let document = parse_html(
+            r#"<section data-hcd-sheet-index="0" data-hcd-row-end="2"><table class="hcd-grid"><tr data-hcd-row="2"><td data-hcd-column="1">0017</td></tr></table></section><section data-hcd-sheet-index="0" data-hcd-row-end="5"><table class="hcd-grid"><tr data-hcd-row="4"><td data-hcd-column="2" data-hcd-merge="B4:C5" rowspan="2" colspan="2"> first&#13;&#10;second </td></tr><tr data-hcd-row="5"></tr></table></section>"#,
+        ).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("windows.xlsx");
+        export_xlsx(&document, &output).unwrap();
+        let package = oxml::OxmlPackage::open(output.to_string_lossy().as_ref(), false).unwrap();
+        let xml = package.read_part_xml("xl/worksheets/sheet1.xml").unwrap();
+        assert!(xml.contains("<mergeCell ref=\"B4:C5\"/>"), "{xml}");
+        assert!(
+            xml.contains("<c r=\"A2\" t=\"inlineStr\"><is><t>0017</t>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<c r=\"B4\" t=\"inlineStr\"><is><t xml:space=\"preserve\"> first&#13;\nsecond </t>"), "{xml}");
+        assert!(!xml.contains("<row r=\"6\">"), "{xml}");
     }
 
     #[test]

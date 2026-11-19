@@ -466,6 +466,7 @@ pub(in crate::patch) fn mint_xlsx_sheet_chunk(
         first_node_id: None,
         last_node_id: None,
         continuation: false,
+        pdf_layout: Vec::new(),
         grid: Some(crate::GridChunkAddress {
             sheet_id: addition.sheet_id.clone(),
             sheet_name: addition.name.clone(),
@@ -479,6 +480,7 @@ pub(in crate::patch) fn mint_xlsx_sheet_chunk(
             default_column_width_emu: None,
             default_row_height_emu: None,
             sheet_part: Some(addition.sheet_part.clone()),
+            auto_filter: None,
         }),
     })
 }

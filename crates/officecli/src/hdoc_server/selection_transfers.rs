@@ -619,21 +619,21 @@ async fn make_draft(
     let mut input = json!({"request": request.instructions, "selection": selected});
     if !is_canvas {
         let mut topic = request.instructions.clone();
-        for text in selected.as_array().into_iter().flatten().filter_map(|item| item["text"].as_str()) {
+        for text in selected
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["text"].as_str())
+        {
             topic.push(' ');
             topic.extend(text.chars().take(240));
-            if topic.chars().count() >= 240 { break; }
+            if topic.chars().count() >= 240 {
+                break;
+            }
         }
         input["materials"] = canvas_core::materials::material_hints(&topic);
     }
-    let result = agent_team::structured(
-        config,
-        name,
-        schema,
-        &instructions,
-        input,
-    )
-    .await?;
+    let result = agent_team::structured(config, name, schema, &instructions, input).await?;
     let title = result["title"]
         .as_str()
         .filter(|title| valid_text(title, 100))
@@ -817,12 +817,14 @@ fn document_blocks(
         kind,
         level,
         font: None,
+        alignment: None,
         inlines: vec![EditorInline {
             text: text.trim().into(),
             node_id: None,
             bold: false,
             italic: false,
             link,
+            format: Default::default(),
         }],
     };
     let mut blocks = vec![block(EditorBlockKind::Heading, Some(1), title, None)];

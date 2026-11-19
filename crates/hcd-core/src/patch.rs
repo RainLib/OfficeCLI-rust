@@ -39,6 +39,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 
+mod grid_filter;
+mod grid_sort;
+pub use grid_filter::{worksheet_filter, GridFilterView};
+pub use grid_sort::{sort_grid, GridSortDirection, GridSortRequest};
+
 const MAX_PATCH_OPERATIONS: usize = 10_000;
 const MAX_PATCH_INSERT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 256;
@@ -192,6 +197,7 @@ pub fn apply_patch(
                         | PatchOperation::PdfTextInsert { .. }
                         | PatchOperation::PdfTextGeometry { .. }
                         | PatchOperation::PdfTextDelete { .. }
+                        | PatchOperation::PdfPageLayoutSet { .. }
                         | PatchOperation::PptxTextInsert { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::PptxTextDelete { .. }
@@ -224,6 +230,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxColumnInsert { .. }
                         | PatchOperation::XlsxColumnDelete { .. }
                         | PatchOperation::XlsxGridRange { .. }
+                        | PatchOperation::XlsxAutoFilterSet { .. }
                         | PatchOperation::XlsxMergeBlank { .. }
                         | PatchOperation::XlsxUnmerge { .. }
                 )
@@ -343,6 +350,41 @@ pub fn apply_patch(
         xlsx_column_insert.as_ref(),
         xlsx_column_delete.as_ref(),
     );
+    let auto_filter = match patch.operations.first() {
+        Some(PatchOperation::XlsxAutoFilterSet { sheet_id, filter }) => {
+            if let Some(filter) = filter {
+                grid_filter::evaluate_grid_filter(bundle, &manifest, sheet_id, filter, true)?;
+            }
+            Some((sheet_id.as_str(), filter))
+        }
+        _ => None,
+    };
+    let pdf_layout = match patch.operations.first() {
+        Some(PatchOperation::PdfPageLayoutSet { pages }) => {
+            let source_page_count = crate::pdf_page_count(bundle, &manifest)?;
+            crate::validate_pdf_placements(pages, source_page_count)?;
+            if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_52
+                && (pages.len() != source_page_count
+                    || pages.iter().any(|page| page.source_page.is_none()))
+            {
+                return Err(HcdError::InvalidPatch(
+                    "hcd-patch/52 must include every source page exactly once".into(),
+                ));
+            }
+            Some(
+                if pages.len() == source_page_count
+                    && pages.iter().enumerate().all(|(index, page)| {
+                        page.source_page == Some(index as u32 + 1) && page.rotation == 0
+                    })
+                {
+                    &[][..]
+                } else {
+                    pages.as_slice()
+                },
+            )
+        }
+        _ => None,
+    };
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
@@ -505,7 +547,9 @@ pub fn apply_patch(
         // A move rewrites the index the deck's page order lives in, without
         // touching a single chunk. A copy rewrites it with one page more.
         || pptx_slide_reorder.is_some()
-        || pptx_slide_copy.is_some();
+        || pptx_slide_copy.is_some()
+        || auto_filter.is_some()
+        || pdf_layout.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -561,6 +605,7 @@ pub fn apply_patch(
     let mut dropped_slide_chunks = 0usize;
     let mut removed_slide_node_ids: Vec<String> = Vec::new();
     let mut appended_index_page: Option<crate::ChunkIndexPage> = None;
+    let mut wrote_auto_filter = false;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -599,6 +644,52 @@ pub fn apply_patch(
         let mut page = bundle.read_index_page(&manifest, page_number)?;
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
+            if let Some(layout) = pdf_layout.filter(|_| descriptor.sequence == 0) {
+                if descriptor.pdf_layout == layout {
+                    return Err(HcdError::PreconditionFailed(
+                        "PDF page layout is already in the requested state".into(),
+                    ));
+                }
+                descriptor.pdf_layout = layout.to_vec();
+                page_changed = true;
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+            }
+            if let Some(grid) = descriptor
+                .grid
+                .as_mut()
+                .filter(|grid| grid.kind == crate::GridChunkKind::Cells)
+            {
+                if let Some((_, filter)) = auto_filter
+                    .filter(|(sheet_id, _)| !wrote_auto_filter && *sheet_id == grid.sheet_id)
+                {
+                    if &grid.auto_filter == filter {
+                        return Err(HcdError::PreconditionFailed(
+                            "AutoFilter is already in the requested state".into(),
+                        ));
+                    }
+                    grid.auto_filter.clone_from(filter);
+                    wrote_auto_filter = true;
+                    page_changed = true;
+                    dirty_chunks.insert(descriptor.chunk_id.clone());
+                }
+                if grid.auto_filter.is_some()
+                    && patch.operations.iter().any(|operation| match operation {
+                        PatchOperation::XlsxRowInsert { sheet_id, .. }
+                        | PatchOperation::XlsxRowDelete { sheet_id, .. }
+                        | PatchOperation::XlsxRowRemoveLast { sheet_id, .. }
+                        | PatchOperation::XlsxColumnInsert { sheet_id, .. }
+                        | PatchOperation::XlsxColumnDelete { sheet_id, .. }
+                        | PatchOperation::XlsxGridRange { sheet_id, .. }
+                        | PatchOperation::XlsxMerge { sheet_id, .. }
+                        | PatchOperation::XlsxMergeBlank { sheet_id, .. } => {
+                            sheet_id == &grid.sheet_id
+                        }
+                        _ => false,
+                    })
+                {
+                    return Err(HcdError::Unsupported("Clear the saved AutoFilter before shifting rows or columns or merging cells on this sheet".into()));
+                }
+            }
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
             let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
             let inserted_visuals = image_insertions.get(&descriptor.chunk_id);
@@ -986,7 +1077,7 @@ pub fn apply_patch(
                             &replacement_hash,
                         )?;
                     }
-                    if manifest.source.format == "xlsx" && entry.source.node_kind == "cell" {
+                    if manifest.source.is_spreadsheet() && entry.source.node_kind == "cell" {
                         set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
                     }
                     if manifest.source.format == "pdf" {
@@ -2313,6 +2404,11 @@ pub fn apply_patch(
             &mut index_root_href,
         )?;
     }
+    if auto_filter.is_some() && !wrote_auto_filter {
+        return Err(HcdError::InvalidPatch(
+            "AutoFilter worksheet does not exist".into(),
+        ));
+    }
 
     // A move puts two pages in each other's place and rewrites nothing else: a
     // page says the same thing wherever it stands, so only the index — which is
@@ -2591,6 +2687,13 @@ pub fn apply_patch(
             })
             .chain(rich_converted_formula_ids)
             .collect(),
+        grid_values_reordered: manifest.source.is_spreadsheet()
+            && patch
+                .metadata
+                .get("gridValuesReordered")
+                .is_some_and(|value| value == "true"),
+        grid_filter_changed: wrote_auto_filter,
+        pdf_layout_changed: pdf_layout.is_some(),
         grid_row_insertions: xlsx_row_insert
             .as_ref()
             .into_iter()
@@ -3364,7 +3467,7 @@ impl FontPresentation {
     /// The inline `style` value this presentation writes, serialized exactly as
     /// `update_start_tag_style` would for an element with no other declarations,
     /// so a rendered block and a patched node carry the same CSS.
-    fn style_value(&self) -> String {
+    pub(crate) fn style_value(&self) -> String {
         self.css
             .iter()
             .map(|(property, value)| format!("{property}:{value}"))
@@ -4130,6 +4233,7 @@ fn apply_annotations(
             | PatchOperation::XlsxCellNumberFormat { .. }
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
+            | PatchOperation::PdfPageLayoutSet { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
@@ -4144,6 +4248,7 @@ fn apply_annotations(
             | PatchOperation::XlsxColumnInsert { .. }
             | PatchOperation::XlsxColumnDelete { .. }
             | PatchOperation::XlsxGridRange { .. }
+            | PatchOperation::XlsxAutoFilterSet { .. }
             | PatchOperation::XlsxMergeBlank { .. }
             | PatchOperation::XlsxRowRemoveLast { .. }
             | PatchOperation::XlsxColumnWidth { .. }

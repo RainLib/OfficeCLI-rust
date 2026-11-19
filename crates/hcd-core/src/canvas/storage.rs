@@ -299,8 +299,12 @@ pub fn apply_batch_with_rewrite(
     let mut record = bundle.revision(manifest.revision)?;
     record.canvas_rewrite = match (effect, rewrite) {
         (Some(effect), Some((owner, epoch))) => Some(crate::CanvasRewriteReceipt {
-            owner: owner.into(), epoch, cursor: effect.cursor,
-            inverse_href: bundle.write_json_object("canvas/inverses", &effect.inverse)?.0,
+            owner: owner.into(),
+            epoch,
+            cursor: effect.cursor,
+            inverse_href: bundle
+                .write_json_object("canvas/inverses", &effect.inverse)?
+                .0,
         }),
         _ => None,
     };
@@ -353,11 +357,20 @@ pub fn apply_batch_with_rewrite(
 }
 
 /// Replaying the same immutable inverse carries the same CRDT item IDs.
-pub fn rewrite_inverse(bundle: &Bundle, receipt: &crate::CanvasRewriteReceipt) -> Result<String, HcdError> {
-    let bytes = crate::bundle::read_bytes_bounded(&bundle.resolve_href(&receipt.inverse_href)?, crate::MAX_CONTROL_PART_BYTES, "Spec rewrite inverse")?;
+pub fn rewrite_inverse(
+    bundle: &Bundle,
+    receipt: &crate::CanvasRewriteReceipt,
+) -> Result<String, HcdError> {
+    let bytes = crate::bundle::read_bytes_bounded(
+        &bundle.resolve_href(&receipt.inverse_href)?,
+        crate::MAX_CONTROL_PART_BYTES,
+        "Spec rewrite inverse",
+    )?;
     let object = format!("canvas/inverses/sha256/{}.json", hash_bytes(&bytes));
     if receipt.inverse_href != object && receipt.inverse_href != format!("{object}.gz") {
-        return Err(HcdError::InvalidBundle("Spec rewrite inverse hash mismatch".into()));
+        return Err(HcdError::InvalidBundle(
+            "Spec rewrite inverse hash mismatch".into(),
+        ));
     }
     Ok(serde_json::from_slice(&bytes)?)
 }

@@ -782,6 +782,7 @@ impl BundleWriter {
             last_node_id: source_map.entries.last().map(|entry| entry.node_id.clone()),
             continuation: options.continuation,
             grid: options.grid,
+            pdf_layout: Vec::new(),
         };
         self.add_descriptor(descriptor.clone())?;
         Ok(descriptor)
@@ -836,7 +837,7 @@ impl BundleWriter {
         manifest.state = "COMPLETE".to_string();
 
         let record = RevisionRecord {
-        canvas_rewrite: None,
+            canvas_rewrite: None,
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             document_id: manifest.document_id.clone(),
             revision: 0,
@@ -862,6 +863,9 @@ impl BundleWriter {
             dirty_source_parts: Vec::new(),
             dirty_grid_parts: Vec::new(),
             converted_formula_node_ids: Vec::new(),
+            grid_values_reordered: false,
+            grid_filter_changed: false,
+            pdf_layout_changed: false,
             grid_row_insertions: Vec::new(),
             grid_row_deletions: Vec::new(),
             grid_column_insertions: Vec::new(),
@@ -1507,6 +1511,7 @@ mod tests {
             first_node_id: None,
             last_node_id: None,
             continuation: false,
+            pdf_layout: Vec::new(),
             grid: None,
         };
         let page = written_page(1, vec![descriptor.clone()]);

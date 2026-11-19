@@ -105,20 +105,29 @@ async fn finish_commit(
     Ok(cursor.final_text.clone())
 }
 
-pub(super) async fn execute(
+pub(in crate::hdoc_server) async fn execute(
     state: &ServerState,
-    id: &str,
     run_id: &str,
     headers: &HeaderMap,
     config: &agent_runs::Config,
     task: &str,
     target: Option<Value>,
-    count: usize,
     cancelled: &AtomicBool,
 ) -> Result<String, ApiError> {
+    let (document_id, actor, count) = {
+        let runs = state.agent_runs.lock().await;
+        let run = runs
+            .get(run_id)
+            .ok_or_else(|| bad("Agent task not found"))?;
+        (
+            run.document_id.clone(),
+            run.agent_id.clone(),
+            run.agent_count,
+        )
+    };
+    let id = document_id.as_str();
     authorized(state, id, headers, config, cancelled).await?;
     let key = agent_execution::key("canvas-team-append", &target)?;
-    let actor = state.agent_runs.lock().await[run_id].agent_id.clone();
     let mut cursor = agent_execution::load(state, run_id, &key)
         .await
         .unwrap_or_default();

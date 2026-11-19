@@ -51,6 +51,9 @@ pub(super) fn validate_patch_identity(
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_47
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_46
         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_37
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_51
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_52
+        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_53
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -666,7 +669,7 @@ pub(super) fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -708,7 +711,7 @@ pub(super) fn validate_patch_identity(
                 end_column,
             } => {
                 if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
@@ -758,7 +761,7 @@ pub(super) fn validate_patch_identity(
                         | crate::HCD_PATCH_SCHEMA_VERSION_28
                         | crate::HCD_PATCH_SCHEMA_VERSION_29
                         | crate::HCD_PATCH_SCHEMA_VERSION_50
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
                         && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
@@ -801,7 +804,7 @@ pub(super) fn validate_patch_identity(
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || (patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
                         && patch.operations.len() != 1)
                 {
@@ -840,7 +843,7 @@ pub(super) fn validate_patch_identity(
                 if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                 {
                     return Err(HcdError::Unsupported(
                         "xlsx.formula.to-value requires an XLSX hcd-patch/28 batch".to_string(),
@@ -878,7 +881,7 @@ pub(super) fn validate_patch_identity(
             } => {
                 if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                 {
                     return Err(HcdError::Unsupported(
                         "numeric XLSX cell edits require an XLSX hcd-patch/29 batch".to_string(),
@@ -912,7 +915,7 @@ pub(super) fn validate_patch_identity(
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
                     && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50)
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || sheet_id.len() != 34
                     || !sheet_id.starts_with("s_")
                     || !sheet_id[2..]
@@ -951,7 +954,7 @@ pub(super) fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1002,7 +1005,7 @@ pub(super) fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1032,7 +1035,7 @@ pub(super) fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.row.insert requires one operation on an XLSX bundle with hcd-patch/12".to_string()));
@@ -1053,7 +1056,7 @@ pub(super) fn validate_patch_identity(
                 if !matches!(
                     patch.schema_version.as_str(),
                     HCD_PATCH_SCHEMA_VERSION_14 | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.row.delete requires one operation on an XLSX bundle with hcd-patch/14".to_string()));
@@ -1079,7 +1082,7 @@ pub(super) fn validate_patch_identity(
                     HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.column.insert requires one operation on an XLSX bundle with hcd-patch/13".to_string()));
@@ -1098,7 +1101,7 @@ pub(super) fn validate_patch_identity(
             }
             PatchOperation::XlsxColumnDelete { sheet_id, column } => {
                 if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported("xlsx.column.delete requires one operation on an XLSX bundle with hcd-patch/15".to_string()));
@@ -1123,7 +1126,7 @@ pub(super) fn validate_patch_identity(
                 count,
             } => {
                 if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_25
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1153,6 +1156,41 @@ pub(super) fn validate_patch_identity(
                     ));
                 }
             }
+            PatchOperation::PdfPageLayoutSet { .. } => {
+                if !matches!(
+                    patch.schema_version.as_str(),
+                    crate::HCD_PATCH_SCHEMA_VERSION_52 | crate::HCD_PATCH_SCHEMA_VERSION_53
+                ) || manifest.schema_version != crate::HCD_SCHEMA_VERSION
+                    || manifest.source.format != "pdf"
+                {
+                    return Err(HcdError::Unsupported(
+                        "Page organization requires a PDF and a PDF layout patch schema".into(),
+                    ));
+                }
+            }
+            PatchOperation::XlsxAutoFilterSet { sheet_id, filter } => {
+                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_51
+                    || manifest.schema_version != crate::HCD_SCHEMA_VERSION
+                    || manifest.source.format != "xlsx"
+                {
+                    return Err(HcdError::Unsupported(
+                        "Saved AutoFilter requires XLSX and hcd-patch/51".into(),
+                    ));
+                }
+                if sheet_id.len() != 34
+                    || !sheet_id.starts_with("s_")
+                    || !sheet_id[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(HcdError::InvalidPatch(
+                        "invalid AutoFilter worksheet ID".into(),
+                    ));
+                }
+                if let Some(filter) = filter {
+                    filter.validate()?;
+                }
+            }
             PatchOperation::XlsxColumnWidth {
                 sheet_id,
                 column,
@@ -1167,7 +1205,7 @@ pub(super) fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1195,7 +1233,7 @@ pub(super) fn validate_patch_identity(
                 height_points,
             } => {
                 if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
-                    || manifest.source.format != "xlsx"
+                    || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(
@@ -1226,7 +1264,7 @@ pub(super) fn validate_patch_identity(
                         | HCD_PATCH_SCHEMA_VERSION_13
                         | HCD_PATCH_SCHEMA_VERSION_14
                         | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
+                ) || !manifest.source.is_spreadsheet()
                     || patch.operations.len() != 1
                 {
                     return Err(HcdError::Unsupported(

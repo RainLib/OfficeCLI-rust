@@ -204,21 +204,55 @@ mod tests {
     fn a_partitioned_canvas_receipt_recovers_after_json_checkpoint_and_peer_commit() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source.excalidraw");
-        std::fs::write(&source, serde_json::to_vec(&canvas_core::Scene::default()).unwrap()).unwrap();
-        hcd_formats::import_document(&source, root.path().join("canvas.hcd"), &hcd_formats::ImportOptions::new("canvas"), |_| Ok(())).unwrap();
+        std::fs::write(
+            &source,
+            serde_json::to_vec(&canvas_core::Scene::default()).unwrap(),
+        )
+        .unwrap();
+        hcd_formats::import_document(
+            &source,
+            root.path().join("canvas.hcd"),
+            &hcd_formats::ImportOptions::new("canvas"),
+            |_| Ok(()),
+        )
+        .unwrap();
         let bundle = Bundle::open(root.path().join("canvas.hcd")).unwrap();
         let composition: canvas_core::Composition = serde_json::from_value(json!({"title":"分区标题","layout":"grid","items":[{"title":"想法","body":"包含小数坐标的两行正文，用于验证持久化后安全续跑。","kind":"bubble"}]})).unwrap();
-        let batch=canvas_core::compose_sections(&canvas_core::Scene::default(),"canvas",0,"original",&[composition.clone(),composition.clone()],None).unwrap();
-        let args=json!({"document_id":"canvas","mode":"canvas","expected_revision":0,"patch":batch});
-        let result=hcd_core::canvas::apply_batch(&bundle,&batch,None,&std::collections::BTreeMap::from([("id".into(),"worker".into())])).unwrap();
-        let saved:Value=serde_json::from_str(&serde_json::to_string(&args).unwrap()).unwrap();
-        let scene=hcd_core::canvas::read_scene(&bundle,None).unwrap();
-        let peer=canvas_core::compose(&scene,"canvas",result.revision,"peer",&composition,None).unwrap();
-        hcd_core::canvas::apply_batch(&bundle,&peer,None,&std::collections::BTreeMap::new()).unwrap();
-        let receipt=committed_patch(&bundle,&saved,"worker").unwrap().unwrap();
-        assert_eq!(receipt["revision"],result.revision);
-        assert_eq!(bundle.manifest().unwrap().revision,result.revision+1);
-        assert!(committed_patch(&bundle,&saved,"other-worker").is_err());
+        let batch = canvas_core::compose_sections(
+            &canvas_core::Scene::default(),
+            "canvas",
+            0,
+            "original",
+            &[composition.clone(), composition.clone()],
+            None,
+        )
+        .unwrap();
+        let args =
+            json!({"document_id":"canvas","mode":"canvas","expected_revision":0,"patch":batch});
+        let result = hcd_core::canvas::apply_batch(
+            &bundle,
+            &batch,
+            None,
+            &std::collections::BTreeMap::from([("id".into(), "worker".into())]),
+        )
+        .unwrap();
+        let saved: Value = serde_json::from_str(&serde_json::to_string(&args).unwrap()).unwrap();
+        let scene = hcd_core::canvas::read_scene(&bundle, None).unwrap();
+        let peer = canvas_core::compose(
+            &scene,
+            "canvas",
+            result.revision,
+            "peer",
+            &composition,
+            None,
+        )
+        .unwrap();
+        hcd_core::canvas::apply_batch(&bundle, &peer, None, &std::collections::BTreeMap::new())
+            .unwrap();
+        let receipt = committed_patch(&bundle, &saved, "worker").unwrap().unwrap();
+        assert_eq!(receipt["revision"], result.revision);
+        assert_eq!(bundle.manifest().unwrap().revision, result.revision + 1);
+        assert!(committed_patch(&bundle, &saved, "other-worker").is_err());
     }
     #[test]
     fn a_lost_response_matches_only_the_exact_canonical_patch_and_author() {

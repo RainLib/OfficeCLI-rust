@@ -65,6 +65,30 @@ const FORMATS: &[FormatRegistration] = &[
         validate_export: validate_restored_source,
     },
     FormatRegistration {
+        id: "csv",
+        extensions: &["csv"],
+        raster_image: false,
+        import: |source, output, options, emit| {
+            xlsx::delimited::import(source, output, options, "csv", emit)
+        },
+        export: |bundle, source, target, options| {
+            xlsx::delimited::export(bundle, Some(source), target, "csv", options, None)
+        },
+        validate_export: xlsx::delimited::validate_source,
+    },
+    FormatRegistration {
+        id: "tsv",
+        extensions: &["tsv"],
+        raster_image: false,
+        import: |source, output, options, emit| {
+            xlsx::delimited::import(source, output, options, "tsv", emit)
+        },
+        export: |bundle, source, target, options| {
+            xlsx::delimited::export(bundle, Some(source), target, "tsv", options, None)
+        },
+        validate_export: xlsx::delimited::validate_source,
+    },
+    FormatRegistration {
         id: "pptx",
         extensions: &["pptx"],
         raster_image: false,
@@ -230,12 +254,14 @@ mod tests {
     }
 
     #[test]
-    fn facade_routes_text_aliases_events_and_source_export() {
+    fn facade_routes_text_aliases_and_delimited_grid_exports() {
         let temp = tempfile::tempdir().unwrap();
         for (extension, canonical, content) in [
             ("htm", "html", "<p>HTML source 中文</p>"),
             ("markdown", "md", "# Markdown source 中文\n"),
             ("txt", "txt", "Plain source 中文\n"),
+            ("csv", "csv", "ID,城市\n001,上海\n"),
+            ("tsv", "tsv", "ID\t城市\n001\t上海\n"),
         ] {
             let source = temp.path().join(format!("source.{extension}"));
             let output = temp.path().join(format!("restored.{extension}"));

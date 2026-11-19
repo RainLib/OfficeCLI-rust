@@ -875,6 +875,7 @@ pub(super) fn clone_pptx_slide_chunks(
                 .map(|entry| entry.node_id.clone()),
             last_node_id: copied_map.entries.last().map(|entry| entry.node_id.clone()),
             continuation: source.continuation,
+            pdf_layout: Vec::new(),
             grid: None,
         });
     }
@@ -935,6 +936,7 @@ pub(super) fn mint_pptx_slide_chunk(
         first_node_id: None,
         last_node_id: None,
         continuation: false,
+        pdf_layout: Vec::new(),
         grid: None,
     })
 }

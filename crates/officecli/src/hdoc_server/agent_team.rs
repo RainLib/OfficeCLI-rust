@@ -6,9 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[path = "canvas_team.rs"]
 mod canvas_team;
 
-pub(super) async fn execute_canvas(state: &ServerState, id: &str, run_id: &str, headers: &HeaderMap, config: &agent_runs::Config, task: &str, target: Option<Value>, count: usize, cancelled: &AtomicBool) -> Result<String, ApiError> {
-    canvas_team::execute(state,id,run_id,headers,config,task,target,count,cancelled).await
-}
+pub(super) use canvas_team::execute as execute_canvas;
 
 const LEASE_MS: u64 = 30_000;
 
@@ -108,7 +106,15 @@ impl Team {
         for (unit, lease) in checkpoint.team.units.iter_mut().zip(checkpoint.leases) {
             unit.lease_id = lease;
             if unit.agent_name.is_empty() {
-                unit.agent_name = unit.agent_id.rsplit('-').next().and_then(|n|n.parse::<usize>().ok()).and_then(|n|n.checked_sub(1)).map(agent_identity::worker).unwrap_or(agent_identity::REVIEWER).into();
+                unit.agent_name = unit
+                    .agent_id
+                    .rsplit('-')
+                    .next()
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| n.checked_sub(1))
+                    .map(agent_identity::worker)
+                    .unwrap_or(agent_identity::REVIEWER)
+                    .into();
             }
         }
         checkpoint.team.resources = checkpoint.resources;
@@ -1454,9 +1460,13 @@ async fn replay_deck(
             .ok_or_else(|| bad("missing staged author"))?;
         {
             let mut runs = state.agent_runs.lock().await;
-            let unit = &mut runs.get_mut(run_id).unwrap().team.as_mut().unwrap().units[saved.unit_index];
+            let unit =
+                &mut runs.get_mut(run_id).unwrap().team.as_mut().unwrap().units[saved.unit_index];
             unit.agent_id = author.into();
-            unit.agent_name = prepared["name"].as_str().unwrap_or(agent_identity::EDITOR).into();
+            unit.agent_name = prepared["name"]
+                .as_str()
+                .unwrap_or(agent_identity::EDITOR)
+                .into();
         }
         let member_headers = delegate(
             state,
@@ -1635,8 +1645,8 @@ async fn prepare_deck(
             result: String::new(),
             draft: None,
             image_job_id: None,
-                    canvas_draft: None,
-                    canvas_region: None,
+            canvas_draft: None,
+            canvas_region: None,
         });
     }
     let commit_index = drafts.len();
@@ -2014,7 +2024,8 @@ mod tests {
                     resources: vec![resource.into()],
                     status: "pending".into(),
                     agent_id,
-                    agent_name: agent_identity::worker(0).into(),                    lease_id: None,
+                    agent_name: agent_identity::worker(0).into(),
+                    lease_id: None,
                     lease_expires_at_epoch_ms: None,
                     result: String::new(),
                     draft: None,
@@ -2641,8 +2652,8 @@ mod tests {
             result: String::new(),
             draft: None,
             image_job_id: None,
-                    canvas_draft: None,
-                    canvas_region: None,
+            canvas_draft: None,
+            canvas_region: None,
         };
         assert!(unit_live(&unit, 99));
         assert!(!unit_live(&unit, 100));

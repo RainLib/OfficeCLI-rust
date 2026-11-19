@@ -9,12 +9,12 @@ import { ExportControl } from './ExportControl.tsx'
 import type { Session } from './api.ts'
 import { HostPublicationControl, permits, useHostPolicy } from './HostIntegration.tsx'
 
-export type EditorTab = 'home' | 'insert' | 'view' | 'revisions' | 'format' | 'sheet'
+export type EditorTab = 'home' | 'insert' | 'view' | 'revisions' | 'format' | 'sheet' | 'data'
 
-export function EditorHeader({ session, revision, status, onClose, onSearch, beforeExport, presence, focused, onFocus }: {
+export function EditorHeader({ session, revision, status, onClose, onSearch, beforeExport, activeSheetName, presence, focused, onFocus }: {
   session: Session; revision: number | null; status: string
   onClose: () => void; onSearch: () => void
-  beforeExport?: () => Promise<number | null>; presence?: ReactNode
+  beforeExport?: () => Promise<number | null>; activeSheetName?: string; presence?: ReactNode
   focused: boolean; onFocus: () => void
 }) {
   const { locale } = useI18n()
@@ -25,7 +25,7 @@ export function EditorHeader({ session, revision, status, onClose, onSearch, bef
       <HostPublicationControl session={session} revision={revision} beforeSave={beforeExport} />
       <button className="icon-button search-trigger" aria-label={localizeSource(locale, '搜索文档')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={18} /></button>
       <button className="icon-button focus-trigger" aria-pressed={focused} aria-label={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} title={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} onClick={onFocus}>{focused ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
-      {(permits(session, 'document.download') || permits(session, 'document.export')) && <ExportControl session={session} revision={revision} beforeExport={beforeExport} />}
+      {(permits(session, 'document.download') || permits(session, 'document.export')) && <ExportControl session={session} revision={revision} beforeExport={beforeExport} activeSheetName={activeSheetName} />}
     </div>
   </header>
 }
@@ -35,9 +35,9 @@ export function ContentToolbar({ activeTab, onTab, expanded, onToggle, readOnly,
 }) {
   const { locale } = useI18n()
   const policy = useHostPolicy()
-  const tabs: [EditorTab, string][] = [['home', '开始'], ...(format === 'xlsx' ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []), ['insert', '插入'], ['view', '视图'], ['revisions', '修订']]
+  const tabs: [EditorTab, string][] = [['home', '开始'], ...(format === 'xlsx' ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []), ['insert', '插入'], ...(['xlsx', 'csv', 'tsv'].includes(format) ? [['data', '数据']] as [EditorTab, string][] : []), ['view', '视图'], ['revisions', '修订']]
   return <div className="content-toolbar">
-    {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="文档内容" /><small>{format.toUpperCase()}</small></span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
+    {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="只读预览" /><small>{format.toUpperCase()}</small>{['xlsx', 'csv', 'tsv'].includes(format) && <button aria-pressed={activeTab === 'data'} onClick={() => onTab('data')}><LocalText source="数据" /></button>}</span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
     <div className="content-toolbar-actions"><button className="toolbar-search" aria-label={localizeSource(locale, '查找全文')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={15} /><span><LocalText source="查找" /></span></button>
     {!readOnly && <button className="icon-button toolbar-toggle" title={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-label={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-expanded={expanded} onClick={onToggle}>{expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>}</div>
   </div>

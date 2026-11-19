@@ -234,6 +234,7 @@ pub(crate) fn distribute_docx_inlines(
             }
             remaining -= text.chars().count();
             inlines.push(EditorInline {
+                format: Default::default(),
                 text,
                 node_id: Some(id.clone()),
                 bold: run.bold,
@@ -246,6 +247,7 @@ pub(crate) fn distribute_docx_inlines(
                 .iter()
                 .find(|run| run.node_id.as_ref() == Some(&id))?;
             inlines.push(EditorInline {
+                format: Default::default(),
                 text: String::new(),
                 node_id: Some(id.clone()),
                 bold: before.bold,

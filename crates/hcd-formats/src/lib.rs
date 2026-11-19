@@ -16,10 +16,12 @@ use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
 pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
+pub use pdf::validate_pdf_source_export;
 pub use theme_fonts::{
     apply_theme_fonts, pdf_body_face, pdf_text_forecast, PdfBodyFace, PdfFaceOptions,
     PdfForecastFace, PdfRetargetLine, PdfTextForecast, ThemeFontApplication,
 };
+pub use xlsx::grid_filter::verify_xlsx_filter_source;
 
 /// Expand presentation-only Markdown features without changing canonical HCD.
 /// The transform is bounded to one chunk and safe to call after every revision.
@@ -98,6 +100,32 @@ pub fn validate_source_export(
         ))
     })?;
     (format.validate_export)(bundle, source, revision)
+}
+
+pub fn export_delimited_grid(
+    bundle: &hcd_core::Bundle,
+    source: Option<&Path>,
+    target: &Path,
+    format: &str,
+    options: &ExportOptions,
+    sheet_name: Option<&str>,
+) -> Result<hcd_core::FidelityReport, HcdError> {
+    xlsx::delimited::export(bundle, source, target, format, options, sheet_name)
+}
+
+pub fn export_pdf_pages(
+    bundle: &hcd_core::Bundle,
+    source: &Path,
+    target: &Path,
+    options: &ExportOptions,
+    page_range: std::ops::RangeInclusive<usize>,
+) -> Result<hcd_core::FidelityReport, HcdError> {
+    if bundle.manifest()?.source.format != "pdf" {
+        return Err(HcdError::Unsupported(
+            "native page extraction requires a PDF bundle".to_string(),
+        ));
+    }
+    pdf::export_pdf_revision(bundle, source, target, options, Some(page_range))
 }
 
 fn extension(path: &Path) -> Result<String, HcdError> {

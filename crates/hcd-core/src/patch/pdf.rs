@@ -428,5 +428,18 @@ pub(super) fn validate_pdf_schema(
             "hcd-patch/24 accepts one PDF text-box deletion only".to_string(),
         ));
     }
+    if matches!(
+        patch.schema_version.as_str(),
+        crate::HCD_PATCH_SCHEMA_VERSION_52 | crate::HCD_PATCH_SCHEMA_VERSION_53
+    ) && (patch.operations.len() != 1
+        || !matches!(
+            patch.operations.first(),
+            Some(PatchOperation::PdfPageLayoutSet { .. })
+        ))
+    {
+        return Err(HcdError::Unsupported(
+            "PDF page layout patches accept one layout operation".into(),
+        ));
+    }
     Ok(())
 }

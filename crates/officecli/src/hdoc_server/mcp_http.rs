@@ -186,7 +186,19 @@ pub(super) async fn post(
                     protocol: protocol.into(),
                     expires: Instant::now() + Duration::from_secs(3600),
                     initialized: false,
-                    agent_name: agent_identity::clean(request.pointer("/params/clientInfo/title").and_then(Value::as_str)).or_else(||agent_identity::clean(request.pointer("/params/clientInfo/name").and_then(Value::as_str))).unwrap_or_else(|| "外部助手".into()),
+                    agent_name: agent_identity::clean(
+                        request
+                            .pointer("/params/clientInfo/title")
+                            .and_then(Value::as_str),
+                    )
+                    .or_else(|| {
+                        agent_identity::clean(
+                            request
+                                .pointer("/params/clientInfo/name")
+                                .and_then(Value::as_str),
+                        )
+                    })
+                    .unwrap_or_else(|| "外部助手".into()),
                 },
             );
         }
@@ -247,9 +259,14 @@ pub(super) async fn post(
             let mut headers = headers;
             if matches!(name, "hcd_patch" | "hcd_activity" | "hcd_read") {
                 if let Some(session) = state.mcp_sessions.lock().await.get(&key) {
-                    headers.insert("x-hcd-agent-name", agent_identity::encode_name(&session.agent_name));
+                    headers.insert(
+                        "x-hcd-agent-name",
+                        agent_identity::encode_name(&session.agent_name),
+                    );
                     headers.insert("x-hcd-agent-presence-id", key.parse().map_err(internal)?);
-                    if name == "hcd_patch" { headers.insert("x-hcd-agent-edit", "true".parse().map_err(internal)?); }
+                    if name == "hcd_patch" {
+                        headers.insert("x-hcd-agent-edit", "true".parse().map_err(internal)?);
+                    }
                 }
             }
             let result = if name == "hcd_workflow" {

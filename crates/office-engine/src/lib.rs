@@ -10,7 +10,10 @@ pub mod registry;
 
 pub use create::{create_document, CreateOptions, CreateSummary};
 pub use hcd_html::render_hcd_html;
-pub use html::{convert_html, convert_html_with_assets, HtmlConversionSummary, SemanticAsset};
+pub use html::{
+    convert_html, convert_html_with_assets, convert_html_with_word_formats, HtmlConversionSummary,
+    SemanticAsset,
+};
 
 use handler_common::{DocumentHandler, HandlerError};
 use std::path::Path;

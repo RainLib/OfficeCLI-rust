@@ -159,6 +159,7 @@ pub struct FormatCapabilities {
     pub hcd_import: bool,
     pub source_backed_export: bool,
     pub raster_image: bool,
+    pub delimited_grid_export: bool,
     pub canonical_html_export: bool,
     pub archive_export: bool,
 }
@@ -176,6 +177,7 @@ pub fn capabilities() -> Vec<FormatCapabilities> {
             hcd_import: true,
             source_backed_export: !adapter.raster_image,
             raster_image: adapter.raster_image,
+            delimited_grid_export: matches!(adapter.id, "csv" | "tsv"),
             canonical_html_export: adapter.id == "html",
             archive_export: false,
         });
@@ -193,6 +195,7 @@ pub fn capabilities() -> Vec<FormatCapabilities> {
             hcd_import: false,
             source_backed_export: false,
             raster_image: false,
+            delimited_grid_export: false,
             canonical_html_export: false,
             archive_export: false,
         });
@@ -206,6 +209,7 @@ pub fn capabilities() -> Vec<FormatCapabilities> {
         hcd_import: false,
         source_backed_export: false,
         raster_image: false,
+        delimited_grid_export: false,
         canonical_html_export: false,
         archive_export: true,
     });
@@ -214,11 +218,14 @@ pub fn capabilities() -> Vec<FormatCapabilities> {
 
 /// The ordered target list for a normal HCD document. Capability discovery,
 /// transport validation and MCP schemas must all use these registrations.
-pub fn document_export_formats() -> Vec<&'static str> {
+pub fn document_export_formats(is_spreadsheet: bool) -> Vec<&'static str> {
     capabilities()
         .into_iter()
         .filter(|format| {
-            format.html_conversion || format.canonical_html_export || format.archive_export
+            format.html_conversion
+                || format.canonical_html_export
+                || format.archive_export
+                || (is_spreadsheet && format.delimited_grid_export)
         })
         .map(|format| format.format)
         .collect()
@@ -238,6 +245,7 @@ pub fn hcd_export_formats() -> Vec<&'static str> {
         .filter(|format| {
             format.html_conversion
                 || format.format == "excalidraw"
+                || format.delimited_grid_export
                 || format.canonical_html_export
                 || format.raster_image
                 || format.archive_export

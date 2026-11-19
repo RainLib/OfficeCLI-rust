@@ -213,7 +213,7 @@ pub(super) fn validate_xlsx_schema(
     patch: &PatchBatch,
 ) -> Result<(), HcdError> {
     if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_19
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || !patch
                 .operations
                 .iter()
@@ -230,7 +230,7 @@ pub(super) fn validate_xlsx_schema(
         ));
     }
     if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -242,7 +242,7 @@ pub(super) fn validate_xlsx_schema(
         ));
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_21
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -254,7 +254,7 @@ pub(super) fn validate_xlsx_schema(
         ));
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_22 {
-        if manifest.source.format != "xlsx"
+        if !manifest.source.is_spreadsheet()
             || !patch.operations.iter().any(|operation| {
                 matches!(
                     operation,
@@ -290,7 +290,7 @@ pub(super) fn validate_xlsx_schema(
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28
         || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_29
     {
-        if manifest.source.format != "xlsx"
+        if !manifest.source.is_spreadsheet()
             || !patch
                 .operations
                 .iter()
@@ -334,7 +334,7 @@ pub(super) fn validate_xlsx_schema(
         }
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_25
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -346,7 +346,7 @@ pub(super) fn validate_xlsx_schema(
         ));
     }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_26
-        && (manifest.source.format != "xlsx"
+        && (!manifest.source.is_spreadsheet()
             || patch.operations.len() != 1
             || !matches!(
                 patch.operations.first(),
@@ -493,6 +493,17 @@ pub(super) fn validate_xlsx_schema(
     {
         return Err(HcdError::Unsupported(
             "hcd-patch/45 accepts one XLSX worksheet freeze operation only".to_string(),
+        ));
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_51
+        && (patch.operations.len() != 1
+            || !matches!(
+                patch.operations.first(),
+                Some(PatchOperation::XlsxAutoFilterSet { .. })
+            ))
+    {
+        return Err(HcdError::Unsupported(
+            "hcd-patch/51 accepts one XLSX AutoFilter operation only".into(),
         ));
     }
     Ok(())

@@ -10,7 +10,7 @@ import { patchPreviewDom } from './patchPreviewDom.ts'
 
 /** Display canonical complex blocks without flattening them into editable text.
  * The iframe has no scripts, network access, forms or navigation controls. */
-export function opaquePreviewExtension(session: Session, locale: EditorLocale = 'zh-CN', resources: SemanticResources = createSemanticResources(()=>session)) {
+export function opaquePreviewExtension(session: Session, locale: EditorLocale = 'zh-CN', resources: SemanticResources = createSemanticResources(()=>session), pendingCell?: {current: string | null}) {
   return HcdOpaque.extend({
     addNodeView() {
       return ({ node: initialNode, editor, getPos }) => {
@@ -82,6 +82,18 @@ export function opaquePreviewExtension(session: Session, locale: EditorLocale = 
               label: text => localizeSource(locale, text),
             })
             if (session.format === 'docx') applyWordGrid(doc)
+            const nodeId = pendingCell?.current
+            if (nodeId && block.editableTextNodeIds?.includes(nodeId)) {
+              const paragraph = content.querySelector(`[data-hcd-id="${CSS.escape(nodeId)}"]`)?.closest<HTMLElement>('[contenteditable="plaintext-only"]')
+              if (paragraph) {
+                dom.scrollIntoView({ block: 'nearest' })
+                requestAnimationFrame(() => {
+                  if (disposed || !pendingCell || pendingCell.current !== nodeId || !editor.isEditable) return
+                  pendingCell.current = null
+                  paragraph.focus()
+                })
+              }
+            }
             measure(); dom.setAttribute('aria-busy', 'false')
             installed = { hash: block.blockHash, styles }
             void doc.fonts.ready.then(() => { if (disposed || ticket !== generation) return; if (session.format === 'docx') applyWordGrid(doc); measure() })
