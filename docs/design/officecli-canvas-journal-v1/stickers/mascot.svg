@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="oc-companion" width="128" height="128" viewBox="0 0 64 64" role="img" aria-label="AI 搭子">
+  <title>AI 搭子</title>
+  <view id="idle" viewBox="0 0 64 64"/>
+  <view id="listening" viewBox="0 0 64 64"/>
+  <view id="active" viewBox="0 0 64 64"/>
+  <view id="complete" viewBox="0 0 64 64"/>
+  <view id="still" viewBox="0 0 64 64"/>
+  <style><![CDATA[
+/* Both glyphs keep their phase when a new gesture takes over. Distances are
+   relative to the glyph, so the same movement fits a toolbar and a large avatar. */
+@property --oc-breath { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --oc-beat { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --oc-rest { syntax: "<number>"; inherits: true; initial-value: 1; }
+@property --oc-work { syntax: "<number>"; inherits: true; initial-value: 0; }
+@property --oc-listen { syntax: "<number>"; inherits: true; initial-value: 0; }
+@property --oc-bow { syntax: "<number>"; inherits: true; initial-value: 0; }
+
+:where(.oc-companion, [data-motion=companion-idle]) {
+  --oc-rest: 1;
+  --oc-work: 0;
+  --oc-listen: 0;
+  --oc-bow: 0;
+  transition-property: --oc-rest, --oc-work, --oc-listen, --oc-bow;
+  transition-duration: 560ms, 420ms, 440ms, 340ms;
+  transition-timing-function: cubic-bezier(.36, 0, .22, 1);
+}
+.oc-companion[data-companion-state=listening] { --oc-rest: .38; --oc-listen: 1; }
+.oc-companion[data-companion-state=active] { --oc-rest: .12; --oc-work: 1; --oc-beat-play: running; }
+.oc-companion[data-companion-state=complete] { --oc-rest: .20; --oc-bow: 1; }
+.oc-companion[data-companion-state=still] { --oc-rest: 0; }
+
+:where(.oc-companion, [data-motion=companion-idle]) [data-sticker-layer=quote-open] {
+  --oc-air-x: -3.5%; --oc-air-y: -4.8%; --oc-air-turn: -4deg;
+  --oc-beat-x: 5.3%; --oc-beat-y: -14%; --oc-beat-turn: 10deg;
+  --oc-near-x: 3.5%; --oc-near-y: 1%; --oc-near-turn: 8deg;
+  --oc-nod-x: 1.8%; --oc-nod-y: 6.5%; --oc-nod-turn: 7deg;
+  --oc-delay: 0s;
+  transform-origin: 46% 66%;
+}
+:where(.oc-companion, [data-motion=companion-idle]) [data-sticker-layer=quote-close] {
+  --oc-air-x: 3%; --oc-air-y: 3.6%; --oc-air-turn: 3.6deg;
+  --oc-beat-x: -3%; --oc-beat-y: -12%; --oc-beat-turn: -9deg;
+  --oc-near-x: -4%; --oc-near-y: -5%; --oc-near-turn: -6deg;
+  --oc-nod-x: -1%; --oc-nod-y: 8.5%; --oc-nod-turn: 6deg;
+  --oc-delay: .34s;
+  transform-origin: 54% 38%;
+}
+:where(.oc-companion, [data-motion=companion-idle]) :is([data-sticker-layer=quote-open], [data-sticker-layer=quote-close]) {
+  --oc-air: calc(var(--oc-breath) * var(--oc-rest));
+  --oc-accent: calc(var(--oc-beat) * var(--oc-work));
+  --oc-x: calc(var(--oc-air) * var(--oc-air-x) + var(--oc-accent) * var(--oc-beat-x) + var(--oc-listen) * var(--oc-near-x) + var(--oc-bow) * var(--oc-nod-x));
+  --oc-y: calc(var(--oc-air) * var(--oc-air-y) + var(--oc-accent) * var(--oc-beat-y) + var(--oc-listen) * var(--oc-near-y) + var(--oc-bow) * var(--oc-nod-y));
+  --oc-angle: calc(var(--oc-air) * var(--oc-air-turn) + var(--oc-accent) * var(--oc-beat-turn) + var(--oc-listen) * var(--oc-near-turn) + var(--oc-bow) * var(--oc-nod-turn));
+  transform-box: fill-box;
+  transform: translate(var(--oc-x), var(--oc-y)) rotate(var(--oc-angle));
+  animation: oc-companion-breathe 5.8s cubic-bezier(.42, 0, .46, 1) infinite,
+             oc-companion-answer 1.8s cubic-bezier(.40, 0, .22, 1) infinite;
+  animation-delay: var(--oc-delay), var(--oc-delay);
+  animation-play-state: running, var(--oc-beat-play, paused);
+}
+@keyframes oc-companion-breathe {
+  0%, 100% { --oc-breath: 0; }
+  43% { --oc-breath: 1; }
+  84% { --oc-breath: .025; }
+}
+@keyframes oc-companion-answer {
+  0%, 79%, 100% { --oc-beat: 0; }
+  12% { --oc-beat: -.16; }
+  34% { --oc-beat: 1; }
+  57% { --oc-beat: -.09; }
+}
+.oc-companion[data-companion-state=still] [data-sticker-layer] { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce), print {
+  :where(.oc-companion, [data-motion=companion-idle]) { transition: none !important; }
+  :where(.oc-companion, [data-motion=companion-idle]) [data-sticker-layer] {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+    .oc-companion:root:has(> #listening:target) { --oc-rest: .38; --oc-listen: 1; }
+    .oc-companion:root:has(> #active:target) { --oc-rest: .12; --oc-work: 1; --oc-beat-play: running; }
+    .oc-companion:root:has(> #still:target) { --oc-rest: 0; }
+    .oc-companion:root:has(> #still:target) [data-sticker-layer] { animation: none; }
+    @media (prefers-reduced-motion: no-preference) {
+      .oc-companion:root:has(> #complete:target) { animation: oc-companion-nod 800ms cubic-bezier(.36,0,.22,1) 1; }
+      @keyframes oc-companion-nod { 0%,100% { --oc-bow: 0; } 46%,56% { --oc-bow: 1; } }
+    }
+  ]]></style>
+  <path data-sticker-layer="quote-open" fill="#654783" d="M32 9C19 7 9 13 6 24C3 33 7 41 15 43C22 45 29 40 29 33C29 27 25 22 19 22C21 17 26 14 32 13C34 12 34 10 32 9Z"/>
+  <path data-sticker-layer="quote-close" fill="#AA88C6" d="M32 55C45 57 55 51 58 40C61 31 57 23 49 21C42 19 35 24 35 31C35 37 39 42 45 42C43 47 38 50 32 51C30 52 30 54 32 55Z"/>
+</svg>

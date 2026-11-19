@@ -1,0 +1,31 @@
+{
+  "checks": [
+    "All four file creation icons share one ink tone. Both AI dock surfaces have four 16px corners, a 10px gap and an outer inset; closing the dock gives its width back to the file library.",
+    "Unified home, four creation actions and four authorized mixed-format files.",
+    "Home search and starred files operate on the authorized catalog.",
+    "Dragging reorders tabs without remounting their editors.",
+    "Three restored background editors; optional global panel, targets and unsent draft survive reload.",
+    "Actual MCP writes to DOCX, XLSX and Excalidraw, three file-colored pointers only during writes; switching the foreground tab did not retarget work.",
+    "Independent engine read-back confirmed the appended text in all three formats.",
+    "The Word range and its pending global instruction were recovered on the same revision after reloading.",
+    "Copied an actual selected Word passage into the authorized spreadsheet cell and a new whiteboard note, with the source file remaining read-only for this task.",
+    "Group, batch close, reopen and read saved content.",
+    "Create a native Word file from Home and open it in a new tab.",
+    "An independent MCP client used one of two scoped file connections, streamed the real editing and completion events into the open tabs, and left Home and the closed AI panel in place.",
+    "On a 390px phone the home, file opener and optional AI drawer stay within the viewport."
+  ],
+  "readBack": {
+    "xlsx": {
+      "contains": true,
+      "revision": 1
+    },
+    "excalidraw": {
+      "contains": true,
+      "revision": 1
+    },
+    "docx": {
+      "contains": true,
+      "revision": 2
+    }
+  }
+}

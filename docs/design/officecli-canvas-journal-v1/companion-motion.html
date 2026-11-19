@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 搭子 · 动作样张</title>
+<style>
+/* Both glyphs keep their phase when a new gesture takes over. Distances are
+   relative to the glyph, so the same movement fits a toolbar and a large avatar. */
+@property --oc-breath { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --oc-beat { syntax: "<number>"; inherits: false; initial-value: 0; }
+@property --oc-rest { syntax: "<number>"; inherits: true; initial-value: 1; }
+@property --oc-work { syntax: "<number>"; inherits: true; initial-value: 0; }
+@property --oc-listen { syntax: "<number>"; inherits: true; initial-value: 0; }
+@property --oc-bow { syntax: "<number>"; inherits: true; initial-value: 0; }
+
+:where(.oc-companion, [data-motion=companion-idle]) {
+  --oc-rest: 1;
+  --oc-work: 0;
+  --oc-listen: 0;
+  --oc-bow: 0;
+  transition-property: --oc-rest, --oc-work, --oc-listen, --oc-bow;
+  transition-duration: 560ms, 420ms, 440ms, 340ms;
+  transition-timing-function: cubic-bezier(.36, 0, .22, 1);
+}
+.oc-companion[data-companion-state=listening] { --oc-rest: .38; --oc-listen: 1; }
+.oc-companion[data-companion-state=active] { --oc-rest: .12; --oc-work: 1; --oc-beat-play: running; }
+.oc-companion[data-companion-state=complete] { --oc-rest: .20; --oc-bow: 1; }
+.oc-companion[data-companion-state=still] { --oc-rest: 0; }
+
+:where(.oc-companion, [data-motion=companion-idle]) [data-sticker-layer=quote-open] {
+  --oc-air-x: -3.5%; --oc-air-y: -4.8%; --oc-air-turn: -4deg;
+  --oc-beat-x: 5.3%; --oc-beat-y: -14%; --oc-beat-turn: 10deg;
+  --oc-near-x: 3.5%; --oc-near-y: 1%; --oc-near-turn: 8deg;
+  --oc-nod-x: 1.8%; --oc-nod-y: 6.5%; --oc-nod-turn: 7deg;
+  --oc-delay: 0s;
+  transform-origin: 46% 66%;
+}
+:where(.oc-companion, [data-motion=companion-idle]) [data-sticker-layer=quote-close] {
+  --oc-air-x: 3%; --oc-air-y: 3.6%; --oc-air-turn: 3.6deg;
+  --oc-beat-x: -3%; --oc-beat-y: -12%; --oc-beat-turn: -9deg;
+  --oc-near-x: -4%; --oc-near-y: -5%; --oc-near-turn: -6deg;
+  --oc-nod-x: -1%; --oc-nod-y: 8.5%; --oc-nod-turn: 6deg;
+  --oc-delay: .34s;
+  transform-origin: 54% 38%;
+}
+:where(.oc-companion, [data-motion=companion-idle]) :is([data-sticker-layer=quote-open], [data-sticker-layer=quote-close]) {
+  --oc-air: calc(var(--oc-breath) * var(--oc-rest));
+  --oc-accent: calc(var(--oc-beat) * var(--oc-work));
+  --oc-x: calc(var(--oc-air) * var(--oc-air-x) + var(--oc-accent) * var(--oc-beat-x) + var(--oc-listen) * var(--oc-near-x) + var(--oc-bow) * var(--oc-nod-x));
+  --oc-y: calc(var(--oc-air) * var(--oc-air-y) + var(--oc-accent) * var(--oc-beat-y) + var(--oc-listen) * var(--oc-near-y) + var(--oc-bow) * var(--oc-nod-y));
+  --oc-angle: calc(var(--oc-air) * var(--oc-air-turn) + var(--oc-accent) * var(--oc-beat-turn) + var(--oc-listen) * var(--oc-near-turn) + var(--oc-bow) * var(--oc-nod-turn));
+  transform-box: fill-box;
+  transform: translate(var(--oc-x), var(--oc-y)) rotate(var(--oc-angle));
+  animation: oc-companion-breathe 5.8s cubic-bezier(.42, 0, .46, 1) infinite,
+             oc-companion-answer 1.8s cubic-bezier(.40, 0, .22, 1) infinite;
+  animation-delay: var(--oc-delay), var(--oc-delay);
+  animation-play-state: running, var(--oc-beat-play, paused);
+}
+@keyframes oc-companion-breathe {
+  0%, 100% { --oc-breath: 0; }
+  43% { --oc-breath: 1; }
+  84% { --oc-breath: .025; }
+}
+@keyframes oc-companion-answer {
+  0%, 79%, 100% { --oc-beat: 0; }
+  12% { --oc-beat: -.16; }
+  34% { --oc-beat: 1; }
+  57% { --oc-beat: -.09; }
+}
+.oc-companion[data-companion-state=still] [data-sticker-layer] { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce), print {
+  :where(.oc-companion, [data-motion=companion-idle]) { transition: none !important; }
+  :where(.oc-companion, [data-motion=companion-idle]) [data-sticker-layer] {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #f8f6f3; color: #322a37; font: 15px/1.5 "PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+main { width: min(100%, 820px); margin: 0 auto; padding: clamp(20px, 4.6vw, 40px); }
+header,footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+h1 { margin: 0; font-size: clamp(23px, 4vw, 32px); line-height:1.15; font-weight:650; letter-spacing:-.05em; }
+button { font:inherit; color:inherit; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+button:focus-visible { outline:2px solid #79579c; outline-offset:3px; }
+#play { display:flex; align-items:center; gap:8px; padding:8px 14px; border-radius:30px; border:1px solid #d9cfe0; background:#fffdfa; font-size:13px; }
+#play svg { width:13px; height:13px; fill:#654783; }
+#play[aria-pressed=true] { background:#eee7f4; }
+section { display:grid; grid-template-columns:minmax(0,1.22fr) minmax(200px,1fr); gap:24px; margin:26px 0 23px; }
+.stage { min-height:246px; display:grid; place-items:center; position:relative; overflow:hidden; background:#f0eaf3; border-radius:22px; }
+.stage::before { content:""; position:absolute; inset:18px; border:1px solid #ded2e3; border-radius:12px; pointer-events:none; }
+.mark { display:block; flex:none; }
+.mark > svg { display:block; width:100%; height:100%; }
+.hero { width:clamp(100px,17vw,140px); height:clamp(100px,17vw,140px); }
+.states { align-self:center; display:grid; gap:5px; }
+.states button { background:transparent; border:1px solid transparent; border-radius:12px; padding:10px 12px; display:grid; grid-template-columns:40px 1fr 6px; gap:11px; text-align:left; align-items:center; }
+.states b { color:#3e3048; font-size:15px; font-weight:650; }
+.states span { color:#6c6372; font-size:13px; }
+.states button[aria-pressed=true] { background:#fffdfc; border-color:#dbcfe0; }
+.states button[aria-pressed=true]::after { content:""; width:6px; height:6px; border-radius:100%; background:#795a97; }
+.states button:hover { background:#f1edf2; }
+footer { border-top:1px solid #dfd8df; padding-top:16px; }
+footer h2 { font-size:13px; font-weight:550; margin:0; color:#665a69; }
+.sizes { display:flex; align-items:center; gap:22px; }
+.sample { display:flex; align-items:center; gap:5px; font:11px/1.3 ui-monospace,monospace; color:#75667b; }
+.sr { position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%); }
+@media(max-width:550px) {
+  main { padding:20px; }
+  section { grid-template-columns:1fr; gap:12px; margin:18px 0; }
+  .stage { min-height:195px; }
+  .states { grid-template-columns:1fr 1fr; }
+  .states button { grid-template-columns:1fr 6px; gap:4px; padding:8px 11px; }
+  .states span { grid-row:2; grid-column:1/-1; font-size:12px; }
+  .states button::after { grid-row:1; grid-column:2; }
+  .sizes { gap:12px; }
+}
+</style>
+</head>
+<body><main>
+<header><h1>AI 搭子动效</h1><button type="button" id="play" aria-pressed="false"><svg viewBox="0 0 12 12" aria-hidden="true"><path id="play-icon" d="M3 1.5 10 6 3 10.5Z"/></svg><span>播放一轮</span></button></header>
+<section aria-label="动作预览">
+<div class="stage"><span class="hero mark oc-companion" data-companion-state="idle" role="img" aria-label="AI 搭子"></span></div>
+<div class="states" role="group" aria-label="选择动作">
+<button type="button" data-mode="idle" aria-pressed="true"><b>待机</b><span>轻轻舒展，缓缓合拢</span></button>
+<button type="button" data-mode="listening" aria-pressed="false"><b>倾听</b><span>向内侧身，停一停</span></button>
+<button type="button" data-mode="active" aria-pressed="false"><b>活跃</b><span>一笔先起，一笔接话</span></button>
+<button type="button" data-mode="complete" aria-pressed="false"><b>完成</b><span>一起轻点，回到原位</span></button>
+</div></section>
+<footer><h2>实际尺寸</h2><div class="sizes" aria-hidden="true"></div></footer>
+<p class="sr" role="status" id="status"></p>
+</main>
+<template id="glyphs"><svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+  <path data-sticker-layer="quote-open" fill="#654783" d="M32 9C19 7 9 13 6 24C3 33 7 41 15 43C22 45 29 40 29 33C29 27 25 22 19 22C21 17 26 14 32 13C34 12 34 10 32 9Z"/>
+  <path data-sticker-layer="quote-close" fill="#AA88C6" d="M32 55C45 57 55 51 58 40C61 31 57 23 49 21C42 19 35 24 35 31C35 37 39 42 45 42C43 47 38 50 32 51C30 52 30 54 32 55Z"/>
+</svg></template>
+<script>
+const states = document.querySelector('.states');
+const play = document.querySelector('#play');
+const sizes = document.querySelector('.sizes');
+for (const size of [20,32,48]) {
+  const sample = document.createElement('span');
+  sample.className = 'sample';
+  const mark = document.createElement('span');
+  mark.className = 'oc-companion mark';
+  mark.style.width = mark.style.height = size + 'px';
+  sample.append(mark, size + ' px');
+  sizes.append(sample);
+}
+const marks = document.querySelectorAll('.mark');
+marks.forEach(mark => mark.append(document.querySelector('#glyphs').content.cloneNode(true)));
+let sequence = 0, release = 0;
+function show(state) {
+  clearTimeout(release);
+  for (const mark of marks) mark.dataset.companionState = state;
+  const chosen = states.querySelector('[data-mode="' + state + '"]');
+  for (const button of states.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button === chosen));
+  document.querySelector('#status').textContent = chosen.querySelector('b').textContent;
+  if (state === 'complete') release = setTimeout(() => show('idle'), 440);
+}
+function setPlaying(on) {
+  play.setAttribute('aria-pressed', String(on));
+  play.querySelector('span').textContent = on ? '停止播放' : '播放一轮';
+  document.querySelector('#play-icon').setAttribute('d', on ? 'M2.5 2.5h7v7h-7Z' : 'M3 1.5 10 6 3 10.5Z');
+}
+function stop() { clearTimeout(sequence); setPlaying(false); }
+states.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (button) { stop(); show(button.dataset.mode); }
+});
+play.addEventListener('click', () => {
+  if (play.getAttribute('aria-pressed') === 'true') { stop(); show('idle'); return; }
+  const parts = [['idle',3100], ['listening',1450], ['active',4000], ['complete',900]];
+  setPlaying(true);
+  function next(i) {
+    if (i === parts.length) { stop(); return; }
+    const [state, duration] = parts[i];
+    show(state);
+    sequence = setTimeout(() => next(i + 1), duration);
+  }
+  next(0);
+});
+show('idle');
+</script></body></html>

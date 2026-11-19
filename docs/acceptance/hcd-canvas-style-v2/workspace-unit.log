@@ -1,0 +1,20 @@
+✔ model use defaults to denied and only deployment-configured IDs are returned (28.979458ms)
+✔ competing publications preserve the immutable source and reject a stale business head (50.828458ms)
+✔ commit rechecks authorization after prepare and upload (37.672875ms)
+✔ signed callbacks bind exact bytes and path, and nonce replay is rejected (22.792625ms)
+✔ logout invalidates live document authorization while preserving committed status recovery (25.575375ms)
+✔ encrypted exchange recovery rejects altered ciphertext and another deployment key (0.514458ms)
+✔ private files and link shares never appear in the public directory (29.172458ms)
+✔ anonymous visitors receive distinct server-assigned identities and browser recovery preserves identity (33.689333ms)
+✔ guest editing uses Provider permissions without acquiring publish, restore or management access (29.057375ms)
+✔ permission downgrade fences old editing sessions before a reader rejoins (34.313625ms)
+✔ rotation, stopping and expiration invalidate old links and grants (36.536416ms)
+✔ public access requires no link secret and expired temporary identities cannot resume (14.70125ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 226.478291

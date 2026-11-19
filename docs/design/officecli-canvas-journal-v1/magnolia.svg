@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="350" height="190" viewBox="0 0 350 190" role="img" aria-label="一枝带花苞和嫩叶的玉兰">
+  <g stroke="#67554B" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M34 187C83 170 117 144 155 119S246 65 298 24M89 159Q111 137 114 105M142 128Q179 125 200 131M192 96Q208 76 211 51M233 72Q249 75 277 72" fill="none" stroke-width="3"/>
+    <path d="M105 146C91 142 79 134 78 120C96 121 104 131 105 146Z" fill="#819383" stroke-width="1.15"/>
+    <path d="M109 140C121 129 135 125 147 129C138 140 123 145 109 140Z" fill="#A5AD8D" stroke-width="1.1"/>
+    <path d="M200 131Q217 115 241 123Q226 137 200 131Z" fill="#8F9B7D" stroke-width="1.15"/>
+    <path d="M242 70Q250 49 265 44Q265 62 242 70Z" fill="#859780" stroke-width="1.2"/>
+    <path d="M111 111Q100 102 100 88Q109 90 115 101Q118 85 123 82Q127 101 113 112Z" fill="#D9A9AE" stroke-width="1.35"/>
+    <path d="M278 72Q290 63 304 65Q298 74 279 76Z" fill="#C39A9B" stroke-width="1.25"/>
+    <path d="M294 28Q292 15 304 8Q309 21 299 27Z" fill="#E4BCC0" stroke-width="1.2"/>
+    <g stroke-width="1.4">
+      <path d="M211 59C193 56 174 39 173 23C188 26 205 38 211 59Z" fill="#E7BEC4"/>
+      <path d="M211 59C193 47 187 23 193 10C206 19 214 40 211 59Z" fill="#F2DBD9"/>
+      <path d="M212 59C205 40 207 17 221 7C226 22 220 45 212 59Z" fill="#F9E8E3"/>
+      <path d="M212 59C216 39 228 21 246 18C245 36 228 51 212 59Z" fill="#E9C3CB"/>
+      <path d="M212 59C215 47 230 39 243 42C236 52 226 59 212 59Z" fill="#F8E2DC"/>
+      <path d="M212 59C200 58 185 51 181 42C194 40 206 49 212 59Z" fill="#F9E7DD"/>
+      <path d="M210 62Q203 59 201 53L212 57L222 52Q219 59 210 62Z" fill="#A69475"/>
+    </g>
+    <g fill="none" stroke="#A78084" stroke-width=".9"><path d="M210 55Q201 36 196 21M214 51Q217 31 219 20M222 48Q234 32 240 27"/></g>
+    <g fill="none" stroke="#69745F" stroke-width=".9"><path d="M202 130Q219 124 233 125M112 140Q132 133 140 132M243 69L260 51M103 143L84 126"/></g>
+  </g>
+</svg>

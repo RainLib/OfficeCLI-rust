@@ -1,0 +1,3355 @@
+{
+  "title": "OfficeCLI · 统一办公与全局 AI · V2",
+  "native": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/officecli-office-workspace-v2.figcraft",
+  "source": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/officecli-resource-workspace.figcraft",
+  "palette": {
+    "Canvas": "#F3F5F8",
+    "Navigation": "#EDF1F6",
+    "Stage": "#FAFBFD",
+    "Surface": "#FFFFFF",
+    "Panel": "#FFFFFF",
+    "Ink": "#253248",
+    "Muted": "#5F6F86",
+    "Faint": "#5F7088",
+    "Border": "#DDE4EE",
+    "Accent": "#486F9D",
+    "AccentSoft": "#EAF0F8",
+    "Sage": "#EBF3EE",
+    "SageInk": "#52725E",
+    "BlueSoft": "#EAF0F8",
+    "BlueInk": "#506C92",
+    "Yellow": "#F4F1E7",
+    "Bubble": "#EDF2F8",
+    "Dark": "#42658F"
+  },
+  "screens": [
+    {
+      "key": "board",
+      "name": "01 · 白板总览 · 资料与全局 AI",
+      "id": 105,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/01-board.png",
+      "layers": 213
+    },
+    {
+      "key": "insert",
+      "name": "02 · 插入资源 · 文档与表格",
+      "id": 364,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/02-insert.png",
+      "layers": 130
+    },
+    {
+      "key": "doc_preview",
+      "name": "03 · 文档预览 · 定位引用位置",
+      "id": 540,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/03-doc-preview.png",
+      "layers": 111
+    },
+    {
+      "key": "doc_edit",
+      "name": "04 · 进入原文编辑 · AI 持续",
+      "id": 697,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/04-doc-edit.png",
+      "layers": 104
+    },
+    {
+      "key": "range",
+      "name": "05 · 选择表格区域 · B2:F7",
+      "id": 847,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/05-range.png",
+      "layers": 256
+    },
+    {
+      "key": "range_board",
+      "name": "06 · 表格区域卡片 · 实时引用",
+      "id": 1149,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/06-range-board.png",
+      "layers": 230
+    },
+    {
+      "key": "sheet_edit",
+      "name": "07 · 进入原表编辑 · 回到白板",
+      "id": 1425,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/07-sheet-edit.png",
+      "layers": 256
+    },
+    {
+      "key": "ai",
+      "name": "08 · 全局 AI · 管理跨资源上下文",
+      "id": 1727,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/08-ai.png",
+      "layers": 231
+    },
+    {
+      "key": "library",
+      "name": "10 · 统一工作台 · 文字表格图片",
+      "id": 2059,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/10-library.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "word",
+      "name": "11 · 文字文档 · 常用编辑工具",
+      "id": 2239,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/11-word.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "review",
+      "name": "12 · 文字审阅 · 批注与修订",
+      "id": 2458,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/12-review.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "excel",
+      "name": "13 · Excel · 常用编辑与公式",
+      "id": 2666,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/13-excel.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "data",
+      "name": "14 · Excel · 筛选与图表",
+      "id": 3021,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/14-data.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "image",
+      "name": "15 · 图片预览 · 信息与快捷处理",
+      "id": 3405,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/15-image.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "crop",
+      "name": "16 · 图片 · 裁剪旋转与尺寸",
+      "id": 3602,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/16-crop.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "adjust",
+      "name": "17 · 图片 · 光线与色彩",
+      "id": 3807,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/17-adjust.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "mask",
+      "name": "18 · 图片 · 涂抹与局部重绘",
+      "id": 4019,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/18-mask.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "progress",
+      "name": "19 · 图片 · 全局 AI 后台任务",
+      "id": 4217,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/19-progress.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "compare",
+      "name": "20 · 图片 · 原图与候选对比",
+      "id": 4419,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/20-compare.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "convert",
+      "name": "21 · 图片 · WebP 转换与导出",
+      "id": 4616,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/21-convert.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "jpeg",
+      "name": "22 · 图片 · JPEG 背景填充",
+      "id": 4816,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/22-jpeg.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "done",
+      "name": "23 · 图片 · 转换完成与副本",
+      "id": 5019,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/23-done.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "history",
+      "name": "24 · 图片 · 版本记录与恢复",
+      "id": 5206,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/24-history.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "focus",
+      "name": "25 · 图片 · 专注与面板收起",
+      "id": 5397,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/25-focus.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "mobile",
+      "name": "26 · 手机 · 图片与全局 AI",
+      "id": 5409,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/26-mobile.png",
+      "width": 390,
+      "height": 844
+    },
+    {
+      "key": "ppt",
+      "name": "27 · 演示 · 幻灯片与属性",
+      "id": 5431,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/27-ppt.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "pdf",
+      "name": "28 · PDF · 阅读高亮与批注",
+      "id": 5624,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/28-pdf.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "find",
+      "name": "29 · 文字 · 查找与替换",
+      "id": 5815,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/29-find.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "excel_find",
+      "name": "30 · Excel · 查找与替换",
+      "id": 6020,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/30-excel_find.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "png",
+      "name": "31 · 图片 · PNG 无损透明导出",
+      "id": 6280,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/previews/31-png.png",
+      "width": 1600,
+      "height": 1000
+    }
+  ],
+  "supportingFrames": [
+    {
+      "key": "foundations",
+      "id": 2,
+      "page": 1
+    },
+    {
+      "key": "states",
+      "id": 2005,
+      "page": 2004
+    }
+  ],
+  "newInteractions": [
+    {
+      "screen": "library",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "library",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "library",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "library",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "library",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "library",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "library",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "library",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "library",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "library",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "library",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "library",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "library",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "library",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "library",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "library",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "library",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "library",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "library",
+      "target": "insert",
+      "label": "导入文件"
+    },
+    {
+      "screen": "library",
+      "target": "word",
+      "label": "工作台/产品发布方案.docx"
+    },
+    {
+      "screen": "library",
+      "target": "excel",
+      "label": "工作台/发布预算.xlsx"
+    },
+    {
+      "screen": "library",
+      "target": "image",
+      "label": "工作台/ceramic-portrait.jpg"
+    },
+    {
+      "screen": "library",
+      "target": "board",
+      "label": "工作台/发布筹备白板"
+    },
+    {
+      "screen": "library",
+      "target": "ppt",
+      "label": "工作台/发布汇报.pptx"
+    },
+    {
+      "screen": "library",
+      "target": "pdf",
+      "label": "工作台/发布手册.pdf"
+    },
+    {
+      "screen": "word",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "word",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "word",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "word",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "word",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "word",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "word",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "word",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "word",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "word",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "word",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "word",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "word",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "word",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "word",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "word",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "word",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "word",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "word",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "word",
+      "target": "review",
+      "label": "打开审阅"
+    },
+    {
+      "screen": "word",
+      "target": "find",
+      "label": "查找与替换"
+    },
+    {
+      "screen": "review",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "review",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "review",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "review",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "review",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "review",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "review",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "review",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "review",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "review",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "review",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "review",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "review",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "review",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "review",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "review",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "review",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "review",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "review",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "review",
+      "target": "review",
+      "label": "打开审阅"
+    },
+    {
+      "screen": "review",
+      "target": "find",
+      "label": "查找与替换"
+    },
+    {
+      "screen": "review",
+      "target": "word",
+      "label": "返回编辑"
+    },
+    {
+      "screen": "excel",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "excel",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "excel",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "excel",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "excel",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "excel",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "excel",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "excel",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "excel",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "excel",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "excel",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "excel",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "excel",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "excel",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "excel",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "excel",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "excel",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "excel",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "excel",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "excel",
+      "target": "data",
+      "label": "打开数据工具"
+    },
+    {
+      "screen": "excel",
+      "target": "review",
+      "label": "打开审阅"
+    },
+    {
+      "screen": "excel",
+      "target": "excel_find",
+      "label": "查找与替换"
+    },
+    {
+      "screen": "excel",
+      "target": "data",
+      "label": "查看筛选与图表"
+    },
+    {
+      "screen": "excel",
+      "target": "range_board",
+      "label": "引用区域到白板"
+    },
+    {
+      "screen": "excel",
+      "target": "data",
+      "label": "筛选与图表"
+    },
+    {
+      "screen": "data",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "data",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "data",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "data",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "data",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "data",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "data",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "data",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "data",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "data",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "data",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "data",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "data",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "data",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "data",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "data",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "data",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "data",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "data",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "data",
+      "target": "data",
+      "label": "打开数据工具"
+    },
+    {
+      "screen": "data",
+      "target": "review",
+      "label": "打开审阅"
+    },
+    {
+      "screen": "data",
+      "target": "excel_find",
+      "label": "查找与替换"
+    },
+    {
+      "screen": "data",
+      "target": "data",
+      "label": "查看筛选与图表"
+    },
+    {
+      "screen": "data",
+      "target": "range_board",
+      "label": "引用区域到白板"
+    },
+    {
+      "screen": "data",
+      "target": "data",
+      "label": "筛选与图表"
+    },
+    {
+      "screen": "data",
+      "target": "excel",
+      "label": "应用筛选"
+    },
+    {
+      "screen": "image",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "image",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "image",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "image",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "image",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "image",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "image",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "image",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "image",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "image",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "image",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "image",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "image",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "image",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "image",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "image",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "image",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "image",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "image",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "image",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "image",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "image",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "image",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "image",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "image",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "image",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "image",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "image",
+      "target": "crop",
+      "label": "裁剪与旋转"
+    },
+    {
+      "screen": "image",
+      "target": "adjust",
+      "label": "光线与色彩"
+    },
+    {
+      "screen": "image",
+      "target": "mask",
+      "label": "局部重绘"
+    },
+    {
+      "screen": "image",
+      "target": "convert",
+      "label": "转换格式"
+    },
+    {
+      "screen": "image",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "crop",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "crop",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "crop",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "crop",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "crop",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "crop",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "crop",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "crop",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "crop",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "crop",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "crop",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "crop",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "crop",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "crop",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "crop",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "crop",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "crop",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "crop",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "crop",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "crop",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "crop",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "crop",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "crop",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "crop",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "crop",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "crop",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "crop",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "crop",
+      "target": "image",
+      "label": "应用编辑"
+    },
+    {
+      "screen": "crop",
+      "target": "crop",
+      "label": "重置裁剪"
+    },
+    {
+      "screen": "crop",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "adjust",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "adjust",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "adjust",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "adjust",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "adjust",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "adjust",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "adjust",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "adjust",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "adjust",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "adjust",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "adjust",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "adjust",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "adjust",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "adjust",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "adjust",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "adjust",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "adjust",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "adjust",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "adjust",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "adjust",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "adjust",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "adjust",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "adjust",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "adjust",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "adjust",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "adjust",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "adjust",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "adjust",
+      "target": "image",
+      "label": "应用编辑"
+    },
+    {
+      "screen": "adjust",
+      "target": "adjust",
+      "label": "重置调整"
+    },
+    {
+      "screen": "adjust",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "mask",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "mask",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "mask",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "mask",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "mask",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "mask",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "mask",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "mask",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "mask",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "mask",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "mask",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "mask",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "mask",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "mask",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "mask",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "mask",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "mask",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "mask",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "mask",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "mask",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "mask",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "mask",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "mask",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "mask",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "mask",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "mask",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "mask",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "mask",
+      "target": "progress",
+      "label": "生成候选"
+    },
+    {
+      "screen": "mask",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "progress",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "progress",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "progress",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "progress",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "progress",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "progress",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "progress",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "progress",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "progress",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "progress",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "progress",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "progress",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "progress",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "progress",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "progress",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "progress",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "progress",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "progress",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "progress",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "progress",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "progress",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "progress",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "progress",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "progress",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "progress",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "progress",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "progress",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "progress",
+      "target": "mask",
+      "label": "取消生成"
+    },
+    {
+      "screen": "progress",
+      "target": "compare",
+      "label": "查看候选"
+    },
+    {
+      "screen": "compare",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "compare",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "compare",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "compare",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "compare",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "compare",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "compare",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "compare",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "compare",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "compare",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "compare",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "compare",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "compare",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "compare",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "compare",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "compare",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "compare",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "compare",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "compare",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "compare",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "compare",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "compare",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "compare",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "compare",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "compare",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "compare",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "compare",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "compare",
+      "target": "mask",
+      "label": "继续局部重绘"
+    },
+    {
+      "screen": "compare",
+      "target": "image",
+      "label": "应用候选版本"
+    },
+    {
+      "screen": "compare",
+      "target": "mask",
+      "label": "丢弃候选"
+    },
+    {
+      "screen": "compare",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "convert",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "convert",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "convert",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "convert",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "convert",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "convert",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "convert",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "convert",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "convert",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "convert",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "convert",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "convert",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "convert",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "convert",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "convert",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "convert",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "convert",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "convert",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "convert",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "convert",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "convert",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "convert",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "convert",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "convert",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "convert",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "convert",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "convert",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "convert",
+      "target": "png",
+      "label": "转换格式/PNG"
+    },
+    {
+      "screen": "convert",
+      "target": "jpeg",
+      "label": "转换格式/JPEG"
+    },
+    {
+      "screen": "convert",
+      "target": "convert",
+      "label": "转换格式/WebP"
+    },
+    {
+      "screen": "convert",
+      "target": "done",
+      "label": "转换为副本"
+    },
+    {
+      "screen": "convert",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "jpeg",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "jpeg",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "jpeg",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "jpeg",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "jpeg",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "jpeg",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "jpeg",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "jpeg",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "jpeg",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "jpeg",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "jpeg",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "jpeg",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "jpeg",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "jpeg",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "jpeg",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "jpeg",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "jpeg",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "jpeg",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "jpeg",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "jpeg",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "jpeg",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "jpeg",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "jpeg",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "jpeg",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "jpeg",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "jpeg",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "jpeg",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "jpeg",
+      "target": "png",
+      "label": "转换格式/PNG"
+    },
+    {
+      "screen": "jpeg",
+      "target": "jpeg",
+      "label": "转换格式/JPEG"
+    },
+    {
+      "screen": "jpeg",
+      "target": "convert",
+      "label": "转换格式/WebP"
+    },
+    {
+      "screen": "jpeg",
+      "target": "done",
+      "label": "转换为副本"
+    },
+    {
+      "screen": "jpeg",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "done",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "done",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "done",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "done",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "done",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "done",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "done",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "done",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "done",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "done",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "done",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "done",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "done",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "done",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "done",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "done",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "done",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "done",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "done",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "done",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "done",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "done",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "done",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "done",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "done",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "done",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "done",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "done",
+      "target": "image",
+      "label": "在新标签打开"
+    },
+    {
+      "screen": "done",
+      "target": "convert",
+      "label": "继续转换"
+    },
+    {
+      "screen": "done",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "history",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "history",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "history",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "history",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "history",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "history",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "history",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "history",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "history",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "history",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "history",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "history",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "history",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "history",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "history",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "history",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "history",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "history",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "history",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "history",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "history",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "history",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "history",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "history",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "history",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "history",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "history",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "history",
+      "target": "compare",
+      "label": "与当前版本对比"
+    },
+    {
+      "screen": "history",
+      "target": "image",
+      "label": "恢复为新版本"
+    },
+    {
+      "screen": "history",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "focus",
+      "target": "image",
+      "label": "退出专注"
+    },
+    {
+      "screen": "focus",
+      "target": "mask",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "mobile",
+      "target": "progress",
+      "label": "生成候选"
+    },
+    {
+      "screen": "ppt",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "ppt",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "ppt",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "ppt",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "ppt",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "ppt",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "ppt",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "ppt",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "ppt",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "ppt",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "ppt",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "ppt",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "ppt",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "ppt",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "ppt",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "ppt",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "ppt",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "ppt",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "ppt",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "ppt",
+      "target": "ppt",
+      "label": "放映"
+    },
+    {
+      "screen": "pdf",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "pdf",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "pdf",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "pdf",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "pdf",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "pdf",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "pdf",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "pdf",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "pdf",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "pdf",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "pdf",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "pdf",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "pdf",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "pdf",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "pdf",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "pdf",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "pdf",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "pdf",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "pdf",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "find",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "find",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "find",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "find",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "find",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "find",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "find",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "find",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "find",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "find",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "find",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "find",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "find",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "find",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "find",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "find",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "find",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "find",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "find",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "find",
+      "target": "review",
+      "label": "打开审阅"
+    },
+    {
+      "screen": "find",
+      "target": "find",
+      "label": "查找与替换"
+    },
+    {
+      "screen": "find",
+      "target": "word",
+      "label": "替换当前"
+    },
+    {
+      "screen": "find",
+      "target": "word",
+      "label": "全部替换"
+    },
+    {
+      "screen": "excel_find",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "excel_find",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "excel_find",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "excel_find",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "excel_find",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "excel_find",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "excel_find",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "excel_find",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "excel_find",
+      "target": "review",
+      "label": "历史"
+    },
+    {
+      "screen": "excel_find",
+      "target": "pdf",
+      "label": "导出"
+    },
+    {
+      "screen": "excel_find",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "excel_find",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "excel_find",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "excel_find",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "excel_find",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "excel_find",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "excel_find",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "excel_find",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "excel_find",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "excel_find",
+      "target": "data",
+      "label": "打开数据工具"
+    },
+    {
+      "screen": "excel_find",
+      "target": "review",
+      "label": "打开审阅"
+    },
+    {
+      "screen": "excel_find",
+      "target": "excel_find",
+      "label": "查找与替换"
+    },
+    {
+      "screen": "excel_find",
+      "target": "data",
+      "label": "查看筛选与图表"
+    },
+    {
+      "screen": "excel_find",
+      "target": "excel",
+      "label": "替换当前"
+    },
+    {
+      "screen": "excel_find",
+      "target": "excel",
+      "label": "全部替换"
+    },
+    {
+      "screen": "png",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "png",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "png",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "png",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "png",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "png",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "png",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "png",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "png",
+      "target": "history",
+      "label": "历史"
+    },
+    {
+      "screen": "png",
+      "target": "convert",
+      "label": "导出"
+    },
+    {
+      "screen": "png",
+      "target": "ai",
+      "label": "全局 AI"
+    },
+    {
+      "screen": "png",
+      "target": "board",
+      "label": "切换筹备白板"
+    },
+    {
+      "screen": "png",
+      "target": "word",
+      "label": "切换产品发布方案"
+    },
+    {
+      "screen": "png",
+      "target": "excel",
+      "label": "切换发布预算"
+    },
+    {
+      "screen": "png",
+      "target": "image",
+      "label": "切换图片素材"
+    },
+    {
+      "screen": "png",
+      "target": "ppt",
+      "label": "切换发布汇报"
+    },
+    {
+      "screen": "png",
+      "target": "pdf",
+      "label": "切换发布手册"
+    },
+    {
+      "screen": "png",
+      "target": "ai",
+      "label": "管理全局上下文"
+    },
+    {
+      "screen": "png",
+      "target": "board",
+      "label": "回到白板"
+    },
+    {
+      "screen": "png",
+      "target": "image",
+      "label": "图片/预览"
+    },
+    {
+      "screen": "png",
+      "target": "crop",
+      "label": "图片/裁剪旋转"
+    },
+    {
+      "screen": "png",
+      "target": "adjust",
+      "label": "图片/光线色彩"
+    },
+    {
+      "screen": "png",
+      "target": "mask",
+      "label": "图片/局部重绘"
+    },
+    {
+      "screen": "png",
+      "target": "compare",
+      "label": "图片/对比"
+    },
+    {
+      "screen": "png",
+      "target": "convert",
+      "label": "图片/格式转换"
+    },
+    {
+      "screen": "png",
+      "target": "history",
+      "label": "图片/历史"
+    },
+    {
+      "screen": "png",
+      "target": "focus",
+      "label": "图片专注模式"
+    },
+    {
+      "screen": "png",
+      "target": "png",
+      "label": "转换格式/PNG"
+    },
+    {
+      "screen": "png",
+      "target": "jpeg",
+      "label": "转换格式/JPEG"
+    },
+    {
+      "screen": "png",
+      "target": "convert",
+      "label": "转换格式/WebP"
+    },
+    {
+      "screen": "png",
+      "target": "done",
+      "label": "转换为副本"
+    },
+    {
+      "screen": "png",
+      "target": "board",
+      "label": "放入白板"
+    },
+    {
+      "screen": "nav_board",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_board",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_board",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_board",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_board",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_board",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_board",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_board",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_insert",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_doc_preview",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_doc_edit",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "nav_range",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_range",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_range",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_range",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_range",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_range",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_range",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_range",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_range_board",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_sheet_edit",
+      "target": "pdf",
+      "label": "打开发布手册"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "library",
+      "label": "新建"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "library",
+      "label": "打开工作台"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "board",
+      "label": "打开筹备白板"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "word",
+      "label": "打开产品发布方案"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "excel",
+      "label": "打开发布预算"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "image",
+      "label": "打开图片素材"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "ppt",
+      "label": "打开发布汇报"
+    },
+    {
+      "screen": "nav_ai",
+      "target": "pdf",
+      "label": "打开发布手册"
+    }
+  ],
+  "previousInteractionCount": 113,
+  "candidateAsset": "Existing color-composite demonstration, not a new model result."
+}

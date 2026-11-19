@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="jiaojiao" viewBox="0 0 320 320" data-state="attention" role="img" aria-labelledby="jiaojiao-title jiaojiao-desc" width="320" height="320">
+        <title id="jiaojiao-title">角角，带一点斜刘海和两只小眼睛的圆角三角小精灵</title>
+        <desc id="jiaojiao-desc">陶土色三角主体，柔软圆角，墨色斜刘海与小眼睛。通过眨眼、歪头、轻跳和弹性伸缩表达 AI 状态。</desc>
+        <style>
+          #jiaojiao{--body:#ce805f;--ink:#30332c}
+          #jiaojiao .body-fill{fill:var(--body,#ce805f)}
+          #jiaojiao [data-pose]{display:none}
+          #jiaojiao[data-state=idle] [data-pose~=idle],#jiaojiao[data-state=thinking] [data-pose~=thinking],#jiaojiao[data-state=working] [data-pose~=working],#jiaojiao[data-state=complete] [data-pose~=complete],#jiaojiao[data-state=waiting] [data-pose~=waiting],#jiaojiao[data-state=attention] [data-pose~=attention]{display:inline}
+          #jiaojiao .triangle{transform-origin:160px 252px}
+          #jiaojiao .gaze{transform-origin:160px 166px;animation:jiao-blink 5.8s infinite}
+          #jiaojiao .look{transform-origin:160px 166px}
+          #jiaojiao .shadow{transform-origin:160px 276px}
+          #jiaojiao[data-state=idle] .triangle{animation:jiao-rest 5.6s ease-in-out infinite}
+          #jiaojiao[data-state=thinking] .triangle{animation:jiao-think 3.6s ease-in-out infinite}
+          #jiaojiao[data-state=thinking] .look{transform:translate(4px,-4px)}
+          #jiaojiao[data-state=thinking] .thought-dot{animation:jiao-dot 1.8s ease-in-out infinite}
+          #jiaojiao[data-state=thinking] .d2{animation-delay:180ms}
+          #jiaojiao[data-state=thinking] .d3{animation-delay:360ms}
+          #jiaojiao[data-state=working] .triangle{animation:jiao-work 1.8s ease-in-out infinite}
+          #jiaojiao[data-state=working] .shadow{animation:jiao-shadow 1.8s ease-in-out infinite}
+          #jiaojiao[data-state=working] .look{animation:jiao-look 3.2s ease-in-out infinite}
+          #jiaojiao[data-state=working] .activity{animation:jiao-dot 1.3s ease-in-out infinite}
+          #jiaojiao[data-state=complete] .triangle{animation:jiao-yay 760ms cubic-bezier(.2,.7,.3,1) 1}
+          #jiaojiao[data-state=complete] .check-line{stroke-dasharray:32;stroke-dashoffset:32;animation:jiao-check 380ms 160ms ease forwards}
+          #jiaojiao[data-state=complete] .spark{transform-origin:160px 160px;animation:jiao-spark 650ms ease-out 1}
+          #jiaojiao[data-state=attention] .triangle{animation:jiao-notice 650ms ease-in-out 2}
+          #jiaojiao[data-state=attention] .look{transform:scale(1.06)}
+          #jiaojiao.is-paused *{animation-play-state:paused!important}
+          @keyframes jiao-rest{0%,100%{transform:translateY(0) scale(1,1)}50%{transform:translateY(-1.5px) scale(1.012,.992)}}
+          @keyframes jiao-blink{0%,42%,46%,77%,81%,100%{transform:scaleY(1)}44%,79%{transform:scaleY(.09)}}
+          @keyframes jiao-think{0%,100%{transform:rotate(-7deg)}50%{transform:rotate(-10deg) translateY(-2px)}}
+          @keyframes jiao-dot{0%,70%,100%{opacity:.35;transform:translateY(0)}35%{opacity:1;transform:translateY(-3px)}}
+          @keyframes jiao-work{0%,100%{transform:translateY(0) rotate(-3deg) scale(1.015,.985)}25%{transform:translateY(-7px) rotate(1deg) scale(.985,1.02)}50%{transform:translateY(-3px) rotate(4deg) scale(1,1)}75%{transform:translateY(1px) rotate(0) scale(1.025,.975)}}
+          @keyframes jiao-shadow{0%,100%{transform:scaleX(1);opacity:.08}25%{transform:scaleX(.88);opacity:.055}75%{transform:scaleX(1.04);opacity:.09}}
+          @keyframes jiao-look{0%,100%{transform:translate(-3px,0)}50%{transform:translate(4px,-1px)}}
+          @keyframes jiao-yay{0%,100%{transform:translateY(0) scale(1,1)}18%{transform:translateY(2px) scale(1.05,.95)}42%{transform:translateY(-14px) rotate(-4deg) scale(.98,1.04)}72%{transform:translateY(1px) scale(1.04,.97)}}
+          @keyframes jiao-check{to{stroke-dashoffset:0}}
+          @keyframes jiao-spark{0%{opacity:0;transform:scale(.8)}45%{opacity:1;transform:scale(1.06)}100%{opacity:.8;transform:scale(1)}}
+          @keyframes jiao-notice{0%,100%{transform:rotate(0)}30%{transform:rotate(-4deg)}65%{transform:rotate(2deg)}}
+          @media(prefers-reduced-motion:reduce){#jiaojiao *{animation:none!important;transition:none!important}#jiaojiao .check-line{stroke-dashoffset:0}}
+        </style>
+        <ellipse class="shadow" cx="160" cy="276" rx="63" ry="8" fill="#252722" opacity=".08" />
+        <g class="triangle">
+          <path class="body-fill" d="M138 64C148 45 172 45 182 64L262 210C273 230 259 254 236 254H84C61 254 47 230 58 210Z" fill="#ce805f" />
+          <path d="M139 88L99 162" fill="none" stroke="#e7ad8e" stroke-width="4" stroke-linecap="round" opacity=".55" />
+          <path class="fringe" d="M116 136C133 132 142 119 150 106C153 126 141 143 122 148L128 137C124 138 120 138 116 136Z" fill="#30332c" />
+          <g class="look">
+            <g class="gaze" data-pose="idle thinking working waiting attention">
+              <ellipse cx="136" cy="166" rx="5.5" ry="8" fill="#30332c" />
+              <ellipse cx="181" cy="166" rx="5.5" ry="8" fill="#30332c" />
+              <circle cx="134.5" cy="163" r="1.2" fill="#fff8ed" />
+              <circle cx="179.5" cy="163" r="1.2" fill="#fff8ed" />
+            </g>
+            <g data-pose="complete" fill="none" stroke="#30332c" stroke-width="3.5" stroke-linecap="round">
+              <path d="M129 166Q136 156 143 166M174 166Q181 156 188 166" />
+            </g>
+          </g>
+          <path d="M151 186Q159 192 167 186" fill="none" stroke="#6f3f31" stroke-width="2.3" stroke-linecap="round" />
+          <ellipse cx="118" cy="183" rx="9" ry="4" fill="#e5a080" opacity=".75" />
+          <ellipse cx="199" cy="183" rx="9" ry="4" fill="#e5a080" opacity=".75" />
+        </g>
+        <g data-pose="thinking" fill="#b75f42">
+          <circle class="thought-dot" cx="223" cy="89" r="3.3" />
+          <circle class="thought-dot d2" cx="238" cy="82" r="3.3" />
+          <circle class="thought-dot d3" cx="253" cy="79" r="3.3" />
+        </g>
+        <g class="activity" data-pose="working" fill="none" stroke="#46628e" stroke-width="3" stroke-linecap="round">
+          <path d="M243 112L252 104M250 129L263 126M241 95L244 84" />
+        </g>
+        <g data-pose="complete">
+          <circle cx="245" cy="104" r="18" fill="#e8efe3" />
+          <path class="check-line" d="M236 104L242 110L254 97" fill="none" stroke="#52664b" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+          <g class="spark" fill="none" stroke="#b75f42" stroke-width="2.5" stroke-linecap="round"><path d="M86 100L79 94M96 85L93 75M247 69L251 61" /></g>
+        </g>
+        <g data-pose="waiting">
+          <circle cx="245" cy="104" r="17" fill="#e5ecf5" />
+          <path d="M241 98V110M249 98V110" fill="none" stroke="#46628e" stroke-width="3" stroke-linecap="round" />
+        </g>
+        <g data-pose="attention">
+          <circle cx="245" cy="104" r="17" fill="#f2eacf" />
+          <path d="M245 95V105" fill="none" stroke="#616049" stroke-width="2.8" stroke-linecap="round" />
+          <circle cx="245" cy="112" r="1.7" fill="#616049" />
+        </g>
+      </svg>

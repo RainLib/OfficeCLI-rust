@@ -1,0 +1,35 @@
+{
+  "states": {
+    "idle": {
+      "label": "待机",
+      "timing": "5.6s 呼吸，5.8s 自然眨眼"
+    },
+    "thinking": {
+      "label": "思考",
+      "timing": "3.6s 轻歪头，1.8s 思考点"
+    },
+    "working": {
+      "label": "工作",
+      "timing": "1.8s 弹性轻跳，3.2s 视线轻移"
+    },
+    "complete": {
+      "label": "完成",
+      "timing": "760ms 开心轻跳，380ms 勾线"
+    },
+    "waiting": {
+      "label": "待确认",
+      "timing": "主体静止，保留眨眼与暂停标记"
+    },
+    "attention": {
+      "label": "需核对",
+      "timing": "650ms 轻歪两次，随后停下"
+    }
+  },
+  "source": "jiaojiao-master.svg",
+  "selfContained": true,
+  "externalResources": [],
+  "animations": "SVG geometry with CSS transforms, stroke motion and opacity",
+  "reducedMotion": true,
+  "staticPoses": 6,
+  "concept": "Rounded triangle with two small eyes and a subtle diagonal fringe; no human body."
+}

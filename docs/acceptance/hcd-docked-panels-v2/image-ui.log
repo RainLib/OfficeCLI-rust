@@ -1,0 +1,20 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test image-workspace.spec.ts --output=/tmp/officecli-docked-image-results
+
+
+Running 9 tests using 1 worker
+
+(node:65093) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/image-workspace.spec.ts:69:1 › image revisions, real encoding, canvas isolation, tabs and responsive design (6.2s)
+  ✓  2 e2e/image-workspace.spec.ts:107:1 › real inpaint stages, region lease, owner cancellation, pixel boundaries and guarded apply (10.4s)
+  ✓  3 e2e/image-workspace.spec.ts:142:1 › overlapping jobs wait, failures release leases, and copies validate actual encoding (6.0s)
+  ✓  4 e2e/image-workspace.spec.ts:160:1 › image input journal restores offline adjustments and conversion parameters without changing its canvas or revision (2.8s)
+  ✓  5 e2e/image-workspace.spec.ts:205:1 › image input journal restores an offline mask pixel for pixel without resubmitting generation (2.9s)
+  ✓  6 e2e/image-workspace.spec.ts:223:1 › image input journal keeps changed revisions downloadable and isolates another signed user (3.9s)
+  ✓  7 e2e/image-workspace.spec.ts:239:1 › image input journal reports storage failures and warns before unprotected inputs are closed (2.6s)
+  ✓  8 e2e/image-workspace.spec.ts:259:1 › image input journal survives browser SIGKILL and keeps masks unsubmitted until explicit generation (3.5s)
+  ✓  9 e2e/image-workspace.spec.ts:284:1 › image task checkpoints survive API SIGKILL with candidates, private ownership, released locks and idempotent receipts (6.2s)
+
+  9 passed (46.3s)

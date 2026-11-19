@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>工作空间 · OfficeCLI</title>
+  </head>
+  <body>
+    <a href="./figjam-board.html#/home">打开工作空间</a>
+    <script>
+      const entry = new URL("./figjam-board.html", location.href);
+      entry.search = location.search;
+      entry.hash = location.hash || "/home";
+      location.replace(entry.href);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 644 178" width="644" height="178" role="img" aria-labelledby="title desc">
+  <title id="title">墨点的协同指针</title>
+  <desc id="desc">等待时整枚笔尖朝左上沿扁椭圆平移，姓名签与笔尖同速同幅平移。写入时笔尖与姓名签归位。</desc>
+  <style><![CDATA[
+text {font-family:system-ui,"PingFang SC",sans-serif}
+.agent-nib {
+  display:inline-block; width:24px; height:24px; overflow:visible; pointer-events:none; flex:none;
+}
+@property --agent-glide-angle {
+  syntax:"<angle>";
+  inherits:false;
+  initial-value:0deg;
+}
+@keyframes agent-idle-glide {
+  from { --agent-glide-angle:0deg; }
+  to { --agent-glide-angle:360deg; }
+}
+/* One clock per participant. Both children translate in CSS pixels, including the smaller Spec nib. */
+@media (prefers-reduced-motion:no-preference) {
+  :is(.canvas-peer-agent,.spec-peer-caret,.image-agent-pointer,.hcd-surface .agent-region):has(> .agent-nib[data-phase='idle']) {
+    animation:agent-idle-glide 3.2s linear infinite;
+    --agent-shift:calc(4px * cos(var(--agent-glide-angle))) calc(1.7px * sin(var(--agent-glide-angle)));
+  }
+  .agent-nib[data-phase='idle'], .agent-nib[data-phase='idle'] + .agent-name-chip,
+  .spec-peer-caret:has(> .agent-nib[data-phase='idle'])::after { translate:var(--agent-shift, none); }
+}
+[data-paused='true'] :is(.canvas-peer-agent,.spec-peer-caret,.image-agent-pointer,.hcd-surface .agent-region):has(> .agent-nib) {
+  animation:none; --agent-shift:none;
+}
+]]></style>
+  <g transform="translate(0 0)">
+    <rect x="1" y="1" width="314" height="176" rx="18" fill="#fffdfb" stroke="#e1dbdf"/>
+    <text x="23" y="33" font-size="16" font-weight="650" fill="#39313f">等待</text>
+    <path d="M26 88H128" stroke="#e0d6e6" stroke-width="7" stroke-linecap="round"/>
+    <path d="M141 77V96" stroke="#9c83ac" stroke-width="1.5"/>
+    <g class="canvas-peer-agent" transform="translate(126.5 85.5) scale(2.5)">
+      <svg width="24" height="24" viewBox="0 0 24 24" class="agent-nib" data-phase="idle" fill="none" color="#73558a">
+        <g class="agent-pointer-glyph" transform="translate(-3 -2.5)">
+    <path class="agent-arrow-face" d="M8.75 8.85 Q8.21 6.96 10.03 7.71 L20.72 13.32 Q22.57 14.32 20.61 15.08 L16.38 16.64 L14.72 20.86 Q13.90 22.83 13.06 20.88 Z" fill="currentColor" stroke="var(--agent-outline,#fffdfb)" stroke-width="1.1" stroke-linejoin="round"/>
+    <path d="M9.46 8.41 L16.18 15.87 L14.24 20.66 Q13.89 21.51 13.56 20.52 Z" fill="#21172f" fill-opacity=".21"/>
+    <path class="agent-arrow-edge" d="M20.84 14.23 Q21.04 14.41 20.40 14.67 L16.04 16.27 L14.30 20.65 Q13.90 21.59 13.55 20.65" stroke="#291c39" stroke-opacity=".62" stroke-width=".88" stroke-linecap="round" stroke-linejoin="round"/>
+    <path class="agent-arrow-light" d="M9.32 8.34 Q9.25 7.93 9.85 8.18 L20.13 13.59" stroke="#fffaf3" stroke-opacity=".68" stroke-width=".9" stroke-linecap="round"/>
+  </g>
+      </svg>
+      <g class="agent-name-chip">
+        <rect x="29.8" y="9.4" width="34.4" height="10.8" rx="5.4" fill="#f4edf7" stroke="#d7c8de" stroke-width=".4"/>
+        <text x="34" y="16.5" font-size="4.7" font-weight="650" fill="#684d79">AI</text>
+        <path d="M41.4 11.9v5.8" stroke="#c5b6cc" stroke-width=".5"/>
+        <text x="44.5" y="16.8" font-size="5.5" font-weight="600" fill="#684d79">墨点</text>
+      </g>
+    </g>
+  </g>
+  <g transform="translate(328 0)">
+    <rect x="1" y="1" width="314" height="176" rx="18" fill="#fffdfb" stroke="#e1dbdf"/>
+    <text x="23" y="33" font-size="16" font-weight="650" fill="#39313f">写入</text>
+    <path d="M26 88H128" stroke="#e0d6e6" stroke-width="7" stroke-linecap="round"/>
+    <path d="M141 77V96" stroke="#9c83ac" stroke-width="1.5"/>
+    <g class="canvas-peer-agent" transform="translate(126.5 85.5) scale(2.5)">
+      <svg width="24" height="24" viewBox="0 0 24 24" class="agent-nib" data-phase="writing" fill="none" color="#73558a">
+        <g class="agent-pointer-glyph" transform="translate(-3 -2.5)">
+    <path class="agent-arrow-face" d="M8.75 8.85 Q8.21 6.96 10.03 7.71 L20.72 13.32 Q22.57 14.32 20.61 15.08 L16.38 16.64 L14.72 20.86 Q13.90 22.83 13.06 20.88 Z" fill="currentColor" stroke="var(--agent-outline,#fffdfb)" stroke-width="1.1" stroke-linejoin="round"/>
+    <path d="M9.46 8.41 L16.18 15.87 L14.24 20.66 Q13.89 21.51 13.56 20.52 Z" fill="#21172f" fill-opacity=".21"/>
+    <path class="agent-arrow-edge" d="M20.84 14.23 Q21.04 14.41 20.40 14.67 L16.04 16.27 L14.30 20.65 Q13.90 21.59 13.55 20.65" stroke="#291c39" stroke-opacity=".62" stroke-width=".88" stroke-linecap="round" stroke-linejoin="round"/>
+    <path class="agent-arrow-light" d="M9.32 8.34 Q9.25 7.93 9.85 8.18 L20.13 13.59" stroke="#fffaf3" stroke-opacity=".68" stroke-width=".9" stroke-linecap="round"/>
+  </g>
+      </svg>
+      <g class="agent-name-chip">
+        <rect x="29.8" y="9.4" width="34.4" height="10.8" rx="5.4" fill="#f4edf7" stroke="#d7c8de" stroke-width=".4"/>
+        <text x="34" y="16.5" font-size="4.7" font-weight="650" fill="#684d79">AI</text>
+        <path d="M41.4 11.9v5.8" stroke="#c5b6cc" stroke-width=".5"/>
+        <text x="44.5" y="16.8" font-size="5.5" font-weight="600" fill="#684d79">墨点</text>
+      </g>
+    </g>
+  </g>
+</svg>

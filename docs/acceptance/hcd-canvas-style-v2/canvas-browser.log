@@ -1,0 +1,20 @@
+
+Running 10 tests using 1 worker
+
+(node:15460) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+[1/10] e2e/canvas.spec.ts:68:1 › object transactions merge independent edits and reject stale fields, scopes and readonly writes
+[2/10] e2e/canvas.spec.ts:81:1 › two browser canvases render free drawing, receive each other and retain content after reload
+[3/10] e2e/canvas.spec.ts:98:1 › selected AI changes merge with a human move and preserve objects outside the selection
+[4/10] e2e/canvas.spec.ts:112:1 › a real marquee selection starts a scoped AI task from the canvas
+[5/10] e2e/canvas.spec.ts:129:1 › an AI task cannot modify an object outside its server-authorized selection
+[6/10] e2e/canvas.spec.ts:137:1 › a blank region can contain new AI objects without editing existing content
+[7/10] e2e/canvas.spec.ts:154:1 › native undo and redo preserve changes committed by another person
+[8/10] e2e/canvas.spec.ts:172:1 › a disconnected edit stays in the local journal and retries once on reconnect
+[9/10] e2e/canvas.spec.ts:188:1 › canvas shares the Pen panel shell in both themes and preserves its editor and draft when panels change
+[10/10] e2e/canvas.spec.ts:219:1 › phone canvas uses the content column for AI and restores the same canvas without an overlay
+e2e/canvas.spec.ts:219:1 › phone canvas uses the content column for AI and restores the same canvas without an overlay
+Canvas acceptance artifacts: /var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-hay73V
+
+  10 passed (19.6s)

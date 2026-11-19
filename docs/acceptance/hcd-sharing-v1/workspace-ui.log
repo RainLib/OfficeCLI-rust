@@ -1,0 +1,31 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test workspace.spec.ts --grep verified grid caches|workspace reload restores|workspace restoration reauthenticates|Word table text editing|Word read access paginates|Word source grids|workspace drawers|workbook permissions|all seven formats|agent commits preserve|fixed history saves|fixed snapshot failures|Word high fidelity downloads|inline tables keep canonical|Word opens directly|insert ribbon creates|HTML and Markdown tables insert
+
+(node:11649) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 17 tests using 1 worker
+
+(node:11677) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:11677) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+  ✓   1 e2e/workspace.spec.ts:948:1 › verified grid caches follow local and remote dependencies without extra writes or canvas replacement (23.3s)
+  ✓   2 e2e/workspace.spec.ts:1520:1 › workspace reload restores multiple tabs, active document, preview and independent canvas zoom (2.1s)
+  ✓   3 e2e/workspace.spec.ts:1551:1 › workspace restoration reauthenticates every tab and isolates expired access (1.0s)
+  ✓   4 e2e/workspace.spec.ts:1675:1 › Word table text editing checkpoints shared drafts and preserves source runs and merged cells (2.3s)
+  ✓   5 e2e/workspace.spec.ts:1966:1 › Word read access paginates saved Unicode content, sections, running regions and table rows (4.4s)
+  ✓   6 e2e/workspace.spec.ts:2028:1 › Word source grids preserve font metrics, opt-outs, fixed lines and header anchors (1.6s)
+  ✓   7 e2e/workspace.spec.ts:2232:1 › workspace drawers, focus mode and export preserve document state (2.1s)
+  ✓   8 e2e/workspace.spec.ts:2270:1 › workbook permissions are explicit and panel actions preserve an unapplied formula (1.6s)
+  ✓   9 e2e/workspace.spec.ts:2285:1 › all seven formats use the content shell and enforce read-only preview (8.0s)
+  ✓  10 e2e/workspace.spec.ts:2468:1 › agent commits preserve preview, focus, zoom and the selected historical comparison (3.7s)
+  ✓  11 e2e/workspace.spec.ts:2843:1 › fixed history saves drafts, pins even the latest revision read-only and restores the live deck (4.0s)
+  ✓  12 e2e/workspace.spec.ts:2892:1 › fixed snapshot failures can retry and delayed requests cannot replace the selected revision (2.3s)
+  ✓  13 e2e/workspace.spec.ts:2994:1 › Word high fidelity downloads preserve native parts and match every preview page and paper size (6.2s)
+  ✓  14 e2e/workspace.spec.ts:3271:1 › inline tables keep canonical appearance in dark mode and reject structural checkpoint changes (1.6s)
+  ✓  15 e2e/workspace.spec.ts:3883:1 › Word opens directly with granted permissions and read credentials show saved pages (1.5s)
+  ✓  16 e2e/workspace.spec.ts:3900:1 › insert ribbon creates blank paragraphs and editable tables that survive collaboration and DOCX export (3.4s)
+  ✓  17 e2e/workspace.spec.ts:3949:1 › HTML and Markdown tables insert through guarded structure patches and hide controls in read-only mode (13.0s)
+
+  17 passed (1.7m)

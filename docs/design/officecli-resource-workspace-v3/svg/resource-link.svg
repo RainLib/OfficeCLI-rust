@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="140" viewBox="0 0 360 140" role="img" aria-labelledby="title">
+  <title id="title">资源引用连接动画</title>
+  <style>@media(prefers-reduced-motion:reduce){.link{stroke-dashoffset:0;animation:none!important}}.link{stroke-dasharray:185;stroke-dashoffset:185;animation:draw 480ms cubic-bezier(.2,.7,.3,1) forwards}@keyframes draw{to{stroke-dashoffset:0}}</style>
+  <rect x="12" y="34" width="106" height="76" rx="14" fill="#fff" stroke="#cacec6" stroke-width="1.5"/>
+  <path d="M34 54h45M34 68h63M34 82h52" fill="none" stroke="#252722" stroke-width="3" stroke-linecap="round"/>
+  <rect x="242" y="34" width="106" height="76" rx="14" fill="#fff" stroke="#cacec6" stroke-width="1.5"/>
+  <path d="M263 53h64v38h-64zM263 66h64M282 53v38M307 53v38M263 79h64" fill="none" stroke="#48628d" stroke-width="2"/>
+  <path class="link" d="M123 72C160 72 194 72 235 72M225 64L235 72L225 80" fill="none" stroke="#b75f42" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

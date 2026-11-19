@@ -1,0 +1,21 @@
+/* OfficeCLI / Neutral blue · Light */
+:root {
+  --canvas: #F3F5F8;
+  --navigation: #EDF1F6;
+  --stage: #FAFBFD;
+  --surface: #FFFFFF;
+  --panel: #FFFFFF;
+  --ink: #253248;
+  --muted: #5F6F86;
+  --faint: #5F7088;
+  --border: #DDE4EE;
+  --accent: #486F9D;
+  --accentsoft: #EAF0F8;
+  --sage: #EBF3EE;
+  --sageink: #52725E;
+  --bluesoft: #EAF0F8;
+  --blueink: #506C92;
+  --yellow: #F4F1E7;
+  --bubble: #EDF2F8;
+  --dark: #42658F;
+}

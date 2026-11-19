@@ -1,0 +1,331 @@
+{
+  "title": "OfficeCLI · 墨色与陶土 · 角角 SVG",
+  "native": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/officecli-office-workspace-v3-triangle.figcraft",
+  "source": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v2/officecli-office-workspace-v2.figcraft",
+  "palette": {
+    "Canvas": "#EDEEE9",
+    "Navigation": "#E2E4DE",
+    "Stage": "#F4F5F0",
+    "Surface": "#FFFFFF",
+    "Panel": "#F8F8F3",
+    "Ink": "#252722",
+    "Muted": "#61655C",
+    "Faint": "#686D63",
+    "Border": "#CACEC6",
+    "Accent": "#B75F42",
+    "AccentSoft": "#F5E7DF",
+    "Sage": "#E8EFE3",
+    "SageInk": "#52664B",
+    "BlueSoft": "#E5ECF5",
+    "BlueInk": "#46628E",
+    "Yellow": "#F2EACF",
+    "Bubble": "#E7E9E2",
+    "Dark": "#282B25"
+  },
+  "screens": [
+    {
+      "key": "board",
+      "name": "01 · 白板总览 · 资料与全局 AI",
+      "id": 105,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/01-board.png",
+      "layers": 213
+    },
+    {
+      "key": "insert",
+      "name": "02 · 插入资源 · 文档与表格",
+      "id": 364,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/02-insert.png",
+      "layers": 130
+    },
+    {
+      "key": "doc_preview",
+      "name": "03 · 文档预览 · 定位引用位置",
+      "id": 540,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/03-doc-preview.png",
+      "layers": 111
+    },
+    {
+      "key": "doc_edit",
+      "name": "04 · 进入原文编辑 · AI 持续",
+      "id": 697,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/04-doc-edit.png",
+      "layers": 104
+    },
+    {
+      "key": "range",
+      "name": "05 · 选择表格区域 · B2:F7",
+      "id": 847,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/05-range.png",
+      "layers": 256
+    },
+    {
+      "key": "range_board",
+      "name": "06 · 表格区域卡片 · 实时引用",
+      "id": 1149,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/06-range-board.png",
+      "layers": 230
+    },
+    {
+      "key": "sheet_edit",
+      "name": "07 · 进入原表编辑 · 回到白板",
+      "id": 1425,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/07-sheet-edit.png",
+      "layers": 256
+    },
+    {
+      "key": "ai",
+      "name": "08 · 全局 AI · 管理跨资源上下文",
+      "id": 1727,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/08-ai.png",
+      "layers": 231
+    },
+    {
+      "key": "library",
+      "name": "10 · 统一工作台 · 文字表格图片",
+      "id": 2059,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/10-library.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "word",
+      "name": "11 · 文字文档 · 常用编辑工具",
+      "id": 2239,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/11-word.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "review",
+      "name": "12 · 文字审阅 · 批注与修订",
+      "id": 2458,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/12-review.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "excel",
+      "name": "13 · Excel · 常用编辑与公式",
+      "id": 2666,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/13-excel.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "data",
+      "name": "14 · Excel · 筛选与图表",
+      "id": 3021,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/14-data.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "image",
+      "name": "15 · 图片预览 · 信息与快捷处理",
+      "id": 3405,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/15-image.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "crop",
+      "name": "16 · 图片 · 裁剪旋转与尺寸",
+      "id": 3602,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/16-crop.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "adjust",
+      "name": "17 · 图片 · 光线与色彩",
+      "id": 3807,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/17-adjust.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "mask",
+      "name": "18 · 图片 · 涂抹与局部重绘",
+      "id": 4019,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/18-mask.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "progress",
+      "name": "19 · 图片 · 全局 AI 后台任务",
+      "id": 4217,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/19-progress.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "compare",
+      "name": "20 · 图片 · 原图与候选对比",
+      "id": 4419,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/20-compare.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "convert",
+      "name": "21 · 图片 · WebP 转换与导出",
+      "id": 4616,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/21-convert.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "jpeg",
+      "name": "22 · 图片 · JPEG 背景填充",
+      "id": 4816,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/22-jpeg.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "done",
+      "name": "23 · 图片 · 转换完成与副本",
+      "id": 5019,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/23-done.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "history",
+      "name": "24 · 图片 · 版本记录与恢复",
+      "id": 5206,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/24-history.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "focus",
+      "name": "25 · 图片 · 专注与面板收起",
+      "id": 5397,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/25-focus.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "mobile",
+      "name": "26 · 手机 · 图片与全局 AI",
+      "id": 5409,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/26-mobile.png",
+      "width": 390,
+      "height": 844
+    },
+    {
+      "key": "ppt",
+      "name": "27 · 演示 · 幻灯片与属性",
+      "id": 5431,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/27-ppt.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "pdf",
+      "name": "28 · PDF · 阅读高亮与批注",
+      "id": 5624,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/28-pdf.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "find",
+      "name": "29 · 文字 · 查找与替换",
+      "id": 5815,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/29-find.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "excel_find",
+      "name": "30 · Excel · 查找与替换",
+      "id": 6020,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/30-excel_find.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "png",
+      "name": "31 · 图片 · PNG 无损透明导出",
+      "id": 6280,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/31-png.png",
+      "width": 1600,
+      "height": 1000
+    },
+    {
+      "key": "identity",
+      "name": "32 · 角角 · 原创 SVG 符号",
+      "id": 7601,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/32-symbol.png"
+    },
+    {
+      "key": "motion",
+      "name": "33 · SVG 动效 · 状态与时序",
+      "id": 7782,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/33-motion.png"
+    },
+    {
+      "key": "welcome",
+      "name": "34 · 全局 AI · 角角与工作空间",
+      "id": 7950,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/previews/34-welcome.png"
+    }
+  ],
+  "supportingFrames": [
+    {
+      "key": "foundations",
+      "id": 2,
+      "page": 1
+    },
+    {
+      "key": "states",
+      "id": 2005,
+      "page": 2004
+    }
+  ],
+  "svgStates": [
+    "idle",
+    "thinking",
+    "working",
+    "complete",
+    "waiting",
+    "attention"
+  ],
+  "motionPreview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v3/svg/manifest.json"
+}

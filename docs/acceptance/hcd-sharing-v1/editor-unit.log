@@ -1,0 +1,61 @@
+(node:22452) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ workflow grants use current credentials and include only exactly declared documents (10.017041ms)
+✔ workflow UI refuses services without the negotiated identity selection guard before posting a plan (0.170208ms)
+✔ shared-content selection invalidates on revision, source root or collaboration generation changes (0.093333ms)
+✔ workflow recovery bookmarks retain only a name and document IDs, never grants or shared contents (0.507291ms)
+block font schema ok
+(node:22453) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ src/blockFont.test.ts (131.600166ms)
+(node:22454) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ rejects a known schema with an unsupported operation or wrong endpoint (0.430333ms)
+✔ an old service is readable but receives no editing POST (10.310542ms)
+✔ valid edits carry the negotiated fingerprint; a changed service is not retried automatically (1.500292ms)
+✔ receipt review requires its own advertised contract before sending the exact patch (0.614167ms)
+(node:22455) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ grid batch retains exact identity, native types, formatting and target independently of later edits (0.9015ms)
+✔ grid batch refuses wrong document, invalid addresses, epoch, revision and unsupported operations (0.501875ms)
+(node:22456) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ image drafts retain exact mask coordinates, edits and conversion parameters (0.822458ms)
+✔ image recovery bounds mask replay and rejects invalid source, crop, point and conversion dimensions (10.533875ms)
+(node:22457) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:22457) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+✔ mapped table runs merge concurrent characters without losing formatting, source identity or empty runs (6.265208ms)
+✔ old opaque rooms gain collaborative runs once and retain existing shared drafts (1.012625ms)
+(node:22458) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ semantic consumers share immutable reads, refresh the head, and isolate renewed credentials (12.280959ms)
+✔ a failed revision read can be retried without poisoning the mounted document (0.392209ms)
+(node:22459) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ source runs keep their identities, untouched text and scalar offsets across mixed-script edits (0.736292ms)
+theme css rewrite ok
+(node:22460) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ src/themeCss.test.ts (93.241709ms)
+(node:22461) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ Word additions and formatting changes retain source anchors across Unicode and repeated rich edits (0.841834ms)
+(node:22462) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ published XLSX content schema accepts standalone rich edits and mixed native types (29.04675ms)
+(node:22463) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ XLSX selection formatting preserves native theme and scheme across emoji boundaries (6.586834ms)
+✔ XLSX text replacement and partial format keep unrelated native properties (0.253292ms)
+✔ XLSX rich input rejects split scalars and hidden objects and ignores stale formula-bar documents (0.2745ms)
+✔ XLSX rich draft reconstruction keeps multiline offsets and native metadata (0.298333ms)
+✔ XLSX HTML clipboard RGB values save opaque colours without silently accepting transparency (0.414708ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 178.003459

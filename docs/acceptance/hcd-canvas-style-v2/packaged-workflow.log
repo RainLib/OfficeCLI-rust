@@ -1,0 +1,12 @@
+{
+  "status": "passed",
+  "root": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-workspace-canvas-L3sbLE",
+  "artifacts": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-workspace-canvas-L3sbLE/artifacts",
+  "checks": [
+    "packaged Workspace creates and opens a native free canvas with local fonts",
+    "host-owned actor delegates a scoped AI task through the real durable runner and the local scripted model; outside objects survive",
+    "native PNG export and font loading work with all external HTTP traffic blocked",
+    "business publication downloads an editable native scene rather than flattening it to HTML",
+    "anonymous visitors draw collaboratively, cannot invoke AI, and become read-only after permission downgrade"
+  ]
+}

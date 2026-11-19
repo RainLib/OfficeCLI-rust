@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="jiaojiao" viewBox="0 0 320 320" data-state="idle" role="img" aria-labelledby="jiaojiao-title jiaojiao-desc" width="220" height="220">
+        <title id="jiaojiao-title">角角，带一点斜刘海和两只小眼睛的圆角三角小精灵</title>
+        <desc id="jiaojiao-desc">陶土色三角主体，柔软圆角，墨色斜刘海与小眼睛。通过眨眼、歪头、轻跳和弹性伸缩表达 AI 状态。</desc>
+        <ellipse class="shadow" cx="160" cy="276" rx="63" ry="8" fill="#252722" opacity=".08" />
+        <g class="triangle" transform="rotate(-4 160 252)">
+          <path class="body-fill" d="M138 64C148 45 172 45 182 64L262 210C273 230 259 254 236 254H84C61 254 47 230 58 210Z" fill="#ce805f" />
+          <path d="M139 88L99 162" fill="none" stroke="#e7ad8e" stroke-width="4" stroke-linecap="round" opacity=".55" />
+          <path class="fringe" d="M116 136C133 132 142 119 150 106C153 126 141 143 122 148L128 137C124 138 120 138 116 136Z" fill="#30332c" />
+          <g class="look">
+            <g class="gaze" data-pose="idle thinking working waiting attention">
+              <ellipse cx="136" cy="166" rx="5.5" ry="8" fill="#30332c" />
+              <ellipse cx="181" cy="166" rx="5.5" ry="8" fill="#30332c" />
+              <circle cx="134.5" cy="163" r="1.2" fill="#fff8ed" />
+              <circle cx="179.5" cy="163" r="1.2" fill="#fff8ed" />
+            </g>
+            </g>
+          <path d="M151 186Q159 192 167 186" fill="none" stroke="#6f3f31" stroke-width="2.3" stroke-linecap="round" />
+          <ellipse cx="118" cy="183" rx="9" ry="4" fill="#e5a080" opacity=".75" />
+          <ellipse cx="199" cy="183" rx="9" ry="4" fill="#e5a080" opacity=".75" />
+        </g>
+        <g data-pose="attention">
+          <circle cx="245" cy="104" r="17" fill="#f2eacf" />
+          <path d="M245 95V105" fill="none" stroke="#616049" stroke-width="2.8" stroke-linecap="round" />
+          <circle cx="245" cy="112" r="1.7" fill="#616049" />
+        </g>
+      </svg>
