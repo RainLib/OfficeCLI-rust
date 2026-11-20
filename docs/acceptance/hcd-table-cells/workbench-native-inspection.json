@@ -1,0 +1,19 @@
+{
+  "nativeGrid": [
+    31,
+    2
+  ],
+  "mergedText": "ROW 04Value 04ROW 05Value 05",
+  "splitText": "拆分后直接输入 🙂",
+  "unchangedParts": [
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "word/_rels/document.xml.rels",
+    "word/styles.xml",
+    "word/settings.xml",
+    "word/footer1.xml",
+    "word/header1.xml",
+    "word/header-first.xml",
+    "word/header-even.xml"
+  ]
+}

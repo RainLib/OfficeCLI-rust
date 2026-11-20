@@ -1,0 +1,58 @@
+
+> @officecli/workspace@0.1.0 test
+> node --test src/*.test.mjs
+
+✔ model use defaults to denied and only deployment-configured IDs are returned (52.41475ms)
+✔ competing publications preserve the immutable source and reject a stale business head (89.270875ms)
+✔ commit rechecks authorization after prepare and upload (56.389833ms)
+✔ signed callbacks bind exact bytes and path, and nonce replay is rejected (30.1105ms)
+✔ logout invalidates live document authorization while preserving committed status recovery (20.388167ms)
+✔ encrypted exchange recovery rejects altered ciphertext and another deployment key (0.520083ms)
+✔ a Unicode selection spanning runs preserves surrounding marks and paragraph properties (0.763416ms)
+✔ deleting one selected run leaves its neighboring linked run intact (0.116917ms)
+✔ a selection token expires with its editor launch and rechecks current permissions (2.514ms)
+✔ sheet ranges stay bounded; native numbers and empty cells keep their patch types (0.587166ms)
+✔ a saved sheet selection follows the same rectangle of native cell IDs (0.323625ms)
+✔ workbench planner uses only the selected source and rejects out-of-scope model plans (26.068625ms)
+✔ a granted Spec keeps its Unicode offsets as people type, and reads back the committed paragraph (1.54975ms)
+✔ a demo phrase edit uses the paragraph and Unicode offsets of the single match (0.5625ms)
+✔ private files and link shares never appear in the public directory (52.821833ms)
+✔ anonymous visitors receive distinct server-assigned identities and browser recovery preserves identity (57.856042ms)
+✔ guest editing uses Provider permissions without acquiring publish, restore or management access (51.3835ms)
+✔ permission downgrade fences old editing sessions before a reader rejoins (40.337417ms)
+✔ rotation, stopping and expiration invalidate old links and grants (31.462541ms)
+✔ public access requires no link secret and expired temporary identities cannot resume (28.224125ms)
+✔ workspaces on separate hostnames can use the same application name and select AI independently (35.052625ms)
+✔ a cookie hostname, tenant identity or internal listener cannot be assigned twice (8.384959ms)
+✔ legacy localhost listeners resolve to the same numeric address for the provider, engine and collaboration (32.911ms)
+✔ copied signing credentials or a shared SQLite file cannot join the registry (28.671416ms)
+✔ exclusive initialization preserves an existing identity (31.044292ms)
+✔ native cell runs are bound to the worksheet revision even when only formatting changed (1.037125ms)
+✔ approval reserves the exact patch and retry runs only the failed file (93.23125ms)
+✔ a restarted worker recovers a committed result when its reply was lost (54.388041ms)
+✔ only confirmed prerequisites enable drafting and each dependent diff requires fresh approval (49.118417ms)
+✔ rechecking a version conflict replaces only its proposal and keeps its sibling's receipt (49.322ms)
+✔ resume finishes an interrupted dependent preview without repeating its committed source (24.936833ms)
+✔ separate proposals for the same file produce one reviewed batch (1.378791ms)
+✔ a board preview keeps each source anchor and rejects invented or repeated sections (11.010667ms)
+✔ a workflow validates dependencies and a deferred plan cannot write to its prerequisites (1.530416ms)
+✔ reversing selected prose restores the original formatting and keeps later text (1.439541ms)
+✔ undo preserves collaborators' adjacent and interleaved input in the same paragraph (0.136542ms)
+✔ undo refuses ambiguous repeated text and changed AI characters (0.149042ms)
+✔ undo of an AI deletion locates an unambiguous gap but refuses an edited gap (0.119667ms)
+✔ long paragraphs retain interleaved peer input without the quadratic alignment budget (1.873791ms)
+✔ undo finds a number by its stable ID after inserting a row and ignores other cells (0.341166ms)
+✔ append undo matches operation identities despite reversed receipt order and keeps peer input (1.0615ms)
+✔ append undo keeps later paragraph structure but refuses rewritten AI characters (0.319917ms)
+✔ spreadsheet undo restores native rich runs after a row move and retains styled peer input (0.319333ms)
+✔ a newly created sheet cell keeps a collaborator's supplement while an untouched new cell is cleared (0.226542ms)
+✔ CSV text undo preserves unambiguous Unicode additions and refuses a later type conversion (0.163292ms)
+✔ rich spreadsheet undo negotiates one atomic schema before preparing a write (0.870917ms)
+ℹ tests 46
+ℹ suites 0
+ℹ pass 46
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 317.946625

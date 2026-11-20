@@ -1,0 +1,17 @@
+{
+  "status": "passed",
+  "rustToolchain": "1.90.0",
+  "rustUnitPassed": 1163,
+  "rustDocPassed": 0,
+  "rustIgnored": 0,
+  "formatChecks": [
+    "cargo +1.90.0 fmt --all -- --check",
+    "cargo fmt --all -- --check"
+  ],
+  "clippy": "cargo +1.90.0 clippy --all-targets -- -D warnings",
+  "nodeCommand": "npm test --prefix apps/workspace",
+  "nodePassed": 46,
+  "engineProtocolFingerprint": "9dd62f7cf9f39d9ac1f31f538be07c2c9e4fc0ad23e40889da2df3d16a98fdac",
+  "engineArtifactSha256": "c0a29792c568830a2a344ec503c5a1f40980e43e5b88f2ed82acb56fff9b13e4",
+  "localOnly": true
+}

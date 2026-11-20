@@ -1,0 +1,111 @@
+{
+  "status": "failed-before-fix",
+  "issue": "Background Univer initialization took focus after the Word comment range was selected.",
+  "events": [
+    {
+      "timeMs": 933.4,
+      "event": "focusin",
+      "element": "<button aria-pressed=\"true\">审阅</button>",
+      "selectedText": "",
+      "pane": null
+    },
+    {
+      "timeMs": 980.9,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" translate=\"no\" class=\"tiptap ProseMirror hcd-editor-body\" tabindex=\"0\"><p data-hcd-block-id=\"n_091e190e7027bfc7771a3c53ea2c11f2\" style=\"font-family: Cal",
+      "selectedText": null,
+      "pane": "96084725-cf06-445d-bca0-2389eb4330e1"
+    },
+    {
+      "timeMs": 982.2,
+      "event": "focusout",
+      "element": "<button aria-pressed=\"true\">审阅</button>",
+      "selectedText": "",
+      "pane": null
+    },
+    {
+      "timeMs": 982.9,
+      "event": "focusin",
+      "element": "<div contenteditable=\"true\" translate=\"no\" class=\"tiptap ProseMirror hcd-editor-body ProseMirror-focused\" tabindex=\"0\"><p data-hcd-block-id=\"n_091e190e7027bfc7771a3c53ea2c11f2\" sty",
+      "selectedText": "List Showcase",
+      "pane": null
+    },
+    {
+      "timeMs": 989.5,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": null
+    },
+    {
+      "timeMs": 991.7,
+      "event": "focusout",
+      "element": "<div contenteditable=\"true\" translate=\"no\" class=\"tiptap ProseMirror hcd-editor-body\" tabindex=\"0\"><p data-hcd-block-id=\"n_091e190e7027bfc7771a3c53ea2c11f2\" style=\"font-family: Cal",
+      "selectedText": "",
+      "pane": null
+    },
+    {
+      "timeMs": 991.8,
+      "event": "focusin",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": "",
+      "pane": null
+    },
+    {
+      "timeMs": 994.8,
+      "event": "focusout",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": "",
+      "pane": null
+    },
+    {
+      "timeMs": 995.4,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": "3da0c375-624b-4ce4-8a65-73f665f4d42e"
+    },
+    {
+      "timeMs": 995.4,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": "3da0c375-624b-4ce4-8a65-73f665f4d42e"
+    },
+    {
+      "timeMs": 995.4,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": "3da0c375-624b-4ce4-8a65-73f665f4d42e"
+    },
+    {
+      "timeMs": 1000.8,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": "3da0c375-624b-4ce4-8a65-73f665f4d42e"
+    },
+    {
+      "timeMs": 1000.8,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": "3da0c375-624b-4ce4-8a65-73f665f4d42e"
+    },
+    {
+      "timeMs": 1002.1,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": "3da0c375-624b-4ce4-8a65-73f665f4d42e"
+    },
+    {
+      "timeMs": 1002.1,
+      "event": "focus-call",
+      "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); col",
+      "selectedText": null,
+      "pane": "3da0c375-624b-4ce4-8a65-73f665f4d42e"
+    }
+  ]
+}

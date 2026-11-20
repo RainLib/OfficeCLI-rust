@@ -1,0 +1,53 @@
+{
+  "sourceSha256": "4e7fbc870321cec5419d5292b82f962e8ab6ac8f4e25d56463563a6e9bf6a743",
+  "imported": {
+    "x": "914400",
+    "y": "457200",
+    "width": "7315200",
+    "height": "914400",
+    "text": "Master-led layout",
+    "runs": [
+      {
+        "font": "Georgia, Arial, \"Helvetica Neue\", sans-serif",
+        "size": "40px",
+        "color": "rgb(34, 34, 34)",
+        "weight": "700"
+      }
+    ]
+  },
+  "moved": {
+    "x": "1123950",
+    "y": "590550",
+    "width": "7315200",
+    "height": "914400",
+    "text": "Master-led title revised",
+    "runs": [
+      {
+        "font": "Georgia, Arial, \"Helvetica Neue\", sans-serif",
+        "size": "40px",
+        "color": "rgb(34, 34, 34)",
+        "weight": "700"
+      }
+    ]
+  },
+  "reopened": {
+    "x": "1123950",
+    "y": "590550",
+    "width": "7315200",
+    "height": "914400",
+    "text": "Master-led title revised",
+    "runs": [
+      {
+        "font": "Georgia, Arial, \"Helvetica Neue\", sans-serif",
+        "size": "40px",
+        "color": "rgb(34, 34, 34)",
+        "weight": "700"
+      }
+    ]
+  },
+  "preserved": [
+    "ppt/slideMasters/slideMaster1.xml",
+    "ppt/slideLayouts/slideLayout1.xml",
+    "ppt/theme/theme1.xml"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "checks": [
+    "Word review anchors a real text selection, follows it past a separate paragraph edit, preserves the reply and resolved status in a native DOCX, and can reopen the thread after re-import.",
+    "Word accepts or rejects individual native tracked runs, synchronizes the body, preserves a later edit to restored bold text and an unrelated pending revision, and reopens the original comment thread in the exported DOCX."
+  ]
+}

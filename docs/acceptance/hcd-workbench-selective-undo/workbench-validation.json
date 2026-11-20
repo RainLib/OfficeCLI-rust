@@ -1,0 +1,60 @@
+{
+  "checks": [
+    "All four file creation icons share one ink tone. Both AI dock surfaces have four 16px corners, a 10px gap and an outer inset; closing the dock gives its width back to the file library.",
+    "Unified home, four creation actions and four authorized mixed-format files.",
+    "Home search and starred files operate on the authorized catalog.",
+    "The drawing surface fills the active tab below the global toolbar, including alongside global AI.",
+    "Dragging reorders tabs without remounting their editors.",
+    "The top bar themes Home, all three editors and global AI together. Switching preserves the live document, explicit dark survives reload, and system mode follows OS changes.",
+    "Three restored background editors; optional global panel, targets and unsent draft survive reload.",
+    "DOCX, XLSX and Excalidraw stayed unchanged before approval. Review and write receipts survived reload. Independent engine read-back confirmed edits in the three authorized files.",
+    "The Word range and its pending global instruction were recovered on the same revision after reloading.",
+    "Copied an actual selected Word passage into the authorized spreadsheet cell and a new whiteboard note, with the source file remaining read-only for this task.",
+    "Only the chosen Word range was undone, and a later manual paragraph edit and undo receipt survived reload.",
+    "Approved Word and canvas additions can be removed individually; undo of a supplemented Word paragraph retains the manual text, and changes in separate paragraphs and canvas objects remain.",
+    "One workspace search reads authorized content in Word, spreadsheets and canvas; choosing a result opens its exact Word selection or spreadsheet cell.",
+    "A search result for a file added after Home loaded opens without refreshing or losing the other tabs.",
+    "Group, batch close, reopen and read saved content.",
+    "Create a native Word file from Home and open it in a new tab.",
+    "An independent MCP client used one of two scoped file connections, streamed the real editing and completion events into the open tabs, and left Home and the closed AI panel in place.",
+    "On a 390px phone the home, file opener and optional AI drawer stay within the viewport.",
+    "CSV and TSV uploaded through Home, opened in editable workbook tabs, and returned original cells from the engine.",
+    "A reviewed AI first write to a blank TSV cell was undone after reload. Engine inspection confirms the cell is physically absent and a later edit to a different cell remains.",
+    "Word, CSV and canvas each restored their distinct unsent prompt, selected range/object and task file after switching, reload and reopening a closed tab.",
+    "Word and CSV reference cards survived reload. A board selection wrote four editable Word cells and a working backlink in one revision.",
+    "Both source editors placed their actual paragraph or B2:C3 selection on the chosen board without retyping its address.",
+    "Row and column insertion moved the linked chart from B2:C3 to B3:C4 and C3:D4. The real source edit updated the bar chart, and its line-chart view retained the same board object.",
+    "A hosted Word selection generated a preview with a loopback model, appended editable diagram elements, left existing objects in place and returned to the original selected passage.",
+    "Word, spreadsheet and slide tabs use one file title, reclaim both closed panel columns, and reopen their panels from View. The slide navigator survives reload.",
+    "A real worksheet → Word → whiteboard dependency chain waits for each saved revision. A later Word edit rejects its stale review; after reload only Word is rechecked, the worksheet receipt and manual text remain, and the whiteboard draft uses the confirmed Word result.",
+    "The real workbench creates a shared project and nested folders, places new Word and uploaded text files in the selected folder, moves a file to the root, searches within the project, updates a member role and restores the same folder after reload.",
+    "The workbench moves an original picture in a real PPTX, inserts a native ellipse and uploaded picture, resizes, jointly moves and aligns them, and reopens the source-backed download with the positions, stack order and editable objects intact.",
+    "A newly inserted ellipse and uploaded picture form one editable native group. Copying the edited slide and moving its group leave the original unchanged; both independent groups reopen in the downloaded PPTX.",
+    "The workbench copies a real slide with notes and an editable native chart, edits the original and copy's notes independently before export, and preserves both after reload and source-format reopening.",
+    "A native PPTX inherits placeholder geometry by idx, master styles and theme Latin/CJK fonts. Text edits and pointer moves survive native export/reopen without changing shared layout, master or theme XML.",
+    "Inherited placeholders retain their positions and typography through a native master-background edit and a three-effect animation track; reload, presentation forward/back and native export/reopen preserve the track.",
+    "Edited title and body master text styles through the real dialog. Reload and native export/reopen retain shared font, size, color and explicit false values, while layout, paragraph and direct run overrides remain unchanged and title XML stays inherited.",
+    "The XLSX workbench creates a native chart from the actual grid selection, reflects a changed literal and dependent formula, exports and reopens the editable chart, and supports deletion and undo.",
+    "An original DOCX drawing can be selected in Word, placed with native top-and-bottom wrapping and spacing, reopened from the download, converted to inline, and restored on its own without replacing its media.",
+    "Word review anchors a real text selection, follows it past a separate paragraph edit, preserves the reply and resolved status in a native DOCX, and can reopen the thread after re-import.",
+    "Word accepts or rejects individual native tracked runs, synchronizes the body, preserves a later edit to restored bold text and an unrelated pending revision, and reopens the original comment thread in the exported DOCX.",
+    "Word table menus merge horizontally and vertically, split back into editable cells, retain original paragraph order and marks, and accept real inline input without a modal.",
+    "Shift-click selects a complete 2×2 rectangle. Two real pages synchronize its merge, and guarded undo/redo leaves the other page’s later body edit intact.",
+    "The actual downloaded DOCX reopens in a new workbench file. Independent OOXML checks confirm native merges, split-cell input, bold/italic and every unrelated ZIP part; source content and the concurrent body edit survive.",
+    "A copied slide note survived offline browser closure; recovery reopened its owning slide without writing, then one explicit save committed the draft."
+  ],
+  "readBack": {
+    "xlsx": {
+      "contains": true,
+      "revision": 1
+    },
+    "excalidraw": {
+      "contains": true,
+      "revision": 1
+    },
+    "docx": {
+      "contains": true,
+      "revision": 2
+    }
+  }
+}

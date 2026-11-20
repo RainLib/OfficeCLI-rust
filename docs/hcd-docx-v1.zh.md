@@ -207,9 +207,25 @@ Markdown/HTML 导出 PDF 时，canonical HTML/CSS 由进程内纯 Rust 排版器
 
 Java 生产服务仍应以数据库 revision/head 为权威，在对象上传完成后做数据库 CAS。OfficeCLI 的本地 manifest head 只负责 bundle 内原子可见性。
 
+## PPT 原生组合
+
+在 PPT 的「开始」中选择「选择对象」，按住 Shift 选中同页的形状、文本框、图片或已有组合，然后点击「组合」。组合可一起移动、等比调整大小，也可以作为整体与其他对象对齐。「取消组合」保留成员及其当前位置，修订历史可恢复先前的组合状态。
+
+`hcd-patch/64` 提供 `pptx.group.create` 和 `pptx.group.ungroup`，组合坐标沿用 `pptx.objects.transform`。原格式导出写入 DrawingML 原生组合并保留成员 ID 和图片关系。超大分片组、带受保护对象的组以及拆分后需要剪切变换的组合保留原生结构。早于此版本导入的文件可直接组合独立对象，旧预览中的原生组合可从原始 PPTX 重新导入读取。
+
+`npm run test:workbench --prefix apps/workspace` 验证新插入的形状与图片能够组合、整体移动、原格式导出和重新打开。
+
+## PDF 扫描文字和缩放
+
+在 PDF 的「视图」菜单选择「识别扫描文字」，可以处理当前页，或批量处理没有原生文字的扫描页。混合页可单独识别，系统会过滤和原生文字重叠的识别结果。浏览器从同源发行资源加载中英文模型，识别完成后把文字和行框写入独立修订。拖选可复制，双击可校对，全文搜索可以定位到识别行。
+
+`hcd-patch/62` 的 `pdf.ocr.apply` 接收原件的物理页号，以及按显示方向计算的归一化行框。原格式导出保留原页的绘制内容，另写可搜索的透明文字。仅有 HCD 包时也会在重建的页面图像上保留 OCR 文字。工作台放大当前可见页时会请求更高分辨率，并在新图解码后替换预览。
+
 ## 导出与保真
 
 导出先校验源文件 SHA-256，再从目标 revision 的 HTML fragment 取正文，通过 revision 的 `dirtyNodeIds` 精确收集实际修改节点，不会因为一个节点变化而缓冲整个 dirty part。OOXML 只有 dirty XML parts 被事件流重写，其他 ZIP entry 使用 raw compressed copy；候选 ZIP 的全部 XML/.rels 会在目标文件原子发布前执行流式 well-formed、DOCTYPE、深度和元素预算校验。PDF 在同目录临时副本上修改后原子发布。HTML/TXT 只流式复制并替换 dirty source range；revision 0 导出与源文件逐字节一致。目标路径必须不存在。
+
+独立的 PNG、JPEG 和 WebP 图片可从「图层」导入素材、调整形状和排列顺序。`hcd-patch/63` 的 `image.layers.set` 将图层属性和服务端合成图写入同一修订。整图调整保存为新的结果图层，局部重绘保存为对应区域的结果图层。通过图层显隐或版本恢复可回到早先的画面。导出图片格式得到当前合成图，导出 HCD 保留图层素材与历史。可用 `officecli hdoc unpack` 和 `officecli hdoc validate` 核对下载包。
 
 HCD 脱敏识别 annotation 默认不写回源格式。导出后会重新打开输出做结构检查并生成 `FidelityReport`。不支持的变更在写目标文件前报错，不做静默降级。source-free/cross-format 路径先按 revision index 顺序校验并物化 canonical chunks，整体 HTML 受 64 MiB 上限约束，再固定使用 OfficeCLI 进程内 Rust handler，不调用 LibreOffice/WPS/pdf2docx/Chromium；Profile 专属源格式几何、opaque part 和 annotation 会在 report 中标记为 flattened。跨 chunk 的 PPTX canonical table 会先按稳定 table node ID、连续 fragment/row range、固定列数和 final 总行数重组；实际 `<tr>` 数也必须与元数据一致。重组后的表格在 PPTX 中建立为原生 DrawingML 表格；单 slide 限制为 18×12，超出时拆为行列窗口并重复首行。PDF 则直接排版 canonical HTML/CSS，保留常见样式、表格、代码块、链接、Unicode/emoji 文本层和分页，并报告 `HIGH`；它不等同于恢复源 Office/PDF 的物理页面，也不宣称任意浏览器 CSS 像素一致。通过 HCD 内容寻址校验和栅格签名白名单的图片会原生写入四种目标；1–100,000,000 EMU 的图片宽高会传递到输出，PPTX 直接 picture 的有界 x/y 会复用。
 
@@ -317,6 +333,14 @@ OFFICECLI_BIN="$PWD/../../../target/debug/officecli" npm run test:workspace -- -
 ```
 
 浏览器回归检查纵横向页面、显式分页、首页／奇偶页页眉、动态页码、长段落 Unicode 字符无损、31 行表格与纵向合并完整、本地草稿预览及重新打开、源格式导出、画布缩放以及两个 MCP Agent 的跨页定位与光标移动，并生成 `word-paginated-cover.png`。服务端回归检查跨文档权限、历史 revision、非 DOCX 拒绝和读取不改 head。
+
+## Word 审阅
+
+在 Word 编辑器的「审阅」中可定位原件批注，选中一段正文后新建批注，也可以回复、解决和重新打开批注。若后续编辑使选文无法唯一定位，面板会标记选区变化，并在原段落仍存在时提供定位。源格式导出保留原生批注范围和线程关系。
+
+「原生修订」列出主文档正文中的原件修订。可以定位并分别接受或拒绝支持的行内插入、删除文字，包括表格单元格里的文字。拒绝删除后恢复的文字保留原有格式，之后可以继续编辑。格式、段落标记、移动和表格结构修订以只读方式列出，并随其他待审项保留在源格式导出中。批注与修订决定都形成工作区版本。恢复旧版本时，正文、批注和待审状态回到对应的保存点。
+
+`npm run test:workbench --prefix apps/workspace` 验证从工作台处理原件修订、保存后续改写、下载 DOCX 并重新上传。`cargo test -p hcd-docx word_run_decisions_round_trip_without_losing_pending_changes_or_later_edits` 同时检查行内文字修订的四种处理结果、表格插行、历史导出与恢复。
 
 ## Word 表格文字编辑与 Agent 协同
 

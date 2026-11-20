@@ -48,9 +48,9 @@ HCD_BROWSER_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' 
 
 ## 范围
 
-结构修改后的 DOCX 使用语义导出，会重建文档布局；不承诺复杂源排版或 ZIP 部件字节保真。仅修改已有表格文字的源格式导出路径不变。合并/拆分单元格、任意表格样式调整及任意分片表格重组不在本次开放范围内。
+后续原生导出路径已补齐按源身份重建表格网格：复用原单元格与段落 XML，只生成网格/合并几何和真正的新内容；页眉、页脚及无关 OOXML 部件不经过 HTML 重建。`hcd-docx` 中 `native_table_edits_keep_running_regions_source_parts_merges_and_new_text` 用同一原件验证运行区域、源部件、合并关系和新文字。没有原件时的语义导出仍不承诺复杂源排版或 ZIP 部件字节保真。合并与按已有网格拆分的编辑入口现已补齐，见[单元格专项验收](hcd-table-cells.zh.md)；任意表格样式调整及任意分片表格重组仍有边界。
 
-完整 `cargo clippy -p hcd-core --all-targets -- -D warnings` 仍被此前 `patch.rs:11152` 的 `collapsible_match` 警告阻塞；不改动该图片操作逻辑。临时放行这一项 lint 后通过，新增表格代码未报告其他 lint。
+此前完整 Clippy 曾被图片操作中的 `collapsible_match` 阻塞。当前已完成相应整理，按 CI 的 Rust 1.90.0 执行 `cargo clippy --all-targets -- -D warnings` 已通过，不再需要临时放行 lint。
 
 ## 执行结果
 

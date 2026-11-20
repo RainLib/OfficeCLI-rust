@@ -1,0 +1,14 @@
+{
+  "status": "passed",
+  "checks": [
+    "The engine accepts the barrier only from its application service. A held barrier rejects direct mutations and still serves document reads.",
+    "A failed snapshot releases the admission barriers and leaves no public backup destination.",
+    "An admitted upload drained. New writes briefly returned a retryable response, while file and editor reads kept serving. Open Yjs clients continued afterwards on the same supervisor.",
+    "Checksums reject tampered bytes and restore refuses an existing working directory. Signing identity and Yjs bytes survive a verified restore.",
+    "The restored service reopened the original DOCX with the synchronized text that was awaiting autosave at the cut. A fresh native DOCX export preserved that text and excluded the later edits.",
+    "The surviving Provider job committed the retained revision through the original publication ID. The business version list and original bytes remained intact."
+  ],
+  "files": 53,
+  "bytes": 304591,
+  "collaborationRooms": 1
+}

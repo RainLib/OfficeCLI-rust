@@ -104,3 +104,82 @@ jobs:
             docs/acceptance/hcd-grid-batch-recovery/*.png
             docs/acceptance/hcd-grid-batch-recovery/*.json
           retention-days: 7
+
+  workbench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      OFFICECLI_BIN: ${{ github.workspace }}/target/debug/officecli
+      OFFICECLI_WORKSPACE_DIST: ${{ runner.temp }}/fold-workspace-dist
+      OFFICECLI_DESK_ARTIFACTS: ${{ runner.temp }}/fold-workbench-proof
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            examples/hdoc/admin-app/package-lock.json
+            examples/hdoc/editor/package-lock.json
+            examples/hdoc/embed-host/package-lock.json
+            examples/hdoc/xlsx-univer-viewer/package-lock.json
+      - name: Install fonts and PDF renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk poppler-utils
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install independent native-file readers
+        run: python -m pip install -r examples/hdoc/embed-host/fixtures/native-office/requirements.txt
+      - run: cargo build -p officecli
+      - name: Install workspace UI dependencies
+        run: |
+          npm ci --prefix examples/hdoc/xlsx-univer-viewer
+          npm ci --prefix examples/hdoc/editor
+          npm ci --prefix examples/hdoc/admin-app
+          npm ci --prefix examples/hdoc/embed-host
+      - name: Workspace unit regressions
+        run: |
+          npm test --prefix apps/workspace
+          npm run test:word-review-anchors --prefix examples/hdoc/editor
+      - name: Build the complete workspace
+        run: npm run build --prefix apps/workspace
+      - name: Install Chromium
+        working-directory: examples/hdoc/editor
+        run: npx playwright install --with-deps chromium
+      - name: Verify main workbench, cross-file AI and native roundtrips
+        run: |
+          npm run test:workbench --prefix apps/workspace
+          npm run test:workbench-review --prefix apps/workspace
+          OFFICECLI_REVIEW_WARM_TABS=1 npm run test:workbench-review --prefix apps/workspace
+      - name: Verify pivots, conditional rules, OCR and image layers through native files
+        env:
+          OFFICECLI_NATIVE_ARTIFACTS: ${{ runner.temp }}/fold-native-office-proof
+        run: npm run test:workbench-native --prefix apps/workspace
+      - name: Verify selective AI undo with distinct browser identities
+        run: |
+          npm run test:workbench-undo --prefix apps/workspace
+          OFFICECLI_UNDO_CASE=pending npm run test:workbench-undo --prefix apps/workspace
+          OFFICECLI_UNDO_CASE=append npm run test:workbench-undo --prefix apps/workspace
+          npm run test:workbench-sheet-undo --prefix apps/workspace
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: hcd-workbench-verification
+          path: |
+            ${{ runner.temp }}/fold-workbench-proof/*.json
+            ${{ runner.temp }}/fold-workbench-proof/*.png
+            /tmp/officecli-workbench-undo-*/*.png
+            /tmp/officecli-sheet-undo-*/validation.json
+            /tmp/officecli-sheet-undo-*/*.png
+            /tmp/officecli-workbench-review-*/validation.json
+            /tmp/officecli-workbench-review-*/*.png
+            ${{ runner.temp }}/fold-native-office-proof/**/*.json
+            ${{ runner.temp }}/fold-native-office-proof/**/*.png
+            ${{ runner.temp }}/fold-native-office-proof/**/native.log
+          retention-days: 7
