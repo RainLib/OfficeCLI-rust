@@ -45,6 +45,27 @@ export function selectedCells(target, sheet) {
     }
   return cells;
 }
+
+export function relocateSheetSelection(target, sheet, nodeIds) {
+  check(sheet.sheetId === target.sheetId && Array.isArray(nodeIds) && nodeIds.length && nodeIds.every(Boolean),
+    409, "包含空白单元格的旧选区需要重新选择。");
+  const addresses = new Map(sheet.cells.map(cell => [cell.nodeId, cell.address]));
+  const positions = nodeIds.map(id => {
+    const address = /^([A-Z]+)([1-9][0-9]*)$/.exec(addresses.get(id) || "");
+    check(address, 409, "原选区的单元格已被移除，请重新选择。");
+    let column = 0;
+    for (const letter of address[1]) column = column * 26 + letter.charCodeAt(0) - 64;
+    return [+address[2] - 1, column - 1];
+  });
+  const [top, left] = positions[0];
+  const rows = target.bottom - target.top + 1;
+  const columns = target.right - target.left + 1;
+  check(positions.length === rows * columns && positions.every(([row, column], index) =>
+    row === top + Math.floor(index / columns) && column === left + index % columns),
+  409, "原来的单元格不再形成同一个区域，请重新选择。");
+  return sheetTarget({ ...target, sheetIndex: sheet.sheetIndex, top, left, bottom: top + rows - 1, right: left + columns - 1 });
+}
+
 export function sheetEdit(target, cells, edits) {
   const selected = new Map(cells.map((c) => [c.address, c]));
   check(

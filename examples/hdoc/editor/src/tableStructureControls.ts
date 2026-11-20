@@ -2,28 +2,43 @@ import type { Editor } from '@tiptap/core'
 import './table-tools.css'
 
 export type TableAction = 'insertRow' | 'deleteRow' | 'insertColumn' | 'deleteColumn' | 'deleteTable'
-export type TableActionDetail = { blockId: string; tableIndex: number } & (
+type CellRange = { row: number; column: number; rows: number; columns: number }
+export type TableActionDetail = { blockId: string; tableIndex: number; expectedLayout?: string } & (
   { action: TableAction; index: number } | { action: 'activateCell'; row: number; column: number }
+  | { action: 'splitCell'; row: number; column: number }
+  | { action: 'mergeCells'; range: CellRange }
 )
 type MenuScope = 'row' | 'column' | 'table'
 const HIDE_DELAY = 800
 
 /** Logical grid addresses agree with the service, including merged cells. */
-function address(table: HTMLTableElement, target: HTMLTableCellElement) {
+function layout(table: HTMLTableElement) {
   const occupied = new Set<string>()
-  let found: { row: number; column: number } | undefined, width = 0
+  const cells: Array<{ value: HTMLTableCellElement; row: number; column: number }> = []
+  let width = 0
   const rows = [...table.rows].filter(row => row.closest('table') === table)
   rows.forEach((row, r) => {
     let c = 0
     for (const cell of [...row.cells]) {
       if (cell.dataset.hcdVMerge === 'continue' && cell.style.display === 'none') continue
       while (occupied.has(`${r}:${c}`)) c++
-      if (cell === target) found = { row: r, column: c }
+      cells.push({ value: cell, row: r, column: c })
       for (let y = r; y < r + cell.rowSpan; y++) for (let x = c; x < c + cell.colSpan; x++) occupied.add(`${y}:${x}`)
       c += cell.colSpan; width = Math.max(width, c)
     }
   })
-  return found && { ...found, rows: rows.length, columns: width }
+  return { cells, rows: rows.length, columns: width }
+}
+function address(table: HTMLTableElement, target: HTMLTableCellElement) {
+  const grid = layout(table), found = grid.cells.find(cell => cell.value === target)
+  return found && { row: found.row, column: found.column, rows: grid.rows, columns: grid.columns }
+}
+
+/** Text checkpoints may advance the block hash; changing cell ownership must
+ * still invalidate a control chosen before the checkpoint was awaited. */
+export function tableLayoutSignature(table: HTMLTableElement) {
+  return JSON.stringify(layout(table).cells.map(({ value, row, column }) => [row, column, value.rowSpan, value.colSpan,
+    [...value.querySelectorAll<HTMLElement>('[data-hcd-id]')].filter(node => node.closest('table') === table).map(node => node.dataset.hcdId)]))
 }
 
 /** Transient affordances live outside canonical content: no cell wrappers or selection boxes. */
@@ -40,6 +55,39 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
   layer.hidden = true
   host.append(layer)
   let cell: HTMLTableCellElement | null = null, hideTimer: ReturnType<typeof setTimeout> | undefined
+  let selectionAnchor: HTMLTableCellElement | null = null, selection: CellRange | null = null
+  let focusedCell: HTMLTableCellElement | null = null
+  const selectedCells = new Set<HTMLTableCellElement>()
+  const selectionStyle = doc.createElement('style')
+  selectionStyle.textContent = '.hcd-table-cell-selected{box-shadow:inset 0 0 0 2px #7960cf;background-image:linear-gradient(#8467dd18,#8467dd18)}'
+  doc.head.append(selectionStyle)
+  const clearSelection = () => {
+    selectedCells.forEach(value => value.classList.remove('hcd-table-cell-selected'))
+    selectedCells.clear(); selection = null; selectionAnchor = null
+  }
+  const rangeCells = (table: HTMLTableElement, range: CellRange) => layout(table).cells
+    .map(({ value, row, column }) => ({ value, at: { row, column } }))
+    .filter(({ value, at }) => at.row < range.row + range.rows && range.row < at.row + value.rowSpan
+      && at.column < range.column + range.columns && range.column < at.column + value.colSpan)
+  const canMerge = (table: HTMLTableElement, range: CellRange | null) => {
+    if (!range) return false
+    const cells = rangeCells(table, range)
+    return cells.length > 1 && cells.every(({ value, at }) => at.row >= range.row && at.column >= range.column
+      && at.row + value.rowSpan <= range.row + range.rows && at.column + value.colSpan <= range.column + range.columns)
+  }
+  const neighborRange = (direction: 'right' | 'down') => {
+    const table = cell?.closest('table'), at = table && cell && address(table, cell)
+    if (!table || !cell || !at) return null
+    const r = at.row + (direction === 'down' ? cell.rowSpan : 0), c = at.column + (direction === 'right' ? cell.colSpan : 0)
+    const next = layout(table).cells.find(({ value, row, column }) => {
+      return row <= r && r < row + value.rowSpan && column <= c && c < column + value.colSpan
+    })
+    if (!next) return null
+    const range = { row: at.row, column: at.column,
+      rows: direction === 'down' ? next.row + next.value.rowSpan - at.row : cell.rowSpan,
+      columns: direction === 'right' ? next.column + next.value.colSpan - at.column : cell.colSpan }
+    return canMerge(table, range) ? range : null
+  }
   let reach: { left: number; top: number; right: number; bottom: number } | undefined
   const button = (text: string, aria: string, className: string) => {
     const item = owner.createElement('button'); item.type = 'button'; item.className = className
@@ -82,11 +130,22 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
     const isRow = action.endsWith('Row')
     const index = (isRow ? at.row : at.column) + (after ? isRow ? cell.rowSpan : cell.colSpan : 0)
     const tableIndex = [...doc.querySelectorAll('.hcd-opaque-content table')].indexOf(table)
+    const expectedLayout = tableLayoutSignature(table)
+    clearSelection()
     hide()
     // The action button is about to disappear. Keep keyboard undo on the
     // editor without moving the canvas to its old text selection.
     editor.view.dom.focus({ preventScroll: true })
-    editor.view.dom.dispatchEvent(new CustomEvent<TableActionDetail>('hcd-table-action', { detail: { blockId, tableIndex, action, index } }))
+    editor.view.dom.dispatchEvent(new CustomEvent<TableActionDetail>('hcd-table-action', { detail: { blockId, tableIndex, action, index, expectedLayout } }))
+  }
+  const reshape = (range: CellRange | null, split = false) => {
+    const table = cell?.closest('table'), at = table && cell && address(table, cell)
+    if (!editor.isEditable || !table || !cell || !at || !split && !canMerge(table, range)) return
+    const detail: TableActionDetail = { blockId, tableIndex: [...doc.querySelectorAll('.hcd-opaque-content table')].indexOf(table), expectedLayout: tableLayoutSignature(table),
+      ...(split ? { action: 'splitCell', row: at.row, column: at.column } : { action: 'mergeCells', range: range! }) }
+    clearSelection(); hide()
+    editor.view.dom.focus({ preventScroll: true })
+    editor.view.dom.dispatchEvent(new CustomEvent<TableActionDetail>('hcd-table-action', { detail }))
   }
   row.onclick = () => execute('insertRow', true); column.onclick = () => execute('insertColumn', true)
   const viewport = host.closest('.canvas-viewport')
@@ -134,6 +193,22 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
       if (action === 'deleteTable') item.classList.add('table-delete-all')
       item.addEventListener('click', () => execute(action, after)); item.dataset.action = action; menu.append(item)
     }
+    if (next === 'table') {
+      const group = owner.createElement('div'); group.className = 'table-cell-actions'
+      const choices: Array<[string, boolean, () => void]> = [
+        ['合并所选单元格', canMerge(table, selection), () => reshape(selection)],
+        ['向右合并单元格', !selection && !!neighborRange('right'), () => reshape(neighborRange('right'))],
+        ['向下合并单元格', !selection && !!neighborRange('down'), () => reshape(neighborRange('down'))],
+        ['拆分单元格', !selection && !!cell && (cell.rowSpan > 1 || cell.colSpan > 1), () => reshape(null, true)],
+      ]
+      for (const [text, enabled, run] of choices) {
+        const item = owner.createElement('button'); item.type = 'button'; item.setAttribute('role', 'menuitem')
+        item.textContent = label(text); item.disabled = !enabled; item.onclick = run
+        if (text === '合并所选单元格' && !enabled) item.title = label('按住 Shift 点击另一单元格，选择矩形区域。')
+        group.append(item)
+      }
+      menu.append(group)
+    }
     menu.hidden = false; triggers[next].setAttribute('aria-expanded', 'true'); position()
     menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true })
   }
@@ -144,6 +219,26 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
     if (!target || !editor.isEditable) return
     if (event.type === 'focusin' || event.type === 'pointerdown') onFocus()
     hold()
+    if (event.type === 'pointerdown') {
+      const pointer = event as PointerEvent
+      const table = target.closest('table')!
+      const anchor = selectionAnchor ?? focusedCell ?? cell
+      if (pointer.shiftKey && anchor?.isConnected && anchor.closest('table') === table) {
+        pointer.preventDefault()
+        const start = address(table, anchor)!, end = address(table, target)!
+        clearSelection(); selectionAnchor = anchor
+        selection = { row: Math.min(start.row, end.row), column: Math.min(start.column, end.column),
+          rows: Math.max(start.row + anchor.rowSpan, end.row + target.rowSpan) - Math.min(start.row, end.row),
+          columns: Math.max(start.column + anchor.colSpan, end.column + target.colSpan) - Math.min(start.column, end.column) }
+        for (const { value } of rangeCells(table, selection)) {
+          selectedCells.add(value); value.classList.add('hcd-table-cell-selected')
+        }
+        close(); cell = target; position(); return
+      }
+      clearSelection()
+      focusedCell = target
+    } else if (selection) return
+    if (event.type === 'focusin') focusedCell = target
     // Moving to the corner menu crosses other cells in a long table. Keep its
     // target and actions stable until an explicit click, Escape or dismissal.
     if (!menu.hidden && event.type !== 'pointerdown') return
@@ -172,12 +267,12 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
     if (x >= reach.left && x <= reach.right && y >= reach.top && y <= reach.bottom) hold()
     else scheduleHide()
   }
-  const outside = (event: Event) => { if (!layer.contains(event.target as Node) && !targetCell(event.target)) hide() }
+  const outside = (event: Event) => { if (!layer.contains(event.target as Node) && !targetCell(event.target)) { clearSelection(); hide() } }
   const keydown = (event: KeyboardEvent) => {
     if (event.key === 'Escape' && !layer.hidden) {
       event.preventDefault(); event.stopPropagation()
       if (!menu.hidden) { close(); triggers[scope].focus({ preventScroll: true }) }
-      else { hide(); cell?.querySelector<HTMLElement>('[contenteditable="plaintext-only"]')?.focus({ preventScroll: true }) }
+      else { clearSelection(); hide(); cell?.querySelector<HTMLElement>('[contenteditable="plaintext-only"]')?.focus({ preventScroll: true }) }
     } else if (!menu.hidden && menu.contains(event.target as Node) && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
       event.preventDefault()
       const items = [...menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
@@ -213,7 +308,7 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
           if (!editor.isEditable) return
           const selected = address(table, cell)
           if (selected) editor.view.dom.dispatchEvent(new CustomEvent<TableActionDetail>('hcd-table-action', {
-            detail: { blockId, tableIndex, action: 'activateCell', row: selected.row, column: selected.column },
+            detail: { blockId, tableIndex, action: 'activateCell', row: selected.row, column: selected.column, expectedLayout: tableLayoutSignature(table) },
           }))
         })
         paragraph.append(item)
@@ -223,7 +318,7 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
   }
   const sync = () => {
     for (const button of blankButtons) button.hidden = !editor.isEditable
-    if (!editor.isEditable) hide()
+    if (!editor.isEditable) { clearSelection(); hide() }
   }
   sync()
   editor.on('transaction', sync); editor.on('update', sync)
@@ -232,6 +327,7 @@ export function tableStructureControls({ editor, doc, frame, host, blockId, onFo
   viewport?.addEventListener('scroll', scroll, { passive: true })
   const observer = new ResizeObserver(() => { if (!layer.hidden) position() }); observer.observe(doc.querySelector('.hcd-opaque-content')!)
   return { destroy() {
+    clearSelection(); selectionStyle.remove()
     clearTimeout(hideTimer); if (scrollFrame !== undefined) owner.defaultView!.cancelAnimationFrame(scrollFrame)
     viewport?.removeEventListener('scroll', scroll); observer.disconnect(); editor.off('transaction', sync); editor.off('update', sync); blankButtons.forEach(button => button.remove())
     doc.removeEventListener('pointerover', show); doc.removeEventListener('focusin', show); doc.removeEventListener('pointerdown', show)

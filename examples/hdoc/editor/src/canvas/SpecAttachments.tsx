@@ -109,7 +109,6 @@ export function Attachment({
                 </div>
               ))}
           </div>
-          {tag?.showAuthor !== false && <small>{tag?.author}</small>}
         </div>
       ) : src ? (
         <img draggable={false} src={src} alt={name} />

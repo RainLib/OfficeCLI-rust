@@ -7,6 +7,8 @@ import { Workspace } from './App.tsx'
 import type { Session } from './api.ts'
 import { I18nProvider, useI18n, type EditorLocale } from './i18n.tsx'
 import './style.css'
+import { useRegisterEmbeddedSession } from './EmbeddedWorkspace'
+export { EmbeddedWorkspace } from './EmbeddedWorkspace'
 export { AgentCompanionMark } from './AgentCompanionMark'
 export { AppearanceProvider, useAppearance } from './Appearance.tsx'
 export { AgentPointer } from './AgentPointer'
@@ -20,6 +22,8 @@ export type EmbeddedHcdEditorProps = {
   collabUrl: string
   chatPanel?: ReactNode
   canvasLayout?: 'panel' | 'fill'
+  /** The host tab already displays the file name. */
+  integratedToolbar?: boolean
   onPreparationChange?: PreparationListener
   onSelectionChange?: (selection: HcdEmbedSelection | null) => void
   /** Open the host assistant for this exact Spec sentence (optional). */
@@ -37,7 +41,7 @@ export function EmbeddedHcdEditor(props: EmbeddedHcdEditorProps) {
   return <I18nProvider initialLocale={props.locale} onLocaleChange={props.onLocaleChange}><AppearanceProvider localControls={props.appearance === undefined || !!props.onAppearanceChange} appearance={props.appearance} onAppearanceChange={props.onAppearanceChange}><EmbeddedContent key={JSON.stringify([props.apiUrl, props.documentId])} {...props} /></AppearanceProvider></I18nProvider>
 }
 
-function EmbeddedContent({ documentId, title, token, apiUrl, collabUrl, onClose, onError, chatPanel, canvasLayout, onSelectionChange, onSpecRewriteRequest, onPreparationChange, committedRevision }: EmbeddedHcdEditorProps) {
+function EmbeddedContent({ documentId, title, token, apiUrl, collabUrl, onClose, onError, chatPanel, canvasLayout, integratedToolbar, onSelectionChange, onSpecRewriteRequest, onPreparationChange, committedRevision }: EmbeddedHcdEditorProps) {
   const { theme } = useAppearance()
   const { locale, t } = useI18n()
   const liveToken = useRef(token); liveToken.current = token
@@ -64,7 +68,8 @@ function EmbeddedContent({ documentId, title, token, apiUrl, collabUrl, onClose,
     return () => { active = false }
   }, [documentId, title, token, apiUrl, collabUrl])
   const hideNativeChat = chatPanel !== undefined
-  const effective = useMemo(() => session && ({ ...session, hideNativeChat, canvasLayout }), [session, hideNativeChat, canvasLayout])
+  const effective = useMemo(() => session && ({ ...session, locale, hideNativeChat, canvasLayout, integratedToolbar }), [session, locale, hideNativeChat, canvasLayout, integratedToolbar])
+  useRegisterEmbeddedSession(effective)
   return <div className="hcd-surface hcd-embedded" data-host-chat={chatPanel ? 'open' : undefined} data-host-back={onClose ? undefined : 'hidden'} data-theme={theme} lang={locale}>
     {effective ? <EmbedCommittedRevision.Provider value={committedRevision}><EmbedPreparation.Provider value={onPreparationChange}><EmbedSelection.Provider value={onSelectionChange}><EmbedSpecRewrite.Provider value={onSpecRewriteRequest}><Workspace key={effective.documentId} session={effective} onClose={() => onClose?.()} onEpochChange={epoch => setSession(previous => previous && ({ ...previous, collaborationEpoch: epoch }))} embedded /></EmbedSpecRewrite.Provider></EmbedSelection.Provider></EmbedPreparation.Provider></EmbedCommittedRevision.Provider> : <div className="embedded-loading">{error || t('openingDocument')}</div>}
     {effective && chatPanel && <aside className="hcd-embed-chat" aria-label="AI 聊天">{chatPanel}</aside>}

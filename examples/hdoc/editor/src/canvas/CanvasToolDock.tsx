@@ -1,3 +1,5 @@
+import { boardShape, shapes, extraShapes, outlines, type ShapeKind } from './boardShapes'
+import { BoardTableCell } from './BoardTableCell'
 import { addMindNode, isMindNode, mindOwner, mindFields } from './mindMap'
 import { MindMapTools, MindNodeEditor } from './MindMapTools'
 import {
@@ -60,19 +62,6 @@ import type { MaterialDetail } from './materialCatalog'
 import { BoardCommands } from './BoardCommands'
 import './board-tool-dock.css'
 
-type ShapeKind =
-  | 'rectangle'
-  | 'ellipse'
-  | 'diamond'
-  | 'triangle'
-  | 'down'
-  | 'rounded'
-  | 'cylinder'
-  | 'star'
-  | 'hexagon'
-  | 'speech'
-  | 'parallelogram'
-  | 'document'
 type Placement =
   | 'sticky'
   | 'table'
@@ -86,91 +75,6 @@ const drawingTools = [
   ['marker', '记号笔'], ['highlighter', '荧光笔'], ['tape', '和纸胶带'], ['eraser', '橡皮擦'],
 ] as const
 const toolMenus = new Set<BoardTool>(['pen', 'sticky', 'shapes', 'table', 'actions', 'insert'])
-const shapes: [ShapeKind, string][] = [
-  ['rectangle', '方形'],
-  ['ellipse', '圆形'],
-  ['diamond', '菱形'],
-  ['triangle', '三角形'],
-  ['down', '倒三角形'],
-  ['rounded', '圆角矩形'],
-  ['cylinder', '圆柱体'],
-]
-const extraShapes: [ShapeKind, string][] = [
-  ['star', '星形'],
-  ['hexagon', '六边形'],
-  ['speech', '对话框'],
-  ['parallelogram', '平行四边形'],
-  ['document', '文件形状'],
-]
-const outlines: Partial<Record<ShapeKind, number[][]>> = {
-  triangle: [
-    [0.5, 0],
-    [1, 1],
-    [0, 1],
-    [0.5, 0],
-  ],
-  down: [
-    [0, 0],
-    [1, 0],
-    [0.5, 1],
-    [0, 0],
-  ],
-  cylinder: [
-    [0, 0.12],
-    [0.2, 0],
-    [0.8, 0],
-    [1, 0.12],
-    [1, 0.88],
-    [0.8, 1],
-    [0.2, 1],
-    [0, 0.88],
-    [0, 0.12],
-    [0.2, 0.22],
-    [0.8, 0.22],
-    [1, 0.12],
-  ],
-  hexagon: [
-    [0.22, 0],
-    [0.78, 0],
-    [1, 0.5],
-    [0.78, 1],
-    [0.22, 1],
-    [0, 0.5],
-    [0.22, 0],
-  ],
-  speech: [
-    [0, 0],
-    [1, 0],
-    [1, 0.78],
-    [0.52, 0.78],
-    [0.28, 1],
-    [0.31, 0.78],
-    [0, 0.78],
-    [0, 0],
-  ],
-  parallelogram: [
-    [0.22, 0],
-    [1, 0],
-    [0.78, 1],
-    [0, 1],
-    [0.22, 0],
-  ],
-  document: [
-    [0, 0],
-    [0.74, 0],
-    [1, 0.25],
-    [1, 1],
-    [0, 1],
-    [0, 0],
-    [0.74, 0],
-    [0.74, 0.25],
-    [1, 0.25],
-  ],
-  star: Array.from({ length: 11 }, (_, i) => [
-    0.5 + 0.5 * (i % 2 ? 0.45 : 1) * Math.cos(-Math.PI / 2 + (i * Math.PI) / 5),
-    0.5 + 0.5 * (i % 2 ? 0.45 : 1) * Math.sin(-Math.PI / 2 + (i * Math.PI) / 5),
-  ]),
-}
 const inks = [
   ['墨黑', '#29282b'],
   ['红色', '#d34452'],
@@ -204,6 +108,9 @@ type Props = {
   writable: boolean
   visible: boolean
   author: string
+  personId?: string
+  people: import('./BoardMentions').BoardPerson[]
+  linkedComment?: { rootId: string; messageId: string }
   stamp: (onEngage: () => void) => ReactNode
   onToolChange: () => void
   onAsk?: () => void
@@ -231,38 +138,10 @@ function placeShape(
     y = drag ? Math.min(a.y, b.y) : a.y,
     w = drag ? Math.max(8, Math.abs(a.x - b.x)) : 110,
     h = drag ? Math.max(8, Math.abs(a.y - b.y)) : 88
-  const id = 'shape-' + crypto.randomUUID(),
-    base = {
-      id,
-      x,
-      y,
-      width: w,
-      height: h,
-      fillStyle: 'solid' as const,
-      backgroundColor: fill,
-      strokeColor: '#56545b',
-      strokeWidth: 1.5,
-      roughness: 0,
-    }
-  const outline = outlines[shape]
-  if (outline) {
-    const points = outline.map(
-      ([px, py]) => [px * w, py * h] as [number, number],
-    )
-    insertBoardShapes(editor, [{ ...base, type: 'line', points }], id)
-  } else
-    insertBoardShapes(
-      editor,
-      [
-        {
-          ...base,
-          type:
-            shape === 'diamond' || shape === 'ellipse' ? shape : 'rectangle',
-          roundness: shape === 'rounded' ? { type: 3 } : null,
-        },
-      ],
-      id,
-    )
+  const { id, shape: element } = boardShape(shape, { x, y, width: w, height: h }, {
+    backgroundColor: fill, fillStyle: 'solid', strokeColor: '#56545b', strokeWidth: 1.5, roughness: 0,
+  })
+  insertBoardShapes(editor, [element], id)
   return id
 }
 export function CanvasToolDock(props: Props) {
@@ -516,6 +395,10 @@ export function CanvasToolDock(props: Props) {
       land(placeShape(editor, shape, a, b, fill, drag),b)
       return
     }
+    if (tool === 'sticky') {
+      land(saveSticky(editor, b, '', paper, author, stickySize), b)
+      return
+    }
     if (tool === 'table') {
       land(insertBoardTable(editor, b, table[0], table[1])+'-0-0',b)
       return
@@ -562,8 +445,8 @@ export function CanvasToolDock(props: Props) {
     place(drag.id === 'shapes' ? 'shape' : (drag.id as Placement), p, p, false)
   }
   const cell = useRef('')
-  const openObject = useRef<(id: string, point?: BoardPoint) => void>(() => {})
-  function openById(id: string, clientPoint?: BoardPoint) {
+  const openObject = useRef<(id: string, point?: BoardPoint, focusMessage?: string) => void>(() => {})
+  function openById(id: string, clientPoint?: BoardPoint, focusMessage?: string) {
     const all = editor.getSceneElements(),
       el = all.find((e) => e.id === id),
       tag = boardTag(el)
@@ -585,9 +468,14 @@ export function CanvasToolDock(props: Props) {
       id: tag.kind === 'spec' ? tag.root : id,
       at: { x: el.x, y: el.y },
       clientPoint,
+      focusMessage,
     })
   }
   openObject.current = openById
+  useEffect(() => {
+    const link = props.linkedComment
+    if (link) openObject.current(link.rootId, undefined, link.messageId)
+  }, [props.linkedComment])
   useEffect(() => {
     const el = surface.current?.closest<HTMLElement>('.canvas-surface')
     if (!el || !visible) return
@@ -608,9 +496,25 @@ export function CanvasToolDock(props: Props) {
         )
       })
     }
+    let tap: { id: string; x: number; y: number; pointer: number } | undefined
     const pointer = (event: PointerEvent) => {
-      const e = hit(event)
-      cell.current = boardTag(e)?.kind === 'table' ? e!.id : ''
+      tap = undefined
+      const app = editor.getAppState()
+      if (!current.current.writable || event.button !== 0 || !event.isPrimary || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || app.activeTool.type !== 'selection') return
+      const element = hit(event), kind = boardTag(element)?.kind
+      cell.current = kind === 'table' ? element!.id : ''
+      if (element && !element.locked && (kind === 'table' || kind === 'sticky'))
+        tap = { id: element.id, x: event.clientX, y: event.clientY, pointer: event.pointerId }
+    }
+    const cancel = () => { tap = undefined }
+    const move = (event: PointerEvent) => {
+      if (tap && Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 4) cancel()
+    }
+    const release = (event: PointerEvent) => {
+      const start = tap
+      cancel()
+      if (start && event.pointerId === start.pointer && hit(event)?.id === start.id && Math.hypot(event.clientX-start.x,event.clientY-start.y) <= 4)
+        openObject.current(start.id, {x:event.clientX, y:event.clientY})
     }
     const double = (event: MouseEvent) => {
       const e = hit(event),
@@ -622,9 +526,15 @@ export function CanvasToolDock(props: Props) {
       openObject.current(tag.kind === 'spec' ? tag.root : e.id, { x: event.clientX, y: event.clientY })
     }
     el.addEventListener('pointerdown', pointer, true)
+    el.addEventListener('pointermove', move, true)
+    el.addEventListener('pointercancel', cancel, true)
+    el.addEventListener('pointerup', release, true)
     el.addEventListener('dblclick', double, true)
     return () => {
       el.removeEventListener('pointerdown', pointer, true)
+      el.removeEventListener('pointermove', move, true)
+      el.removeEventListener('pointercancel', cancel, true)
+      el.removeEventListener('pointerup', release, true)
       el.removeEventListener('dblclick', double, true)
     }
   }, [editor, visible])
@@ -663,11 +573,16 @@ export function CanvasToolDock(props: Props) {
     observe(editor.getAppState())
     return editor.onChange((_, state) => observe(state))
   }, [editor, observe])
-  function nextSticky(id: string, direction: NoteDirection = 'right', drop?:BoardPoint) {
+  function nextSticky(id: string, direction: NoteDirection = 'right', drop?:BoardPoint, edit=false) {
     const all = editor.getSceneElements(), source = all.find(el => el.id === id)
     if (!writable || !source || source.locked || boardTag(source)?.kind !== 'sticky') return false
+    if (drop) {
+      const target=[...all].reverse().find(el=>el.id!==id && !el.locked && ['rectangle','ellipse','diamond'].includes(el.type) &&
+        !['spec','comment'].includes(boardTag(el)?.kind || '') && drop.x>=el.x && drop.x<=el.x+el.width && drop.y>=el.y && drop.y<=el.y+el.height)
+      if (target) {connectNotes(editor,id,direction,target.id);return true}
+    }
     const spot = neighborSpot(source, direction, all.filter(el =>
-      el.id !== id && (el.type !== 'text' || el.containerId !== id) && boardTag(el)?.kind !== 'spec'))
+      el.id !== id && boardTag(el)?.kind === 'sticky' && el.type === 'rectangle'), edit)
     const {width,height}=spot, x=drop?drop.x-width/2:spot.x, y=drop?drop.y-height/2:spot.y
     const app = editor.getAppState(), z = app.zoom.value
     const sx = Math.min(Math.max(app.scrollX, 18/z-x), Math.max(18/z-x,(app.width-18)/z-x-width))
@@ -677,10 +592,11 @@ export function CanvasToolDock(props: Props) {
     dismiss()
     setPaper(source.backgroundColor)
     const tag=boardTag(source)
-    const next=saveSticky(editor,{x,y},'',source.backgroundColor,author,height,undefined,width,tag?.noteFormat,tag?.showAuthor)
-    if(drop)connectNotes(editor,id,next)
+    const next=saveSticky(editor,{x,y},'',source.backgroundColor,author,height,undefined,width,tag?.noteFormat)
+    if(drop)connectNotes(editor,id,direction,next)
     transferBoardDrop(editor,[next],{x:x+width/2,y:y+height/2},undefined,props.onSpecChange,props.elements)
-    setDraft({kind:'sticky',id:next,at:{x,y}})
+    setDraft(edit ? {kind:'sticky',id:next,at:{x,y}} : null)
+    if(!edit)focusCanvas()
     return true
   }
   const keyActions = useRef({ choose, applyBrush, connector, dismiss, nextSticky, openById })
@@ -848,11 +764,11 @@ export function CanvasToolDock(props: Props) {
       full,
     })
   }
-  function styleSticky(patch: { color?: string; format?: NoteFormat; signed?: boolean }) {
+  function styleSticky(patch: { color?: string; format?: NoteFormat }) {
     if (!selected || block?.kind !== 'sticky' || selected.locked || !writable) return
     editor.updateScene({ elements: editor.getSceneElementsIncludingDeleted().map(el => el.id !== selected.id ? el :
       newElementWith(el, { ...(patch.color && {backgroundColor:patch.color}), customData:{...el.customData,officeBoard:{
-        ...boardTag(el), ...(patch.format && {noteFormat:patch.format}), ...(patch.signed!==undefined && {showAuthor:patch.signed}) }} })),
+        ...boardTag(el), ...(patch.format && {noteFormat:patch.format}) }} })),
       captureUpdate: CaptureUpdateAction.IMMEDIATELY })
     if (patch.color) setPaper(patch.color)
   }
@@ -918,7 +834,7 @@ export function CanvasToolDock(props: Props) {
       {builtinDraft?.kind==='mind' && builtinDraft.id && writable && <MindNodeEditor key={builtinDraft.id} api={editor} id={builtinDraft.id} field={builtinDraft.field} clientPoint={builtinDraft.clientPoint} edit={setBuiltinDraft}
         close={focus=>{setBuiltinDraft(null);if(focus)focusCanvas()}}/>}
       {builtinDraft&&builtinDraft.kind!=='mind'&&writable&&<BuiltinEditor key={builtinDraft.id||builtinDraft.kind} api={editor} draft={builtinDraft} onCreate={land} close={()=>{setBuiltinDraft(null);focusCanvas()}}/>}
-      <BoardPaperLayer onPinDrop={(id,point,origin)=>transferBoardDrop(editor,[id],point,origin,props.onSpecChange,props.elements)} editor={editor} onNeighbor={nextSticky} selected={selection.id} editing={draft?.kind === 'sticky' ? draft.id : undefined}
+      <BoardPaperLayer peekComments={draft?.kind==='comment'} personId={props.personId} onPinDrop={(id,point,origin)=>transferBoardDrop(editor,[id],point,origin,props.onSpecChange,props.elements)} editor={editor} onNeighbor={nextSticky} selected={selection.id} editing={draft?.kind === 'sticky' ? draft.id : undefined}
         canPoint={visible && !placing && !draft && native === 'selection'} writable={writable}
         open={id => { editor.updateScene({appState:{selectedElementIds:{[id]:true}},captureUpdate:CaptureUpdateAction.NEVER}); openById(id) }}/>
       {placing && !draft && (
@@ -979,9 +895,7 @@ export function CanvasToolDock(props: Props) {
       )}
       {highlight && (placing === 'sticky' || trayDrag.current?.id === 'sticky') ?
         <div className="board-sticky-ghost" aria-hidden="true" style={{ left: highlight.x, top: highlight.y,
-          width: stickySize, height: stickySize, background: paper, transform: `scale(${editor.getAppState().zoom.value})` }}>
-          <span className="board-note-author">{author}</span>
-        </div> : highlight && (
+          width: stickySize, height: stickySize, background: paper, transform: `scale(${editor.getAppState().zoom.value})` }}/> : highlight && (
         <div
           className="board-tray-ghost"
           style={{ left: highlight.x - 15, top: highlight.y - 21 }}
@@ -994,13 +908,14 @@ export function CanvasToolDock(props: Props) {
       )}
       {draft?.kind==='spec' && draft.id && <BoardSpecEditor key={draft.id+':'+props.epoch} canvas={editor} camera={props.camera} id={draft.id} at={draft.at} clientPoint={draft.clientPoint} full={draft.full} creating={draft.creating} editable={writable} elements={props.elements} send={props.onSpecChange} flush={props.flushSpec} close={focus=>{if(editingDraft.current?.id===draft.id){setDraft(null);if(focus)focusCanvas()}}}/>}
       {draft?.kind === 'sticky' && writable && <BoardStickyEditor key={[draft.id,draft.at.x,draft.at.y].join(':')}
-        draft={draft} editor={editor} author={author} paper={paper} onCreate={land} onNext={nextSticky}
+        draft={draft} editor={editor} author={author} people={props.people} paper={paper} onCreate={land} onNext={id=>nextSticky(id,'right',undefined,true)}
         onClose={() => { setDraft(null); focusCanvas() }}/>}
-      {draft && (draft.kind === 'table' || draft.kind === 'comment') && (
+      {draft?.kind === 'table' && draft.id && writable && <BoardTableCell key={draft.id} id={draft.id} editor={editor} onCell={openById} onClose={()=>{setDraft(null);focusCanvas()}}/>}
+      {draft?.kind === 'comment' && (
         <BoardBlockEditor
           key={[draft.kind, draft.id, draft.at.x, draft.at.y].join(':')}
           draft={draft}
-          onCell={openById}
+          people={props.people} personId={props.personId} onCreate={land}
           editor={editor}
           author={author}
           writable={writable}
@@ -1011,11 +926,11 @@ export function CanvasToolDock(props: Props) {
         />
       )}
       {block?.kind === 'sticky' && selected && writable && !selected.locked && !draft && !placing &&
-        <StickyToolbar key={selected.id} color={selected.backgroundColor} format={block.noteFormat||{}} signed={block.showAuthor!==false}
+        <StickyToolbar key={selected.id} color={selected.backgroundColor} format={block.noteFormat||{}}
           x={Math.max(4,Math.min(selection.x+selected.width*editor.getAppState().zoom.value/2-195,editor.getAppState().width-396))}
           y={Math.max(4,selection.y-66)} onColor={color=>styleSticky({color})} onFormat={format=>styleSticky({format})}
-          onSigned={()=>styleSticky({signed:block.showAuthor===false})} onEdit={()=>editBlock()} onNext={()=>nextSticky(selected.id)}/>}
-      {block && block.kind!=='sticky' && selected && !draft && !placing && (
+          onEdit={()=>editBlock()} onNext={()=>nextSticky(selected.id)}/>}
+      {block && block.kind!=='sticky' && block.kind!=='table' && selected && !draft && !placing && (
         <div
           className="board-object-bar"
           style={{
@@ -1041,9 +956,6 @@ export function CanvasToolDock(props: Props) {
             >
               <Link2 size={14} />
             </button>
-          )}
-          {block.kind === 'table' && (
-            <button onClick={() => editBlock()}>编辑单元格</button>
           )}
           {block.kind === 'comment' && (
             <button onClick={() => editBlock()}>

@@ -39,17 +39,35 @@ node apps/workspace/cli.mjs start --root /srv/officecli-workspace
 ## 使用流程
 
 1. 在“用户与角色”创建成员；管理员也可以重置密码、调整角色或停用成员，最后一个管理员受到保护。
-2. 上传自己的文档，或新建 TXT、Markdown、HTML。上传接受 DOCX、XLSX、PPTX、PDF、HTML、Markdown、TXT、PNG、JPEG、WebP；具体编辑和导出能力仍取决于格式与实际内容。
+2. 上传自己的文档，或新建 TXT、Markdown、HTML。上传接受 DOCX、XLSX、CSV、TSV、PPTX、PDF、HTML、Markdown、TXT、PNG、JPEG、WebP；具体编辑和导出能力仍取决于格式与实际内容。
 3. 在文件详情为成员选择只读、编辑、文件管理员角色，并单独调整查看、编辑、下载、导出、复制、打印、历史、恢复、主题和业务回写权限。角色调整、停用与密码重置会结束该用户的全部业务登录会话。
 4. “打开文档”在服务端兑换绑定文件与访问者的短期会话，按实际权限直接查看或编辑。界面不提供编辑/预览权限切换。编辑保存形成 HCD 修订；“回写业务系统”才生成新的业务文件版本。恢复历史形成新 HCD 修订，不会直接替换已确认的业务版本。
 5. 在“字体目录”登记本地字体及许可证，创建不可变主题，并在文件详情指定。主题更新先进入工作区修订，检查后再回写。
 6. “业务事件”显示已验签并持久接收的提交通知；“操作记录”显示账号、权限与文件业务审计。同步提交回执是业务版本的依据，Webhook 延迟或重复不另建文件版本。
+
+管理员在「服务管理 → 回写任务」可核对原任务号、工作区修订、预期和当前业务版本。核对回执使用已登记的发布归属，发起人退出后仍可确认已经发生的提交。重试待处理的原任务会重新核验发起人的权限，并使用同一修订和任务号。遇到版本冲突时可下载两份内容，或把保留的回写稿另存为独立业务文件。重复另存会返回同一副本。未送达的通知可从原任务重投，使用原事件 ID。
 
 管理员和文件负责人在当前工作区管理文件，普通成员只看到获授权的文件。登录后打开「应用接入」可查看本工作区的租户标识、应用标识、访问地址与 AI 开关。
 
 ## 统一工作台
 
 登录后从 `/workbench/` 进入同一窗口的首页和文件标签。文档、表格、演示和白板可直接新建，PDF 与图片通过文件库打开。右侧全局 AI 支持同时读取或编辑所勾选的正文、单元格和白板对象；明确勾选的追加范围可以在文末或白板空白处落笔。标签上的彩色箭头跟随实际写入，文件回执带修订号。设置与用户管理仍在 `/admin`。[操作示例](../../examples/hdoc/embed-host/README.md#多标签工作台)
+
+配置工作台模型后，可在同一指令中安排有依赖的步骤，例如先更新表格，再把保存结果整理到 Word 和白板。先审核表格的修改，保存后才会看到后续文件的预览。若协作者先更新了目标文件，可重新核对原选区，或在该文件中选择范围后点「用当前选区」。新预览需要再次确认，已保存的文件回执会保留。
+
+对正文选句的 AI 改写与 AI 新增段落，可在任务回执中单独撤销；其他人后来在同段输入的可区分内容和格式会保留。新的表格任务也支持在同格补写后撤销 AI 文字；XLSX 保留原生文字格式，数字恢复和未被后续编辑的新建格清理一次提交。插行后按单元格身份定位。匹配有歧义、AI 原字或格式已被改动，或协作服务已接收的输入尚未保存时会拒绝撤销。适用范围、限制和双账号验证见[正文与表格撤销验收](../../docs/acceptance/hcd-workbench-selective-undo.zh.md)。
+
+Word 当前审阅显示在正文页旁边，批注与对应原文一起滚动、缩放；点击卡片可定位原文，回复和解决状态保存在原生审阅数据中。原生 DOCX 导出重开验证见[页边批注验收](../../docs/acceptance/hcd-word-margin-comments.zh.md)。
+
+Word 表格可通过边缘菜单向右或向下合并；按住 Shift 点击另一格可选择矩形区域后合并。拆分时内容留在第一格，其余格可直接输入。操作进入同一套撤销/重做，原格式下载保留各来源单元格的段落、文字格式和无关部件；分片或切过已有合并格的选区会拒绝，保留当前内容。
+
+恢复多个标签时，后台表格的内部输入框不会取得其他文件或全局 AI 的键盘焦点。其选区与滚动恢复继续在自己的工作簿中执行，Word 批注定位和已经展开的文件菜单保持可用。
+
+PPTX 支持常见占位符继承版式和母版的坐标、文字格式与主题字体，包括中文字体。原位改字、拖动占位符、母版背景、共享文字样式和基础动画均通过原件导出重开验证。母版文字支持标题、正文和其他文字的 1–9 级字体、字号、颜色及加粗等格式，保留版式与局部覆盖，见[母版文字验收](../../docs/acceptance/hcd-pptx-master-text.zh.md)。完整母版图形、复杂主题效果和高级动画仍有边界，见[占位符与母版继承验收](../../docs/acceptance/hcd-pptx-placeholder-inheritance.zh.md)。
+
+在白板便签、备注或回复输入 `@`，从候选中选中有权访问该文件的成员。保存后，接收方可在工作台顶栏「@我」跨白板查看未读提及。点击提醒会定位便签，或展开并定位评论消息。已读状态按账号持久保存，移动对象或编辑提及周围的文字会沿用原提醒。移除提及、删除对象或撤回文件访问权限后，对应提醒从可见列表中移除。
+
+工作台打开时定期检查已保存的白板修订，未变更的白板只核对修订号。`npm run test:acceptance --prefix apps/workspace` 通过两套真实浏览器会话验证通知、定位、重启后的已读状态和权限撤回。
 
 ## 单独嵌入与外部 Agent
 
@@ -137,14 +155,59 @@ root/
 
 自由画布基于 Excalidraw，首页或「白板空间」中的「新建白板」可创建 `.excalidraw`。支持自由绘制、对象编辑、多人协作、框选对象或空白区域后交给 AI、历史恢复，以及原生文件/PNG 导出。回写业务系统保留可继续编辑的原生场景。模块边界、事务协议与能力限制见 [自由画布接入说明](../../docs/hcd-canvas-v1.zh.md)。
 
-**完整断网发行包尚未完成验收。** 当前证据为：干净浏览器拦截非 loopback 请求，验证默认应用的登录、字体/主题、编辑和回写。尚不包括全格式、全部浏览器、目标网 OS/字体依赖、运行时分发、备份迁移工具及升级回滚。不要把这项验证解释为全新断网机器的完整交付承诺。
+## 离线发行与版本切换
 
-备份前停止 Workspace 并等待子进程退出，再完整备份 root（含 SQLite WAL/SHM、engine、staging 与 keys），按同样路径恢复并启动。密钥应受限保管；仅备份最终文件或仅备份 SQLite 都无法恢复完整编辑状态。当前未提供在线一致性备份或自动升级迁移命令，禁止跨不兼容 schema 直接写库。
+在构建机器准备当前平台的 OfficeCLI、已锁定的前端依赖、构建后的静态资源和 Node.js 发行目录。封装命令会把 Node.js、原生引擎、协作与 MCP、界面、模板和第三方许可随包复制，并生成带平台、版本、协议指纹和逐文件 SHA-256 的 `release.json`。
+
+```bash
+npm run package --prefix apps/workspace -- \
+  --version 0.1.31 --node-runtime /opt/node-v24 --output /tmp/fold-0.1.31
+```
+
+把发行目录复制或归档到与包匹配的系统和 CPU。安装使用包内运行时，启动机只需要系统基础库和支持的浏览器。包内静态资源由工作区同源提供。AI 在首次安装时默认关闭。
+
+```bash
+/media/fold-0.1.31/workspace release-info
+/media/fold-0.1.31/workspace install --deployment /srv/fold \
+  --public-url http://127.0.0.1:7400 --password-env FOLD_INITIAL_ADMIN_PASSWORD
+/srv/fold/workspace start
+/srv/fold/workspace deployment-status
+/srv/fold/workspace upgrade --release /media/fold-0.1.32
+/srv/fold/workspace rollback
+```
+
+`install --backup <校验通过的备份目录>` 可用已有工作区来建立托管部署，保留原地址、账号和文件版本。每个托管部署管理一个工作区。多工作区可分别安装，并由内网入口按域名转发。`start --tenants` 仍支持从同一进程启动非托管的租户清单。
+
+升级先验证发行包，随后保存已同步的协作修改，等待已受理的写入结束。旧版退出后封存升级前数据，新版在独立副本上运行迁移。引擎版本、协议指纹与协作服务通过检查后才发布新版本，切换期间访问可能暂不可用。新版在发布前启动失败时，管理进程自动用以前的数据和发行包恢复服务。
+
+`rollback` 将服务切回记录中的上一组发行和数据。当前版本的数据会先封存并保存在独立目录，回滚后的文件视图对应上一版留存的数据。用 `rollback --to <数据版本 ID>` 可固定目标，重复执行同一个目标会保留其激活状态。`deployment-status` 显示当前和上一组标识，`operations/` 保存切换记录，`backups/` 保存切换前的快照。当前内置工作区支持在现有存储主版本内升级，无法读取的存储版本会在切换前被拒绝。
+
+`npm run test:deployment --prefix apps/workspace` 用 `OFFICECLI_RELEASE_PACKAGE` 指定发行目录。测试在隔离数据目录验证首次安装、浏览器冷启动、真实迁移、启动失败自动恢复及回滚。macOS 命令进程通过系统策略限制为 loopback。Linux 验收可把包和测试夹具放入 `--network none` 的容器。
+
+设置 `OFFICECLI_RELEASE_NATIVE_VERIFY=1` 会在安装后的工作台实际操作透视表、条件格式、OCR、图片图层、PPTX 母版文字与 Word 表格合并/拆分，再继续升级、失败恢复和回滚。验证驱动使用 Python 3 标准库生成原生 PPTX 夹具、读取导出的 XML，产品运行本身不依赖 Python。可用 `OFFICECLI_RELEASE_NATIVE_CASE=word`（或 `pivots`、`conditions`、`ocr`、`layers`、`pptx`）单独诊断一项；省略则完整执行六项。当前 macOS 与 Linux ARM64 发行、完整断网操作及在线备份的结果见[当前发行验收](../../docs/acceptance/hcd-workspace-release-current.zh.md)。
+
+## 在线备份与恢复
+
+在运行 Workspace 的主机上操作，每个 `--root` 对应一个租户。快照包含业务数据库、原文件与版本、项目和权限、编辑修订、协作状态、回写暂存与回执，以及当前配置和签名密钥。取点时系统先落盘已同步的协作修改，等待已受理的写入完成。读请求继续服务，取点期间的新写入会返回可重试的 `503`，原有协作连接会在取点完成后继续同步。复制到指定目录和逐文件校验在开放写入后进行。
+
+```bash
+node apps/workspace/cli.mjs backup --root ./workspace-data --output /backup/fold-2026-11-20
+node apps/workspace/cli.mjs verify-backup --backup /backup/fold-2026-11-20
+node apps/workspace/cli.mjs restore --backup /backup/fold-2026-11-20 --root ./workspace-restored
+node apps/workspace/cli.mjs start --root ./workspace-restored
+```
+
+用已有父目录下的新路径作为备份目标和恢复目标。恢复校验每个文件的 SHA-256、SQLite 完整性和文件版本对应的对象，随后启用新工作区。恢复保留原域名和端口，同机启动恢复实例前须腾出这些监听地址。服务账号应限制备份目录的访问权限，因为其中含密钥。外部 Provider 管理的业务数据库和文件使用其自身的备份流程。
+
+`npm run test:backup --prefix apps/workspace` 使用真实工作区和两页协作编辑器，验证在线读写时的取点、备份损坏拒绝、异目录恢复、DOCX 导出及原回写任务续跑。
 
 ## 验证
 
 ```bash
 npm test --prefix apps/workspace
+npm run test:workbench-pptx --prefix apps/workspace
+# 需先安装 fixtures/native-office/requirements.txt 中的测试依赖和 Poppler。
+npm run test:workbench-native --prefix apps/workspace
 npm run test:embed --prefix apps/workspace
 cargo test -p officecli --bin officecli hdoc_server::integration:: --offline
 # 打包后的自由画布验收；模型为本地脚本，不消耗外部 API Key。

@@ -17,6 +17,12 @@ function token(user='alice',scope='write') {
   const payload=`${b64({alg:'HS256',typ:'JWT'})}.${b64({doc:'canvas-accept',scope,sub:user,name:user,aud:'hcd-core',iat:now,exp:now+3600})}`
   return `${payload}.${createHmac('sha256',secret).update(payload).digest('base64url')}`
 }
+async function clickNewestNote(page:Page) {
+  const note=page.locator('.board-paper-shadow[data-note-id]').last()
+  await expect(note).toBeVisible()
+  const box=(await note.boundingBox())!
+  await page.mouse.click(box.x+box.width*.45,box.y+box.height*.4)
+}
 async function freePort(){const server=createServer();await new Promise<void>(done=>server.listen(0,testHost,done));const value=(server.address() as {port:number}).port;await new Promise<void>(done=>server.close(()=>done()));return value}
 function start(command:string,args:string[],extra:NodeJS.ProcessEnv){const env={...process.env,HCD_TOKEN_SECRET:secret,HCD_API_TARGET:apiUrl,HCD_VITE_CACHE_DIR:resolve(root,'vite-cache'),...extra};delete env.HCD_DATABASE_URL;delete env.HCD_S3_BUCKET;delete env.HCD_DEFAULT_THEME;const child=spawn(command,args,{cwd:editorRoot,env,stdio:['ignore','pipe','pipe']});children.push(child);const log=createWriteStream(resolve(root,`process-${child.pid}.log`));child.stdout?.pipe(log);child.stderr?.pipe(log);return child}
 async function request(route:string,init:RequestInit={},user='alice',scope='write'){return fetch(`${apiUrl}/v1/documents/canvas-accept${route}`,{...init,headers:{Authorization:`Bearer ${token(user,scope)}`,'Content-Type':'application/json','X-HCD-Collaboration-Epoch':String(epoch),...init.headers}})}
@@ -71,6 +77,43 @@ test.beforeAll(async()=>{
   await expect.poll(async()=>{try{return(await fetch(uiUrl)).status}catch{return 0}},{timeout:30_000}).toBe(200)
 })
 test.afterAll(async()=>{allowModel?.();for(const child of children)child.kill('SIGTERM');model?.close();console.log(`Canvas acceptance artifacts: ${root}`)})
+
+test('continuous board zoom repaints visible text during the gesture without modifying the document', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await open(page, 'zoom-reviewer')
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('officecli:canvas-locate', {
+    detail: { documentId: 'canvas-accept', region: { x: 0, y: 0, width: 260, height: 160 } },
+  })))
+  const canvas = page.locator('canvas.interactive')
+  const bounds = (await canvas.boundingBox())!
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+  const before = await read()
+  const scales = await canvas.evaluate(async element => {
+    const drawnAt = new Set<number>()
+    const prototype = CanvasRenderingContext2D.prototype
+    const fillText = prototype.fillText
+    prototype.fillText = function (...args) {
+      if (args[0] === '正在讨论的方案') drawnAt.add(this.getTransform().a)
+      return fillText.apply(this, args)
+    }
+    try {
+      const rect = element.getBoundingClientRect()
+      for (let step = 0; step < 10; step++) {
+        element.dispatchEvent(new WheelEvent('wheel', {
+          ctrlKey: true, deltaY: -5, bubbles: true, cancelable: true,
+          clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2,
+        }))
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      }
+      return [...drawnAt]
+    } finally {
+      prototype.fillText = fillText
+    }
+  })
+  expect(scales.length).toBeGreaterThan(1)
+  await page.getByRole('button', { name: '保存画布', exact: true }).click()
+  expect((await read()).revision).toBe(before.revision)
+})
 
 test('object transactions merge independent edits and reject stale fields, scopes and readonly writes',async()=>{
   const before=await read()
@@ -277,6 +320,8 @@ test('FigJam dock drops an editable note, opens a Spec, and exchanges transient 
     expect(tb.y+tb.height).toBeLessThan(bb.y+bb.height)
     expect(Math.abs(tb.x+tb.width/2-bb.x-bb.width/2)).toBeLessThan(2)
     await dock.getByRole('button',{name:'便利贴'}).dragTo(board,{targetPosition:{x:360,y:180}})
+    await expect(alice.getByRole('textbox',{name:'便利贴内容'})).toHaveCount(0)
+    await clickNewestNote(alice)
     await alice.getByRole('textbox',{name:'便利贴内容'}).fill('两位协作者一起梳理反馈')
     await alice.getByRole('button',{name:'完成',exact:true}).click()
     const scene=async()=>(await read()).scene.elements
@@ -409,10 +454,17 @@ test('FigJam drawing presets, patterned tape, editable table and anchored discus
   await page.getByRole('button',{name:'2 行 3 列',exact:true}).click()
   await page.getByLabel('画布放置区').click({position:{x:310,y:280}})
   await expect.poll(async()=>(await elements()).filter((e:any)=>e.customData?.officeBoard?.kind==='table').length).toBeGreaterThanOrEqual(6)
-  await page.getByRole('button',{name:'编辑单元格'}).click()
-  await page.getByRole('textbox',{name:'单元格内容'}).fill('访谈问题')
-  await page.getByRole('button',{name:'完成',exact:true}).click()
-  await expect.poll(async()=>(await elements()).some((e:any)=>e.originalText==='访谈问题')).toBe(true)
+  await page.mouse.click(bb.x+332,bb.y+300)
+  const value='访谈问题需要完整保留，包括没有空格的长编号12345678901234567890。'.repeat(3)
+  const before=(await elements()).filter((e:any)=>e.customData?.officeBoard?.kind==='table').slice(-6)
+  await page.getByRole('textbox',{name:'单元格内容'}).fill(value)
+  await page.getByRole('textbox',{name:'单元格内容'}).press('Enter')
+  await expect.poll(async()=>{const all=await elements(),text=all.find((e:any)=>e.originalText===value)
+    if(!text)return false
+    const cells=before.map((old:any)=>all.find((el:any)=>el.id===old.id))
+    return text.text.replaceAll('\n','')===value && text.text.split('\n').length>3 && text.height<=cells[0].height &&
+      cells.slice(0,3).every((c:any)=>c.height===cells[0].height) && cells[3].y===cells[0].y+cells[0].height
+  }).toBe(true)
   await dock.getByRole('button',{name:'评论',exact:true}).click()
   await page.getByLabel('画布放置区').click({position:{x:700,y:300}})
   await page.getByRole('textbox',{name:'评论内容'}).fill('这里需要核对原文')
@@ -485,11 +537,14 @@ test('tab navigates native cells, clicking away saves sticky text, and scoped la
   await open(page,'keyboard-editor')
   const dock=page.getByRole('toolbar',{name:'白板工具栏'})
   await dock.getByRole('button',{name:'表格',exact:true}).click();await page.getByRole('button',{name:'2 行 2 列'}).click();await page.getByLabel('画布放置区').click({position:{x:320,y:220}})
-  await page.getByRole('button',{name:'编辑单元格'}).click()
+  const boardBounds=(await page.locator('.canvas-surface').boundingBox())!
+  await page.mouse.click(boardBounds.x+346,boardBounds.y+236)
   const cell=page.getByRole('textbox',{name:'单元格内容'})
   await cell.fill('议题');await cell.press('Tab');await cell.fill('负责人');await cell.press('Tab');await cell.fill('排期')
   await dock.getByRole('button',{name:'便利贴',exact:true}).click()
   await page.getByLabel('画布放置区').click({position:{x:445,y:130}})
+  await expect(page.getByRole('textbox',{name:'便利贴内容'})).toHaveCount(0)
+  await clickNewestNote(page)
   await page.getByRole('textbox',{name:'便利贴内容'}).fill('点击画布也会保存')
   await dock.getByRole('button',{name:'选择',exact:true}).click()
   const texts=async()=>(await read()).scene.elements.map((e:any)=>e.originalText)
@@ -1114,6 +1169,8 @@ test('FigJam notes edit in place, inherit paper color and reopen by ID; comment 
   await expect(ghost).toBeVisible()
   const start = (await ghost.boundingBox())!
   await placement.click({position:point})
+  await expect(field).toHaveCount(0)
+  await clickNewestNote(page)
   await expect(field).toBeFocused()
   const face = (await page.locator('.board-note-face').boundingBox())!
   expect(Math.abs(start.x-face.x)+Math.abs(start.y-face.y)).toBeLessThan(2)
@@ -1128,16 +1185,12 @@ test('FigJam notes edit in place, inherit paper color and reopen by ID; comment 
   const note=await namedNote('先让三个试点团队试用')
   expect(note.root.height).toBe(192)
   const shadow = page.locator('[data-note-id="'+note.root.id+'"]')
-  await expect(shadow).toHaveText('林夏')
+  await expect(shadow).toHaveText('')
   await page.getByLabel('便利贴颜色',{exact:true}).click()
   await page.getByRole('button',{name:'蜜桃橙',exact:true}).click()
   await expect.poll(async()=>(await namedNote('先让三个试点团队试用')).root?.backgroundColor).toBe('#ffcba7')
-  await page.getByRole('button',{name:'显示署名'}).click()
-  await expect(shadow).toHaveText('')
-  await page.getByRole('button',{name:'显示署名'}).click()
-  await expect(shadow).toHaveText('林夏')
   const sheet=(await shadow.boundingBox())!
-  await page.mouse.dblclick(sheet.x+sheet.width*.5,sheet.y+sheet.height*.45)
+  await page.mouse.click(sheet.x+sheet.width*.5,sheet.y+sheet.height*.45)
   await expect(field).toBeFocused()
   await expect(field).toHaveValue('先让三个试点团队试用')
   await field.fill('先让三个试点团队试用\n记录第一次上手的反馈')
@@ -1164,7 +1217,7 @@ test('FigJam notes edit in place, inherit paper color and reopen by ID; comment 
   expect(ratio).toBeCloseTo(1, 2)
   await pin.click()
   await expect(page.getByRole('form',{name:'评论线程'})).toContainText('下周一起看试点反馈')
-  await page.getByRole('button',{name:'关闭编辑'}).click()
+  await page.getByRole('button',{name:'关闭评论'}).click()
   const savedPin = async () => (await read()).scene.elements.find((el:any) => !el.isDeleted && el.customData?.officeComment === '下周一起看试点反馈')
   await expect.poll(savedPin).toBeTruthy()
   const pinBefore = await savedPin()
@@ -1177,12 +1230,14 @@ test('FigJam notes edit in place, inherit paper color and reopen by ID; comment 
   await expect.poll(async()=>Math.round((await pin.boundingBox())!.x-originalPin.x)).toBe(25)
   await expect.poll(async()=>(await savedPin())?.x).toBeGreaterThan(pinBefore.x)
   await page.reload()
-  await expect(shadow).toContainText('林夏')
+  await expect(shadow).toBeVisible()
+  await expect(shadow).toHaveText('')
   await expect(pin).toBeVisible()
   // Quick creation pans past occupied space, keeping the new sheet in the viewport.
   const reloaded = (await page.locator('[data-note-id="'+second.root.id+'"]').boundingBox())!
   await page.mouse.click(reloaded.x+reloaded.width/2,reloaded.y+reloaded.height/2)
-  await expect(page.getByRole('button',{name:'编辑便利贴'})).toBeVisible()
+  await expect(field).toBeFocused()
+  await expect(field).toHaveValue(secondBody)
   await page.screenshot({path:info.outputPath('figjam-paper-comments.png')})
 })
 
@@ -1290,7 +1345,7 @@ test('Four hover controls create neighbours and native drags carry Spec objects 
     await alice.screenshot({path:info.outputPath('figjam-sticky-four-sides.png')})
     await controls.getByLabel('向上新增便利贴').click()
     const field=alice.getByRole('textbox',{name:'便利贴内容'})
-    await expect(field).toBeFocused();await field.fill('上方新便签');await field.press('Escape')
+    await expect(field).toHaveCount(0);await clickNewestNote(alice);await field.fill('上方新便签');await field.press('Escape')
     await expect.poll(async()=>(await records()).find((e:any)=>e.originalText==='上方新便签')?.containerId).toBeTruthy()
     const note=await get((await records()).find((e:any)=>e.originalText==='上方新便签').containerId)
     expect(note.y+note.height).toBeLessThan(y+265);expect(note.backgroundColor).toBe('#ffafa3')
@@ -1356,7 +1411,8 @@ test('each sticky edge creates one signed note and dragging the plus adds a boun
   if(await ai.getAttribute('aria-pressed')==='true')await ai.click()
   const id='four-edge-paper',x=7100,y=6200
   const root={id,type:'rectangle',x,y,width:130,height:130,roughness:0,strokeColor:'transparent',backgroundColor:'#ffafa3',fillStyle:'solid',customData:{officeBoard:{kind:'sticky',root:id,author:'小雨'}}}
-  const base=await read();expect((await request('/canvas/patch',{method:'POST',body:JSON.stringify(batch(base.revision,[{op:'element.add',element:root}]))})).ok).toBe(true)
+  const stroke={id:'wide-stroke-by-note',type:'line',x:x-1500,y:y-140,width:1800,height:380,points:[[0,0],[1800,380]],strokeWidth:2}
+  const base=await read();expect((await request('/canvas/patch',{method:'POST',body:JSON.stringify(batch(base.revision,[root,stroke].map(element=>({op:'element.add',element}))))})).ok).toBe(true)
   const shadow=page.locator('[data-note-id="'+id+'"]')
   await expect(shadow).toBeAttached()
   await page.evaluate(root=>window.dispatchEvent(new CustomEvent('officecli:canvas-locate',{detail:{documentId:'canvas-accept',region:root}})),root)
@@ -1365,22 +1421,69 @@ test('each sticky edge creates one signed note and dragging the plus adds a boun
     const box=(await shadow.boundingBox())!
     await page.mouse.move(box.x+box.width/2,box.y+box.height/2)
     await page.getByLabel('向'+side+'新增便利贴',{exact:true}).click()
-    await expect(field).toBeFocused();await field.fill('四向测试'+side);await field.press('Escape')
+    await expect(field).toHaveCount(0);await clickNewestNote(page);await field.fill('四向测试'+side);await field.press('Escape')
     const note=async()=>{const {scene}=await read(),label=scene.elements.find((e:any)=>e.originalText==='四向测试'+side&&!e.isDeleted);return scene.elements.find((el:any)=>el.id===label?.containerId)}
     await expect.poll(async()=>(await note())?.customData?.officeBoard?.author).toBe('four-edges')
     const saved=await note()
     expect(saved.backgroundColor).toBe(root.backgroundColor)
     if(side==='上'||side==='下'){expect(saved.x).toBe(x);expect(Math.sign(saved.y-y)).toBe(side==='上'?-1:1)}
-    else{expect(saved.y).toBe(y);expect(Math.sign(saved.x-x)).toBe(side==='左'?-1:1)}
+    else{expect(saved.y).toBe(y);expect(saved.x).toBe(side==='左'?x-saved.width-16:x+root.width+16)}
   }
   const box=(await shadow.boundingBox())!
   await page.mouse.move(box.x+box.width/2,box.y+box.height/2)
   const handle=(await page.getByLabel('向右新增便利贴',{exact:true}).boundingBox())!
   await page.mouse.move(handle.x+handle.width/2,handle.y+handle.height/2);await page.mouse.down()
   await page.mouse.move(box.x+box.width+160,box.y+box.height+125,{steps:8});await page.mouse.up()
-  await expect(field).toBeFocused();await field.fill('带连接的便签');await field.press('Escape')
+  await expect(field).toHaveCount(0);await clickNewestNote(page);await field.fill('带连接的便签');await field.press('Escape')
   await expect.poll(async()=>{const scene=(await read()).scene.elements,child=scene.find((el:any)=>el.originalText==='带连接的便签')
     return !!child && scene.some((el:any)=>el.type==='arrow'&&el.startBinding?.elementId===id&&el.endBinding?.elementId===child.containerId)}).toBe(true)
+})
+
+test('a shape edge follows the pointer and dragging it binds a connector from that exact side',async({page})=>{
+  await page.setViewportSize({width:1400,height:850})
+  await page.emulateMedia({reducedMotion:'reduce'})
+  await open(page)
+  const ai=page.getByRole('button',{name:'AI 协作',exact:true})
+  if(await ai.getAttribute('aria-pressed')==='true')await ai.click()
+  const z=page.locator('.reset-zoom-button')
+  const scene=(await read()).scene.elements
+  const from=scene.find((el:any)=>el.id==='focus'), to=scene.find((el:any)=>el.id==='outside')
+  await page.evaluate(({from,to})=>window.dispatchEvent(new CustomEvent('officecli:canvas-locate',{detail:{documentId:'canvas-accept',region:{x:from.x,y:from.y,width:to.x+to.width-from.x,height:from.height}}})),{from,to})
+  await expect(z).toHaveText('100%')
+  const board=page.getByRole('main',{name:'自由画布'})
+  const origin=await board.evaluate(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return {x:r.x+parseFloat(s.getPropertyValue('--board-dot-x')),y:r.y+parseFloat(s.getPropertyValue('--board-dot-y'))}})
+  await page.mouse.move(origin.x+from.x+20,origin.y+from.y+from.height-24)
+  const handles=page.getByRole('group',{name:'相邻图形'}), handle=handles.getByRole('button',{name:'向上新增图形'})
+  await expect(handle).toBeVisible()
+  await page.emulateMedia({reducedMotion:'no-preference'})
+  const box=(await handle.boundingBox())!
+  await handle.hover({position:{x:box.width/2+7,y:box.height/2}})
+  await expect.poll(async()=>handle.locator('.mind-handle-motion').evaluate(el=>new DOMMatrix(getComputedStyle(el).transform).m41)).toBeGreaterThan(1)
+  await page.mouse.down()
+  await expect(handle).toHaveAttribute('data-armed','true')
+  await page.mouse.move(origin.x+to.x+to.width/2,origin.y+to.y+to.height/2,{steps:8})
+  await expect(page.locator('.board-connector-preview')).toBeVisible()
+  await page.mouse.up()
+  const line=async()=>(await read()).scene.elements.find((el:any)=>el.type==='arrow'&&el.startBinding?.elementId===from.id&&el.endBinding?.elementId===to.id)
+  await expect.poll(line).toBeTruthy()
+  const saved=await line()
+  // Excalidraw offsets bound points by a one-pixel gap at the shape outline.
+  expect(Math.abs(saved.x+saved.points[0][0]-from.x-from.width/2)).toBeLessThanOrEqual(1)
+  expect(Math.abs(saved.y+saved.points[0][1]-from.y)).toBeLessThanOrEqual(1)
+  await page.mouse.move(origin.x+from.x+20,origin.y+from.y+from.height-24)
+  await handles.getByRole('button',{name:'向下新增图形'}).click()
+  const palette=page.getByRole('group',{name:'选择相邻图形'})
+  await expect(palette.getByRole('button')).toHaveCount(12)
+  await palette.getByRole('button',{name:'六边形',exact:true}).click()
+  const graph=async()=>(await read()).scene.elements.filter((el:any)=>!el.isDeleted)
+  const branch=async()=>{const all=await graph(),poly=all.find((e:any)=>e.customData?.officeShape==='hexagon')
+    const anchor=all.find((e:any)=>poly && e.customData?.officeShapeAnchor && e.groupIds.includes(poly.groupIds[0]))
+    return poly && anchor && all.find((e:any)=>e.startBinding?.elementId===from.id && e.endBinding?.elementId===anchor.id)}
+  await expect.poll(branch).toBeTruthy()
+  const undo=page.getByRole('button',{name:/^撤销/}).filter({visible:true}).first()
+  await undo.click()
+  await expect.poll(async()=>(await graph()).some((e:any)=>e.customData?.officeShape==='hexagon')).toBe(false)
+  await expect.poll(line).toBeTruthy()
 })
 
 test('intentional layer changes persist when overlapping notes are dragged and reopened by a peer',async({browser})=>{
@@ -1626,4 +1729,42 @@ test('a long Spec keeps the same visible paragraph when switching between readin
   await page.mouse.dblclick(pos.x+12,pos.y+pos.height/2)
   await expect(form.getByRole('textbox',{name:'文档正文'})).toBeFocused()
   expect(await line.evaluate(el=>el.contains(document.getSelection()?.focusNode??null))).toBe(true)
+})
+
+test('anchored comments mention the actual collaborator and keep emoji, images and replies after reload',async({browser},info)=>{
+  const alice=await browser.newPage(),bob=await browser.newPage()
+  try {
+    await open(alice,'Ada');await open(bob,'Lin')
+    const paper=bob.locator('.canvas-surface'), bb=(await paper.boundingBox())!
+    await bob.mouse.move(bb.x+150,bb.y+180);await bob.mouse.move(bb.x+260,bb.y+190,{steps:5})
+    await alice.getByRole('toolbar',{name:'白板工具栏'}).getByRole('button',{name:'评论',exact:true}).click()
+    await alice.getByLabel('画布放置区').click({position:{x:225,y:245}})
+    const form=alice.getByRole('form',{name:'评论线程'}),field=form.getByRole('textbox',{name:'评论内容'})
+    await expect(alice.locator('.board-comment-anchor')).toBeVisible()
+    await form.getByRole('button',{name:'提及协作者'}).click()
+    await expect(form.getByRole('option',{name:/Lin/})).toBeVisible()
+    await field.pressSequentially('Li');await field.press('Enter')
+    await expect(field).toHaveValue('@Lin ')
+    await field.press('End');await field.pressSequentially('review')
+    await form.getByRole('button',{name:'添加表情'}).click();await form.getByRole('button',{name:'💡'}).click()
+    await form.locator('input[type=file]').setInputFiles({name:'pin.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHy0AAAAASUVORK5CYII=','base64')})
+    await expect(form.getByRole('img',{name:'pin.png'})).toBeVisible()
+    await alice.screenshot({path:info.outputPath('comment-composer.png')})
+    await form.getByRole('button',{name:'发送'}).click()
+    const theirs=bob.getByRole('button',{name:'打开Ada的评论',exact:true}).last()
+    await expect(theirs).toHaveAttribute('data-mentioned','true')
+    const avatar=theirs.locator('.board-comment-avatar'), original=await avatar.elementHandle(), anchor=await avatar.boundingBox()
+    await theirs.hover();await expect(theirs.getByRole('tooltip')).toContainText('@Lin review💡')
+    await expect(theirs.getByRole('tooltip')).toBeVisible()
+    expect(await avatar.evaluate((current,old)=>current===old,original!)).toBe(true)
+    expect(await avatar.boundingBox()).toEqual(anchor)
+    await expect(theirs.locator('.board-comment-peek .board-person-badge')).toHaveCount(0)
+    await theirs.click()
+    const thread=bob.getByRole('form',{name:'评论线程'})
+    await expect(thread.locator('mark[data-person="Lin"]')).toHaveText('@Lin');await expect(thread.getByRole('img',{name:'评论配图'})).toBeVisible()
+    await thread.getByRole('textbox').fill('已经看过');await thread.getByRole('button',{name:'发送'}).click()
+    await expect.poll(async()=>(await read()).scene.elements.some((el:any)=>el.customData?.officeBoard?.part==='reply'&&el.originalText==='已经看过')).toBe(true)
+    await alice.reload();await alice.getByRole('button',{name:'打开Ada的评论',exact:true}).last().click()
+    await expect(alice.getByRole('form',{name:'评论线程'})).toContainText('已经看过')
+  } finally {await alice.close();await bob.close()}
 })

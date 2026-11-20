@@ -194,6 +194,20 @@ test("sheet ranges stay bounded; native numbers and empty cells keep their patch
   assert.equal(result.operations[2].row, 2);
 });
 
+test("a saved sheet selection follows the same rectangle of native cell IDs", async () => {
+  const { relocateSheetSelection, sheetTarget } = await import("./workbench-targets.mjs");
+  const sheetId = "s_" + "b".repeat(32);
+  const before = sheetTarget({ sheetId, sheetIndex: 1, top: 1, left: 1, bottom: 2, right: 2 });
+  const sheet = { sheetId, sheetIndex: 0, cells: [
+    { nodeId: "a", address: "C3" }, { nodeId: "b", address: "D3" },
+    { nodeId: "c", address: "C4" }, { nodeId: "d", address: "D4" },
+  ] };
+  assert.deepEqual(relocateSheetSelection(before, sheet, ["a", "b", "c", "d"]),
+    { ...before, sheetIndex: 0, top: 2, left: 2, bottom: 3, right: 3 });
+  for (const ids of [["a", "b", "c", null], ["a", "b", "c", "deleted"], ["d", "a", "b", "c"]])
+    assert.throws(() => relocateSheetSelection(before, sheet, ids), { status: 409 });
+});
+
 test("workbench planner uses only the selected source and rejects out-of-scope model plans", async () => {
   const { planWorkbench } = await import("./workbench-planner.mjs");
   const targets = [

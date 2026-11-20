@@ -2,8 +2,9 @@ import type { LoadedChunk } from './hcd';
 import type { FUniver, ICellData, IObjectMatrixPrimitiveType, IRange, IStyleData } from '@univerjs/presets';
 import { CellValueType, LifecycleStages } from '@univerjs/presets';
 import type { FWorkbook, FWorksheet, IScrollState } from '@univerjs/preset-sheets-core';
-import { ScrollToRangeOperation, SetFormulaCalculationResultMutation, SetScrollOperation } from '@univerjs/preset-sheets-core';
-import { HcdBundleClient, type ChunkDescriptor } from './hcd.ts';
+import { ScrollToRangeOperation, SetFormulaCalculationResultMutation, SetRangeValuesMutation, SetScrollOperation } from '@univerjs/preset-sheets-core';
+import { HcdBundleClient, pivotContains, pivotRange, type ChunkDescriptor } from './hcd.ts';
+import { PivotProjection } from './pivot-projection.ts';
 import { parseGridChunk, type NodeLink, type ParsedGridChunk, type ParsedVisual } from './hcd-parser.ts';
 import { documentFromInlineRuns, editedInlineRuns, validateInlineRuns, type XlsxInlineRun } from './rich-text.ts';
 
@@ -190,8 +191,17 @@ export class HcdUniverAdapter {
   private readonly recalculatedFormulas = new Set<string>();
   private readonly editInputs = new Map<string, string>();
   private readonly editDocuments = new Map<string, ICellData['p']>();
+  private readonly pivotProjection = new PivotProjection();
   private applying = 0;
   private inputBlocked = false;
+  private disposed = false;
+  private calculationListener?: { dispose: () => void };
+
+  dispose(): void {
+    this.disposed = true;
+    this.calculationListener?.dispose();
+    this.calculationListener = undefined;
+  }
 
   setInputBlocked(blocked: boolean): void { this.inputBlocked = blocked; }
   private readonly delimitedFields: boolean;
@@ -220,9 +230,18 @@ export class HcdUniverAdapter {
 
   get mode(): HcdViewerMode { return this.currentMode; }
 
+  updatePresentation(operation: () => void): void {
+    this.withApplying(operation);
+  }
+
   setMode(mode: HcdViewerMode): void {
     if (this.hasPendingPatch()) throw new Error('请等待当前单元格保存完成');
     this.currentMode = mode;
+  }
+
+  isPivotCell(sheet: string, row: number, column: number): boolean {
+    return this.client.worksheetPivots(sheet).some(pivot =>
+      pivotContains(pivotRange(pivot), row, column) || pivotContains(pivot.origin?.range, row, column));
   }
 
   async start(): Promise<void> {
@@ -235,7 +254,8 @@ export class HcdUniverAdapter {
       this.scheduleVisible(activeSheet);
     });
     this.univerAPI.addEvent(this.univerAPI.Event.BeforeSheetEditStart, (event) => {
-      if (this.mode === 'readonly' || this.inputBlocked) {
+      if (this.mode === 'readonly' || this.inputBlocked
+        || this.isPivotCell(event.worksheet.getSheetId(), event.row, event.column)) {
         event.cancel = true;
         return;
       }
@@ -261,6 +281,17 @@ export class HcdUniverAdapter {
       const calculation = event.id.startsWith('formula.mutation.')
         || event.options?.fromFormula === true
         || event.options?.applyFormulaCalculationResult === true;
+      if (!this.applying && !calculation && event.id === SetRangeValuesMutation.id) {
+        const data = event.params as { unitId?: string; subUnitId?: string; cellValue?: IObjectMatrixPrimitiveType<ICellData> } | undefined;
+        if (data?.unitId === this.workbook.getId() && data.subUnitId && data.cellValue
+          && this.client.worksheetPivots(data.subUnitId).length
+          && Object.entries(data.cellValue).some(([row, cells]) => Object.keys(cells)
+            .some(column => this.isPivotCell(data.subUnitId!, Number(row), Number(column))))) {
+          event.cancel = true;
+          this.onError('请修改透视表源数据，或在透视表中调整字段。');
+          return;
+        }
+      }
       if (
         (this.mode === 'readonly' || this.inputBlocked)
         && !this.applying
@@ -276,14 +307,14 @@ export class HcdUniverAdapter {
     });
     // A compatibility calculation can complete after a service result. Reapply
     // only the changed caches, never a formula edit or a document transaction.
-    this.univerAPI.getFormula().calculationResultApplied(() => {
+    this.calculationListener = this.univerAPI.getFormula().calculationResultApplied(() => {
       if (!this.applying) void this.refreshFormulaResults();
     });
     await this.ensureVisible(this.workbook.getActiveSheet());
   }
 
   getNodeAt(sheetId: string, row: number, column: number): NodeLink | undefined {
-    return this.linksByCell.get(cellKey(sheetId, row, column));
+    return this.isPivotCell(sheetId, row, column) ? undefined : this.linksByCell.get(cellKey(sheetId, row, column));
   }
 
   applyRichCellInput(sheetId: string, row: number, column: number, runs: XlsxInlineRun[]): void {
@@ -409,6 +440,12 @@ export class HcdUniverAdapter {
     const visualDescriptors = this.client.visuals(sheetId).filter(({ grid }) => grid?.rowStart === undefined
       || grid.rowEnd === undefined
       || (grid.rowEnd >= startRow + 1 && grid.rowStart <= endRow + 1));
+    const sheet = this.workbook.getSheetBySheetId(sheetId);
+    const pivots = this.client.worksheetPivots(sheetId);
+    if (sheet && (cellDescriptors.some(descriptor => this.loadedVersions.get(descriptor.chunkId) !== this.descriptorVersion(descriptor))
+      || !this.pivotProjection.isCurrent(sheetId, pivots))) {
+      this.withApplying(() => this.pivotProjection.restore(sheet));
+    }
     // Cell chunks establish the real row/column geometry. Drawings must be
     // inserted afterwards or their two-cell anchors are measured against the
     // temporary default grid.
@@ -420,18 +457,21 @@ export class HcdUniverAdapter {
     const descriptors = [...cellDescriptors, ...visualDescriptors];
     const keep = new Set(descriptors.map(({ chunkId }) => chunkId));
     this.evictOutsideWindow(sheetId, keep);
+    if (sheet && !this.pivotProjection.isCurrent(sheetId, pivots)) {
+      this.withApplying(() => this.pivotProjection.paint(sheet, pivots));
+    }
     await this.refreshFormulaResults();
   }
 
   /** Update real cell caches from the same checked results used by CLI/Agents.
    * Keep formulas, formatting, selection, scroll and the renderer untouched. */
   private async refreshFormulaResults(): Promise<void> {
-    if (this.hasPendingPatch() || this.workbook.isCellEditing()) return;
+    if (this.disposed || this.hasPendingPatch() || this.workbook.isCellEditing()) return;
     const revision = this.client.manifest.revision;
     const sheetIds = new Set([...this.linksByNode.values()].filter(link => link.formula).map(link => link.sheetId));
     try {
       const results = await Promise.all([...sheetIds].map(async sheetId => [sheetId, await this.client.readCalculations(sheetId)] as const));
-      if (this.client.manifest.revision !== revision || this.hasPendingPatch() || this.workbook.isCellEditing()) return;
+      if (this.disposed || this.client.manifest.revision !== revision || this.hasPendingPatch() || this.workbook.isCellEditing()) return;
       const unitData: Record<string, Record<string, Record<number, Record<number, ICellData>>>> = {};
       for (const [sheetId, cells] of results) {
         if (!cells) continue;
@@ -1496,6 +1536,7 @@ export class HcdUniverAdapter {
   }
 
   private canEditBlankCell(sheetId: string, row: number, column: number): boolean {
+    if (this.isPivotCell(sheetId, row, column)) return false;
     if (this.blankCells.has(cellKey(sheetId, row, column))
       || column < (this.loadedRowCeilings.get(`${sheetId}:${row}`) ?? 0)) return true;
     // A worksheet HCD just created, like a source tab that has no rows at all,

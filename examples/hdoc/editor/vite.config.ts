@@ -5,6 +5,7 @@ import { Agent as HttpsAgent } from 'node:https'
 import { join } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 import { canvasAssets } from './canvasAssets.ts'
+import { pdfOcrAssets } from './pdfOcrAssets.mjs'
 
 const samples = [
   { id: 'accept-image', title: '陶艺时刻.jpg', format: 'JPG', mode: '可编辑图片与局部重绘' },
@@ -80,7 +81,7 @@ const apiAgent = new (new URL(apiTarget).protocol === 'https:' ? HttpsAgent : Ht
 
 export default defineConfig({
   cacheDir: process.env.HCD_VITE_CACHE_DIR,
-  plugins: [canvasAssets(), localAcceptanceSamples(), {
+  plugins: [canvasAssets(), pdfOcrAssets(), localAcceptanceSamples(), {
     name: 'hcd-api-proxy-connections',
     configureServer(server) { server.httpServer?.once('close', () => apiAgent.destroy()) },
   }],

@@ -6,6 +6,7 @@ import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, writeFileSync 
 import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const app = resolve(import.meta.dirname, "..");
 const { chromium, expect } = await import(
@@ -428,6 +429,18 @@ try {
   await openBoard.click();
   await expect(shared.locator(".canvas-workspace")).toBeVisible({ timeout: 60000 });
   checks.push("访客文件库并列展示文档与白板，支持跨类型搜索，分别显示真实分享权限并进入对应编辑器");
+  const archive = join(sandbox, "studio-backup");
+  const backedUp = spawnSync(process.execPath, [cli, "backup", "--root", join(sandbox, alpha.id), "--output", archive], { encoding: "utf8" });
+  assert.equal(backedUp.status, 0, backedUp.stderr);
+  const manifest = JSON.parse(readFileSync(join(archive, "snapshot.json"), "utf8"));
+  assert.equal(manifest.tenantId, alpha.id);
+  assert(manifest.files.some(item => item.path.startsWith(`engine/${alpha.boardSession.documentId}.hcd/`)));
+  assert(!manifest.files.some(item => item.path.startsWith(`engine/${beta.boardSession.documentId}.hcd/`)));
+  const archived = new DatabaseSync(join(archive, "business.sqlite"), { readOnly: true });
+  try { assert.deepEqual(new Set(archived.prepare("SELECT id FROM files").all().map(row => row.id)), new Set([alpha.doc.id, alpha.board.id])); }
+  finally { archived.close(); }
+  assert.equal(success(await engine(beta, "/canvas")).scene.elements[0].text, beta.name);
+  checks.push("通过本机命令备份指定租户，业务库和可编辑白板只包含该租户，另一工作区继续提供服务");
   await browser.close();
   browser = null;
   const pidFile = join(sandbox, "pid-" + alpha.ports[2]);

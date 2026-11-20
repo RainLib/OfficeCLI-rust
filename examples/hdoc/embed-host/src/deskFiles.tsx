@@ -44,7 +44,7 @@ export const kinds = {
 export type FileKind = keyof typeof kinds
 export const createKinds: FileKind[] = ['doc', 'sheet', 'deck', 'board']
 export function kindOf(format: string): FileKind {
-  if (format === 'xlsx') return 'sheet'
+  if (['xlsx', 'csv', 'tsv'].includes(format)) return 'sheet'
   if (format === 'pptx') return 'deck'
   if (format === 'excalidraw') return 'board'
   if (format === 'pdf') return 'pdf'
@@ -188,6 +188,14 @@ export function PaperArt({ kind }: { kind: FileKind }) {
   )
 }
 export const baseName = (s: string) => s.replace(/\.[^.]+$/, '')
+export function selectionKey(selection: HcdEmbedSelection | null) {
+  if (!selection) return 'append'
+  const t = selection.target
+  const range = t.kind === 'document' ? t.spans.map(s => [s.blockId, s.start, s.end, s.textHash])
+    : t.kind === 'sheet' ? [t.sheetId, t.top, t.left, t.bottom, t.right]
+    : t.kind === 'spec' ? [t.id, t.anchor, t.head, t.expected] : [...t.elementIds].sort()
+  return JSON.stringify([selection.documentId, selection.revision, selection.collaborationEpoch, t.kind, range])
+}
 export function scopeOf(file: FileEntry, selection: HcdEmbedSelection | null) {
   if (!file.canDelegateSelection) return ''
   if (selection?.target.kind === 'spec') return 'Spec 选句 · '+selection.target.expected

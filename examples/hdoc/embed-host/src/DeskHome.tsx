@@ -1,9 +1,10 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ArrowDownToLine,
   Check,
   Clock3,
   Files,
+  FolderInput,
   FolderOpen,
   Home,
   Layers,
@@ -26,7 +27,9 @@ import {
   PaperArt,
   type FileKind,
 } from './deskFiles'
-import { api, mutation, type Account, type FileEntry } from './hostApi'
+import { api, mutation, type Account, type FileEntry, type Project, type ProjectDetails, type ProjectFolder } from './hostApi'
+import { DeskContentSearch, type FoundContent } from './DeskContentSearch'
+import { EditProjectDialog, MoveProjectFileDialog, ProjectActions, ProjectFolders, ProjectIndex, ProjectMembersDialog, folderTrail, type ProjectEdit } from './DeskProjects'
 type Props = {
   account: Account
   files: FileEntry[]
@@ -34,7 +37,10 @@ type Props = {
   recent: string[]
   star: (id: string) => void
   open: (id: string) => void
+  openContent: (content: FoundContent) => void
   add: (file: FileEntry) => void
+  fileChanged: (file: FileEntry) => void
+  refreshFiles: () => Promise<void>
   creating: FileKind | null
   setCreating: (kind: FileKind | null) => void
   error: string
@@ -46,18 +52,85 @@ export function DeskHome({
   recent,
   star,
   open,
+  openContent,
   add,
+  fileChanged,
+  refreshFiles,
   creating,
   setCreating,
   error,
 }: Props) {
-  const [filter, setFilter] = useState('home'),
+  const [filter, setFilter] = useState(() => {
+    const query = new URLSearchParams(location.search)
+    return query.has('project') || query.get('section') === 'projects' ? 'projects' : 'home'
+  }),
     [search, setSearch] = useState(''),
     [order, setOrder] = useState<'recent' | 'name'>('recent'),
     [name, setName] = useState(''),
     [notice, setNotice] = useState(''),
     [busy, setBusy] = useState(false)
   const picker = useRef<HTMLInputElement>(null)
+  const [contentSearch, setContentSearch] = useState(false)
+  const [projects, setProjects] = useState<Project[]>([])
+  const [projectListReady, setProjectListReady] = useState(false)
+  const [projectId, setProjectId] = useState(() => new URLSearchParams(location.search).get('project'))
+  const [folderId, setFolderId] = useState(() => new URLSearchParams(location.search).get('folder'))
+  const [details, setDetails] = useState<ProjectDetails | null>(null)
+  const [projectChanges, updateProjects] = useState(0)
+  const [editProject, setEditProject] = useState<ProjectEdit | null>(null)
+  const [memberProject, setMemberProject] = useState<Project | null>(null)
+  const [moving, setMoving] = useState<FileEntry | null>(null)
+  const inProjects = filter === 'projects'
+  const project = inProjects && details && details.project.id === projectId ? details.project : null
+  const folders = project && details ? details.folders : []
+  const folderMap = new Map(folders.map(folder => [folder.id, folder]))
+  const currentFolder = folderId && folderMap.has(folderId) ? folderId : null
+  const trail = folderTrail(folderMap, currentFolder)
+  const projectWritable = !!project && project.role !== 'viewer'
+  const destination = projectWritable ? { projectId: project.id, folderId: currentFolder } : null
+  const refreshProjects = () => updateProjects(value => value + 1)
+  useEffect(() => {
+    const controller = new AbortController()
+    api<{ projects: Project[] }>('/projects', { signal: controller.signal }).then(reply => {
+      if (!controller.signal.aborted) { setProjects(reply.projects); setProjectListReady(true) }
+    }).catch(cause => {
+      if (!controller.signal.aborted) { setNotice(failText(cause)); setProjectListReady(true) }
+    })
+    return () => controller.abort()
+  }, [account.user.id, projectChanges])
+  useEffect(() => {
+    if (!inProjects) return
+    const controller = new AbortController()
+    const request = projectId ? api<ProjectDetails>('/projects/' + projectId, { signal: controller.signal }) : Promise.resolve(null)
+    Promise.all([request, refreshFiles()]).then(([reply]) => {
+      if (!controller.signal.aborted) setDetails(reply)
+    }).catch(cause => {
+      if (!controller.signal.aborted) { setDetails(null); setNotice(failText(cause)) }
+    })
+    return () => controller.abort()
+  }, [inProjects, projectId, projectChanges, refreshFiles])
+  useEffect(() => {
+    if (!inProjects) return
+    const onFocus = () => updateProjects(value => value + 1)
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [inProjects])
+  function setDirectory(id: string | null, folder: string | null = null) {
+    setFilter('projects'); setProjectId(id); setFolderId(folder); setSearch(''); setNotice('')
+    const url = new URL(location.href)
+    url.searchParams.set('section', 'projects')
+    if (id) url.searchParams.set('project', id); else url.searchParams.delete('project')
+    if (folder) url.searchParams.set('folder', folder); else url.searchParams.delete('folder')
+    history.replaceState(history.state, '', url)
+  }
+  function editFolder(folder: ProjectFolder) {
+    if (!project) return
+    const empty = !folders.some(item => item.parentId === folder.id) &&
+      !files.some(file => file.location?.projectId === project.id && file.location.folderId === folder.id)
+    setEditProject({ kind: 'folder', project, folders, folder, parentId: folder.parentId, empty })
+  }
+  const canMove = (file: FileEntry) => projects.some(item => item.role !== 'viewer' &&
+    (file.canManage || item.id === file.location?.projectId)) || file.canManage && !!file.location
   const filterLabel =
     filter === 'stars'
       ? '星标文件'
@@ -65,13 +138,16 @@ export function DeskHome({
         ? '最近打开'
         : filter === 'home'
           ? '全部文件'
-          : kinds[filter as FileKind]?.label
+          : inProjects
+            ? trail.at(-1)?.name || project?.name || '共享项目'
+            : kinds[filter as FileKind]?.label
   const matched = files.filter(
     (f) =>
       (filter === 'home' ||
         (filter === 'stars' && stars.includes(f.id)) ||
         (filter === 'recent' && recent.includes(f.id)) ||
-        kindOf(f.format) === filter) &&
+        (inProjects ? !!project && f.location?.projectId === project.id && f.location.folderId === currentFolder
+          : kindOf(f.format) === filter)) &&
       f.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
   )
   matched.sort((a, b) =>
@@ -93,6 +169,7 @@ export function DeskHome({
         '/files',
         mutation(account.csrf, {
           name: title.toLowerCase().endsWith(ext) ? title : title + ext,
+          ...destination,
         }),
       )
       setCreating(null)
@@ -108,8 +185,11 @@ export function DeskHome({
     setBusy(true)
     setNotice('')
     try {
+      const query = new URLSearchParams({ filename: file.name })
+      if (destination) query.set('projectId', destination.projectId)
+      if (destination?.folderId) query.set('folderId', destination.folderId)
       const { file: entry } = await api<{ file: FileEntry }>(
-        '/files?filename=' + encodeURIComponent(file.name),
+        '/files?' + query,
         {
           method: 'POST',
           headers: {
@@ -127,8 +207,13 @@ export function DeskHome({
     }
   }
   const go = (next: string) => {
+    if (next === 'projects') { setDirectory(null); refreshProjects(); return }
     setFilter(next)
     setSearch('')
+    setNotice('')
+    const url = new URL(location.href)
+    for (const key of ['section', 'project', 'folder']) url.searchParams.delete(key)
+    history.replaceState(history.state, '', url)
   }
   return (
     <div className="desk-home">
@@ -145,6 +230,7 @@ export function DeskHome({
         <div className="desk-rail-list">
           {[
             { id: 'home', label: '首页', icon: Home },
+            { id: 'projects', label: '共享项目', icon: FolderOpen },
             { id: 'recent', label: '最近打开', icon: Clock3 },
             { id: 'stars', label: '星标文件', icon: Star },
           ].map((n) => (
@@ -210,36 +296,48 @@ export function DeskHome({
         <div className="desk-breadcrumb">
           <Home size={15} /> <span>工作台</span>
           <span>/</span>
-          <strong>{filter === 'home' ? '首页' : filterLabel}</strong>
+          {project ? <>
+            <button onClick={() => setDirectory(null)}>共享项目</button><span>/</span>
+            <button onClick={() => setDirectory(project.id)}>{project.name}</button>
+            {trail.map(folder => <span className="desk-project-crumb" key={folder.id}>/<button onClick={() => setDirectory(project.id, folder.id)}>{folder.name}</button></span>)}
+          </> : <strong>{filter === 'home' ? '首页' : filterLabel}</strong>}
         </div>
+        {inProjects && !project ? <ProjectIndex projects={projects} loading={!projectListReady}
+          onOpen={id => setDirectory(id)} onCreate={() => setEditProject({ kind: 'project' })} /> : <>
         <div className="desk-page-head">
           <div>
             <h1>{filter === 'home' ? '工作空间' : filterLabel}</h1>
-            <p>
+            {!project && <p>
               {account.workspace.name || '我的工作空间'} <span> / </span>{' '}
               {account.user.displayName}
-            </p>
+            </p>}
           </div>
-          <button
+          <div className="desk-project-actions">
+          {project && <ProjectActions manager={project.role === 'manager'} writable={projectWritable} name={project.name}
+            createFolder={() => setEditProject({ kind: 'folder', project, folders, parentId: currentFolder })}
+            openMembers={() => setMemberProject(project)}
+            rename={() => setEditProject({ kind: 'project', project })} />}
+          {(!project || projectWritable) && <button
             className="desk-upload"
             disabled={busy}
             onClick={() => picker.current?.click()}
           >
             <Upload size={16} />
             上传文件
-          </button>
+          </button>}
+          </div>
           <input
             hidden
             type="file"
             ref={picker}
-            accept=".docx,.xlsx,.pptx,.pdf,.txt,.md,.html,.excalidraw,.png,.jpg,.jpeg,.webp"
+            accept=".docx,.xlsx,.csv,.tsv,.pptx,.pdf,.txt,.md,.html,.excalidraw,.png,.jpg,.jpeg,.webp"
             onChange={(e) => {
               if (e.target.files?.[0]) void upload(e.target.files[0])
               e.target.value = ''
             }}
           />
         </div>
-        {filter === 'home' && (
+        {(filter === 'home' || projectWritable) && (
           <section className="desk-new">
             <h2>新建文件</h2>
             <div className="desk-tiles">
@@ -263,13 +361,16 @@ export function DeskHome({
             </div>
           </section>
         )}
+        {project && <ProjectFolders folders={folders.filter(folder => folder.parentId === currentFolder &&
+          folder.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))} writable={projectWritable}
+          open={id => setDirectory(project.id, id)} edit={editFolder} />}
         <section className="desk-file-section">
           <div className="desk-files-head">
             <h2>
-              {filter === 'home' ? '文件库' : filterLabel}{' '}
+              {project ? '文件' : filter === 'home' ? '文件库' : filterLabel}{' '}
               <small>{matched.length}</small>
             </h2>
-            <label className="desk-search">
+            <div className="desk-library-search"><label className="desk-search">
               <Search size={15} />
               <input
                 aria-label="搜索文件"
@@ -282,7 +383,7 @@ export function DeskHome({
                   <X size={13} />
                 </button>
               )}
-            </label>
+            </label><button className="desk-start-content-search" type="button" onClick={() => setContentSearch(true)}>查找正文</button></div>
           </div>
           <div className="desk-list-head">
             <span>文件名称</span>
@@ -316,6 +417,9 @@ export function DeskHome({
                   day: 'numeric',
                 })}
               </time>
+              <div className="desk-row-actions">
+              {canMove(f) && <button className="desk-project-icon-button"
+                aria-label={'移动 ' + f.name} onClick={() => setMoving(f)}><FolderInput size={16} /></button>}
               <button
                 className={
                   'desk-star' + (stars.includes(f.id) ? ' picked' : '')
@@ -328,6 +432,7 @@ export function DeskHome({
               >
                 <Star size={16} />
               </button>
+              </div>
             </div>
           ))}
           {!matched.length && (
@@ -343,12 +448,24 @@ export function DeskHome({
             </div>
           )}
         </section>
+        </>}
         {(error || notice) && (
           <p role="alert" className="desk-error">
             {notice || error}
           </p>
         )}
       </main>
+      {contentSearch && <DeskContentSearch projectId={project?.id} close={() => setContentSearch(false)} open={content => { setContentSearch(false); openContent(content) }} />}
+      {editProject && <EditProjectDialog edit={editProject} account={account} close={() => setEditProject(null)}
+        saved={(id, removedFolder) => {
+          if (!project || project.id !== id) setDirectory(id)
+          else if (removedFolder === currentFolder) setDirectory(id)
+          setEditProject(null); refreshProjects()
+        }} />}
+      {memberProject && <ProjectMembersDialog project={memberProject} account={account}
+        close={() => setMemberProject(null)} changed={refreshProjects} />}
+      {moving && <MoveProjectFileDialog file={moving} projects={projects} account={account}
+        close={() => setMoving(null)} saved={file => { setMoving(null); fileChanged(file) }} />}
       {creating && (
         <div className="desk-shade">
           <form
@@ -379,6 +496,7 @@ export function DeskHome({
                 placeholder={'未命名' + kinds[creating].label}
               />
             </label>
+            {destination && <p className="desk-project-note">保存到 {project?.name}{trail.map(folder => ' / ' + folder.name).join('')}</p>}
             {notice && <p role="alert">{notice}</p>}
             <button className="desk-primary" disabled={busy || !name.trim()}>
               <Check size={15} />

@@ -1102,6 +1102,11 @@ test('native stamp cursor stays separate from zoomed ink and a cold transparent 
   const [a,b]=await marks()
   expect(a.id).not.toBe(b.id);expect(a.groupIds).toEqual([]);expect(b.groupIds).toEqual([])
   expect(a.fileId).toBe(b.fileId)
+  expect(a.customData.officeStamp.author).toBe('设计同伴')
+  await page.keyboard.press('Escape');await page.mouse.move(spot.x,spot.y)
+  await expect(board.getByRole('tooltip').filter({hasText:'设计同伴'})).toBeVisible()
+  await page.screenshot({path:info.outputPath('stamp-author.png'),clip:{x:spot.x-70,y:spot.y-90,width:140,height:135}})
+
   await page.reload()
   await expect(board.locator('canvas.interactive')).toBeVisible()
   expect((await marks()).map((e:any)=>[e.width,e.height,e.opacity])).toEqual([[54,54,100],[54,54,100]])

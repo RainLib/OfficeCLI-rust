@@ -135,6 +135,7 @@ test.beforeAll(async () => {
     'fixed-draft-crash':'examples/ppt/textboxes/textboxes-basic.pptx',
     'grid-draft-reopen':'xlsx-generated', 'grid-draft-cell':'xlsx-generated', 'grid-draft-stale':'xlsx-generated',
     'ppt-panels':'examples/ppt/textboxes/textboxes-basic.pptx',
+    'ppt-ribbon':'examples/ppt/textboxes/textboxes-basic.pptx',
     'ppt-properties':'examples/ppt/textboxes/textboxes-basic.pptx',
     'ppt-panels-read':'examples/ppt/textboxes/textboxes-basic.pptx',
     'fixed-history-errors':'examples/ppt/textboxes/textboxes-basic.pptx',
@@ -3445,6 +3446,55 @@ test('PPT thumbnail drag saves the complete order in one revision with hover act
   await expect(readOnly.locator('.slide-card')).toHaveCount(4)
   await expect(readOnly.locator('.slide-card[draggable=true]')).toHaveCount(0)
   await expect(readOnly.locator('.slide-actions,.add-slide')).toHaveCount(0)
+})
+
+test('PPT grip swaps adjacent slides and the ribbon inserts editable layouts on the active page', async ({page}, info) => {
+  const id = 'ppt-ribbon'
+  await open(page, id)
+  const pane = page.locator('.document-tab-panel:not([hidden])')
+  const cards = pane.locator('.slide-card')
+  const ids = () => cards.evaluateAll(items => items.map(item => (item as HTMLElement).dataset.slideId))
+  const patch = () => page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/node-patch'))
+  await expect(cards).toHaveCount(4)
+  const initial = await ids()
+  await cards.first().hover()
+  const swapped = patch()
+  await cards.first().getByRole('button', {name:'拖动幻灯片 1 排序'}).dragTo(cards.nth(1))
+  expect((await swapped).ok()).toBe(true)
+  await expect.poll(ids).toEqual([initial[1], initial[0], ...initial.slice(2)])
+  await cards.nth(1).getByRole('button',{name:'幻灯片 2',exact:true}).click()
+  await pane.getByRole('button',{name:'插入',exact:true}).click()
+  const headers = {Authorization:'Bearer ' + token(id,'browser-user')}
+  const chunk = async () => {
+    const res = await page.request.get(apiUrl + '/v1/documents/' + id + '/chunks/1', {headers})
+    expect(res.ok()).toBe(true)
+    return (await res.json()).html as string
+  }
+  for (const layout of [{name:'标题与正文', texts:['标题','正文']},{name:'双栏内容', texts:['标题','左栏内容','右栏内容']}]) {
+    const saved = patch()
+    await pane.getByRole('button', {name:layout.name,exact:true}).click()
+    const response = await saved
+    expect(response.ok(),await response.text()).toBe(true)
+    const {baseRevision, operations} = response.request().postDataJSON()
+    expect((await response.json()).revision).toBe(baseRevision + 1)
+    expect(operations.map((op:{text:string})=>op.text)).toEqual(layout.texts)
+    expect(operations.every((op:{chunkId:string})=>op.chunkId === initial[0])).toBe(true)
+    const html = await chunk()
+    for (const value of layout.texts) expect(html).toContain(value)
+  }
+  await page.reload()
+  await expect.poll(ids).toEqual([initial[1], initial[0], ...initial.slice(2)])
+  await cards.nth(1).getByRole('button',{name:'幻灯片 2',exact:true}).click()
+  await pane.getByRole('button',{name:'从当前页放映'}).click()
+  const show = page.getByRole('dialog',{name:'幻灯片放映'})
+  await expect(show.locator('output')).toHaveText('2 / 4')
+  await expect(show.locator('iframe').contentFrame().locator('body')).toContainText('右栏内容')
+  await page.keyboard.press('ArrowRight')
+  await expect(show.locator('output')).toHaveText('3 / 4')
+  await page.keyboard.press('Escape')
+  await expect(show).toHaveCount(0)
+  await pane.getByRole('button',{name:'插入',exact:true}).click()
+  await page.screenshot({animations:'disabled',path:info.outputPath('ppt-slide-layouts.png')})
 })
 
 test('PPT shape properties follow the design and commit real typography and geometry',async({page},info)=>{

@@ -354,3 +354,19 @@
 .hcd-surface .export-guidance p { margin:0 0 8px; }
 .hcd-surface .export-guidance [role=alert] { color:#a44040; }
 .hcd-surface .export-guidance details>summary { cursor:pointer; color:var(--accent); }
+
+/* File tabs supply the title in the integrated workbench. Keep file actions in the ribbon menu. */
+.hcd-surface .integrated-file-menu { position:relative; color:var(--ink); }
+.hcd-surface .integrated-file-menu > summary { display:grid; place-items:center; cursor:pointer; width:30px; height:30px; border-radius:8px; list-style:none; }
+.hcd-surface .integrated-file-menu > summary::-webkit-details-marker { display:none; }
+.hcd-surface .integrated-file-menu[open] > summary { background:var(--accent-soft); color:var(--accent); }
+.hcd-surface .integrated-file-menu[open] > .header-actions { position:absolute; z-index:12; top:calc(100% + 4px); right:0; display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:8px; width:max-content; max-width:min(350px,65vw); border:1px solid var(--line); border-radius:12px; background:var(--surface); box-shadow:var(--shadow); }
+.hcd-surface .workspace.semantic-workspace > .integrated-exit-focus { align-self:flex-end; flex:none; }
+.hcd-surface .workspace.semantic-workspace .ribbon.document-ribbon { display:flex; gap:0; max-height:none; overflow:visible; padding:6px 10px; }
+.document-ribbon .command-clip { flex:1 1 0; min-width:0; }
+.document-ribbon[data-expanded=false] .command-clip { height:var(--command-row-height,32px); overflow:clip; }
+.document-ribbon[data-expanded=false] [data-extra-command] { visibility:hidden; }
+.document-ribbon .command-rows { display:flex; flex-wrap:wrap; align-items:center; gap:5px; min-width:0; }
+.hcd-surface .workspace.semantic-workspace .document-ribbon .command-rows > div.tool-group { display:contents; }
+.hcd-surface .workspace.semantic-workspace .document-ribbon .command-rows > .save-trigger { margin-left:0; }
+.hcd-surface .workspace.semantic-workspace .document-ribbon .command-overflow { align-self:flex-end; flex:none; display:grid; place-items:center; width:32px; color:var(--accent); }

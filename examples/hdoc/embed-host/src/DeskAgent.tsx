@@ -12,12 +12,12 @@ import {
   X,
 } from 'lucide-react'
 import { AgentCompanionMark } from '@officecli/hcd-reference-editor/react'
-import { applyAgentAction, type Grant, type SpecUndo, type PlannedAction } from './agent'
 import { type PaneHandle, type PaneState } from './DeskPane'
 import { api, mutation, type Account, type FileEntry } from './hostApi'
 import { baseName, failText, FileGlyph, kindOf } from './deskFiles'
 
-type Phase = 'planning' | 'reading' | 'editing' | 'complete' | 'failed'
+type Phase = 'planning' | 'reading' | 'waiting' | 'drafting' | 'review' | 'queued' | 'editing' | 'complete' | 'failed'
+type JobAction = 'approve' | 'retry' | 'recheck' | 'recheck-selection' | 'undo'
 export type Job = {
   id: string
   prompt: string
@@ -29,9 +29,17 @@ export type Job = {
     format: string
     scope: string
     phase: Phase
-    specUndo?: SpecUndo
+    specUndo?: boolean
+    undoable?: boolean
+    undoReceipt?: number
     receipt?: number
     error?: string
+    retryable?: boolean
+    recheckable?: boolean
+    dependencyBlocked?: boolean
+    dependsOn?: { id: string; name: string; revision?: number; undone: boolean }[]
+    reviewId?: string
+    changes?: { label: string; before: string | number | null; after: string | number | null }[]
   }[]
 }
 type Activity = {
@@ -45,6 +53,10 @@ type Activity = {
 const phaseLabel: Record<Phase, string> = {
   planning: '准备中',
   reading: '已读取',
+  waiting: '等待前序文件',
+  drafting: '生成预览',
+  review: '待审核',
+  queued: '等待执行',
   editing: '编辑中',
   complete: '已保存',
   failed: '未完成',
@@ -55,14 +67,31 @@ export function useDeskTasks(
   states: Record<string, PaneState>,
   enabled: boolean,
 ) {
-  const [jobs, setJobs] = useState<Job[]>([]),
-    [external, setExternal] = useState<Activity[]>([])
+  const [serverJobs, setServerJobs] = useState<Job[]>([])
+  const [localJobs, setLocalJobs] = useState<Job[]>([])
+  const [external, setExternal] = useState<Activity[]>([])
   const locks = useRef(new Set<string>())
-  const patch = useCallback(
-    (id: string, fn: (row: Job) => Job) =>
-      setJobs((rows) => rows.map((r) => (r.id === id ? fn(r) : r))),
-    [],
-  )
+  const serverGeneration = useRef(0)
+  const accept = useCallback((job: Job) => {
+    serverGeneration.current++
+    setServerJobs(previous => [...previous.filter(item => item.id !== job.id), job])
+  }, [])
+  const jobs = [...serverJobs, ...localJobs.filter(local => !serverJobs.some(server => server.id === local.id))]
+  useEffect(() => {
+    if (!account.workspace.selectionMcp) return
+    let alive = true
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      const generation = serverGeneration.current
+      try {
+        const { jobs } = await api<{ jobs: Job[] }>('/agent-jobs')
+        if (alive && generation === serverGeneration.current) setServerJobs(jobs)
+      } catch { /* A later poll can recover without changing persisted state. */ }
+      if (alive) timer = setTimeout(() => void poll(), 650)
+    }
+    void poll()
+    return () => { alive = false; clearTimeout(timer) }
+  }, [account.user.id, account.workspace.selectionMcp])
   useEffect(() => {
     if (!enabled || !account.workspace.selectionMcp) return
     const stream = new EventSource('/workspace/api/agent-activity/stream')
@@ -73,109 +102,56 @@ export function useDeskTasks(
       } catch {}
     }
     stream.onerror = () => setExternal([])
-    return () => {
-      stream.close()
-      setExternal([])
-    }
+    return () => { stream.close(); setExternal([]) }
   }, [enabled, account.workspace.selectionMcp])
   async function run(prompt: string, files: FileEntry[]) {
-    if (
-      !prompt.trim() ||
-      !files.length ||
-      files.some((f) => locks.current.has(f.id))
-    )
-      return false
-    const targets = files.map((f) => ({
-      file: f,
-      state: states[f.id],
-      handle: handles.current.get(f.id),
-    }))
-    if (targets.some((t) => !t.state?.ready || !t.state.scope || !t.handle))
-      return false
+    if (!prompt.trim() || !files.length || files.some((f) => locks.current.has(f.id))) return false
+    const targets = files.map(file => ({ file, state: states[file.id], handle: handles.current.get(file.id) }))
+    if (targets.some(target => !target.state?.ready || !target.state.scope || !target.handle)) return false
     const id = crypto.randomUUID()
-    files.forEach((f) => locks.current.add(f.id))
-    setJobs((rows) => [
-      ...rows.slice(-29),
-      {
-        id,
-        prompt,
-        reply: '',
-        done: false,
-        targets: targets.map((t) => ({
-          id: t.file.id,
-          name: t.file.name,
-          format: t.file.format,
-          scope: t.state.scope,
-          phase: 'planning',
-        })),
-      },
-    ])
-    const change = (fileId: string, update: Partial<Job['targets'][number]>) =>
-      patch(id, (j) => ({
-        ...j,
-        targets: j.targets.map((t) =>
-          t.id === fileId ? { ...t, ...update } : t,
-        ),
-      }))
-    const grants = new Map<string, Grant>()
+    const planning: Job = {
+      id, prompt, reply: '', done: false,
+      targets: targets.map(({ file, state }) => ({
+        id: file.id, name: file.name, format: file.format, scope: state.scope, phase: 'planning',
+      })),
+    }
+    files.forEach(file => locks.current.add(file.id))
+    setLocalJobs(previous => [...previous.slice(-19), planning])
     try {
-      // Prepare each editor before issuing any grant. A local draft may advance its revision.
-      await Promise.all(targets.map((t) => t.handle!.prepare()))
-      await Promise.all(
-        targets.map(async (t) => {
-          try {
-            grants.set(t.file.id, await t.handle!.authorize(t.state.mode))
-          } catch (e) {
-            throw Error(t.file.name + ' · ' + failText(e))
-          }
-        }),
-      )
-      const plan = await api<{ reply: string; actions: PlannedAction[] }>(
-        '/agent-plan',
-        mutation(account.csrf, {
-          prompt,
-          tokens: targets.map((t) => grants.get(t.file.id)!.token),
-        }),
-      )
-      patch(id, (j) => ({
-        ...j,
-        reply: plan.reply,
-        targets: j.targets.map((t) => ({ ...t, phase: 'reading' })),
+      await Promise.all(targets.map(target => target.handle!.prepare()))
+      const grants = await Promise.all(targets.map(async target => {
+        try { return await target.handle!.authorize(target.state.mode, target.state.selectionKey) }
+        catch (error) { throw Error(target.file.name + ' · ' + failText(error)) }
       }))
-      await Promise.all(
-        plan.actions.map(async (action) => {
-          const grant = grants.get(action.fileId)
-          if (!grant) throw Error('任务返回了未授权的文件。')
-          change(action.fileId, { phase: 'editing' })
-          try {
-            const receipt = await applyAgentAction(
-              grant,
-              action,
-              crypto.randomUUID(),
-            )
-            change(action.fileId, {
-              phase: 'complete',
-              receipt: receipt.revision, specUndo:receipt.specUndo,
-            })
-          } catch (e) {
-            change(action.fileId, { phase: 'failed', error: failText(e) })
-          }
-        }),
-      )
-    } catch (e) {
-      patch(id, (j) => ({
-        ...j,
-        reply: failText(e),
-        targets: j.targets.map((t) => ({ ...t, phase: 'failed' })),
-      }))
+      accept(await api<Job>('/agent-jobs', mutation(account.csrf, { id, prompt, tokens: grants.map(grant => grant.token) })))
+      setLocalJobs(previous => previous.filter(job => job.id !== id))
+    } catch (error) {
+      setLocalJobs(previous => previous.map(job => job.id === id ? {
+        ...planning, done: true, reply: failText(error), targets: planning.targets.map(target => ({ ...target, phase: 'failed' })),
+      } : job))
     } finally {
-      for (const t of targets) {
-        locks.current.delete(t.file.id)
-        t.handle?.clear()
+      for (const target of targets) {
+        locks.current.delete(target.file.id)
+        target.handle?.clear()
       }
-      patch(id, (j) => ({ ...j, done: true }))
     }
     return true
+  }
+  async function transition(jobId: string, action: JobAction, files: string[]) {
+    const handle = handles.current.get(files[0])
+    const reselect = action === 'recheck-selection'
+    const current = states[files[0]]
+    if (reselect && (!current?.ready || !current.scope || !handle)) throw Error('请打开此文件并选中需要编辑的内容。')
+    if (action === 'undo' || action === 'recheck' || reselect) await handle?.prepare()
+    const grant = reselect ? await handle!.authorize(current.mode, current.selectionKey) : null
+    const reviews = action === 'approve' ? Object.fromEntries((jobs.find(job => job.id === jobId)?.targets || [])
+      .filter(target => files.includes(target.id) && target.reviewId).map(target => [target.id, target.reviewId])) : undefined
+    try {
+      accept(await api<Job>('/agent-jobs/' + encodeURIComponent(jobId) + '/' + (reselect ? 'recheck' : action),
+        mutation(account.csrf, { files, reviews, ...(grant && { token: grant.token }) })))
+    } finally {
+      if (grant) handle?.clear()
+    }
   }
   const editing = new Set<string>(),
     recent = new Map<string, 'complete' | 'failed'>()
@@ -201,21 +177,25 @@ export function useDeskTasks(
       if (target.receipt !== undefined)
         heads.set(
           target.id,
-          Math.max(heads.get(target.id) ?? 0, target.receipt),
+          Math.max(heads.get(target.id) ?? 0, target.undoReceipt ?? target.receipt),
         )
-  return { jobs, run, editing, recent, locks, heads, names }
+  return { jobs, run, transition, editing, recent, locks, heads, names }
 }
 type Props = {
   account: Account
+  active: string
   files: FileEntry[]
   cursors: Map<string, string>
   states: Record<string, PaneState>
   selected: string[]
   toggle: (id: string) => void
+  changedScope: boolean
+  confirmScope: () => void
   draft: string
-  setDraft: (s: string) => void
+  setDraft: (s: string, restoreIfEmpty?: boolean) => void
   jobs: Job[]
   run: (prompt: string, files: FileEntry[]) => Promise<boolean>
+  transition: (id: string, action: JobAction, files: string[]) => Promise<void>
   close: () => void
   open: (id: string) => void
   handles: RefObject<Map<string, PaneHandle>>
@@ -223,15 +203,18 @@ type Props = {
 }
 export function DeskAgent({
   account,
+  active,
   files,
   cursors,
   states,
   selected,
+  changedScope, confirmScope,
   toggle,
   draft,
   setDraft,
   jobs,
   run,
+  transition,
   close,
   open,
   handles,
@@ -240,32 +223,31 @@ export function DeskAgent({
   const [picker, setPicker] = useState(true),
     [copyMsg, setCopyMsg] = useState(''),
     [copying, setCopying] = useState(false)
-  const [undoStatus,setUndoStatus]=useState<Record<string,string>>({})
-  async function undo(fileId:string, ref:SpecUndo) {
-    const key=fileId+':'+ref.revision, handle=handles.current.get(fileId)
-    if(!handle)return
-    setUndoStatus(s=>({...s,[key]:'正在撤销'}))
-    try { await handle.undoSpec(ref); setUndoStatus(s=>({...s,[key]:'已撤销'})) }
-    catch(e){setUndoStatus(s=>({...s,[key]:failText(e)}))}
+  const [jobActions, setJobActions] = useState<Record<string, string>>({})
+  async function act(jobId: string, action: JobAction, files: string[]) {
+    setJobActions(previous => ({ ...previous, [jobId]: 'pending' }))
+    try { await transition(jobId, action, files); setJobActions(previous => ({ ...previous, [jobId]: '' })) }
+    catch (error) { setJobActions(previous => ({ ...previous, [jobId]: failText(error) })) }
   }
   const end = useRef<HTMLDivElement>(null),
     input = useRef<HTMLTextAreaElement>(null)
+  const lastJob = jobs.at(-1)?.id
   const targets = files.filter((f) => selected.includes(f.id)),
     running = jobs.some((j) => !j.done)
   const ready =
-    targets.length > 0 &&
+    !changedScope && targets.length === selected.length && targets.length > 0 &&
     targets.every(
       (f) =>
         !!states[f.id]?.ready && !!states[f.id]?.scope && !locked.has(f.id),
     )
   useEffect(() => {
-    if (jobs.length) end.current?.scrollIntoView({ block: 'nearest' })
-  }, [jobs])
+    if (lastJob) end.current?.scrollIntoView({ block: 'nearest' })
+  }, [lastJob])
   async function send() {
     if (!ready || !draft.trim()) return
     const value = draft.trim()
     setDraft('')
-    if (!(await run(value, targets))) setDraft(value)
+    if (!(await run(value, targets))) setDraft(value, true)
   }
   async function share() {
     if (!ready || copying) return
@@ -276,7 +258,7 @@ export function DeskAgent({
         targets.map(async (file) => {
           const handle = handles.current.get(file.id)!
           await handle.prepare()
-          const grant = await handle.authorize(states[file.id].mode)
+          const grant = await handle.authorize(states[file.id].mode, states[file.id].selectionKey)
           return [
             'office-' + file.format + '-' + file.id,
             {
@@ -355,7 +337,7 @@ export function DeskAgent({
                       size={21}
                       state={job.done ? 'complete' : 'active'}
                     />
-                    {job.done ? '任务结果' : '正在处理'}
+                    {job.targets.some(target => target.phase === 'review') ? '待审核修改' : job.done ? '任务结果' : '正在处理'}
                   </strong>
                   {job.reply && <p className="desk-answer-text">{job.reply}</p>}
                   {job.targets.map((t) => (
@@ -367,6 +349,10 @@ export function DeskAgent({
                       <span>
                         <strong>{baseName(t.name)}</strong>
                         <small>{t.scope}</small>
+                        {!!t.dependsOn?.length && <small>
+                          依赖 {t.dependsOn.map(source => baseName(source.name) +
+                            (source.undone ? '（已撤销）' : source.revision === undefined ? '' : ' · r' + source.revision)).join('、')}
+                        </small>}
                         {t.error && (
                           <small className="desk-error">{t.error}</small>
                         )}
@@ -385,10 +371,36 @@ export function DeskAgent({
                           : phaseLabel[t.phase]}
                       </em>
                     </button>
-                    {t.specUndo && <button className="desk-spec-undo" aria-label={'撤销 r'+t.specUndo.revision+' 的选句改写'} disabled={!states[t.id]?.ready || ['正在撤销','已撤销'].includes(undoStatus[t.id+':'+t.specUndo.revision])} onClick={()=>void undo(t.id,t.specUndo!)}>
-                      <Undo2 size={13}/>{undoStatus[t.id+':'+t.specUndo.revision] || '撤销这次改写'}
+                    {t.phase === 'review' && <div className="desk-change-review">
+                      <details open>
+                        <summary>修改预览 · {t.changes?.length ?? 0} 项</summary>
+                        {t.changes?.map(({ label, before, after }, index) => <div className="desk-change" key={index}>
+                          <strong>{label}</strong>
+                          <dl><dt>原内容</dt><dd>{before == null || before === '' ? '空' : String(before)}</dd>
+                            <dt>修改后</dt><dd>{after == null || after === '' ? '空' : String(after)}</dd></dl>
+                        </div>)}
+                      </details>
+                      <button disabled={!job.done || t.dependencyBlocked || jobActions[job.id] === 'pending'} aria-label={`应用到 ${t.name}`}
+                        onClick={() => void act(job.id, 'approve', [t.id])}>应用修改</button>
+                    </div>}
+                    {t.retryable && t.phase === 'failed' && !t.dependencyBlocked && <button className="desk-spec-undo" aria-label={`重试 ${t.name}`}
+                      disabled={!job.done || jobActions[job.id] === 'pending'} onClick={() => void act(job.id, 'retry', [t.id])}>重试此文件</button>}
+                    {t.recheckable && !t.dependencyBlocked && <>
+                      <button className="desk-spec-undo" aria-label={`重新核对 ${t.name}`}
+                        disabled={!job.done || jobActions[job.id] === 'pending'} onClick={() => void act(job.id, 'recheck', [t.id])}>重新核对原选区</button>
+                      {active === t.id && states[t.id]?.ready && states[t.id].scope && <button className="desk-spec-undo"
+                        aria-label={`用当前选区重新核对 ${t.name}`}
+                        disabled={!job.done || jobActions[job.id] === 'pending'} onClick={() => void act(job.id, 'recheck-selection', [t.id])}>用当前选区</button>}
+                    </>}
+                    {t.undoable && <button className="desk-spec-undo" aria-label={t.specUndo ? `撤销 r${t.receipt} 的选句改写` : `撤销 ${t.name} r${t.receipt} 的修改`}
+                      disabled={!job.done || t.undoReceipt !== undefined || jobActions[job.id] === 'pending'} onClick={() => void act(job.id, 'undo', [t.id])}>
+                      <Undo2 size={13}/>{t.undoReceipt !== undefined ? '已撤销' : '撤销这次修改'}
                     </button>}</Fragment>
                   ))}
+                  {job.targets.filter(t => t.phase === 'review' && !t.dependencyBlocked).length > 1 &&
+                    <button className="desk-confirm-job" disabled={!job.done || jobActions[job.id] === 'pending'}
+                      onClick={() => void act(job.id, 'approve', job.targets.filter(t => t.phase === 'review' && !t.dependencyBlocked).map(t => t.id))}>应用全部待审核修改</button>}
+                  {!!jobActions[job.id] && jobActions[job.id] !== 'pending' && <p role="alert" className="desk-error">{jobActions[job.id]}</p>}
                 </article>
               ))}
               <div ref={end} />
@@ -466,6 +478,7 @@ export function DeskAgent({
         </div>
       </div>
       <div className="desk-compose">
+        {changedScope && <div className="desk-scope-change" role="status">草稿关联的选区已变化或文件已关闭。<button onClick={confirmScope}>使用当前文件和选区</button></div>}
         <textarea
           ref={input}
           aria-label="全局 AI 指令"

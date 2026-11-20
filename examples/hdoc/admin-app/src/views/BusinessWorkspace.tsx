@@ -14,6 +14,7 @@ import {
   ArrowLeft,
   ArrowUpRight,
   CheckCircle2,
+  CloudUpload,
   FilePlus2,
   Files,
   Layers2,
@@ -69,6 +70,7 @@ import { UploadView } from "./UploadView";
 import { PreviewView } from "./PreviewView";
 import { JobsView } from "./JobsView";
 import { BusinessSettings } from "./BusinessSettings";
+import { PublicationJobsView } from "./PublicationJobsView";
 
 type Navigate = (route: string) => void;
 function ErrorMessage({ value }: { value: string }) {
@@ -209,6 +211,13 @@ const navigation = [
     label: "主题与预览",
     icon: Palette,
     group: "品牌资源",
+    admin: true,
+  },
+  {
+    route: "publication-jobs",
+    label: "回写任务",
+    icon: CloudUpload,
+    group: "服务管理",
     admin: true,
   },
   {
@@ -429,6 +438,8 @@ export function BusinessWorkspace({ name }: { name: string }) {
               <EditorIntegration workspace={account.workspace} />
             ) : selected === "users" ? (
               <BusinessUsers />
+            ) : selected === "publication-jobs" ? (
+              <PublicationJobsView openFile={id => go("documents/" + id)} />
             ) : selected === "events" ? (
               <BusinessEvents />
             ) : selected === "audit" ? (
@@ -668,7 +679,7 @@ function BusinessFiles({
               accept={
                 boardOnly
                   ? ".excalidraw"
-                  : ".docx,.xlsx,.pptx,.pdf,.html,.htm,.md,.txt,.png,.jpg,.jpeg,.webp" +
+                  : ".docx,.xlsx,.csv,.tsv,.pptx,.pdf,.html,.htm,.md,.txt,.png,.jpg,.jpeg,.webp" +
                     (area === "writing" ? "" : ",.excalidraw")
               }
               onChange={(event) => {
@@ -1584,6 +1595,10 @@ function BusinessAudit() {
     "acl.updated": "更新文件权限",
     "acl.removed": "移除文件权限",
     "publication.committed": "回写业务文件",
+    "publication.reconciled": "核对回写回执",
+    "publication.retried": "重试业务回写",
+    "publication.copied": "另存回写稿",
+    "publication.event_retried": "重试回写通知",
   };
   return (
     <>

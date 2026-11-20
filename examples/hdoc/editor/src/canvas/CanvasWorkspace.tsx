@@ -24,8 +24,9 @@ import { HostPublicationControl, permits } from '../HostIntegration.tsx'
 import { DocumentVisitorIdentity, ShareControl } from '../DocumentSharing.tsx'
 import { EmbedSelection, EmbedSpecRewrite } from '../embedSelection'
 import { CanvasCursorChat, type CursorBubble } from './CanvasCursorChat'
+import { BoardHoverActions } from './BoardHoverActions'
 import { BoardWidgets } from './BoardWidgets'
-import type { BoardPoint } from './boardObjects'
+import { boardTag, type BoardPoint } from './boardObjects'
 import { CanvasToolDock } from './CanvasToolDock'
 import { CanvasConnection, type CanvasConnectionState } from './CanvasConnection.ts'
 import { CanvasPresenceLayer } from './CanvasPresenceLayer.tsx'
@@ -45,8 +46,10 @@ import type { Batch, CanvasElement, CanvasEmote, CanvasEvent, CanvasFile, Compos
 import { ResourcePicker } from '../resources/ResourcePicker.tsx'
 import { ResourceCard } from '../resources/ResourceCard.tsx'
 import { useResourceWorkspace } from '../resources/ResourceWorkspace.tsx'
-import { findResourceSession, referenceFrom, type ResourceReference } from '../resources/resourceReference.ts'
+import { referenceFrom, type ResourceReference, type SheetPresentation } from '../resources/resourceReference.ts'
 import { isIndex, readTabState, tabStateKey, workspaceIdentity, writeTabState } from '../tabState.ts'
+import { useEmbeddedSearchLocation, useEmbeddedWorkspace } from '../EmbeddedWorkspace'
+import { BoardDocumentTransfer } from '../resources/BoardDocumentTransfer'
 import { useSelectionTransferWorkspace, useTransferNavigation } from '../SelectionTransferWorkspace.tsx'
 import { decodeTransferLink, supportsTransfer } from '../selectionTransfer.ts'
 import '@excalidraw/excalidraw/index.css'
@@ -69,8 +72,9 @@ const nativeElements = (elements: readonly CanvasElement[], animated = false, ed
   return native.map(el => el === title || el === body ? { ...el, opacity: 0 } : el)
 }
 // The dots belong to the viewport. Export and remote clients keep the authored background.
-const paperBackground = (color: unknown) => /^(#fff(?:fff)?|white)$/i.test(String(color || '#ffffff')) ? 'transparent' : String(color)
-const screenApp = (app: Record<string, unknown>) => ({ ...app, viewBackgroundColor: paperBackground(app.viewBackgroundColor) })
+const paperBackground = (color: unknown) => typeof color === 'string' && color !== 'transparent' ? color : '#ffffff'
+const screenApp = (app: Record<string, unknown>) => ({ ...app, viewBackgroundColor: 'transparent' })
+const ZOOM_REPAINT_INTERVAL_MS = 50
 type Camera = { x: number; y: number; zoom: number }
 type CanvasTabView = { camera: Camera; epoch: number; selectedIds: string[]; box: Selection | null }
 
@@ -95,6 +99,8 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   const fill = session.canvasLayout === 'fill'
   const resourceWorkspace = useResourceWorkspace()
   const transfers = useSelectionTransferWorkspace()
+  const hostWorkspace = useEmbeddedWorkspace()
+  const [exportIds, setExportIds] = useState<string[] | null>(null)
   const [resourcePicker, setResourcePicker] = useState(false)
   const [composeOpen, setComposeOpen] = useState(false)
   const sessionRef = useRef(session); sessionRef.current = session
@@ -109,6 +115,20 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   nativeEditor.current = editor
   const connection = useRef<CanvasConnection | null>(null)
   const lastUI = useRef<CanvasElement[]>([]), updating = useRef(false)
+  // Preview geometry belongs to the authorized viewer. Merely opening a linked
+  // file must not write source-dependent measurements into the shared board.
+  const resourceSizes = useMemo(() => new Map<string, { key: string; width: number; height: number }>(), [session.documentId, session.token])
+  const fitResource = useCallback((id: string, key: string, width: number, height: number) => {
+    const api = nativeEditor.current
+    if (!api) return
+    const scene = api.getSceneElementsIncludingDeleted(), el = scene.find(item => item.id === id)
+    if (!el || el.isDeleted || el.type !== 'embeddable' || Math.abs(width - el.width) > 0.51 || JSON.stringify(el.customData?.officeResource) !== key) return
+    resourceSizes.set(id, { key, width, height })
+    if (el.height === height) return
+    // Diff only human edits against the displayed geometry, including during a drag.
+    lastUI.current = lastUI.current.map(item => item.id === id ? { ...item, height } : item)
+    api.updateScene({ elements: scene.map(item => item === el ? newElementWith(el, { height }) : item), captureUpdate: CaptureUpdateAction.NEVER })
+  }, [resourceSizes])
   const lastApp = useRef<Record<string, unknown> | null>(null)
   const viewKey = tabStateKey(session, 'canvas-view')
   const identity = workspaceIdentity(session)
@@ -127,6 +147,19 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   const [showStyles,setShowStyles]=useState(false)
   const [toolRevision, bumpTool] = useState(0)
   const [bubbles,setBubbles] = useState<CursorBubble[]>([])
+  function locateCanvasObject(id: string) {
+    if (!editor) return false
+    const all = editor.getSceneElements(), item = all.find(element => element.id === id && !element.isDeleted)
+    if (!item) return false
+    const members = all.filter(element => element.id === id || item.groupIds.some(group => element.groupIds.includes(group)))
+    const group = item.groupIds.at(-1)
+    editor.updateScene({ appState: {
+      selectedElementIds: Object.fromEntries(members.map(element => [element.id, true as const])),
+      selectedGroupIds: group ? { [group]: true } : {},
+    }, captureUpdate: CaptureUpdateAction.NEVER })
+    editor.scrollToContent(members, { fitToViewport: true, viewportZoomFactor: .8, maxZoom: 1, animate: false })
+    return true
+  }
   useEffect(()=>{
     if(!bubbles.length)return
     const next=setTimeout(()=>setBubbles(items=>items.filter(b=>b.expires>Date.now())),Math.max(0,Math.min(...bubbles.map(b=>b.expires))-Date.now())+10)
@@ -161,10 +194,28 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   const selectedIds = activeSelection?.elementIds
   const revision = state?.snapshot?.revision, epoch = state?.snapshot?.collaborationEpoch
   const [specFocus,setSpecFocus]=useState<{id:string;cursor:SpecCursor|null}|null>(null)
-  const [pinnedSentence,setPinnedSentence]=useState<HcdEmbedSelection|null>(null)
+  const sentenceKey = tabStateKey(session, 'spec-sentence')
+  const [pinnedSentence,setPinnedSentence]=useState<HcdEmbedSelection|null>(() => {
+    const stored = readTabState<HcdEmbedSelection>(sentenceKey)
+    return stored?.target?.kind === 'spec' && stored.documentId === session.documentId ? stored : null
+  })
+  const restoredPin = useRef(pinnedSentence)
+  useEffect(() => { writeTabState(sentenceKey, pinnedSentence || undefined) }, [sentenceKey, pinnedSentence])
+  const currentPin = useMemo(() => {
+    if (pinnedSentence?.target.kind !== 'spec' || pinnedSentence.collaborationEpoch !== epoch ||
+        pinnedSentence.documentId !== session.documentId || !state?.snapshot) return null
+    // The grant owns the original CRDT range and revision. Concurrent inserts inside
+    // that range must remain attributable to the other author during rewrite and undo.
+    const saved = savedSentence(state.snapshot, pinnedSentence.target)
+    if (!saved) return null
+    if (pinnedSentence === restoredPin.current && pinnedSentence.revision !== state.snapshot.revision) {
+      return saved.expected === pinnedSentence.target.expected ? { ...pinnedSentence, revision: state.snapshot.revision,
+        target: {kind: 'spec' as const, ...saved} } : null
+    }
+    return pinnedSentence
+  }, [pinnedSentence, epoch, state?.snapshot, session.documentId])
   const releaseSentence=useCallback(()=>setPinnedSentence(null),[])
   const reportSpec=useCallback((value:typeof specFocus)=>{
-    if (!value) setPinnedSentence(null)
     connection.current?.setSpecCursor(value?.cursor??null)
     setSpecFocus(old=>same(old,value)?old:value)
   },[])
@@ -179,7 +230,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   }, [selectedIds, state?.scene])
   useEffect(() => {
     if (!reportSelection) return
-    if(canEdit && pinnedSentence?.documentId===session.documentId && pinnedSentence.collaborationEpoch===epoch){reportSelection(pinnedSentence);return}
+    if (canEdit && currentPin) { reportSelection(currentPin); return }
     if (specFocus) {
       reportSelection(canEdit && sentence && revision!==undefined && epoch!==undefined ? {documentId:session.documentId, revision,collaborationEpoch:epoch,target:{kind:'spec',...sentence}}:null)
       return
@@ -187,7 +238,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     reportSelection(canEdit && selectedIds?.length && revision !== undefined && epoch !== undefined
       ? { documentId: session.documentId, revision, collaborationEpoch: epoch, target: { kind: 'canvas', elementIds: selectedIds, ...(specTarget && {spec:true as const}) } }
       : null)
-  }, [reportSelection, canEdit, selectedIds, specTarget, revision, epoch, session.documentId,specFocus,sentence,pinnedSentence])
+  }, [reportSelection, canEdit, selectedIds, specTarget, revision, epoch, session.documentId,specFocus,sentence,currentPin])
   useEffect(() => () => reportSelection?.(null), [reportSelection, session.documentId])
   const { busy, panelOpen, setPanelOpen, requestTask, runTask } = useAgentWorkspace()
   const { focused, setFocused, rightPanel, setRightPanel, closeRightPanel, lastRightPanel, stickerMotionPaused, setStickerMotionPaused } = useDocumentViewState()
@@ -255,6 +306,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   })
   const visible = !resourceWorkspace || resourceWorkspace.activeDocument === session.documentId
   const openedLink=useRef('')
+  const [linkedComment, setLinkedComment] = useState<{ rootId: string; messageId: string }>()
   const [copiedObject,setCopiedObject]=useState('')
   useEffect(()=>{if(!copiedObject)return;const timer=setTimeout(()=>setCopiedObject(''),2000);return()=>clearTimeout(timer)},[copiedObject])
   async function copyObjectLink(id:string){
@@ -275,6 +327,9 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
       await navigator.clipboard.writeText(href.href);setCopiedObject(id)
     }catch(e){setNotice(String(e))}
   }
+  useEmbeddedSearchLocation(session, state?.snapshot?.revision, !!editor && state?.ready === true, ({ hit }) => {
+    if (!hit.elementId || !locateCanvasObject(hit.elementId)) throw new Error('画布对象已变化，请重新搜索。')
+  }, setNotice)
   useEffect(()=>{
     if(!visible||!editor||!state?.ready)return
     function showNode(){
@@ -284,17 +339,20 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
       const linkedDocument=url.searchParams.get('doc-id')
       if(!id||linkedDocument&&linkedDocument!==session.documentId||hostFile&&url.searchParams.get('file')!==hostFile){openedLink.current='';return}
       if(openedLink.current===id)return
-      const all=editor.getSceneElements(),el=all.find(e=>e.id===id);if(!el)return
-      openedLink.current=id
-      const members=all.filter(e=>e.id===id||el.groupIds.some(group=>e.groupIds.includes(group)))
-      const group=el.groupIds.at(-1)
-      editor.updateScene({appState:{selectedElementIds:Object.fromEntries(members.map(e=>[e.id,true as const])),selectedGroupIds:group?{[group]:true}:{}},captureUpdate:CaptureUpdateAction.NEVER})
-      editor.scrollToContent(members,{fitToViewport:true,viewportZoomFactor:.8,maxZoom:1,animate:false})
+      const item = editor.getSceneElements().find(element => element.id === id && !element.isDeleted)
+      if (!item) return
+      const data = boardTag(item)
+      const rootId = data?.kind === 'comment' ? data.root : id
+      if (locateCanvasObject(rootId)) {
+        openedLink.current = id
+        setLinkedComment(data?.kind === 'comment' ? { rootId, messageId: id } : undefined)
+      }
     }
     let frame=requestAnimationFrame(showNode)
     const unsubscribe=editor.onChange((_,app)=>{if(!openedLink.current&&!app.isLoading&&new URL(location.href).searchParams.has('node-id')){cancelAnimationFrame(frame);frame=requestAnimationFrame(showNode)}})
-    window.addEventListener('popstate',showNode)
-    return()=>{cancelAnimationFrame(frame);unsubscribe();window.removeEventListener('popstate',showNode)}
+    function revisit() { openedLink.current = ''; showNode() }
+    window.addEventListener('popstate',revisit)
+    return()=>{cancelAnimationFrame(frame);unsubscribe();window.removeEventListener('popstate',revisit)}
   },[editor,visible,state?.ready,session.documentId])
   useEffect(()=>{
     const el=workspaceRef.current?.querySelector<HTMLElement>('.canvas-surface')
@@ -313,6 +371,30 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     })
     observer.observe(el);return()=>{cancelAnimationFrame(frame);observer.disconnect()}
   },[editor,visible,savedView])
+  useEffect(() => {
+    if (!editor || !visible) return
+    let lastZoom = editor.getAppState().zoom.value
+    let lastPaint = -Infinity
+    let frame = 0
+    // Excalidraw stretches cached objects until a gesture has been idle for 300 ms.
+    // Refresh at the live zoom while leaving time between paints for pointer movement.
+    const repaint = (now: number) => {
+      frame = 0
+      if (!editor.getAppState().shouldCacheIgnoreZoom) return
+      if (now - lastPaint < ZOOM_REPAINT_INTERVAL_MS) {
+        frame = requestAnimationFrame(repaint)
+        return
+      }
+      lastPaint = now
+      editor.updateScene({ appState: { shouldCacheIgnoreZoom: false }, captureUpdate: CaptureUpdateAction.NEVER })
+    }
+    const unsubscribe = editor.onScrollChange((_x, _y, zoom) => {
+      if (zoom.value === lastZoom) return
+      lastZoom = zoom.value
+      if (!frame && editor.getAppState().shouldCacheIgnoreZoom) frame = requestAnimationFrame(repaint)
+    })
+    return () => { unsubscribe(); cancelAnimationFrame(frame) }
+  }, [editor, visible])
   useEffect(() => {
     if (!visible) return
     const escape = (event: KeyboardEvent) => {
@@ -376,7 +458,11 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     if (!editor || !state?.scene) return
     const scene = connection.current?.optimistic() ?? state.scene
     const files = displayedStampFiles(scene)
-    const elements = nativeElements(scene.elements, true, editingMind, stampCache)
+    const elements = nativeElements(scene.elements, true, editingMind, stampCache).map(el => {
+      const size = el.type === 'embeddable' && resourceSizes.get(el.id)
+      return size && Math.abs(size.width - el.width) <= 0.51 && size.key === JSON.stringify(el.customData?.officeResource)
+        ? { ...el, height: size.height } : el
+    })
     setStickers(stickerElements(elements as unknown as CanvasElement[], state.scene.elements))
     lastUI.current = snapshotElements(elements as unknown as CanvasElement[])
     const app = editor.getAppState()
@@ -388,7 +474,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     editor.addFiles(Object.values(files) as unknown as BinaryFiles[keyof BinaryFiles][])
     updating.current = false
     prepareStampPaint(scene, files, stampCache, () => setStampPaint(v => v+1))
-  }, [editor, state?.scene, editingMind, stampCache, stampPaint])
+  }, [editor, state?.scene, editingMind, stampCache, stampPaint, resourceSizes])
   useEffect(() => {
     if (!editor) return
     const collaborators = new Map<string, Collaborator>()
@@ -435,7 +521,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
       const operations: Operation[] = changesFromUI(raw, lastUI.current, next)
       for (const [id, file] of Object.entries(files)) if (!raw.files[id]) operations.unshift({ op: 'file.add', id, file: file as unknown as CanvasFile })
       for (const key of ['viewBackgroundColor', 'gridSize'] as const) {
-        if (key==='viewBackgroundColor' && appState[key]===paperBackground(raw.appState[key])) continue
+        if (key==='viewBackgroundColor' && appState[key]==='transparent') continue
         if (lastApp.current && !same(lastApp.current[key], appState[key])) operations.push({ op: 'scene.update', before: { [key]: raw.appState[key] ?? null }, changes: { [key]: appState[key] } })
       }
       client!.enqueue(operations)
@@ -481,7 +567,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     const fileId=existing?.id ?? crypto.randomUUID()
     const file:CanvasFile=existing ?? {id:fileId,mimeType:'image/png',dataURL,created:Date.now()}
     const records=convertToExcalidrawElements([{id,type:'image',fileId:fileId as BinaryFiles[keyof BinaryFiles]['id'],x:point.x-size/2,y:point.y-size/2,width:size,height:size,status:'saved',
-      customData:{officeStamp:{kind},officeMaterial:{id:kind,category:kind.startsWith('emoji-')?'emoji':'reaction',catalogVersion:3}}}],{regenerateIds:false})
+      customData:{officeStamp:{kind,author:session.displayName || session.userId || '协作者',actorId:session.userId},officeMaterial:{id:kind,category:kind.startsWith('emoji-')?'emoji':'reaction',catalogVersion:3}}}],{regenerateIds:false})
     client.enqueue([...(existing ? [] : [{op:'file.add' as const,id:fileId,file}]),...records.map(element=>({op:'element.add' as const,element:{...element,index:null} as unknown as CanvasElement}))])
     await client.flush()
   }
@@ -522,9 +608,8 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   }
   useWorkflowPreparation(session, async () => {
     if (await flush() === null) throw new Error('请等待白板加载完成。')
-  })
+  }, !session.hideNativeChat || !!state?.ready)
   const selectedReference = state?.scene?.elements.filter(element => !element.isDeleted && activeSelection?.elementIds.includes(element.id)).map(element => referenceFrom((element.customData as { officeResource?: unknown } | undefined)?.officeResource)).find(ref => !!ref)
-  const editableReference = selectedReference && resourceWorkspace && findResourceSession(selectedReference, resourceWorkspace.sessions, session)?.scope === 'write'
   const stickerId = selectedStickerId(state?.scene?.elements || [], activeSelection?.elementIds)
   const selectedTransferLink = state?.scene?.elements.find(element => !element.isDeleted && activeSelection?.elementIds.includes(element.id)
     && typeof (element.customData as { officeTransfer?: unknown } | undefined)?.officeTransfer === 'string')
@@ -532,16 +617,40 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   const enterResource = async (reference: ResourceReference, ai = false) => {
     try { await flush(); await resourceWorkspace?.navigate(reference, sessionRef.current, ai) } catch (error) { setNotice(String(error)) }
   }
-  const insertReference = async (reference: ResourceReference) => {
+  const presentResource = async (id: string, presentation: SheetPresentation) => {
+    try {
+      await flush()
+      const client = connection.current, snapshot = client?.state.snapshot
+      const element = snapshot?.scene.elements.find(item => item.id === id && !item.isDeleted)
+      const customData = element?.customData as { officeResource?: unknown } | undefined
+      const reference = referenceFrom(customData?.officeResource)
+      if (!client || !snapshot || reference?.anchor.kind !== 'sheet-range' || (reference.presentation || 'table') === presentation) return
+      client.enqueue([{ op: 'element.update', id, before: { customData },
+        changes: { customData: { ...customData, officeResource: { ...reference, presentation } } } }])
+      await client.flush()
+    } catch (error) { setNotice(String(error)) }
+  }
+  const insertReference = async (reference: ResourceReference, size:{width:number;height:number}) => {
     if (!editor || !connection.current) throw new Error('画布尚未就绪。')
     await flush()
+    const client = connection.current, snapshot = client.state.snapshot
+    if (!snapshot) throw Error('画布尚未就绪。')
     const app = editor.getAppState(), id = `resource-${crypto.randomUUID()}`
-    const elements = convertToExcalidrawElements([{ id, type: 'rectangle', x: -app.scrollX + app.width / app.zoom.value / 2 - 240,
-      y: -app.scrollY + app.height / app.zoom.value / 2 - 170, width: 480, height: 340, link: `#officecli-resource:${id}`,
-      strokeColor: 'transparent', backgroundColor: 'transparent', strokeWidth: 0, roundness: { type: 3 }, customData: { officeResource: reference } }]).map(element => ({ ...element, type: 'embeddable' as const }))
-    connection.current.enqueue(elements.map(element => ({ op: 'element.add' as const, element: element as unknown as CanvasElement })))
-    await flush()
-    editor.updateScene({ elements: nativeElements(connection.current.optimistic()?.elements || [], true), appState: { selectedElementIds: { [id]: true } }, captureUpdate: CaptureUpdateAction.NEVER })
+    const box = {x:-app.scrollX+(app.width/app.zoom.value-size.width)/2, y:-app.scrollY+(app.height/app.zoom.value-size.height)/2,...size}
+    // Move only the new card. Adjacent cards share a baseline and a 32-unit gutter.
+    for (const e of snapshot.scene.elements.filter(e => !e.isDeleted).sort((a,b) => a.x - b.x)) {
+      if (e.y + e.height >= box.y && e.y <= box.y + box.height && e.x + e.width >= box.x && e.x <= box.x + box.width)
+        box.x = e.x + e.width + 32
+    }
+    const elements = convertToExcalidrawElements([{ id, type: 'rectangle', ...box, link: `#officecli-resource:${id}`,
+      strokeColor: 'transparent', backgroundColor: 'transparent', strokeWidth: 0, roundness: { type: 3 }, customData: { officeResource: reference } }], {regenerateIds:false})
+      .map(element => ({ ...element, type: 'embeddable' as const }))
+    await client.append({schemaVersion: 'officecli-canvas/1', documentId: session.documentId, baseRevision: snapshot.revision,
+      patchId: id, vacantRegions: [box], operations: elements.map(element => ({ op: 'element.add', element: element as unknown as CanvasElement }))}, snapshot.collaborationEpoch)
+    // The connection projects the committed scene, including fitted reference heights.
+    // Selecting a new card must not reinstall older geometry over that projection.
+    editor.updateScene({ appState: { selectedElementIds: { [id]: true } }, captureUpdate: CaptureUpdateAction.NEVER })
+    editor.scrollToContent(elements, {animate: false})
   }
   const ask = () => {
     setFocused(false)
@@ -549,13 +658,16 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     const targetVersion = snapshot ? { revision: snapshot.revision, collaborationEpoch: snapshot.collaborationEpoch } : undefined
     requestTask(activeSelection ? '整理选中的区域，保留其他区域。' : '在画布上整理我的想法。', activeSelection ? { canvas: activeSelection } : undefined, { targetVersion })
   }
-  const organizeAsDocument = async () => {
-    if (!activeSelection?.elementIds.length || !transfers) return
+  const organizeAsDocument = async (id?:string) => {
+    const selection = id ? selectedRegion(connection.current?.optimistic()?.elements || [],[id]) : activeSelection
+    if (!selection?.elementIds.length) return
     try {
       await flush()
       const snapshot = connection.current?.state.snapshot
       if (!snapshot) throw new Error('画布尚未加载。')
-      transfers.begin(sessionRef.current, { kind: 'canvas', revision: snapshot.revision, ...activeSelection }, snapshot.collaborationEpoch)
+      if (hostWorkspace) { setExportIds([...selection.elementIds]); return }
+      if (!transfers) return
+      transfers.begin(sessionRef.current, { kind: 'canvas', revision: snapshot.revision, ...selection }, snapshot.collaborationEpoch)
       setFocused(false)
       setPanelOpen(true)
     } catch (cause) { setNotice(String(cause)) }
@@ -641,6 +753,21 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     setReceipts(rewriteLog(session,epoch,{remove:ref.revision}))
     await client.refresh()
   }
+  const [directory,setDirectory]=useState<{id:string;name:string}[]>([])
+  const listPeople=hostWorkspace?.mentionable
+  useEffect(()=>{
+    setDirectory([])
+    if(!listPeople || !visible || !canEdit)return
+    let active=true
+    void listPeople(session.documentId).then(items=>{if(active)setDirectory(items)}).catch(()=>{})
+    return ()=>{active=false}
+  },[listPeople,session.documentId,visible,canEdit])
+  const mentionPeople = useMemo(() => {
+    const names = new Map(directory.map(p=>[p.id,p.name]))
+    if(session.userId)names.set(session.userId,session.displayName || session.userId)
+    for(const peer of peers.values())if(peer.actorId && peer.name)names.set(peer.actorId,peer.name)
+    return [...names].map(([id,name])=>({id,name}))
+  }, [directory,peers,session.userId,session.displayName])
   const agentsHere=[...peers.values()].filter(peer=>peer.actorKind==='agent').length
   const rightOpen = !focused && (panelOpen || rightPanel === 'revisions')
   const elementCount = useMemo(()=>{
@@ -677,14 +804,14 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     </header>
     {(state?.error || notice) && <div role="alert" className="canvas-notice"><span>{state?.error || notice}</span>{state?.pending && <><button onClick={() => void connection.current?.retry().catch(() => {})}>重试保存</button><button onClick={() => { const scene = connection.current?.optimistic(); if (scene) download(new Blob([JSON.stringify(scene)]), '画布草稿.excalidraw') }}>下载草稿</button><button onClick={() => void connection.current?.discard().catch(error => setNotice(String(error)))}>读取协作版本</button></>}<button aria-label="关闭提示" onClick={() => setNotice('')}><X size={14} /></button></div>}
     <div className="layout editor-layout canvas-work-area">
-      <main className="content-shell canvas-surface" aria-label="自由画布" data-inspecting={showStyles} data-paper={paperBackground(state?.scene?.appState.viewBackgroundColor)==='transparent'?'dots':undefined}
-        style={{'--board-dot-step':Math.max(8,16*camera.zoom)+'px','--board-dot-x':camera.x*camera.zoom+'px','--board-dot-y':camera.y*camera.zoom+'px'} as React.CSSProperties}>
+      <main className="content-shell canvas-surface" aria-label="自由画布" data-inspecting={showStyles} data-paper="dots" data-selected-reference={!!selectedReference}
+        style={{'--board-paper-color':paperBackground(state?.scene?.appState.viewBackgroundColor),'--board-dot-step':(16*camera.zoom*2**Math.max(0, Math.ceil(Math.log2(.5/camera.zoom))))+'px','--board-dot-x':camera.x*camera.zoom+'px','--board-dot-y':camera.y*camera.zoom+'px'} as React.CSSProperties}>
         {state?.scene && state.ready ? <Excalidraw excalidrawAPI={setEditor} initialData={initialData.current}
           onChange={onChange} theme={theme} langCode="zh-CN" name={session.title} isCollaborating viewModeEnabled={!canEdit} handleKeyboardGlobally={false}
           validateEmbeddable={link => link.startsWith('#officecli-resource:') ? true : undefined}
           renderEmbeddable={element => {
             const reference = referenceFrom(element.customData?.officeResource)
-            if (reference) return <ResourceCard reference={reference} owner={session} />
+            if (reference) return <ResourceCard elementId={element.id} reference={reference} owner={session} onFit={fitResource} />
             return element.customData?.officeResource || element.link?.startsWith('#officecli-resource:') ? <div className="resource-card">资源引用不可用</div> : null
           }}
           onLinkOpen={(element, event) => {
@@ -705,6 +832,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
           )}
           UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, saveAsImage: false, export: false } }}
           onPointerUpdate={event => connection.current?.sendPresence({ pointer: event.pointer, viewport:followingId.current?undefined:viewport.current,avatar:avatarRef.current, selectedIds: selection?.elementIds || [], preview: event.button === 'down' && selection ? editor?.getSceneElements().filter(element => selection.elementIds.includes(element.id)) as unknown as CanvasElement[] : undefined })}
+          onPointerDown={() => releaseSentence()}
           onPointerUp={() => { queueMicrotask(() => { void flush().catch(() => {}) }) }}
         >
           <MainMenu>
@@ -734,7 +862,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
         <CanvasStickers editor={editor} elements={stickers} camera={camera} paused={stickerMotionPaused} />
 
         {canEdit && permits(session,'document.ai') && <CanvasRegionPicker camera={camera} elements={state?.scene?.elements || []} value={regionSelection} selecting={selectingRegion} onChange={setRegionSelection} onFinish={() => setSelectingRegion(false)} />}
-        {editor && <CanvasToolDock camera={camera} onEditSpec={setEditingSpec} onEditMind={setEditingMind} copyAllowed={permits(session,'document.copy')} elements={state?.scene?.elements||[]} epoch={epoch} onSpecChange={ops=>connection.current?.enqueue(ops)} flushSpec={flush} focused={focused} onFocus={()=>setFocused(v=>!v)} cursors={showCursors} onCursors={()=>setShowCursors(v=>!v)} paused={stickerMotionPaused} onMotion={()=>setStickerMotionPaused(v=>!v)} storageKey={identity&&JSON.stringify(['officecli-board-plugins',...identity])} onMaterial={useMaterial} editor={editor} writable={canEdit} visible={visible} author={session.displayName || session.userId || '协作者'}
+        {editor && <CanvasToolDock linkedComment={linkedComment} people={mentionPeople} personId={session.userId} camera={camera} onEditSpec={setEditingSpec} onEditMind={setEditingMind} copyAllowed={permits(session,'document.copy')} elements={state?.scene?.elements||[]} epoch={epoch} onSpecChange={ops=>connection.current?.enqueue(ops)} flushSpec={flush} focused={focused} onFocus={()=>setFocused(v=>!v)} cursors={showCursors} onCursors={()=>setShowCursors(v=>!v)} paused={stickerMotionPaused} onMotion={()=>setStickerMotionPaused(v=>!v)} storageKey={identity&&JSON.stringify(['officecli-board-plugins',...identity])} onMaterial={useMaterial} editor={editor} writable={canEdit} visible={visible} author={session.displayName || session.userId || '协作者'}
           onToolChange={()=>{bumpTool(v=>v+1);setSelectingRegion(false)}}
           onAsk={canEdit && permits(session,'document.ai') ? (aiAllowed ? ask : () => {
             workspaceRef.current?.dispatchEvent(new CustomEvent('officecli:board-ai',{bubbles:true,detail:{documentId:session.documentId}}))
@@ -744,18 +872,26 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
           onTemplate={appendComposition} onCopyLink={permits(session,'document.copy')?copyObjectLink:undefined} onError={e=>setNotice(String(e))}
           stamp={onEngage=><CanvasStampTool camera={camera} person={session.displayName||session.userId||'我'} recentKey={session.userId ? JSON.stringify(['officecli-recent-emoji',session.userId]):null} editor={editor} visible={visible} writable={canEdit} cancelSerial={toolRevision} onEngage={onEngage} targets={reactionIds} stamp={stampAt} react={stampSelection} emote={emoteAt} onError={cause=>setNotice(String(cause))}/>}
         />}
-        {editor && (activeSelection || selectingRegion || presentedTransferLink) && <div className="canvas-selection-actions" style={activeSelection?.elementIds.length && editor.getAppState().width>720 ? {left:Math.max(0,Math.min((activeSelection.region.x+activeSelection.region.width/2+camera.x)*camera.zoom-120,editor.getAppState().width-345)),top:Math.max(56,Math.min((activeSelection.region.y+camera.y)*camera.zoom-51,editor.getAppState().height-121)),bottom:'auto',transform:'none'}:undefined}>
+        {editor && <BoardHoverActions editor={editor} camera={camera} enabled={visible} enter={enterResource}
+          selected={selectedReference && activeSelection?.elementIds.length === 1 ? activeSelection.elementIds[0] : undefined}
+          organize={(hostWorkspace ? permits(session,'document.copy') : aiAllowed && transfers && supportsTransfer(session)) ? id=>void organizeAsDocument(id) : undefined}
+          present={canEdit ? (id, presentation) => void presentResource(id, presentation) : undefined}/>}
+        {editor && !(selectedReference && activeSelection?.elementIds.length===1 && !selectingRegion) && (activeSelection || selectingRegion || presentedTransferLink) && <div className="canvas-selection-actions" style={activeSelection?.elementIds.length && editor.getAppState().width>720 ? {left:Math.max(0,Math.min((activeSelection.region.x+activeSelection.region.width/2+camera.x)*camera.zoom-120,editor.getAppState().width-345)),top:Math.max(56,Math.min((activeSelection.region.y+camera.y)*camera.zoom-51,editor.getAppState().height-121)),bottom:'auto',transform:'none'}:undefined}>
             {selection?.elementIds.length===1&&permits(session,'document.copy')&&<button aria-label="复制对象链接" className="canvas-region-action" title="复制对象链接" onClick={()=>copyObjectLink(selection.elementIds[0])}><Link2 size={14}/></button>}
             {canEdit&&!!selection?.elementIds.length&&<button className="canvas-region-action" title="对象样式" aria-label="对象样式" aria-pressed={showStyles} onClick={()=>setShowStyles(v=>!v)}><SlidersHorizontal size={15}/></button>}<span>{activeSelection ? (activeSelection.elementIds.length ? `已选中 ${activeSelection.elementIds.length} 个对象` : '已框选空白区域') : (canEdit ? '拖动画布 · 框选对象 · 自由绘制' : '拖动画布浏览')}</span>
             {canEdit && reactionIds.length > 0 && <CanvasReactionTools feedback={feedback} targets={reactionIds} onReact={respondToSelection} />}
             {canEdit && aiAllowed && <><button className="canvas-region-action" aria-pressed={selectingRegion} onClick={() => { if (regionSelection || selectingRegion) { setRegionSelection(null); setSelectingRegion(false) } else setSelectingRegion(true) }}>{regionSelection || selectingRegion ? '取消区域' : '框选区域'}</button>
             <button onClick={ask}><Sparkles size={15} />{activeSelection ? '让 AI 修改选区' : '与 AI 一起创作'}</button>
-            {!!activeSelection?.elementIds.length && transfers && supportsTransfer(session) && <button className="canvas-region-action" onClick={() => void organizeAsDocument()}><Sparkles size={15} />整理为文档</button>}
-            {transfers && (selectedTransferLink || !activeSelection && presentedTransferLink) && <button className="canvas-region-action" onClick={() => visitTransferSource(selectedTransferLink?.officeTransfer || presentedTransferLink)}>查看原文</button>}</>}
+            </>}
+            {!!activeSelection?.elementIds.length && (hostWorkspace ? permits(session, 'document.copy') : aiAllowed && transfers && supportsTransfer(session)) && <button className="canvas-region-action" onClick={() => void organizeAsDocument()}><Sparkles size={15} />整理为文档</button>}
+            {transfers && (selectedTransferLink || !activeSelection && presentedTransferLink) && <button className="canvas-region-action" onClick={() => visitTransferSource(selectedTransferLink?.officeTransfer || presentedTransferLink)}>查看原文</button>}
           </div>}
       </main>
-      {selectedReference && resourceWorkspace && <div className="canvas-resource-actions"><button onClick={() => void enterResource(selectedReference)}>进入引用源文件</button>{editableReference && <button onClick={() => void enterResource(selectedReference, true)}><Sparkles size={14} />AI 编辑源内容</button>}</div>}
-      {resourcePicker && <ResourcePicker owner={session} onInsert={insertReference} onClose={() => setResourcePicker(false)} />}
+
+      {exportIds && <BoardDocumentTransfer owner={session} ids={exportIds} onClose={() => setExportIds(null)} />}
+      {(resourcePicker || hostWorkspace?.placement?.boardId === session.documentId) && <ResourcePicker owner={session}
+        preset={hostWorkspace?.placement?.boardId === session.documentId ? hostWorkspace.placement.source : undefined}
+        onInsert={insertReference} onClose={() => { setResourcePicker(false); if (hostWorkspace?.placement?.boardId === session.documentId) hostWorkspace.finishPlacement() }} />}
       {composeOpen && <CanvasComposePanel aiAllowed={aiAllowed} scoped={!!regionSelection} motionPaused={stickerMotionPaused} onAppend={appendComposition} onAsk={askComposition} onClose={() => setComposeOpen(false)} />}
       {aiAllowed && <AgentPanel beforeRun={flush} registerPreparation={false} resourcePanel={<CanvasResources scene={state?.scene || null} />} />}
       <WorkspacePanel side="right" hidden={rightPanel !== 'revisions' || focused} className="canvas-history" aria-label="画布历史版本">

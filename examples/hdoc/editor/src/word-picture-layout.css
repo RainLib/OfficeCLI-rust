@@ -1,0 +1,16 @@
+.hcd-surface .word-picture-dialog {
+  width: min(520px, calc(100% - 28px));
+  max-height: calc(100dvh - 32px);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.word-picture-dialog::backdrop { background: #18202060; }
+.word-picture-dialog header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.hcd-surface .word-picture-dialog h2 { margin: 0; }
+.word-picture-thumbnail { display: grid; place-items: center; height: 118px; margin-bottom: 16px; border-radius: 10px; background: var(--stage); }
+.word-picture-thumbnail img { display: block; width: 100%; height: 102px; object-fit: contain; }
+.word-picture-fields { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(184px, 100%), 1fr)); }
+.word-picture-fields :is(input, select) { min-width: 0; width: 100%; border-radius: 8px; }
+.word-picture-fields select { padding: 9px; border: 1px solid var(--line); }
+.word-picture-reset { margin-inline-end: auto; }
+.hcd-surface .word-picture-dialog [role="alert"] { margin-top: 12px; color: var(--danger, #ac3636); }

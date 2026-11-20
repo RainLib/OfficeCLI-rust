@@ -3,6 +3,45 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod/v4";
 
+const requestId = z.uuid().describe("Unique patch ID. Reuse only for an exact retry.");
+const color = z.string().regex(/^#[0-9a-f]{6}$/i);
+const mutations = {
+  append_to_file: z.strictObject({
+    requestId, text: z.string().trim().min(1).max(6000), title: z.string().trim().max(90).optional(),
+  }),
+  edit_selected_cells: z.strictObject({
+    requestId, edits: z.array(z.strictObject({
+      address: z.string().regex(/^[A-Z]{1,3}[1-9][0-9]{0,6}$/), value: z.string().max(8000),
+    })).min(1).max(128),
+  }),
+  replace_selected_text: z.strictObject({
+    requestId, replacements: z.array(z.string().max(16000).nullable()).min(1).max(64),
+  }),
+  edit_canvas_selection: z.strictObject({
+    requestId, edits: z.array(z.strictObject({
+      id: z.string().min(1).max(256), text: z.string().max(8000).optional(),
+      specSplice: z.strictObject({
+        block: z.number().int().nonnegative(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
+        expected: z.string().max(16000), insert: z.string().max(8000),
+      }).optional(),
+      strokeColor: color.optional(), backgroundColor: color.optional(),
+      dx: z.number().min(-10000).max(10000).optional(), dy: z.number().min(-10000).max(10000).optional(),
+    })).min(1).max(128),
+  }),
+};
+const descriptions = {
+  append_to_file: "Append a paragraph or a native canvas note in free space. Existing material is preserved.",
+  edit_selected_cells: "Set literal values at selected worksheet addresses. Formula cells remain protected.",
+  replace_selected_text: "Replace selected text only. Supply one replacement per span in read_selection order. A null entry leaves a document span unchanged. Surrounding content and paragraph formatting are preserved.",
+  edit_canvas_selection: "Change text or color, or move selected canvas objects. IDs must come from read_selection. Positions use relative canvas units. For concurrent Spec edits, use specSplice with the block index, zero-based Unicode character offsets and exact text from the granted revision.",
+};
+
+export function parseSelectionMutation(name, args) {
+  const schema = Object.hasOwn(mutations, name) ? mutations[name] : null;
+  const parsed = schema?.safeParse(args);
+  return parsed?.success ? parsed.data : null;
+}
+
 // Compiled alongside the collaboration sidecar so existing Workspace installs
 // do not need to resolve npm dependencies at runtime.
 export async function handleSelectionMcp(request, response, body, grant, call) {
@@ -58,77 +97,10 @@ export async function handleSelectionMcp(request, response, body, grant, call) {
     z.strictObject({}),
     true,
   );
-  const requestId = z
-    .uuid()
-    .describe("Unique patch ID. Reuse only for an exact retry.");
-  if (grant.target.kind === "append") {
-    register(
-      "append_to_file",
-      "Append a paragraph or a native canvas note in free space. Existing material is preserved.",
-      z.strictObject({
-        requestId,
-        text: z.string().trim().min(1).max(6000),
-        title: z.string().trim().max(90).optional(),
-      }),
-    );
-  } else if (grant.target.kind === "sheet") {
-    register(
-      "edit_selected_cells",
-      "Set literal values at selected worksheet addresses. Formula cells remain protected.",
-      z.strictObject({
-        requestId,
-        edits: z
-          .array(
-            z.strictObject({
-              address: z.string().regex(/^[A-Z]{1,3}[1-9][0-9]{0,6}$/),
-              value: z.string().max(8000),
-            }),
-          )
-          .min(1)
-          .max(128),
-      }),
-    );
-  } else if (grant.target.kind === "document" || grant.target.kind === "spec") {
-    register(
-      "replace_selected_text",
-      "Replace selected text only. Supply one replacement per span in read_selection order. Surrounding content and paragraph formatting are preserved.",
-      z.strictObject({
-        requestId,
-        replacements: z.array(z.string().max(16000)).min(1).max(64),
-      }),
-    );
-  } else {
-    const color = z.string().regex(/^#[0-9a-f]{6}$/i);
-    register(
-      "edit_canvas_selection",
-      "Change text or color, or move selected canvas objects. IDs must come from read_selection. Positions use relative canvas units. For concurrent Spec edits, use specSplice with the block index, zero-based Unicode character offsets and exact text from the granted revision.",
-      z.strictObject({
-        requestId,
-        edits: z
-          .array(
-            z.strictObject({
-              id: z.string().min(1).max(256),
-              text: z.string().max(8000).optional(),
-              specSplice: z
-                .strictObject({
-                  block: z.number().int().nonnegative(),
-                  start: z.number().int().nonnegative(),
-                  end: z.number().int().nonnegative(),
-                  expected: z.string().max(16000),
-                  insert: z.string().max(8000),
-                })
-                .optional(),
-              strokeColor: color.optional(),
-              backgroundColor: color.optional(),
-              dx: z.number().min(-10000).max(10000).optional(),
-              dy: z.number().min(-10000).max(10000).optional(),
-            }),
-          )
-          .min(1)
-          .max(128),
-      }),
-    );
-  }
+  const tool = grant.target.kind === "append" ? "append_to_file"
+    : grant.target.kind === "sheet" ? "edit_selected_cells"
+    : ["document", "spec"].includes(grant.target.kind) ? "replace_selected_text" : "edit_canvas_selection";
+  register(tool, descriptions[tool], mutations[tool]);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

@@ -1,3 +1,5 @@
+import { FileActionsMenu } from './EditorChrome'
+import { tabStateKey, readTabState, writeTabState } from './tabState'
 import { AgentPointer } from './AgentPointer'
 import { WorkspacePanel, WorkspacePanelControls, WorkspacePanelLayer } from './WorkspacePanel.tsx'
 import { WorkspaceDrawers } from './WorkspaceDrawers.tsx'
@@ -5,7 +7,7 @@ import { DocumentVisitorIdentity, ShareControl } from './DocumentSharing.tsx'
 import { keepHistory } from './editHistory.ts'
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type CSSProperties } from 'react'
 import { useWorkflowPreparation } from './WorkflowWorkspace.tsx'
-import { ArrowDownToLine, ArrowUpRight, Check, CheckCheck, CloudCheck, Crop, Eraser, Expand, FlipHorizontal2, FlipVertical2, Grid2X2, History, Image as ImageIcon, LoaderCircle, LockKeyhole, Maximize, Minus, PanelRightClose, PanelRightOpen, Paintbrush, Plus, Redo2, RotateCcw, RotateCw, SlidersHorizontal, Sparkles, Undo2, Users, X } from 'lucide-react'
+import { ArrowDownToLine, ArrowUpRight, Check, CheckCheck, CloudCheck, Crop, Eraser, Expand, FlipHorizontal2, FlipVertical2, Grid2X2, History, Image as ImageIcon, Layers3, LoaderCircle, LockKeyhole, Maximize, Minus, PanelRightClose, PanelRightOpen, Paintbrush, Plus, Redo2, RotateCcw, RotateCw, SlidersHorizontal, Sparkles, Undo2, Users, X } from 'lucide-react'
 import { api, type Session } from './api.ts'
 import { HostPublicationControl, permits } from './HostIntegration.tsx'
 import { ExportControl } from './ExportControl.tsx'
@@ -15,15 +17,16 @@ import { ImageMaskFlow } from './ImageMaskFlow.tsx'
 import { InputDraftRecovery, useInputDraft } from './useInputDraft.tsx'
 import { type InputDraft } from './inputDraftJournal.ts'
 import { parseImageInput, type ImageInput, type ImageStroke as Stroke } from './imageDraft.ts'
+import { ImageLayerHandles, ImageLayersPanel, updateLayer, type ImageLayer, type ImageLayersSnapshot, type ImageLayerStack } from './ImageLayers'
 import './image-workspace.css'
 
-type Info = { revision: number; width: number; height: number; format: string; bytes: number; sourceBytes: number; hasAlpha: boolean; aiAvailable: boolean; aiReason?: string; imageModel: string; planningModel: string; exportFormats: string[]; maxAgents: number }
+type Info = { revision: number; width: number; height: number; format: string; bytes: number; sourceBytes: number; hasAlpha: boolean; aiAvailable: boolean; aiReason?: string; imageModel: string; planningModel: string; exportFormats: string[]; maxAgents: number; imageLayers?: ImageLayersSnapshot }
 type Worker = { name: string; role: string; status: string; message: string; position: [number, number] }
 type Job = { jobId: string; sourceRevision: number; owner: string; status: string; prompt: string; agents: Worker[]; region: number[]; error?: string; model: string; planningModel: string; createdAtEpochMs: number }
-type Panel = 'info' | 'crop' | 'adjust' | 'ai' | 'inpaint' | 'compare' | 'convert' | 'export' | 'history'
+type Panel = 'info' | 'layers' | 'crop' | 'adjust' | 'ai' | 'inpaint' | 'compare' | 'convert' | 'export' | 'history'
 type Copy = { documentId: string; token: string; title: string }
 const ongoing = (j: Job) => ['queued', 'planning', 'generating', 'checking'].includes(j.status)
-const panelTitle: Record<Panel, string> = { info: '图像', crop: '裁剪与旋转', adjust: '光线与色彩', ai: 'AI 工作台', inpaint: '局部重绘', compare: '候选对比', convert: '转换格式', export: '导出图片', history: '版本记录' }
+const panelTitle: Record<Panel, string> = { info: '图像', layers: '图层', crop: '裁剪与旋转', adjust: '光线与色彩', ai: 'AI 工作台', inpaint: '局部重绘', compare: '候选对比', convert: '转换格式', export: '导出图片', history: '版本记录' }
 const stageText: Record<string, string> = { queued: '等待区域', planning: '读取与规划', generating: '正在生成候选', checking: '正在检查边界', ready: '候选已就绪', applying: '正在应用候选', applied: '已应用到当前版本', interrupted: '已中断，区域已释放', failed: '生成失败', cancelled: '已取消，区域已释放', discarded:'候选已丢弃' }
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="image-field"><span>{label}</span>{children}</label> }
 function Slider({ label, value, min = -100, max = 100, suffix = '', onChange }: { label: string; value: number; min?: number; max?: number; suffix?: string; onChange: (v: number) => void }) { return <label className="image-slider"><span>{label}<output>{value}{suffix}</output></span><input aria-label={label} type="range" min={min} max={max} value={value} onChange={e => onChange(+e.target.value)} /></label> }
@@ -48,7 +51,14 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
   const { localControls } = useAppearance()
   const [info, setInfo] = useState<Info | null>(null), [source, setSource] = useState<Blob | null>(null)
   const [edits, setEdits] = useState<ImageEdits>(() => blankEdits(1, 1)), [undo, setUndo] = useState<ImageEdits[]>([]), [redo, setRedo] = useState<ImageEdits[]>([])
-  const [panel, setPanel] = useState<Panel>('info'), [panelOpen, setPanelOpen] = useState(() => window.innerWidth > 900)
+  const panelKey = session.integratedToolbar ? tabStateKey(session, 'image-panel-open') : null
+  const layerSelectionKey = tabStateKey(session, 'image-selected-layer')
+  const [layerId, setLayerId] = useState(() => readTabState<string>(layerSelectionKey) || '')
+  const layerSave = useRef(false)
+  const [panel, setPanel] = useState<Panel>('info')
+  const [panelOpen, setPanelOpen] = useState(() => session.integratedToolbar ? readTabState<boolean>(panelKey) === true : window.innerWidth > 900)
+  useEffect(() => { writeTabState(panelKey, panelOpen) }, [panelKey, panelOpen])
+  useEffect(() => { writeTabState(layerSelectionKey, layerId) }, [layerSelectionKey, layerId])
   const [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(''), [stale, setStale] = useState<number | null>(null)
   const [view, setView] = useState({ scale: .5, x: 0, y: 0 }), [background, setBackground] = useState(false)
   const [aspect, setAspect] = useState('free'), [sizeLocked, setSizeLocked] = useState(true)
@@ -82,6 +92,10 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
   const hasInput = dirty || strokes.current.length > 0 || !!cropSelection || !!prompt || conversionPending
   const job = jobs.find(j => j.jobId === selectedJob) || jobs.at(-1)
   const running = !!job && ongoing(job), generating = running && job.status !== 'queued'
+  const layers = info?.imageLayers
+  const selectedLayer = layers?.stack.layers.find(layer => layer.id === layerId) || layers?.stack.layers.at(-1)
+  const layerDraftPending = dirty || !!cropSelection || strokes.current.length > 0
+  const layersDisabled = readOnly || running || !!busy || layerDraftPending || stale !== null
   const inpaintMode = ['ai', 'inpaint'].includes(panel) && editing
   const canPaint = inpaintMode && !running && !dirty && !readOnly && !busy
   const dimensions = { width: edits.width, height: edits.height }
@@ -232,6 +246,41 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
     } catch (cause) { setError(String(cause)); return null } finally { setBusy('') }
   }
   const save = () => saveCurrent()
+  function changeLayers(build: (stack: ImageLayerStack) => Promise<{ stack: ImageLayerStack; selected?: string }>) {
+    if (!info || !layers || layersDisabled || layerSave.current) return
+    layerSave.current = true
+    void task('正在保存图层', async () => {
+      const receipt = inputProtection.capture()
+      const next = await build(layers.stack)
+      const result = await (await api(session, '/node-patch', { method: 'POST', headers: epochHeaders,
+        body: JSON.stringify({ schemaVersion: 'hcd-patch/63', documentId: session.documentId,
+          patchId: crypto.randomUUID(), baseRevision: info.revision, operations: [{ op: 'image.layers.set',
+            nodeId: layers.nodeId, stack: next.stack, precondition: { visualHash: layers.visualHash } }],
+        }) })).json() as { revision: number }
+      await reload(receipt)
+      if (next.selected) setLayerId(next.selected)
+      setNotice(`图层已保存 · r${result.revision}`)
+    }).finally(() => { layerSave.current = false })
+  }
+  function saveLayers(stack: ImageLayerStack, selected?: string) {
+    changeLayers(async () => ({ stack, selected }))
+  }
+  function uploadLayer(file: File, replace?: string) {
+    changeLayers(async stack => {
+      const { assetHash, width, height } = await (await api(session, '/assets', { method: 'POST', body: file })).json() as {
+        assetHash: string; width: number; height: number
+      }
+      if (replace) return { stack: updateLayer(stack, replace, { assetHash }), selected: replace }
+      const scale = Math.min(1, stack.width / width, stack.height / height)
+      const w = Math.max(1, Math.round(width * scale)), h = Math.max(1, Math.round(height * scale))
+      const layer: ImageLayer = { id: crypto.randomUUID(), name: Array.from(file.name.replace(/\.[^.]+$/, '').trim() || '图片图层').slice(0, 120).join(''),
+        assetHash, x: Math.floor((stack.width - w) / 2), y: Math.floor((stack.height - h) / 2), width: w, height: h,
+        visible: true, opacity: 100, blend: 'normal' }
+      const next = [...stack.layers]
+      next.push(layer)
+      return { stack: { ...stack, layers: next }, selected: layer.id }
+    })
+  }
   useWorkflowPreparation(session, async () => {
     if (running) throw new Error('图片任务正在运行，请在完成后关闭。')
     if (await saveCurrent() === null) throw new Error('请先完成并保存图片编辑。')
@@ -309,27 +358,39 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
   const setZoom = (scale: number) => { interacted.current = true; setView(v => ({ ...v, scale: Math.max(.02, Math.min(8, scale)) })) }
   const cropStyle = cropSelection ? { left: `${cropSelection[0] / (info?.width || edits.width) * 100}%`, top: `${cropSelection[1] / (info?.height || edits.height) * 100}%`, width: `${cropSelection[2] / (info?.width || edits.width) * 100}%`, height: `${cropSelection[3] / (info?.height || edits.height) * 100}%` } : undefined
   const compareVisible = panel === 'compare' && !!candidate, historicalVisible = panel === 'history' && !!historyUrl
+  const fileActions = <div className="header-actions im-header-actions"><ShareControl />{localControls && <details className="im-profile-menu"><summary aria-label="界面与主题"><span>{session.displayName?.slice(0,1)||'我'}</span></summary><div><AppearanceSelect /></div></details>}<HostPublicationControl session={session} revision={info?.revision ?? null} beforeSave={saveCurrent} />{canExport && (session.hostIntegration ? <ExportControl session={session} revision={info?.revision ?? null} beforeExport={saveCurrent} /> : <button className="im-dark" onClick={() => openPanel('export')}><ArrowUpRight size={16} />导出</button>)}</div>
   return <section data-document-scope={session.scope} className="image-workspace" aria-label="图片工作台">
-    <header className="image-header">
+    {!session.integratedToolbar && <header className="image-header">
       <button className="im-collection" onClick={onClose}><PanelRightOpen size={16} /><span>图片集</span></button>
       <div className="im-title"><strong>{title}</strong><small>工作空间 / 品牌素材 <CloudCheck size={13} />{busy || (dirty ? '编辑草稿' : `原图已保留 · r${info?.revision ?? '…'}`)}</small></div>
-      <div className="im-header-actions"><ShareControl />{localControls && <details className="im-profile-menu"><summary aria-label="界面与主题"><span>{session.displayName?.slice(0,1)||'我'}</span></summary><div><AppearanceSelect /></div></details>}<HostPublicationControl session={session} revision={info?.revision ?? null} beforeSave={saveCurrent} />{canExport && (session.hostIntegration ? <ExportControl session={session} revision={info?.revision ?? null} beforeExport={saveCurrent} /> : <button className="im-dark" onClick={() => openPanel('export')}><ArrowUpRight size={16} />导出</button>)}</div>
-    </header>
+      {fileActions}
+    </header>}
     <div className="image-input-recovery"><InputDraftRecovery protection={inputProtection} disabled={!info || readOnly || !!busy || running || hasInput} onRestore={restoreInput} onError={setError} />{hasInput && !readOnly && <div className="image-draft-status"><span role="status" aria-label="图片草稿保护状态" data-protection={inputProtection.status}>{({ loading: '正在准备本地保护', writing: '正在保护图片草稿', protected: '图片草稿已保存在此浏览器', failed: '图片草稿尚未受到保护' })[inputProtection.status]}</span><button disabled={!!busy || running} onClick={discardCurrent}>舍弃当前图片草稿</button></div>}</div>
     <div className="image-body">
-      <WorkspacePanelLayer><WorkspacePanelControls side="right" open={panelOpen} onToggle={() => setPanelOpen(value => !value)}>
+      {!session.integratedToolbar && <WorkspacePanelLayer><WorkspacePanelControls side="right" open={panelOpen} onToggle={() => setPanelOpen(value => !value)}>
         {aiEnabled && <button className="im-collaborate" aria-label="协作" title="协作" aria-pressed={panelOpen && ['ai', 'inpaint'].includes(panel)} onClick={() => openPanel('ai')}><Users size={18} /></button>}
         {hasHistory && <button aria-label="版本记录" title="版本记录" aria-pressed={panelOpen && panel === 'history'} onClick={() => openPanel('history')}><History size={18} /></button>}
-      </WorkspacePanelControls></WorkspacePanelLayer>
+      </WorkspacePanelControls></WorkspacePanelLayer>}
       <WorkspaceDrawers leftOpen={false} rightOpen={panelOpen} onCloseLeft={() => {}} onCloseRight={() => setPanelOpen(false)} />
       <main className="image-stage-panel">
-        <nav className="image-toolbar" aria-label="图片工具" inert={!!busy}>
+        <div className="image-toolbar-row"><nav className="image-toolbar" aria-label="图片工具" inert={!!busy}>
+          {!inpaintMode && <button type="button" className={panel === 'layers' && panelOpen ? 'im-soft' : ''}
+            aria-pressed={panel === 'layers' && panelOpen} disabled={!layers} onClick={() => openPanel('layers')}><Layers3 size={15} />图层</button>}
           {!editing ? <><button className="im-soft" onClick={() => { interacted.current = false; fit() }}><Maximize size={15} />适合窗口</button><button onClick={() => setZoom(1)}><Expand size={15} />原始大小</button><span className="im-spacer" />{!session.hostIntegration && <button onClick={() => openPanel('convert')}><Grid2X2 size={15} />转换格式</button>}<IconButton label="切换透明背景" onClick={() => setBackground(v => !v)}><Grid2X2 size={15} /></IconButton></> : inpaintMode ? <><button className="im-soft" onClick={() => openPanel('inpaint')}><Paintbrush size={15} />局部重绘</button><button className={!erase ? 'im-soft' : ''} aria-pressed={!erase} onClick={() => setErase(false)} disabled={running}><Paintbrush size={15} />涂抹</button><button aria-pressed={erase} className={erase ? 'im-soft' : ''} onClick={() => setErase(true)} disabled={running}><Eraser size={15} />擦除</button><IconButton label="撤销蒙版" onClick={undoMask} disabled={!maskCount || running}><Undo2 size={15} /></IconButton><span className="im-spacer" /><button onClick={clearMask} disabled={!maskCount || running}><RotateCcw size={15} />清空蒙版</button></> : <><button className={panel === 'crop' ? 'im-soft' : ''} onClick={() => openPanel('crop')}><Crop size={15} />裁剪与旋转</button><button className={panel === 'adjust' ? 'im-soft' : ''} onClick={() => openPanel('adjust')}><SlidersHorizontal size={15} />光线与色彩</button>{aiEnabled && <button className={panel === 'ai' ? 'im-soft' : ''} onClick={() => openPanel('ai')}><Sparkles size={15} />AI 修图</button>}{!session.hostIntegration && <button onClick={() => openPanel('convert')}><Grid2X2 size={15} />转换格式</button>}<span className="im-spacer" /><IconButton label="撤销编辑" onClick={undoEdit} disabled={!undo.length || !!busy || running}><Undo2 size={15} /></IconButton><IconButton label="重做编辑" onClick={redoEdit} disabled={!redo.length || !!busy || running}><Redo2 size={15} /></IconButton></>}
         </nav>
+          {session.integratedToolbar && <FileActionsMenu><div className="header-actions im-file-actions">
+            <button aria-pressed={panelOpen} onClick={() => setPanelOpen(!panelOpen)}><PanelRightOpen size={15}/>属性面板</button>
+            {hasHistory && <button onClick={() => openPanel('history')}><History size={15}/>版本记录</button>}
+            {fileActions}
+          </div></FileActionsMenu>}
+        </div>
         <div className={`image-canvas-viewport${background ? ' im-checker' : ''}${canPaint ? ' im-painting' : ''}`} ref={viewport} role="region" tabIndex={0} aria-label="图片画布，滚轮缩放，空格拖动" onDoubleClick={() => { if (!canPaint) { interacted.current = false; fit() } }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}>
           {!source && <div className="im-loading" role="status"><LoaderCircle size={22} />正在载入原图…</div>}
           <div className="image-pixel-plane" ref={plane} data-image-plane="true" style={{ width: dimensions.width, height: dimensions.height, transform: `translate(calc(-50% + ${view.x}px),calc(-50% + ${view.y}px)) scale(${view.scale})` }}>
             <canvas ref={canvas} className="image-pixels" aria-label="当前图片" />
+            {panel === 'layers' && panelOpen && selectedLayer?.visible && !layerDraftPending && layers &&
+              <ImageLayerHandles key={selectedLayer.id} layer={selectedLayer} scale={view.scale} disabled={layersDisabled}
+                panning={() => space.current} onChange={rect => saveLayers(updateLayer(layers.stack, selectedLayer.id, rect), selectedLayer.id)} />}
             {historicalVisible && <img src={historyUrl} className="image-candidate" alt={`版本 ${historyRevision}`} style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }} />}
             {compareVisible && <img src={candidate} className="image-candidate" alt="局部重绘候选" style={{ clipPath: `inset(0 0 0 ${compare}%)` }} />}
             {(compareVisible || historicalVisible) && <div className="image-compare-line" style={{ left: `${compare}%` }}><button className="image-compare-handle" aria-label="拖动图像对比" style={{ transform: `scale(${1 / view.scale})` }} onPointerDown={e=>{e.stopPropagation();e.currentTarget.setPointerCapture(e.pointerId)}} onPointerMove={e=>{if(e.currentTarget.hasPointerCapture(e.pointerId)&&plane.current){const r=plane.current.getBoundingClientRect();setCompare(Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)))}}} onPointerUp={e=>{e.stopPropagation();if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId)}}>↔</button></div>}
@@ -345,6 +406,14 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
       <WorkspacePanel side="right" className="image-drawer" hidden={!panelOpen} aria-label={panelTitle[panel]}>
         <div className="image-drawer-head"><h2>{panelTitle[panel]}</h2><IconButton label="收起图片面板" onClick={() => setPanelOpen(false)}><PanelRightClose size={17} /></IconButton></div>
         <div className="image-drawer-scroll" inert={!!busy}>
+        {panel === 'layers' && layers && info && <>
+          {layerDraftPending && !readOnly && <div className="im-notice">先保存当前调整，或舍弃草稿后再编辑图层。
+            {dirty && !cropSelection && <button onClick={() => void save()}>应用当前调整</button>}
+            <button onClick={discardCurrent}>舍弃草稿</button>
+          </div>}
+          <ImageLayersPanel session={session} stack={layers.stack} selected={selectedLayer} revision={info.revision} disabled={layersDisabled}
+            onSelect={setLayerId} onSave={saveLayers} onUpload={uploadLayer} />
+        </>}
         {panel === 'info' && <>
           <nav className="im-segments"><button aria-pressed onClick={() => openPanel('info')}>信息</button><button disabled={readOnly} onClick={() => openPanel('crop')}>调整</button>{aiEnabled && <button disabled={readOnly} onClick={() => openPanel('ai')}>AI 修图</button>}</nav>
           <h3 className="im-editorial">每一处细节，都清晰。</h3><p>查看原图，或直接开始编辑。<br />你的原始图片始终保留。</p>
@@ -381,6 +450,10 @@ export function ImageWorkspace({ session, onClose, onOpenDocument }: { session: 
         {panel === 'history' && <><p>点击版本，在中间预览并与当前版本对比。</p>{[...revisions].sort((a, b) => b.revision - a.revision).map(r => <button className={`im-version${historyRevision === r.revision ? ' selected' : ''}`} key={r.revision} onClick={() => setHistoryRevision(r.revision)}><History size={15} /><span>版本 r{r.revision}<small>{r.authorName || (r.revision === 0 ? '原图' : '图片编辑')}</small></span>{r.revision === info?.revision && <small>当前版本</small>}</button>)}<button className="im-version" onClick={() => setHistoryRevision(0)}><ImageIcon size={15} />原图 · r0</button></>}
         </div>
         <div className="image-drawer-bottom">
+          {panel === 'layers' && <><small>图层随版本保存 · r{info?.revision ?? '…'}</small>
+            {hasHistory && <button className="im-wide" onClick={() => openPanel('history')}><History size={15} />图层版本记录</button>}
+            {!session.hostIntegration && canExport && layers?.persisted && <ExportControl session={session} revision={info?.revision ?? null} beforeExport={saveCurrent} />}
+          </>}
           {panel === 'info' && <><small><History size={14} />原图保留 · 编辑可随时撤销</small>{aiEnabled && <button className="im-dark im-wide" onClick={() => openPanel('ai')} disabled={readOnly}><Sparkles size={16} />用 AI 处理这张图片</button>}</>}
           {['crop', 'adjust'].includes(panel) && <><small>应用后形成一个新版本，原图保留。</small><button className="im-dark im-wide" onClick={() => void save()} disabled={!dirty || !!busy || readOnly || running}>{busy ? <LoaderCircle size={16} /> : <Check size={16} />}{busy || '应用编辑'}</button><button className="im-wide" onClick={reset} disabled={!!busy || !dirty}>重置调整</button></>}
           {['ai', 'inpaint'].includes(panel) && <><small>{running ? '生成期间可切换标签，任务会继续执行。' : '先生成候选，确认后应用到当前版本。'}</small>{running ? <button className="im-wide" onClick={() => void task('正在取消', async () => { await api(session, `/image/jobs/${job.jobId}`, { method: 'DELETE' }); setNotice('已取消，区域锁已释放。') })}>取消生成</button> : <button className="im-dark im-wide" disabled={!maskCount || !prompt.trim() || !info?.aiAvailable || !!busy || dirty || readOnly} onClick={() => void generate()}><Sparkles size={16} />生成局部重绘候选</button>}{candidate && <button className="im-soft im-wide" onClick={() => openPanel('compare')}>对比候选</button>}</>}

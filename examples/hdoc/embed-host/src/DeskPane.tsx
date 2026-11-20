@@ -4,22 +4,24 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  useState,
 } from 'react'
-import { EmbeddedHcdEditor, useAppearance } from '@officecli/hcd-reference-editor/react'
+import { EmbeddedHcdEditor, useAppearance, type HcdEmbedSelection } from '@officecli/hcd-reference-editor/react'
 import { useFileBinding } from './useFileBinding'
 import type { Account, FileEntry } from './hostApi'
-import type { Grant, SpecUndo } from './agent'
-import { scopeOf } from './deskFiles'
+import type { Grant } from './agent'
+import { scopeOf, selectionKey } from './deskFiles'
 export type PaneState = {
   ready: boolean
+  selectionKey: string
   scope: string
   mode: 'selection' | 'append'
 }
 export type PaneHandle = {
-  authorize: (mode: PaneState['mode']) => Promise<Grant>
+  authorize: (mode: PaneState['mode'], expected?: string) => Promise<Grant>
+  selection: () => HcdEmbedSelection | null
   prepare: () => Promise<void>
   clear: () => void
-  undoSpec: (ref:SpecUndo) => Promise<void>
 }
 const socket = new URL('/collaboration', location.origin)
 socket.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -30,7 +32,7 @@ export const DeskPane = forwardRef<
     account: Account
     committedRevision?: number
     visible: boolean
-    onSpecRewrite: (id:string)=>void
+    onSpecRewrite: (id: string, selection: HcdEmbedSelection) => void
     onState: (id: string, state: PaneState) => void
   }
 >(function DeskPane(
@@ -41,23 +43,23 @@ export const DeskPane = forwardRef<
   const { launch, error, setError, selection, report, connect, clear } =
     useFileBinding(file, account)
   const check = useRef<(() => Promise<unknown>) | null>(null)
+  const [editorReady, setEditorReady] = useState(false)
   const register = useCallback((fn: (() => Promise<unknown>) | null) => {
     check.current = fn
+    setEditorReady(!!fn)
   }, [])
-  const latest = useRef({ connect, clear, launch })
-  latest.current = { connect, clear, launch }
+  const latest = useRef({ connect, clear, selection })
+  latest.current = { connect, clear, selection }
   useImperativeHandle(
     ref,
     () => ({
-      authorize: (mode) => latest.current.connect(mode),
-      clear: () => latest.current.clear(),
-      undoSpec: async ({id,revision,epoch})=>{
-        if(check.current)await check.current()
-        const launch=latest.current.launch
-        if(!launch)throw Error('请重新打开原文件。')
-        const r=await fetch('/v1/documents/'+encodeURIComponent(launch.documentId)+'/canvas/spec-undo',{method:'POST',headers:{Authorization:'Bearer '+launch.token,'Content-Type':'application/json','X-HCD-Collaboration-Epoch':String(epoch)},body:JSON.stringify({id,revision})})
-        if(!r.ok)throw Error((await r.json()).error || '未能撤销这次改写。')
+      selection: () => latest.current.selection,
+      authorize: async (mode, expected) => {
+        if (!check.current) throw Error('请等待编辑器完成同步。')
+        if (expected && expected !== selectionKey(latest.current.selection)) throw Error('选区已变化，请重新核对。')
+        return latest.current.connect(mode)
       },
+      clear: () => latest.current.clear(),
       prepare: async () => {
         if (check.current) await check.current()
       },
@@ -70,9 +72,10 @@ export const DeskPane = forwardRef<
     !selection || selection.target.kind==='spec' ||
     committedRevision === undefined ||
     selection.revision >= committedRevision
+  const key = selectionKey(selection)
   useEffect(() => {
-    onState(file.id, { ready: !!launch && !error && synced, scope, mode })
-  }, [file.id, launch, error, scope, mode, onState, synced])
+    onState(file.id, { selectionKey: key, ready: !!launch && !error && editorReady && synced, scope, mode })
+  }, [file.id, launch, error, scope, mode, onState, synced, key, editorReady])
   const onError = useCallback((e: Error) => setError(e.message), [setError])
   return (
     <section
@@ -101,9 +104,14 @@ export const DeskPane = forwardRef<
           appearance={theme}
           chatPanel={false}
           canvasLayout="fill"
+          integratedToolbar
           onPreparationChange={register}
           onSelectionChange={report}
-          onSpecRewriteRequest={account.workspace.selectionMcp && file.canDelegateSelection ? async target=>{report(target);await connect();onSpecRewrite(file.id)} : undefined}
+          onSpecRewriteRequest={account.workspace.selectionMcp && file.canDelegateSelection ? async target => {
+            report(target)
+            await connect()
+            onSpecRewrite(file.id, target)
+          } : undefined}
           onError={onError}
         />
       ) : (

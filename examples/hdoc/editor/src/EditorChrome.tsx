@@ -4,12 +4,22 @@ import { ZoomControls } from './CanvasZoom.tsx'
 import { useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import type { ReactNode } from 'react'
-import { ArrowLeft, Check, ChevronDown, ChevronUp, Eye, Maximize2, Minimize2, PanelLeftClose, PanelRightClose, Search } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, ChevronUp, Eye, Maximize2, Minimize2, MoreHorizontal, PanelLeftClose, PanelRightClose, Search } from 'lucide-react'
 import { ExportControl } from './ExportControl.tsx'
 import type { Session } from './api.ts'
 import { HostPublicationControl, permits, useHostPolicy } from './HostIntegration.tsx'
 
-export type EditorTab = 'home' | 'insert' | 'view' | 'revisions' | 'format' | 'sheet' | 'data'
+export type EditorTab = 'home' | 'insert' | 'view' | 'review' | 'revisions' | 'format' | 'sheet' | 'data' | 'animation'
+
+export function FileActionsMenu({ children }: { children: ReactNode }) {
+  const { locale } = useI18n()
+  return <details className="integrated-file-menu" onKeyDown={event => {
+    if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus() }
+  }} onBlur={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.open = false }}>
+    <summary aria-label={localizeSource(locale, '文件操作')} title={localizeSource(locale, '文件操作')}><MoreHorizontal size={17}/></summary>
+    {children}
+  </details>
+}
 
 export function EditorHeader({ session, revision, status, onClose, onSearch, beforeExport, activeSheetName, presence, focused, onFocus }: {
   session: Session; revision: number | null; status: string
@@ -19,26 +29,29 @@ export function EditorHeader({ session, revision, status, onClose, onSearch, bef
 }) {
   const { locale } = useI18n()
   const headerStatus = status === '只读' ? '已打开' : status === '历史只读' ? '历史版本' : status
-  return <header className="editor-header">
-    <div className="document-identity"><button className="icon-button back-library" aria-label={localizeSource(locale, '返回文档库')} title={localizeSource(locale, '返回文档库')} onClick={onClose}><ArrowLeft size={18} /></button><div className="document-title"><strong title={session.documentId}>{session.title || session.documentId}</strong><small><LocalText source="工作空间" /> / {session.format.toUpperCase()} · r{revision ?? '…'}</small></div><span className="status" role="status"><Check size={13} />{localizeDynamic(locale, headerStatus)}</span></div>
-    <div className="header-actions">{presence}<ShareControl /><AppearanceSelect />
+  const integrated = session.integratedToolbar
+  const actions = <div className="header-actions">{presence}<ShareControl /><AppearanceSelect />
       <HostPublicationControl session={session} revision={revision} beforeSave={beforeExport} />
-      <button className="icon-button search-trigger" aria-label={localizeSource(locale, '搜索文档')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={18} /></button>
+      {!integrated && <button className="icon-button search-trigger" aria-label={localizeSource(locale, '搜索文档')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={18} /></button>}
       <button className="icon-button focus-trigger" aria-pressed={focused} aria-label={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} title={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} onClick={onFocus}>{focused ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
       {(permits(session, 'document.download') || permits(session, 'document.export')) && <ExportControl session={session} revision={revision} beforeExport={beforeExport} activeSheetName={activeSheetName} />}
     </div>
+  if (integrated) return <FileActionsMenu>{actions}</FileActionsMenu>
+  return <header className="editor-header">
+    <div className="document-identity"><button className="icon-button back-library" aria-label={localizeSource(locale, '返回文档库')} title={localizeSource(locale, '返回文档库')} onClick={onClose}><ArrowLeft size={18} /></button><div className="document-title"><strong title={session.documentId}>{session.title || session.documentId}</strong><small><LocalText source="工作空间" /> / {session.format.toUpperCase()} · r{revision ?? '…'}</small></div><span className="status" role="status"><Check size={13} />{localizeDynamic(locale, headerStatus)}</span></div>
+    {actions}
   </header>
 }
 
-export function ContentToolbar({ activeTab, onTab, expanded, onToggle, readOnly, format, onSearch }: {
-  activeTab: EditorTab; onTab: (tab: EditorTab) => void; expanded: boolean; onToggle: () => void; readOnly: boolean; format: string; onSearch: () => void
+export function ContentToolbar({ activeTab, onTab, expanded, onToggle, readOnly, format, onSearch, fileMenu, actions }: {
+  activeTab: EditorTab; onTab: (tab: EditorTab) => void; expanded: boolean; onToggle: () => void; readOnly: boolean; format: string; onSearch: () => void; fileMenu?: ReactNode; actions?: ReactNode
 }) {
   const { locale } = useI18n()
   const policy = useHostPolicy()
-  const tabs: [EditorTab, string][] = [['home', '开始'], ...(format === 'xlsx' ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []), ['insert', '插入'], ...(['xlsx', 'csv', 'tsv'].includes(format) ? [['data', '数据']] as [EditorTab, string][] : []), ['view', '视图'], ['revisions', '修订']]
+  const tabs: [EditorTab, string][] = [['home', '开始'], ...(format === 'xlsx' ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []), ['insert', '插入'], ...(['xlsx', 'csv', 'tsv'].includes(format) ? [['data', '数据']] as [EditorTab, string][] : []), ...(format === 'pptx' ? [['animation', '动画']] as [EditorTab, string][] : []), ['view', '视图'], ...(format === 'docx' ? [['review', '审阅']] as [EditorTab, string][] : []), ['revisions', '修订']]
   return <div className="content-toolbar">
-    {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="只读预览" /><small>{format.toUpperCase()}</small>{['xlsx', 'csv', 'tsv'].includes(format) && <button aria-pressed={activeTab === 'data'} onClick={() => onTab('data')}><LocalText source="数据" /></button>}</span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
-    <div className="content-toolbar-actions"><button className="toolbar-search" aria-label={localizeSource(locale, '查找全文')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={15} /><span><LocalText source="查找" /></span></button>
+    {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="只读预览" /><small>{format.toUpperCase()}</small>{fileMenu && <button aria-pressed={activeTab === 'view'} onClick={() => onTab('view')}><LocalText source="视图" /></button>}{format === 'docx' && <button aria-pressed={activeTab === 'review'} onClick={() => onTab('review')}><LocalText source="审阅" /></button>}{['xlsx', 'csv', 'tsv'].includes(format) && <button aria-pressed={activeTab === 'data'} onClick={() => onTab('data')}><LocalText source="数据" /></button>}</span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
+    <div className="content-toolbar-actions">{actions}{fileMenu}<button className="toolbar-search" aria-label={localizeSource(locale, '查找全文')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={15} /><span><LocalText source="查找" /></span></button>
     {!readOnly && <button className="icon-button toolbar-toggle" title={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-label={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-expanded={expanded} onClick={onToggle}>{expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>}</div>
   </div>
 }

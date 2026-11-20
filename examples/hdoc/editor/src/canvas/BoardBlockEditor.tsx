@@ -1,363 +1,328 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { CaptureUpdateAction, newElementWith } from '@excalidraw/excalidraw'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
-import { Check, X } from 'lucide-react'
-import {
-  boardTag,
-  insertBoardShapes,
-  insertComment,
-  type BoardPoint,
-} from './boardObjects'
+import { ArrowUp, AtSign, Check, ImagePlus, Smile, X } from 'lucide-react'
+import { boardTag, insertBoardShapes, insertComment, type BoardPoint } from './boardObjects'
+import { usePaintStack } from './paintStack'
+import { readBoardMedia, type BoardMedia } from './BoardBuiltins'
+import { MentionText, useBoardMentions, type BoardPerson, type BoardMention } from './BoardMentions'
 
 export type BoardDraft = {
   kind: 'sticky' | 'spec' | 'comment' | 'table'
   at: BoardPoint
   id?: string
   width?: number
-  format?: import('./StickyToolbar').NoteFormat
   height?: number
+  format?: import('./StickyToolbar').NoteFormat
   creating?: boolean
   full?: boolean
   clientPoint?: BoardPoint
+  focusMessage?: string
 }
-type Props = {
-  draft: BoardDraft
-  editor: ExcalidrawImperativeAPI
-  author: string
-  writable: boolean
-  onClose: () => void
-  onCreate?:(id:string,point:BoardPoint)=>void
-  onCell?: (id: string) => void
+export function commentTime(value: unknown) {
+  const ts = Number(value)
+  if (!Number.isFinite(ts) || ts <= 0) return ''
+  const minutes = Math.max(0, Math.floor((Date.now() - ts) / 60000))
+  return minutes < 1
+    ? '刚刚'
+    : minutes < 60
+      ? minutes + ' 分钟前'
+      : minutes < 1440
+        ? Math.floor(minutes / 60) + ' 小时前'
+        : new Date(ts).toLocaleDateString()
 }
 export function BoardBlockEditor({
   draft,
   editor,
   author,
+  personId,
+  people,
   writable,
   onClose,
-  onCell,onCreate,
-}: Props) {
-  const all = () => editor.getSceneElements(),
-    initial = all(),
-    root = initial.find((e) => e.id === draft.id)
-  const line = (part: string) =>
-    initial.find(
-      (e) => boardTag(e)?.root === draft.id && boardTag(e)?.part === part,
-    )
-  const label = (id: string | undefined) =>
-    initial.find((e) => e.type === 'text' && e.containerId === id)
-  const textOf = (e: ReturnType<typeof line>) =>
-    e?.type === 'text' ? e.originalText : ''
-  const [body,setBody]=useState(draft.kind==='table'?textOf(label(draft.id)).trim():'')
-  const [error,setError]=useState('')
-  const [, refresh] = useState(0),
-    closed = useRef(false)
-  const wrap = useRef<HTMLFormElement>(null),
-    area = useRef<HTMLTextAreaElement>(null)
-  const base = useRef(body)
+  onCreate,
+}: {
+  draft: BoardDraft
+  editor: ExcalidrawImperativeAPI
+  author: string
+  personId?: string
+  people: BoardPerson[]
+  writable: boolean
+  onClose: () => void
+  onCreate?: (id: string, point: BoardPoint) => void
+}) {
+  const scene = usePaintStack(editor),
+    root = scene.find((el) => el.id === draft.id)
+  const [body, setBody] = useState(''),
+    [emoji, setEmoji] = useState(false),
+    [photo, setPhoto] = useState<BoardMedia | null>(null)
+  const [error, setError] = useState(''),
+    [reading, setReading] = useState(false)
+  const area = useRef<HTMLTextAreaElement>(null),
+    upload = useRef<HTMLInputElement>(null),
+    form = useRef<HTMLFormElement>(null),
+    linkedMessage = useRef<HTMLElement>(null)
+  const mention = useBoardMentions(area, body, setBody, people)
   const app = editor.getAppState(),
-    zoom = app.zoom.value
-  const width = Math.min(320, app.width - 24)
-  const left = Math.max(
-    8,
-    Math.min((draft.at.x + app.scrollX) * zoom, app.width - width - 8),
-  )
-  const top = Math.max(
-    8,
-    Math.min(
-      (draft.at.y + app.scrollY) * zoom,
-      app.height - 175,
-    ),
-  )
+    z = app.zoom.value,
+    width = Math.min(300, Math.max(150, app.width - 24))
+  const x = ((root?.x ?? draft.at.x) + app.scrollX) * z,
+    y = ((root?.y ?? draft.at.y) + app.scrollY) * z
+  const offset = root ? Math.max(26, Math.min(44, root.width * z)) : 32
+  const left = x + offset + 12 + width <= app.width - 8 ? x + offset + 12 : Math.max(8, x - width - 12)
+  const [height, setHeight] = useState(104)
+  const top = Math.max(8, Math.min(y - 3, app.height - height - 12))
   useEffect(() => {
-    area.current?.focus({ preventScroll: true })
+    const node = form.current
+    if (!node) return
+    const observer = new ResizeObserver(() => setHeight(node.offsetHeight))
+    observer.observe(node)
+    return () => observer.disconnect()
   }, [])
+  useLayoutEffect(() => {
+    if (draft.focusMessage) {
+      linkedMessage.current?.scrollIntoView({ block: 'nearest' })
+      linkedMessage.current?.focus({ preventScroll: true })
+    } else area.current?.focus({ preventScroll: true })
+  }, [draft.focusMessage])
+  useLayoutEffect(() => {
+    const input = area.current
+    if (!input) return
+    input.style.height = '0px'
+    input.style.height = Math.min(176, Math.max(54, input.scrollHeight)) + 'px'
+  }, [body, width])
   useEffect(() => {
-    let last = ''
-    return editor.onChange((elements, state) => {
-      const versions = draft.id
-        ? elements
-            .filter((e) => e.id === draft.id || boardTag(e)?.root === draft.id)
-            .map((e) => e.versionNonce)
-            .join(',')
-        : ''
-      const next = [
-        state.zoom.value,
-        state.scrollX,
-        state.scrollY,
-        state.width,
-        state.height,
-        versions,
-      ].join('/')
-      if (next !== last) {
-        last = next
-        refresh((n) => n + 1)
-      }
-    })
-  }, [editor, draft.id])
-  const liveRoot = all().find((e) => e.id === draft.id)
-  function close() {
-    if (!closed.current) {
-      closed.current = true
-      onClose()
+    if (body || photo) return
+    const dismiss = (e: PointerEvent) => {
+      if (
+        form.current &&
+        !form.current.contains(e.target as Node) &&
+        !(e.target as Element)?.closest('.board-comment-pin')
+      )
+        onClose()
     }
-  }
+    document.addEventListener('pointerdown', dismiss, true)
+    return () => document.removeEventListener('pointerdown', dismiss, true)
+  }, [draft.id, body, photo, onClose])
+  const thread = root
+    ? [
+        root,
+        ...scene
+          .filter((el) => boardTag(el)?.root === draft.id && boardTag(el)?.part === 'reply')
+          .sort((a, b) => Number(a.customData?.createdAt) - Number(b.customData?.createdAt)),
+      ]
+    : []
   function save() {
-    if (closed.current) return
-    if (!writable) {
-      close()
+    if (!writable || reading || (!body.trim() && !photo)) return
+    if (draft.id && !editor.getSceneElements().some((el) => el.id === draft.id)) {
+      setError('这条评论已被移除。')
       return
     }
-    if (draft.id && !liveRoot) {
-      setError('此对象已被协作者移除。')
-      return
+    const start = body.length - body.trimStart().length,
+      text = body.trim()
+    const mentions = mention.mentions.map((m) => ({ ...m, start: m.start - start, end: m.end - start }))
+    const metadata = {
+      createdAt: Date.now(),
+      authorId: personId,
+      mentions,
+      ...(photo && { imageFileId: photo.file.id }),
     }
-    if (!draft.id && !body.trim()) {
-      close()
-      return
-    }
-    if (draft.kind === 'comment') {
-      if (!draft.id) {const id=insertComment(editor,draft.at,author,body.trim());onCreate?.(id,draft.at)}
-      else if (body.trim()) {
-        const id = 'reply-' + crypto.randomUUID()
-        // Each reply owns a different record, so two simultaneous replies can merge.
-        insertBoardShapes(
-          editor,
-          [
-            {
-              id,
-              type: 'text',
-              ...draft.at,
-              text: body.trim(),
-              fontSize: 12,
-              opacity: 0,
-              locked: true,
-              customData: {
-                officeBoard: {
-                  kind: 'comment',
-                  root: draft.id,
-                  part: 'reply',
-                  author,
-                },
-                createdAt: Date.now(),
-              },
+    if (photo) editor.addFiles([photo.file])
+    if (!draft.id) {
+      const id = insertComment(editor, draft.at, author, text, metadata)
+      onCreate?.(id, draft.at)
+    } else
+      insertBoardShapes(
+        editor,
+        [
+          {
+            id: 'reply-' + crypto.randomUUID(),
+            type: 'text',
+            x: root?.x ?? draft.at.x,
+            y: root?.y ?? draft.at.y,
+            text: text || ' ',
+            fontSize: 12,
+            opacity: 0,
+            locked: true,
+            customData: {
+              ...metadata,
+              officeBoard: { kind: 'comment', root: draft.id, part: 'reply', author },
             },
-          ],
-          draft.id,
-        )
-      }
-    }
-    if (draft.id && draft.kind==='table') {
-      const wanted=new Map<string,{before:string;after:string}>()
-      const cell=label(draft.id)
-      if(cell)wanted.set(cell.id,{before:base.current,after:body})
-      const changes = new Map(
-        [...wanted].filter(([, v]) => v.before !== v.after),
+          },
+        ],
+        draft.id,
       )
-      const elements = editor.getSceneElementsIncludingDeleted()
-      for (const [id, v] of changes) {
-        const found = elements.find((e) => e.id === id && !e.isDeleted)
-        if (
-          !found ||
-          found.type !== 'text' ||
-          found.originalText.trimEnd() !== v.before.trimEnd()
-        ) {
-          setError(
-            '这段内容刚被另一位协作者修改。草稿已保留，请复制后重新打开。',
-          )
-          return
-        }
-      }
-      if (changes.size)
-        editor.updateScene({
-          elements: elements.map((el) => {
-            const v = changes.get(el.id)
-            if (!v || el.type !== 'text') return el
-            const text = v.after || ' '
-            return newElementWith(el, {
-              text,
-              originalText: text,
-              height: Math.max(
-                el.fontSize * el.lineHeight,
-                text.split('\n').length * el.fontSize * el.lineHeight,
-              ),
-            })
-          }),
-          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-        })
-    }
-    close()
-  }
-  const latestSave = useRef(save)
-  latestSave.current = save
-  useEffect(() => {
-    if (draft.kind === 'comment') return
-    const outside = (event: PointerEvent) => {
-      if (!wrap.current || wrap.current.contains(event.target as Node)) return
-      latestSave.current()
-      if (!closed.current) {
-        event.preventDefault()
-        event.stopImmediatePropagation()
-        area.current?.focus()
-      }
-    }
-    document.addEventListener('pointerdown', outside, true)
-    return () => document.removeEventListener('pointerdown', outside, true)
-  }, [draft.kind])
-  function advanceCell(back: boolean) {
-    const rootId = boardTag(root)?.root
-    const cells = all()
-      .filter((e) => rootId && boardTag(e)?.root === rootId)
-      .sort(
-        (a, b) =>
-          boardTag(a)!.row! - boardTag(b)!.row! ||
-          boardTag(a)!.col! - boardTag(b)!.col!,
-      )
-    const next =
-      cells[cells.findIndex((e) => e.id === draft.id) + (back ? -1 : 1)]
-    save()
-    if (closed.current && next) onCell?.(next.id)
+    onClose()
   }
   function resolve() {
-    if (!liveRoot || !writable) return
+    const target = editor.getSceneElements().find((el) => el.id === draft.id)
+    if (!writable || !target) return
     editor.updateScene({
-      elements: editor.getSceneElementsIncludingDeleted().map((el) =>
-        el.id === liveRoot.id
-          ? newElementWith(el, {
-              customData: {
-                ...el.customData,
-                officeBoard: {
-                  ...boardTag(el),
-                  resolved: !boardTag(el)?.resolved,
+      elements: editor
+        .getSceneElementsIncludingDeleted()
+        .map((el) =>
+          el.id === target.id
+            ? newElementWith(el, {
+                customData: {
+                  ...el.customData,
+                  officeBoard: { ...boardTag(el), resolved: !boardTag(el)?.resolved },
                 },
-              },
-            })
-          : el,
-      ),
+              })
+            : el,
+        ),
       captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     })
-    close()
+    onClose()
   }
-  const replies =
-    draft.kind === 'comment' && draft.id
-      ? all()
-          .filter(
-            (e) =>
-              boardTag(e)?.root === draft.id &&
-              boardTag(e)?.part === 'reply' &&
-              e.type === 'text',
-          )
-          .sort(
-            (a, b) =>
-              Number(a.customData?.createdAt) - Number(b.customData?.createdAt),
-          )
-      : []
   return (
-    <form
-      ref={wrap}
-      className={'board-block-editor board-block-' + draft.kind}
-      aria-label={
-        {
-          sticky: '编辑便利贴',
-          spec: '编辑 Spec 文档',
-          table: '编辑单元格',
-          comment: '评论线程',
-        }[draft.kind]
-      }
-      style={{ left, top, width }}
-      onSubmit={(e) => {
-        e.preventDefault()
-        save()
-      }}
-      onKeyDown={(e) => {
-        if (e.nativeEvent.isComposing) return
-        if (
-          e.key === 'Tab' &&
-          draft.kind === 'table' &&
-          e.target === area.current
-        ) {
-          e.preventDefault()
-          e.stopPropagation()
-          advanceCell(e.shiftKey)
-          return
-        }
-        if (e.key === 'Escape') {
-          e.stopPropagation()
-          close()
-        }
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    <>
+      {!draft.id && (
+        <div className="board-comment-anchor" aria-hidden="true" style={{ left: x, top: y }} />
+      )}
+      <form
+        ref={form}
+        className="board-comment-composer"
+        aria-label="评论线程"
+        style={{ left, top, width }}
+        onSubmit={(e) => {
           e.preventDefault()
           save()
-        }
-      }}
-    >
-      <header>
-        <strong>
-          {
-            {
-              sticky: '便利贴',
-              spec: 'Spec 文档',
-              table: '单元格',
-              comment: '评论',
-            }[draft.kind]
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation()
+          if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229 || mention.key(e)) return
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            if (emoji) setEmoji(false)
+            else onClose()
+          } else if (e.key === 'Enter' && !e.shiftKey && e.target === area.current) {
+            e.preventDefault()
+            save()
           }
-        </strong>
-        <button
-          type="button"
-          aria-label="关闭编辑"
-          onClick={draft.kind === 'comment' ? close : save}
-        >
-          <X size={15} />
-        </button>
-      </header>
-      {draft.kind === 'comment' && root && (
-        <div className="board-comment-list">
-          <p>
-            <b>{boardTag(root)?.author}</b>
-            {String(root.customData?.officeComment || '')}
-          </p>
-          {replies.map((r) => (
-            <p key={r.id}>
-              <b>{boardTag(r)?.author}</b>
-              {textOf(r)}
-            </p>
-          ))}
-        </div>
-      )}
-      {writable && (
-        <textarea
-          ref={area}
-          aria-label={
-            draft.kind === 'comment'
-                ? '评论内容'
-                : draft.kind === 'table'
-                  ? '单元格内容'
-                  : '便利贴内容'
-          }
-          placeholder={
-            draft.kind === 'comment'
-              ? draft.id
-                ? '回复…'
-                : '写下评论…'
-              : '写点什么…'
-          }
-          readOnly={!writable}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-        />
-      )}
-      {error && <p role="alert">{error}</p>}
-      <footer>
-        {draft.kind === 'comment' && draft.id && writable && (
-          <button type="button" onClick={resolve}>
-            {boardTag(liveRoot)?.resolved ? '重新打开' : '解决评论'}
-          </button>
+        }}
+      >
+        {thread.length > 0 && (
+          <div className="board-comment-thread">
+            {thread.map((el) => {
+              const tag = boardTag(el),
+                data = el.customData,
+                text = el.type === 'text' ? el.originalText : String(data?.officeComment || '')
+              const image = data?.imageFileId && editor.getFiles()[data.imageFileId]
+              const focused = el.id === draft.focusMessage
+              return (
+                <article key={el.id} data-mentioned={focused || undefined} ref={focused ? linkedMessage : undefined} tabIndex={focused ? -1 : undefined}>
+                  <span className="board-person-badge">{Array.from(tag?.author || '协')[0]}</span>
+                  <div>
+                    <b>{tag?.author || '协作者'}</b>{' '}
+                    <time>{commentTime(data?.createdAt ?? el.updated)}</time>
+                    <p>
+                      <MentionText text={text} mentions={data?.mentions as BoardMention[]} />
+                    </p>
+                    {image && <img src={image.dataURL} alt="评论配图" />}
+                  </div>
+                </article>
+              )
+            })}
+            <div className="board-thread-actions">
+              {writable && (
+                <button type="button" onClick={resolve}>
+                  <Check size={14} />
+                  {boardTag(root)?.resolved ? '重新打开' : '解决评论'}
+                </button>
+              )}
+              <button type="button" aria-label="关闭评论" onClick={onClose}>
+                <X size={14} />
+              </button>
+            </div>
+          </div>
         )}
-        <button type="submit">
-          <Check size={13} />
-          {writable ? (draft.kind === 'comment' ? '发送' : '完成') : '关闭'}
-        </button>
-      </footer>
-    </form>
+        {writable && (
+          <>
+            <textarea
+              ref={area}
+              aria-label="评论内容"
+              placeholder={root ? '回复，@ 提及协作者' : '写下备注，@ 提及协作者'}
+              rows={2}
+              value={body}
+              {...mention.inputProps}
+              onClick={mention.refresh}
+              onChange={(e) => mention.change(e.target.value, e.target.selectionStart)}
+            />
+            {photo && (
+              <div className="board-comment-attachment">
+                <img alt={photo.name} src={photo.file.dataURL} />
+                <button type="button" aria-label="移除配图" onClick={() => setPhoto(null)}>
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+            {error && <small role="alert">{error}</small>}
+            {mention.menu}
+            <footer>
+              <button
+                type="button"
+                aria-label="添加表情"
+                aria-expanded={emoji}
+                onClick={() => setEmoji((v) => !v)}
+              >
+                <Smile size={17} />
+              </button>
+              <button
+                type="button"
+                aria-label="提及协作者"
+                onClick={() => {
+                  setEmoji(false)
+                  mention.insert('@')
+                }}
+              >
+                <AtSign size={17} />
+              </button>
+              <button type="button" aria-label="添加图片" onClick={() => upload.current?.click()}>
+                <ImagePlus size={17} />
+              </button>
+              <input
+                ref={upload}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                hidden
+                onChange={async (e) => {
+                  const f = e.currentTarget.files?.[0]
+                  e.currentTarget.value = ''
+                  if (!f) return
+                  setReading(true)
+                  try {
+                    setPhoto(await readBoardMedia(f))
+                    setError('')
+                  } catch (err) {
+                    setError(String(err))
+                  } finally {
+                    setReading(false)
+                  }
+                }}
+              />
+              <button type="submit" aria-label="发送" disabled={reading || (!body.trim() && !photo)}>
+                <ArrowUp size={17} />
+              </button>
+            </footer>
+            {emoji && (
+              <div className="board-comment-emoji" role="group" aria-label="选择表情">
+                {['👍', '❤️', '🎉', '👀', '💡', '✅'].map((symbol) => (
+                  <button
+                    type="button"
+                    key={symbol}
+                    onClick={() => {
+                      mention.insert(symbol)
+                      setEmoji(false)
+                    }}
+                  >
+                    {symbol}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </form>
+    </>
   )
 }

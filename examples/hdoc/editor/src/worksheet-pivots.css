@@ -1,0 +1,48 @@
+.hcd-surface .worksheet-pivot-dialog {
+  width: min(1080px, calc(100% - 28px));
+  max-height: calc(100dvh - 30px);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.worksheet-pivot-dialog::backdrop { background: #18202060; }
+.pivot-dialog-header, .pivot-report-picker, .pivot-revision-note {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.pivot-dialog-header, .pivot-revision-note { justify-content: space-between; }
+.hcd-surface .worksheet-pivot-dialog h2 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.hcd-surface .worksheet-pivot-dialog button { display: inline-flex; align-items: center; gap: 8px; }
+.hcd-surface .pivot-report-picker label { display: flex; align-items: center; }
+.worksheet-pivot-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.worksheet-pivot-dialog select { width: 100%; border-radius: 8px; padding: 7px; color: inherit; }
+.pivot-location { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr .7fr; gap: 10px; }
+.pivot-location input { min-width: 0; }
+.pivot-layout { display: grid; grid-template-columns: minmax(130px,.8fr) minmax(180px,1fr) minmax(260px,2fr); gap: 12px; margin-top: 14px; }
+.pivot-layout h3 { font-size: 12px; margin: 0 0 6px; color: var(--muted); }
+.pivot-field-catalog, .pivot-field-area, .pivot-preview { border: 1px solid var(--line); border-radius: 12px; min-width: 0; padding: 10px; }
+.pivot-field-catalog { max-height: 360px; overflow: auto; }
+.pivot-field-areas { display: grid; gap: 6px; }
+.pivot-field-area { min-height: 78px; }
+.pivot-catalog-field, .pivot-assigned-field { display: flex; align-items: center; min-width: 0; gap: 5px; border-radius: 8px; padding: 4px; }
+.pivot-catalog-field[draggable="true"], .pivot-assigned-field[draggable="true"] { cursor: grab; }
+.pivot-catalog-field:hover { background: var(--surface-raised); }
+.pivot-assigned-field { background: var(--accent-soft); margin-bottom: 4px; }
+.pivot-catalog-field span, .pivot-assigned-field span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pivot-assigned-field span { font-size: 12px; }
+.hcd-surface .worksheet-pivot-dialog .pivot-assigned-field button { padding: 2px; min-height: 24px; }
+.worksheet-pivot-dialog .pivot-assigned-field select { width: auto; max-width: 85px; font-size: 11px; padding: 2px; }
+.pivot-add-field { margin-top: 3px; font-size: 12px; }
+.pivot-preview { min-height: 240px; }
+.pivot-report-scroll { max-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.pivot-report-scroll table { border-collapse: collapse; table-layout: fixed; width: 100%; font-size: 12px; text-align: left; }
+.pivot-report-scroll th, .pivot-report-scroll td { border: 1px solid var(--line); padding: 6px 8px; overflow-wrap: anywhere; }
+.pivot-report-scroll thead { background: var(--accent-soft); }
+.pivot-report-scroll .pivot-number { text-align: right; font-variant-numeric: tabular-nums; }
+.pivot-delete { margin-inline-end: auto; }
+@media (max-width: 750px) {
+  .pivot-location { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pivot-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .pivot-preview { grid-column: 1 / -1; min-height: 80px; }
+}

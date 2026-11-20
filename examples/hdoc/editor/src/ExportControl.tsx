@@ -23,6 +23,8 @@ const warningLabels: Record<string, string> = {
   word_preview_layout: '与分页预览使用相同的字体、分节、表格、页眉页脚和分页规则。',
   source_pdf_approximate: '保留源 PDF；已修改文字的位置和字体可能存在偏差，请预览检查。',
   archive_history: '包含当前文档及完整历史，仅支持当前版本打包。',
+  image_layers_archive: '保留可编辑图层、素材和版本历史。',
+  image_layers_flattened: '图片格式保存当前合成画面。要继续编辑图层，请导出 HCD。',
 }
 const reasonLabels: Record<string, string> = {
   source_missing: '原文件缺失，请选择其他导出方式。',

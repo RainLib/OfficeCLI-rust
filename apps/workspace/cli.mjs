@@ -13,6 +13,9 @@ import {
   iso,
 } from "./src/store.mjs";
 import { createRuntime, listen } from "./src/runtime.mjs";
+import { requestOnlineBackup, restoreBackup, verifyBackup } from "./src/backup.mjs";
+import { connectDeploymentChild, deploymentCommand, installDeployment, isDeploymentChild, runDeployment } from "./src/deployment.mjs";
+import { verifyRelease } from "./src/release.mjs";
 import {
   bindAddress,
   createTenantGateway,
@@ -43,6 +46,11 @@ const { values, positionals } = parseArgs({
     assets: { type: "string" },
     "sidecar-script": { type: "string" },
     name: { type: "string" },
+    output: { type: "string" },
+    backup: { type: "string" },
+    deployment: { type: "string" },
+    release: { type: "string" },
+    to: { type: "string" },
   },
 });
 const command = positionals[0],
@@ -56,14 +64,35 @@ function stop(code = 0) {
   if (!shutdown) {
     process.exitCode = code;
     gateway?.close();
-    shutdown = Promise.all(runtimes.map((rt) => rt.stop())).finally(() =>
-      store?.close(),
-    );
+    shutdown = Promise.all(runtimes.map((rt) => rt.stop())).finally(() => {
+      store?.close();
+      if (isDeploymentChild()) process.disconnect();
+    });
   }
   return shutdown;
 }
 try {
-  if (command === "init") {
+  if (command === "release-info") {
+    const { manifest, root: path } = await verifyRelease(values.release || dirname(here));
+    const { files, ...identity } = manifest;
+    console.log(JSON.stringify({ ...identity, path, files: files.length }, null, 2));
+  } else if (command === "install") {
+    check(values.deployment && !root && !values.tenants, 400, "安装需要 --deployment <新目录>，可指定 --backup 恢复已有工作区。");
+    const init = [];
+    for (const option of ["tenant-id", "app-id", "public-url", "port", "bind-host", "engine-port", "collab-port", "admin", "password-env", "name"])
+      if (values[option] !== undefined) init.push("--" + option, values[option]);
+    if (values["selection-mcp"]) init.push("--selection-mcp");
+    console.log(JSON.stringify(await installDeployment({ path: values.deployment, release: values.release || dirname(here), backup: values.backup, init }), null, 2));
+  } else if (command === "start" && values.deployment) {
+    check(!root && !values.tenants && !values.assets && !values.officecli && !values["sidecar-script"],
+      400, "托管部署按安装记录启动，直接工作区参数仅用于开发启动。");
+    await runDeployment(values.deployment);
+  } else if (["upgrade", "rollback", "deployment-status"].includes(command)) {
+    check(values.deployment && !root && !values.tenants && (command !== "upgrade" || values.release),
+      400, "切换或查看部署需要 --deployment；升级还需要 --release <发行包目录>。");
+    const action = command === "deployment-status" ? "status" : command;
+    console.log(JSON.stringify(await deploymentCommand(values.deployment, action, values.release && resolve(values.release), values.to), null, 2));
+  } else if (command === "init") {
     check(root && !values.tenants, 400, "初始化工作空间需要 --root。");
     mkdirSync(root, { recursive: true, mode: 0o700 });
     check(
@@ -150,7 +179,17 @@ try {
     console.log(
       `工作空间已初始化：${url.origin}\n管理员：${username}\n使用 node apps/workspace/cli.mjs start --root <目录> 启动。`,
     );
+  } else if (command === "backup") {
+    check(root && values.output && !values.tenants, 400, "在线备份需要 --root <正在运行的工作区> --output <新目录>。");
+    console.log(JSON.stringify(await requestOnlineBackup(readWorkspace(root), values.output), null, 2));
+  } else if (command === "verify-backup") {
+    check(values.backup, 400, "备份校验需要 --backup <备份目录>。");
+    console.log(JSON.stringify(await verifyBackup(values.backup), null, 2));
+  } else if (command === "restore") {
+    check(root && values.backup && !values.tenants, 400, "恢复需要 --backup <备份目录> --root <新工作区目录>。");
+    console.log(JSON.stringify(await restoreBackup(values.backup, root), null, 2));
   } else if (command === "start") {
+    const standby = isDeploymentChild();
     check(
       Boolean(root) !== Boolean(values.tenants),
       400,
@@ -188,7 +227,7 @@ try {
     for (const workspace of workspaces) {
       const runtime = createRuntime(
         workspace,
-        { assets, binary, sidecar },
+        { assets, binary, sidecar, standby },
         (tenant) => {
           console.error(`工作空间 ${tenant} 的子服务已退出。`);
           if (values.tenants && started) void runtime.stop();
@@ -199,17 +238,19 @@ try {
     }
     process.once("SIGINT", () => void stop());
     process.once("SIGTERM", () => void stop());
+    if (standby) process.once("disconnect", () => void stop());
     if (values.tenants) {
       gateway = createTenantGateway(runtimes);
       await listen(gateway.server, port, values["bind-host"] || "127.0.0.1");
     }
     await Promise.all(runtimes.map((runtime) => runtime.start()));
     started = true;
+    if (standby) await connectDeploymentChild(runtimes[0]);
     for (const { config } of workspaces)
       console.log(`OfficeCLI Workspace · ${config.name} · ${config.publicUrl}`);
   } else
     throw new Error(
-      "用法：node apps/workspace/cli.mjs init --root <目录> 或 start (--root <目录> | --tenants <清单>)",
+      "命令包括 init、install、start、release-info、deployment-status、upgrade、rollback、backup、verify-backup、restore。参数见 Workspace README。",
     );
 } catch (error) {
   console.error(error.message);

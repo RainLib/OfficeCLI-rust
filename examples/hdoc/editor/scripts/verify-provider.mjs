@@ -25,7 +25,8 @@ const checks = [], children = [], log = createWriteStream(resolve(root, 'service
 let backend, browser, failCommit = false, failEvent = true, commit202 = false, wrongHash = false, hostileTransfer = false
 let verified = 0, signatureErrors = 0, commitCount = 0, eventAttempts = 0
 const nonces = new Set(), codes = new Map(), exchanges = new Map(), pubs = new Map(), eventIds = new Set()
-const files = new Map(['a','b','browser','bad-hash','bad-transfer','async-commit'].map(id => [id, {
+const rejectedEvents = new Map(), blockedEvents = new Set()
+const files = new Map(['a','b','browser','bad-hash','bad-transfer','async-commit','receipt-only'].map(id => [id, {
   head: 'v1', versions: { v1: Buffer.from(`Original ${id} document.\n\nA public provider acceptance fixture.\n`) },
 }]))
 const editable = ['document.view','document.edit','document.publish','document.copy','history.view','history.restore']
@@ -72,6 +73,8 @@ const host = createServer(async (request, response) => {
     if (event) {
       assert.equal(data.tenantId,'acme'); assert.equal(data.appId,'archive')
       eventAttempts++
+      if (blockedEvents.has(data.eventId)) { rejectedEvents.set(data.eventId, data); send(403,{error:'injected event authorization failure'}); return }
+      if (rejectedEvents.has(data.eventId)) assert.deepEqual(data,rejectedEvents.get(data.eventId))
       if (failEvent) { failEvent = false; send(503,{error:'injected delivery failure'}); return }
       eventIds.add(data.eventId); saveHost(); response.writeHead(204); response.end(); return
     }
@@ -196,12 +199,14 @@ try {
   assert.equal(uncertain.status,202,JSON.stringify(uncertain.value)); assert.equal(uncertain.value.state,'retrying'); assert.equal(commitCount,1)
   checks.push('lost commit response is not reported as saved')
   await stop(backend,'SIGKILL'); await startBackend()
+  const reopened=await open('a')
+  assert.equal((await call(doc(reopened,'/integration'),{token:reopened.token})).value.externalVersion,'v2')
   const recovered=await publish(a,revision,uncertain.id)
   assert.equal(recovered.status,200,JSON.stringify(recovered.value)); assert.equal(recovered.value.state,'committed'); assert.equal(commitCount,1)
   assert.equal(files.get('a').versions.v2.toString(),'Changed through host-authorized API.\n\nA public provider acceptance fixture.\n')
   const status=(await call(doc(a,'/integration'),{token:a.token})).value
   assert.equal(status.importBaseVersion,'v1'); assert.equal(status.externalVersion,'v2'); assert.equal(status.lastPublishedRevision,revision)
-  checks.push('SIGKILL/restart reconciles one commit and preserves immutable source baseline')
+  checks.push('SIGKILL/restart and a fresh browser session reconcile one commit and preserve the immutable source baseline')
   assert.equal((await publish(a,revision+1,uncertain.id)).status,409)
   checks.push('publication IDs reject changed revisions')
   const renewed=await open('a','alice',a.sessionId,true)
@@ -219,16 +224,42 @@ try {
   assert.equal((await call(ticket.value.url)).status,200)
   acl.set('alice',[...editable])
   checks.push('historical download tickets also recheck history permission')
+  const departed=await open('receipt-only'), departedRevision=await edit(departed,'Receipt recovery after revocation.')
+  failCommit=true
+  const lost=await publish(departed,departedRevision)
+  assert.equal(lost.status,202)
+  const beforeReconcile=commitCount, operator=`/integration/v1/publications/${lost.id}`
+  assert.equal((await call('/integration/v1/publications',{token:departed.token})).status,401)
+  assert.equal((await call(`/integration/v1/sessions/${departed.sessionId}`,{token:serviceKey,method:'DELETE'})).status,204)
+  acl.set('alice',editable.filter(op=>op!=='document.publish'))
+  const reconciled=await call(operator+'/reconcile',{token:serviceKey,method:'POST'})
+  assert.equal(reconciled.status,200,JSON.stringify(reconciled.value))
+  assert.equal(reconciled.value.job.receipt.externalVersion,'v2')
+  assert.equal((await call(operator+'/reconcile',{token:serviceKey,method:'POST'})).value.job.state,'committed')
+  assert.equal(commitCount,beforeReconcile)
+  acl.set('alice',[...editable])
+  checks.push('application service recovers an original receipt after logout and publication revocation without another write')
   const asyncSession=await open('async-commit'), asyncRevision=await edit(asyncSession,'HTTP 202 cannot confirm a business commit.')
-  commit202=true; const asynchronous=await publish(asyncSession,asyncRevision); commit202=false
+  const eventId=randomUUID(); blockedEvents.add(eventId)
+  commit202=true; const asynchronous=await publish(asyncSession,asyncRevision,eventId); commit202=false
   assert.equal(asynchronous.status,202); assert.equal(asynchronous.value.state,'retrying')
   assert.equal((await publish(asyncSession,asyncRevision,asynchronous.id)).value.state,'committed')
   checks.push('HTTP 202 with a receipt body still requires reconciliation')
+  const eventPath=`/integration/v1/publications/${eventId}`
+  await poll(async()=> (await call(eventPath,{token:serviceKey})).value.eventDelivery?.deadLetter)
+  blockedEvents.delete(eventId)
+  assert.equal((await call(eventPath+'/event-retry',{token:serviceKey,method:'POST'})).status,200)
+  await poll(async()=> (await call(eventPath,{token:serviceKey})).value.eventDelivery?.delivered)
+  assert(eventIds.has(eventId)); assert.equal((await call(eventPath+'/event-retry',{token:serviceKey,method:'POST'})).status,409)
+  checks.push('manual redelivery preserves the immutable event identity and payload')
   // A host edit while HCD remains dirty must not be overwritten by prepare.
   const c=await open('browser'), cRevision=await edit(c,'Changed while the business file also changed.')
   const cFile=files.get('browser'); cFile.versions.external=Buffer.from('Independent business content.'); cFile.head='external'
   const conflicted=await publish(c,cRevision)
   assert.equal(conflicted.status,409); assert.equal(cFile.head,'external')
+  const candidate=await call(`/integration/v1/publications/${conflicted.id}/artifact`,{token:serviceKey})
+  assert.equal(candidate.status,200); assert.match(candidate.value,/Changed while the business file also changed/)
+  assert.equal(cFile.versions.external.toString(),'Independent business content.')
   checks.push('business CAS conflict preserves both sides')
   wrongHash=true
   const badId=randomUUID(),badCode=secret(); codes.set(badCode,{fileId:'bad-hash',actor:'alice',sessionId:badId,used:false})

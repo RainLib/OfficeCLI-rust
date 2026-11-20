@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import type { EditorTab } from './EditorChrome.tsx'
 
-type RightPanel = 'agents' | 'settings' | 'revisions' | 'properties'
+type RightPanel = 'agents' | 'settings' | 'revisions' | 'properties' | 'word-review'
 type PanelState = { agentPanelOpen: boolean; rightPanel: Exclude<RightPanel, 'agents'> | null; lastRightPanel: RightPanel }
 type PanelAction = { type: 'agents'; value: SetStateAction<boolean> } | { type: 'panel'; value: SetStateAction<PanelState['rightPanel']> } | { type: 'close' } | { type: 'reopen' }
 function panelReducer(state: PanelState, action: PanelAction): PanelState {
@@ -21,7 +21,7 @@ type DocumentViewState = {
   selectedRevision: number | null; setSelectedRevision: Dispatch<SetStateAction<number | null>>
   comparing: boolean; setComparing: Dispatch<SetStateAction<boolean>>
   stickerMotionPaused: boolean; setStickerMotionPaused: Dispatch<SetStateAction<boolean>>
-  rightPanel: 'settings' | 'revisions' | 'properties' | null; setRightPanel: Dispatch<SetStateAction<'settings' | 'revisions' | 'properties' | null>>
+  rightPanel: PanelState['rightPanel']; setRightPanel: Dispatch<SetStateAction<PanelState['rightPanel']>>
   agentPanelOpen: boolean; setAgentPanelOpen: Dispatch<SetStateAction<boolean>>
   lastRightPanel: RightPanel; closeRightPanel: () => void; reopenRightPanel: () => void
   activeTab: EditorTab; setActiveTab: Dispatch<SetStateAction<EditorTab>>
@@ -36,9 +36,9 @@ function readView(key?: string): Partial<SavedView> {
     const result: Partial<SavedView> = {}
     for (const property of ['focused', 'wrapText', 'comparing', 'agentPanelOpen', 'stickerMotionPaused'] as const) if (typeof data[property] === 'boolean') result[property] = data[property]
     if (data.selectedRevision === null || Number.isSafeInteger(data.selectedRevision) && data.selectedRevision >= 0) result.selectedRevision = data.selectedRevision
-    if (['settings', 'revisions', 'properties', null].includes(data.rightPanel)) result.rightPanel = data.rightPanel
-    if (['agents', 'settings', 'revisions', 'properties'].includes(data.lastRightPanel)) result.lastRightPanel = data.lastRightPanel
-    if (['home', 'insert', 'view', 'revisions', 'format', 'sheet'].includes(data.activeTab)) result.activeTab = data.activeTab
+    if (['settings', 'revisions', 'properties', 'word-review', null].includes(data.rightPanel)) result.rightPanel = data.rightPanel
+    if (['agents', 'settings', 'revisions', 'properties', 'word-review'].includes(data.lastRightPanel)) result.lastRightPanel = data.lastRightPanel
+    if (['home', 'insert', 'view', 'review', 'revisions', 'format', 'sheet', 'data', 'animation'].includes(data.activeTab)) result.activeTab = data.activeTab
     return result
   } catch { return {} }
 }

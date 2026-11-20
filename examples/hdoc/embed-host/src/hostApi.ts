@@ -1,8 +1,16 @@
+export type ProjectRole = 'manager' | 'editor' | 'viewer'
+export type Project = { id: string; name: string; ownerId: string; role: ProjectRole }
+export type ProjectFolder = { id: string; name: string; parentId: string | null }
+export type ProjectDetails = { project: Project; folders: ProjectFolder[] }
+export type FileLocation = { projectId: string; folderId: string | null }
 export type FileEntry = {
   id: string
+  resourceDocumentId: string
   name: string
   format: string
   canDelegateSelection: boolean
+  canManage: boolean
+  location: FileLocation | null
   ownerName: string
   createdAt: string
   modifiedAt: string

@@ -77,16 +77,27 @@ export const noteDirections: Record<NoteDirection, string> = {
   down: '下',
   left: '左',
 }
+
+export function pointOnSide(
+  box: { x: number; y: number; width: number; height: number; angle?: number },
+  side: NoteDirection,
+  distance = 0,
+) {
+  const dx = side === 'left' ? -box.width / 2 - distance : side === 'right' ? box.width / 2 + distance : 0
+  const dy = side === 'up' ? -box.height / 2 - distance : side === 'down' ? box.height / 2 + distance : 0
+  const angle = box.angle || 0, cos = Math.cos(angle), sin = Math.sin(angle)
+  return { x: box.x + box.width / 2 + dx * cos - dy * sin, y: box.y + box.height / 2 + dx * sin + dy * cos }
+}
 export function neighborSpot(
   source: { x: number; y: number; width: number; height: number },
   direction: NoteDirection,
   others: readonly { x: number; y: number; width: number; height: number }[],
+  sameLine = false,
 ) {
   const width = source.width,
     height = Math.min(source.width, source.height),
     gap = 16
   const horizontal = direction === 'left' || direction === 'right'
-  const positive = direction === 'down' || direction === 'right'
   let x =
     direction === 'right'
       ? source.x + source.width + gap
@@ -99,19 +110,17 @@ export function neighborSpot(
       : direction === 'up'
         ? source.y - height - gap
         : source.y
-  const sorted = [...others].sort(
-    (a, b) => (positive ? 1 : -1) * (horizontal ? a.x - b.x : a.y - b.y),
-  )
-  for (const el of sorted) {
-    if (
-      el.x >= x + width ||
-      el.x + el.width <= x ||
-      el.y >= y + height ||
-      el.y + el.height <= y
-    )
+  // Keep the requested edge adjacent even when the next slot already holds a note.
+  const startX = x, startY = y
+  for (let slot = 1; others.some(el => el.x < x + width && el.x + el.width > x && el.y < y + height && el.y + el.height > y); slot++) {
+    if (sameLine) {
+      if (horizontal) x = startX + slot * (width+gap) * (direction==='left'?-1:1)
+      else y = startY + slot * (height+gap) * (direction==='up'?-1:1)
       continue
-    if (horizontal) x = positive ? el.x + el.width + gap : el.x - width - gap
-    else y = positive ? el.y + el.height + gap : el.y - height - gap
+    }
+    const offset = Math.ceil(slot / 2) * (slot % 2 ? 1 : -1)
+    if (horizontal) y = startY + offset * (height + gap)
+    else x = startX + offset * (width + gap)
   }
   return { x, y, width, height }
 }

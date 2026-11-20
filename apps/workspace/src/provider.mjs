@@ -335,6 +335,8 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
             "excalidraw",
             "docx",
             "xlsx",
+            "csv",
+            "tsv",
             "pptx",
             "pdf",
             "html",

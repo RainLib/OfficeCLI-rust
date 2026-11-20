@@ -23,13 +23,17 @@
     "dev:agent": "tsx scripts/start-agent-demo.ts",
     "build": "tsc --noEmit && vite build && vite build --config vite.embed.config.ts",
     "test:workspace": "playwright test",
-    "test:provider": "node scripts/verify-provider.mjs"
+    "test:provider": "node scripts/verify-provider.mjs",
+    "test:word-review-anchors": "tsx scripts/verify-word-review-anchors.ts"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.18.1",
     "@hocuspocus/provider": "4.7.0",
     "@hocuspocus/server": "4.7.0",
     "@hocuspocus/transformer": "4.7.0",
+    "@tesseract.js-data/chi_sim": "1.0.0",
+    "@tesseract.js-data/chi_tra": "1.0.0",
+    "@tesseract.js-data/eng": "1.0.0",
     "@tiptap/core": "3.31.3",
     "@tiptap/extension-collaboration": "3.31.3",
     "@tiptap/extension-collaboration-caret": "3.31.3",
@@ -46,6 +50,7 @@
     "pdfjs-dist": "^6.3.289",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "tesseract.js": "7.0.0",
     "yjs": "13.6.27"
   },
   "peerDependencies": {

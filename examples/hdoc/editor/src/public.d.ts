@@ -12,6 +12,29 @@ export type HcdEmbedSelection = {
     | { kind: 'sheet'; sheetId: string; sheetIndex: number; top: number; left: number; bottom: number; right: number }
 }
 
+export type BoardExcerpt = { id: string; heading?: string; lines: string[]; documentId?: string }
+export type HcdWorkspaceSearchHit = {
+  chunkSequence: number; region: string; nodeId: string; offset: number; preview: string
+  blockId?: string; elementId?: string; sheetId?: string; sheetName?: string; pageNumber?: number
+}
+export type HcdWorkspaceSearchLocation = {
+  requestId: string; documentId: string; revision: number; query: string; hit: HcdWorkspaceSearchHit
+}
+export type EmbeddedWorkspaceProps = {
+  mentionable?: (documentId:string) => Promise<{id:string; name:string}[]>
+  organize?: (boardId: string, selected: BoardExcerpt[]) => Promise<BoardExcerpt[]>
+  children: ReactNode
+  activeDocumentId: string | null
+  files: { documentId: string; title: string; format: string; writable: boolean; canAsk?: boolean }[]
+  activate: (documentId: string) => void
+  access: (documentId: string) => Promise<{ token: string; apiUrl: string }>
+  sourceLink: (documentId: string, nodeId: string) => string
+  selection: (documentId: string) => HcdEmbedSelection | null
+  searchLocation?: HcdWorkspaceSearchLocation
+  ask?: (selection: HcdEmbedSelection) => void
+}
+export declare function EmbeddedWorkspace(props: EmbeddedWorkspaceProps): ReactElement
+
 export type EmbeddedHcdEditorProps = {
   documentId: string
   title?: string
@@ -24,6 +47,8 @@ export type EmbeddedHcdEditorProps = {
   chatPanel?: ReactNode
   /** Fill the host pane when the surrounding app already supplies the file title and navigation. */
   canvasLayout?: 'panel' | 'fill'
+  /** The host tab already displays the file name. */
+  integratedToolbar?: boolean
   onPreparationChange?: (prepare: (() => Promise<unknown>) | null) => void
   onSelectionChange?: (selection: HcdEmbedSelection | null) => void
   /** Open the host assistant for this exact Spec sentence (optional). */

@@ -1,5 +1,5 @@
 import {
-  HcdBundleClient, type ChunkDescriptor, type HcdManifest, type LoadedChunk,
+  HcdBundleClient, type ChunkDescriptor, type HcdManifest, type LoadedChunk, type WorksheetCondition,
 } from '../../xlsx-univer-viewer/src/hcd.ts'
 import { api, type Session } from './api.ts'
 import { readCapabilities, type CalculationResult } from './capabilities.ts'
@@ -9,6 +9,9 @@ export class ServiceGridClient extends HcdBundleClient {
   private readonly assetUrls = new Map<string, string>()
   private readonly calculations = new Map<string, Promise<Map<string, { formula?: string; calculation: CalculationResult }>>>()
   verifiedFunctions: string[] = []
+  worksheetChartsSupported = false
+  worksheetConditionsSupported = false
+  worksheetPivotsSupported = false
 
   constructor(private readonly session: Session) { super('/') }
 
@@ -17,7 +20,14 @@ export class ServiceGridClient extends HcdBundleClient {
     if (this.manifest.schemaVersion !== 'hcd/2' || this.manifest.profile !== 'grid') {
       throw new Error('需要 HCD/2 工作簿')
     }
-    this.verifiedFunctions = await readCapabilities(this.session).then(value => value.calculation.verifiedFunctions).catch(() => [])
+    const capabilities = await readCapabilities(this.session).catch(() => null)
+    this.verifiedFunctions = capabilities?.calculation.verifiedFunctions ?? []
+    this.worksheetChartsSupported = this.manifest.source?.format === 'xlsx'
+      && !!capabilities?.patchSchemas['hcd-patch/56']?.operations.includes('xlsx.chart.set')
+    this.worksheetConditionsSupported = this.manifest.source?.format === 'xlsx'
+      && !!capabilities?.patchSchemas['hcd-patch/58']?.operations.includes('xlsx.condition.set')
+    this.worksheetPivotsSupported = this.manifest.source?.format === 'xlsx'
+      && !!capabilities?.patchSchemas['hcd-patch/59']?.operations.includes('xlsx.pivot.set')
     if (this.manifest.indexPageCount > 10_000) throw new Error('工作簿索引页超过安全上限')
     const descriptors: ChunkDescriptor[] = []
     for (let start = 0; start < this.manifest.indexPageCount; start += 8) {
@@ -27,6 +37,12 @@ export class ServiceGridClient extends HcdBundleClient {
     }
     this.descriptors = descriptors.sort((a, b) => a.sequence - b.sequence)
     if (this.descriptors.some(descriptor => !descriptor.grid)) throw new Error('工作簿缺少 grid 随机访问元数据')
+  }
+
+  worksheetConditions(sheetId: string): WorksheetCondition[] {
+    const first = this.descriptors.find(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)
+    return (first?.grid?.conditions ?? []).filter(rule => !rule.removed)
+      .sort((a, b) => (a.sourcePriority ?? Infinity) - (b.sourcePriority ?? Infinity))
   }
 
   override async readChunk(descriptor: ChunkDescriptor): Promise<LoadedChunk> {
@@ -44,6 +60,11 @@ export class ServiceGridClient extends HcdBundleClient {
 
   override async readStyles(): Promise<string> {
     return (await api(this.session, '/styles')).text()
+  }
+
+  override visuals(sheetId: string): ChunkDescriptor[] {
+    return super.visuals(sheetId).filter(({ grid }) => !this.worksheetChartsSupported
+      || grid?.kind !== 'chart' || !grid.charts?.some(chart => chart.imported))
   }
 
   override async readCalculations(sheetId: string) {

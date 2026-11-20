@@ -42,9 +42,9 @@ export function validIdentity(value) {
   );
 }
 
-export function readWorkspace(path) {
+export function readWorkspace(path, configName = "config.json") {
   const root = realpathSync(path);
-  const config = JSON.parse(readFileSync(join(root, "config.json"), "utf8"));
+  const config = JSON.parse(readFileSync(join(root, configName), "utf8"));
   check(
     config.schemaVersion === "officecli-workspace/1" &&
       validIdentity(config.tenantId) &&

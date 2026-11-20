@@ -10,6 +10,8 @@ import {
 } from './selectionTransfer.ts'
 import { readTabState, tabStateKey, writeTabState } from './tabState.ts'
 import { LocalText } from './sourceLocale.tsx'
+import { I18nProvider } from './i18n.tsx'
+import type { EmbeddedWorkspaceProps } from './public'
 import './selection-transfer.css'
 
 const newTarget = '@new'
@@ -25,19 +27,22 @@ type TransferWorkspace = {
   change: (session: Session, form: TransferForm) => void
   begin: (session: Session, selection: TransferSelection, epoch: number) => void
   register: (result: TransferReceipt, token: string, title: string) => Promise<boolean>
-  navigate: (origin: Session, result: TransferReceipt) => void
+  navigate: (origin: Session, result: TransferReceipt) => Promise<void>
   openSource: (origin: Session, link: string) => Promise<void>
   navigation?: TransferReceipt & { sequence: number; sessionKey: string; from: string }
   notice: string
   finish: (sequence: number, message?: string) => void
+  host?: HostedTransfers
 }
+type HostedTransfers = { files: EmbeddedWorkspaceProps['files']; resolve: (id: string) => Promise<Session> }
 const Context = createContext<TransferWorkspace | null>(null)
 export const useSelectionTransferWorkspace = () => useContext(Context)
 
-export function SelectionTransferProvider({ children, register, defaultUploadToken }: {
+export function SelectionTransferProvider({ children, register = async () => false, defaultUploadToken = '', host }: {
   children: ReactNode
-  register: TransferWorkspace['register']
-  defaultUploadToken: string
+  register?: TransferWorkspace['register']
+  defaultUploadToken?: string
+  host?: HostedTransfers
 }) {
   const workspace = useWorkflowWorkspace()
   const [forms, setForms] = useState<TransferWorkspace['forms']>({})
@@ -54,43 +59,66 @@ export function SelectionTransferProvider({ children, register, defaultUploadTok
     writeTabState(key, form)
     setForms(previous => ({ ...previous, [key]: form }))
   }
-  const locateSession = (origin: Session, documentId: string) =>
-    sessions.current.find(item => item.documentId === documentId && sameTransferWorkspace(item, origin))
-  const navigate: TransferWorkspace['navigate'] = (origin, result) => {
-    const target = locateSession(origin, result.documentId)
+  const locateSession = async (origin: Session, documentId: string) => {
+    const mounted = sessions.current.find(item => item.documentId === documentId && sameTransferWorkspace(item, origin))
+    if (mounted || !host || !origin.hostIntegration) return mounted
+    const target = await host.resolve(documentId)
+    return sameTransferWorkspace(target, origin) ? target : undefined
+  }
+  const navigate: TransferWorkspace['navigate'] = async (origin, result) => {
+    const target = await locateSession(origin, result.documentId)
     const key = target && keyFor(target)
     if (!target || !key) throw new Error('请打开原文件或目标文件并重新验证访问权限。')
     setNotice('')
     setNavigation({ ...result, sequence: ++sequence.current, sessionKey: key, from: origin.documentId })
+    if (host) setRequested(null)
     workspace.activate(target.documentId)
   }
   const value: TransferWorkspace = {
-    requested, defaultUploadToken, forms, change, register, navigate, navigation, notice,
+    requested, defaultUploadToken, forms, change, register, navigate, navigation, notice, host,
     begin(session, selection, sourceEpoch) {
+      const key = keyFor(session)
+      const saved = key ? forms[key] || readTabState<TransferForm>(key) : undefined
+      if (host && saved?.sourceEpoch === sourceEpoch && JSON.stringify(saved.selection) === JSON.stringify(selection)) {
+        setRequested(key)
+        return
+      }
       const target = sessions.current.find(item => transferTarget(session, item))
+      const hostTarget = host?.files.find(item => item.format === 'excalidraw' && item.writable)
       change(session, {
         id: crypto.randomUUID(), sourceEpoch, selection, instructions: '',
-        targetId: target?.documentId || newTarget, afterBlockId: '',
+        targetId: target?.documentId || hostTarget?.documentId || (host ? '' : newTarget), afterBlockId: '',
         title: `${fileName(session)} · ${selection.kind === 'canvas' ? '整理稿' : '讲解白板'}`.replace(/[\\/]/g, ' ').slice(0, 100),
       })
-      setRequested(keyFor(session))
+      setRequested(key)
     },
     async openSource(origin, link) {
       const parsed = decodeTransferLink(link)
       if (!parsed) throw new Error('来源链接无效。')
-      const source = locateSession(origin, parsed.documentId)
+      const source = await locateSession(origin, parsed.documentId)
       if (!source) throw new Error('请打开来源文件并重新验证访问权限。')
       const result = await (await api(source, `${requestRoute(parsed.id)}/source?section=${parsed.section}`, {
         headers: { 'x-hcd-target-authorization': `Bearer ${accessToken(origin)}` },
       })).json() as TransferReceipt
-      navigate(origin, result)
+      await navigate(origin, result)
     },
     finish(ticket, message = '') { if (ticket === sequence.current) setNotice(message) },
   }
+  const hostedSource = host && requested ? sessions.current.find(item => keyFor(item) === requested && supportsTransfer(item)) : undefined
   return <Context.Provider value={value}>
     {notice && <p className="resource-navigation-error" role="alert">{notice}</p>}
     {children}
+    {hostedSource && <HostedTransferDialog session={hostedSource} close={() => setRequested(null)} />}
   </Context.Provider>
+}
+
+function HostedTransferDialog({ session, close }: { session: Session; close: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => { dialog.current?.showModal() }, [])
+  return <dialog ref={dialog} className="resource-picker hosted-transfer" aria-label="在白板讲解" onCancel={close}>
+    <button type="button" className="hosted-transfer-close" aria-label="关闭白板讲解" onClick={close}>×</button>
+    <I18nProvider initialLocale={session.locale}><SelectionTransferPanel session={session}/></I18nProvider>
+  </dialog>
 }
 
 export function useTransferForm(session: Session | undefined) {
@@ -155,7 +183,10 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState('')
   const [anchors, setAnchors] = useState<Projection['blocks']>([])
   const target = workspace?.sessions.find(item => item.documentId === form?.targetId && transferTarget(session, item))
-  const isNew = form?.targetId === newTarget
+  const host = transfers?.host
+  const hostedTargets = host?.files.filter(file => file.format === 'excalidraw' && file.writable)
+  const hostedTarget = hostedTargets?.find(file => file.documentId === form?.targetId)
+  const isNew = !host && form?.targetId === newTarget
   const fromBoard = session.format === 'excalidraw'
   const current = run?.id === form?.id ? run : null
   const id = form?.id, submitted = form?.submitted
@@ -189,7 +220,7 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
   if (!form) return <section className="selection-transfer" aria-label="跨文件生成"><p className="drawer-caption">
     <LocalText source={fromBoard ? '选择白板内容后，点击「整理为文档」。' : '选择正文后，从右键菜单打开「在白板讲解」。'} />
   </p></section>
-  const candidates = workspace.sessions.filter(item => transferTarget(session, item))
+  const candidates = hostedTargets || workspace.sessions.filter(item => transferTarget(session, item))
   const upload = uploadToken || transfers.defaultUploadToken
   const selectedRun = current?.status
   const receipt = current?.status === 'applied' ? current.receipt : null
@@ -197,13 +228,14 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
   const generated = !!current?.draft
   const location = form.selection.kind === 'canvas' ? `${form.selection.elementIds.length} 个白板对象` : `${form.selection.spans.length} 个正文段落`
   const update = (changes: Partial<TransferForm>) => { setError(''); transfers.change(session, { ...form, ...changes }) }
-  const requestHeaders = (): Headers => {
+  const requestHeaders = async () => {
     if (isNew) {
       if (!upload.trim()) throw new Error('新建目标需要当前账号的上传令牌。')
       return new Headers({ 'Content-Type': 'application/json', 'x-hcd-upload-authorization': `Bearer ${upload.trim()}` })
     }
-    if (!target) throw new Error('请重新打开目标文件并验证编辑权限。')
-    return new Headers({ 'Content-Type': 'application/json', 'x-hcd-target-authorization': `Bearer ${accessToken(target)}` })
+    const authorized = target || (host && hostedTarget && await host.resolve(hostedTarget.documentId))
+    if (!authorized || !transferTarget(session, authorized)) throw new Error('请重新打开目标文件并验证编辑权限。')
+    return new Headers({ 'Content-Type': 'application/json', 'x-hcd-target-authorization': `Bearer ${accessToken(authorized)}` })
   }
   const perform = async (operation: () => Promise<void>) => {
     if (busy) return
@@ -212,10 +244,10 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
     finally { setBusy(false) }
   }
   const start = () => perform(async () => {
-    const headers = requestHeaders()
     await workspace.prepare(target ? [session, target] : [session])
-    const destination: TransferTarget = target
-      ? { kind: 'existing', documentId: target.documentId, afterBlockId: form.afterBlockId || undefined }
+    const headers = await requestHeaders()
+    const destination: TransferTarget = !isNew
+      ? { kind: 'existing', documentId: form.targetId, afterBlockId: form.afterBlockId || undefined }
       : { kind: 'new', title: form.title.trim() }
     update({ submitted: true })
     try {
@@ -229,8 +261,8 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
     }
   })
   const apply = () => perform(async () => {
-    const headers = requestHeaders()
     await workspace.prepare(target ? [session, target] : [session])
+    const headers = await requestHeaders()
     const response = await api(session, `${requestRoute(form.id)}/apply`, { method: 'POST', headers })
     const applied = await response.json() as TransferRun
     if (!applied.receipt) throw new Error('服务未返回提交回执。')
@@ -243,15 +275,16 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
   const cancel = () => perform(async () => {
     setRun(await (await api(session, requestRoute(form.id), { method: 'DELETE' })).json() as TransferRun)
   })
-  const resultAvailable = !!receipt && workspace.sessions.some(item => item.documentId === receipt.documentId && sameTransferWorkspace(session, item))
+  const resultAvailable = !!receipt && (hostedTargets?.some(item => item.documentId === receipt.documentId) ||
+    workspace.sessions.some(item => item.documentId === receipt.documentId && sameTransferWorkspace(session, item)))
   return <section className="selection-transfer" aria-label="跨文件生成">
     <header className="transfer-heading"><ArrowLeftRight size={17} /><h3><LocalText source={fromBoard ? '整理为文档' : '在白板讲解'} /></h3></header>
     <div className="transfer-source"><FileText size={14} /><div><strong>{fileName(session)}</strong><small>{location}{current ? ` · r${current.sourceRevision}` : ''}</small></div></div>
     <form onSubmit={event => { event.preventDefault(); void start() }}>
       <label><LocalText source="目标文件" /><select aria-label="目标文件" disabled={busy || submitted} value={form.targetId} onChange={event => update({ targetId: event.target.value, afterBlockId: '' })}>
-        {candidates.map(item => <option key={item.documentId} value={item.documentId}>{fileName(item)}</option>)}
-        {!isNew && !target && <option value={form.targetId}>{form.targetId} · 待连接</option>}
-        <option value={newTarget}>{fromBoard ? '新建 Markdown 文档' : '新建白板'}</option>
+        {candidates.map(item => <option key={item.documentId} value={item.documentId}>{item.title || item.documentId}</option>)}
+        {!isNew && !target && !hostedTarget && <option value={form.targetId}>{form.targetId ? `${form.targetId} · 待连接` : '请先从首页创建可编辑的白板'}</option>}
+        {!host && <option value={newTarget}>{fromBoard ? '新建 Markdown 文档' : '新建白板'}</option>}
       </select></label>
       {fromBoard && target && !submitted && <label><LocalText source="插入位置" /><select aria-label="插入位置" value={form.afterBlockId} onChange={event => update({ afterBlockId: event.target.value })}>
         <option value="">文末</option>
@@ -263,7 +296,7 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
       </>}
       {!submitted && <label><LocalText source="生成要求（可选）" /><textarea aria-label="生成要求" rows={3} maxLength={4000} value={form.instructions} disabled={busy} onChange={event => update({ instructions: event.target.value })} /></label>}
       {submitted && fromBoard && form.afterBlockId && <small><LocalText source="追加到已选段落后" /></small>}
-      {!submitted && <button type="submit" className="transfer-primary" disabled={busy || (!target && !isNew) || isNew && (!form.title.trim() || !upload.trim())}>
+      {!submitted && <button type="submit" className="transfer-primary" disabled={busy || (!target && !hostedTarget && !isNew) || isNew && (!form.title.trim() || !upload.trim())}>
         {busy && <LoaderCircle size={14} className="agent-spinner" />}<LocalText source="生成预览" />
       </button>}
     </form>
@@ -276,7 +309,7 @@ export function SelectionTransferPanel({ session }: { session: Session }) {
     {current?.draft && <DraftPreview draft={current.draft} />}
     {generated && !hasResult && <div className="transfer-actions">
       <span><LocalText source="应用后按目标文件的权限共享" /></span>
-      <button type="button" className="transfer-primary" disabled={busy || (!target && !isNew) || isNew && !upload.trim()} onClick={() => void apply()}><LocalText source={fromBoard ? '写入文档' : '追加到白板'} /></button>
+      <button type="button" className="transfer-primary" disabled={busy || (!target && !hostedTarget && !isNew) || isNew && !upload.trim()} onClick={() => void apply()}><LocalText source={fromBoard ? '写入文档' : '追加到白板'} /></button>
     </div>}
     {receipt && <div className="transfer-actions">
       <span role="status"><LocalText source="已应用" /> · r{receipt.revision}</span>

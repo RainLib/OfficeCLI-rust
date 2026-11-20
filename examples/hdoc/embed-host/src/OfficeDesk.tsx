@@ -1,22 +1,24 @@
-import { useCallback, useMemo, useEffect, useRef, useState } from 'react'
+import { useCallback, useMemo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Check, ChevronDown, Home, Monitor, Moon, Plus, RotateCcw, Sun, X } from 'lucide-react'
-import { AgentCompanionMark, AgentPointer, AppearanceProvider, useAppearance, type Appearance } from '@officecli/hcd-reference-editor/react'
-import { api, type Account, type FileEntry } from './hostApi'
+import { EmbeddedWorkspace, type HcdEmbedSelection, type BoardExcerpt, type HcdWorkspaceSearchLocation, AgentCompanionMark, AgentPointer, AppearanceProvider, useAppearance, type Appearance } from '@officecli/hcd-reference-editor/react'
+import { api, mutation, type Launch, type Account, type FileEntry } from './hostApi'
 import {
   baseName,
   createKinds,
   failText,
   FileGlyph,
   kindOf,
-  fileCursorColors,
+  fileCursorColors, selectionKey,
   kinds,
   type FileKind,
 } from './deskFiles'
 import { DeskPane, type PaneHandle, type PaneState } from './DeskPane'
 import { DeskAgent, useDeskTasks } from './DeskAgent'
 import { DeskHome } from './DeskHome'
+import { DeskMentions, type DeskMention } from './DeskMentions'
 import './office-desk.css'
 
+type Composer = { text: string; targets: string[]; selections: Record<string, string> }
 type Layout = {
   tabs: string[]
   active: string
@@ -26,7 +28,7 @@ type Layout = {
   groups: Record<string, string>
   picked: string[]
   chat: boolean
-  draft: string
+  composers: Record<string, Composer>
 }
 const home = 'home'
 function readLayout(key: string): Layout {
@@ -39,7 +41,7 @@ function readLayout(key: string): Layout {
     groups: {},
     picked: [],
     chat: window.innerWidth > 920,
-    draft: '',
+    composers: {},
   }
   try {
     const s = JSON.parse(localStorage.getItem(key) || 'null')
@@ -52,7 +54,15 @@ function readLayout(key: string): Layout {
           ),
         ]
     if (typeof s.active === 'string') blank.active = s.active
-    if (typeof s.draft === 'string') blank.draft = s.draft.slice(0, 4000)
+    for (const [id, saved] of Object.entries(s.composers || {})) {
+      const c = saved as Partial<Composer> | null
+      if (c && typeof c.text === 'string' && Array.isArray(c.targets))
+        blank.composers[id] = { text: c.text.slice(0, 4000), targets: c.targets.filter(id => typeof id === 'string').slice(0, 12),
+          selections: Object.fromEntries(Object.entries(c.selections || {}).filter(([, v]) => typeof v === 'string')) }
+    }
+    if (typeof s.draft === 'string' && s.draft && !blank.composers[blank.active])
+      blank.composers[blank.active] = { text: s.draft.slice(0, 4000), targets: blank.picked,
+        selections: Object.fromEntries(blank.picked.map(id => [id, 'unconfirmed'])) }
     if (typeof s.chat === 'boolean') blank.chat = s.chat
     if (s.groups && typeof s.groups === 'object')
       blank.groups = Object.fromEntries(
@@ -86,6 +96,25 @@ export function OfficeDesk({ account }: { account: Account }) {
 }
 
 function DeskWorkspace({ account }: { account: Account }) {
+  const desk = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const viewport = window.visualViewport, element = desk.current
+    if (!viewport || !element) return
+    // Pin the chrome and dock to the visible area during pinch zoom and keyboard resizes.
+    const fit = () => {
+      element.style.setProperty('--desk-visible-height', viewport.height + 'px')
+      element.style.setProperty('--desk-visible-width', viewport.width + 'px')
+      element.style.setProperty('--desk-visible-top', viewport.offsetTop + 'px')
+      element.style.setProperty('--desk-visible-left', viewport.offsetLeft + 'px')
+    }
+    fit()
+    viewport.addEventListener('resize', fit)
+    viewport.addEventListener('scroll', fit)
+    return () => {
+      viewport.removeEventListener('resize', fit)
+      viewport.removeEventListener('scroll', fit)
+    }
+  }, [])
   const { preference, theme, setPreference } = useAppearance()
   const ThemeIcon = preference === 'system' ? Monitor : theme === 'dark' ? Moon : Sun
   const key =
@@ -106,12 +135,34 @@ function DeskWorkspace({ account }: { account: Account }) {
     [error, setError] = useState('')
   const [states, setStates] = useState<Record<string, PaneState>>({}),
     handles = useRef(new Map<string, PaneHandle>())
+  const catalogGeneration = useRef(0)
+  const refreshFiles = useCallback(async () => {
+    const generation = ++catalogGeneration.current
+    const { files } = await api<{ files: FileEntry[] }>('/files')
+    if (generation !== catalogGeneration.current) return
+    const readable = new Set(files.map(file => file.id))
+    setCatalog(files)
+    setLayout(previous => {
+      const tabs = previous.tabs.filter(id => readable.has(id))
+      if (tabs.length === previous.tabs.length) return previous
+      return { ...previous, tabs, picked: previous.picked.filter(id => readable.has(id)),
+        active: readable.has(previous.active) ? previous.active : home }
+    })
+  }, [])
+  function fileChanged(file: FileEntry) {
+    catalogGeneration.current++
+    setCatalog(items => items.some(item => item.id === file.id)
+      ? items.map(item => item.id === file.id ? file : item) : [file, ...items])
+  }
   const [menu, setMenu] = useState<'new' | 'tabs' | null>(null),
     [checked, setChecked] = useState<string[]>([]),
     [group, setGroup] = useState(''),
     [creating, setCreating] = useState<FileKind | null>(null)
-  function rewriteSentence(id:string) {
-    setLayout(s=>({...s,chat:true,picked:[id],draft:s.draft || (account.workspace.workbenchModel?'请改写选中的这句话，使表达更清晰。':'改写为：')}))
+  function rewriteSentence(id: string, selection: HcdEmbedSelection) {
+    setLayout(s => ({ ...s, chat: true, picked: [id], composers: { ...s.composers, [id]: {
+      text: s.composers[id]?.text || (account.workspace.workbenchModel ? '请改写选中的这句话，使表达更清晰。' : '改写为：'),
+      targets: [id], selections: { [id]: selectionKey(selection) },
+    } } }))
     requestAnimationFrame(()=>document.querySelector<HTMLTextAreaElement>('.desk-compose textarea')?.focus())
   }
   useEffect(() => {
@@ -119,7 +170,11 @@ function DeskWorkspace({ account }: { account: Account }) {
       const target=event.target
       if(!(target instanceof Element))return
       const id=target.closest<HTMLElement>('.desk-editor.is-visible[data-file-id]')?.dataset.fileId
-      if(id)setLayout(s=>({...s,chat:true,picked:s.picked.includes(id)?s.picked:[...s.picked,id].slice(-12)}))
+      if (id) setLayout(s => {
+        const c = s.composers[id]
+        const picked = [...new Set([...(c?.targets || s.picked), id])].slice(-12)
+        return { ...s, chat: true, picked, composers: { ...s.composers, [id]: { text: c?.text || '', targets: picked, selections: c?.selections || {} } } }
+      })
     }
     window.addEventListener('officecli:board-ai',boardAi)
     return ()=>window.removeEventListener('officecli:board-ai',boardAi)
@@ -130,6 +185,7 @@ function DeskWorkspace({ account }: { account: Account }) {
   const {
     jobs,
     run,
+    transition,
     editing,
     recent: activity,
     names: agentNames,
@@ -176,6 +232,7 @@ function DeskWorkspace({ account }: { account: Account }) {
             recent: s.recent.filter((id) => valid.has(id)),
             stars: s.stars.filter((id) => valid.has(id)),
             picked: s.picked.filter((id) => ids.includes(id)),
+            composers: Object.fromEntries(Object.entries(s.composers).filter(([id]) => id === home || valid.has(id))),
           }
         })
       })
@@ -235,13 +292,46 @@ function DeskWorkspace({ account }: { account: Account }) {
       const p = s[id]
       return p?.ready === state.ready &&
         p.scope === state.scope &&
-        p.mode === state.mode
+        p.mode === state.mode && p.selectionKey === state.selectionKey
         ? s
         : { ...s, [id]: state }
     })
   }, [])
+  const composerId = layout.active
+  const composer = layout.composers[composerId]
+  const picked = composer?.targets ?? (composerId === home || layout.picked.includes(composerId) ? layout.picked : [composerId])
+  const changedScope = picked.some(id => !layout.tabs.includes(id) || (composer?.text && composer.selections[id] &&
+    states[id]?.ready && composer.selections[id] !== states[id].selectionKey))
+  const selectionKeys = (ids: string[]) => Object.fromEntries(ids.map(id =>
+    [id, states[id]?.ready ? states[id].selectionKey : 'unconfirmed']))
+  function selectTargets(ids: string[], confirmCurrent = false) {
+    setLayout(s => {
+      const previous = s.composers[composerId]
+      const selections = selectionKeys(ids)
+      if (previous?.text && !confirmCurrent) {
+        for (const id of ids) {
+          if (previous.selections[id]) selections[id] = previous.selections[id]
+        }
+      }
+      return { ...s, picked: ids, composers: { ...s.composers, [composerId]: {
+        text: previous?.text || '', targets: ids, selections,
+      } } }
+    })
+  }
+  function setDraft(text: string, restoreIfEmpty = false) {
+    setLayout(s => {
+      const previous = s.composers[composerId]
+      if (restoreIfEmpty && previous?.text) return s
+      const selections = previous?.text ? { ...selectionKeys(picked), ...previous.selections } : selectionKeys(picked)
+      return { ...s, composers: { ...s.composers, [composerId]: { text, targets: picked, selections: text ? selections : {} } } }
+    })
+  }
+  const [searchLocation, setSearchLocation] = useState<HcdWorkspaceSearchLocation>()
   function open(id: string) {
-    if (id !== home && !byId.has(id)) return
+    if (id === home || byId.has(id)) activateTab(id)
+  }
+  function activateTab(id: string, result?: HcdWorkspaceSearchLocation) {
+    setSearchLocation(result)
     const showFileOnly = window.matchMedia('(max-width: 860px)').matches
     setMenu(null)
     setError('')
@@ -254,9 +344,54 @@ function DeskWorkspace({ account }: { account: Account }) {
       closed: s.closed.filter((f) => f !== id),
     }))
   }
+  async function openMention(item: DeskMention) {
+    if (!byId.has(item.fileId)) {
+      const { file } = await api<{ file: FileEntry }>('/files/' + item.fileId)
+      fileChanged(file)
+    }
+    const url = new URL(location.href)
+    url.searchParams.delete('doc-id')
+    url.searchParams.set('file', item.fileId)
+    url.searchParams.set('node-id', item.elementId)
+    history.replaceState(history.state, '', url.href)
+    activateTab(item.fileId)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  }
+  const resourceFiles = useMemo(() => catalog.map(file => ({
+    documentId: file.resourceDocumentId, title: file.name, format: file.format, writable: file.operations.includes('document.edit'),
+    canAsk: file.canDelegateSelection,
+  })), [catalog])
+  const fileFor = (docId: string) => catalog.find(file => file.resourceDocumentId === docId)
+  const resourceSelection = (docId: string) => handles.current.get(fileFor(docId)?.id || '')?.selection() || null
+  const mentionable = useCallback(async (docId:string) => {
+    const file=catalog.find(item=>item.resourceDocumentId===docId)
+    if(!file)return []
+    const {people}=await api<{people:{id:string;name:string}[]}>('/files/'+file.id+'/mentionable')
+    // Integration sessions publish this pseudonymous subject in presence and comment records.
+    return Promise.all(people.map(async person=>{
+      const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(person.id)))
+      return {name:person.name,id:'host-'+Array.from(digest.slice(0,16),b=>b.toString(16).padStart(2,'0')).join('')}
+    }))
+  }, [catalog])
+  const resourceAccess = async (docId: string) => {
+    const file = fileFor(docId)
+    if (!file) throw Error('源文件不可访问。')
+    const launch = await api<Launch>('/files/' + file.id + '/editor-session', mutation(account.csrf, { sessionId: crypto.randomUUID() }))
+    if (launch.documentId !== docId) throw Error('源文件已变化，请重新选择。')
+    return { token: launch.token, apiUrl: '/v1/documents' }
+  }
+  const askResource = (selection: HcdEmbedSelection) => {
+    const file = fileFor(selection.documentId)
+    if (!file?.canDelegateSelection) throw Error('没有编辑此文件选区的 AI 权限。')
+    const id = file.id
+    setLayout(s => ({ ...s, active: id, chat: true, picked: [id], composers: { ...s.composers,
+      [id]: { text: s.composers[id]?.text || '', targets: [id],
+        selections: { [id]: selectionKey(selection) } },
+    } }))
+  }
   function added(file: FileEntry) {
     const showFileOnly = window.matchMedia('(max-width: 860px)').matches
-    setCatalog((items) => [file, ...items.filter((f) => f.id !== file.id)])
+    fileChanged(file)
     setLayout((s) => ({
       ...s,
       tabs: [...s.tabs.filter((f) => f !== file.id), file.id],
@@ -360,7 +495,7 @@ function DeskWorkspace({ account }: { account: Account }) {
     }
   }
   return (
-    <div className="office-desk" data-theme={theme}>
+    <div ref={desk} className="office-desk" data-theme={theme}>
       <header className="desk-chrome">
         <DeskBrand />
         <div className="desk-tabs" role="tablist" aria-label="打开的文件">
@@ -477,6 +612,7 @@ function DeskWorkspace({ account }: { account: Account }) {
             <option value="dark">深色</option>
           </select>
         </label>
+        <DeskMentions csrf={account.csrf} openFile={openMention} />
         <button
           className={'desk-global-toggle' + (layout.chat ? ' on' : '')}
           aria-pressed={layout.chat}
@@ -591,7 +727,21 @@ function DeskWorkspace({ account }: { account: Account }) {
                   }))
                 }
                 open={open}
+                openContent={async ({ fileId, revision, query, hit }) => {
+                  try {
+                    let source = byId.get(fileId)
+                    if (!source) {
+                      source = (await api<{ file: FileEntry }>('/files/' + fileId)).file
+                      fileChanged(source)
+                    }
+                    activateTab(fileId, { requestId: crypto.randomUUID(), documentId: source.resourceDocumentId, revision, query, hit })
+                  } catch (error) {
+                    setError(failText(error))
+                  }
+                }}
                 add={added}
+                fileChanged={fileChanged}
+                refreshFiles={refreshFiles}
                 creating={creating}
                 setCreating={setCreating}
                 error={error}
@@ -600,6 +750,18 @@ function DeskWorkspace({ account }: { account: Account }) {
               <p className="desk-loading">正在读取工作空间…</p>
             )}
           </div>
+          <EmbeddedWorkspace mentionable={mentionable} searchLocation={searchLocation} activeDocumentId={byId.get(layout.active)?.resourceDocumentId || null} files={resourceFiles}
+            activate={docId => { const file = fileFor(docId); if (file) open(file.id) }} selection={resourceSelection} access={resourceAccess}
+            organize={account.workspace.workbenchModel ? async (id, excerpts) => {
+              const sources = [...new Set(excerpts.flatMap(s => s.documentId ? [fileFor(s.documentId)!.id] : []))]
+              const sections = excerpts.map(s => ({id:s.id, heading:s.heading || '', lines:s.lines}))
+              return (await api<{sections: BoardExcerpt[]}>('/board-document-preview', mutation(account.csrf, {boardId:fileFor(id)!.id, sources, sections}))).sections
+            } : undefined}
+            ask={account.workspace.selectionMcp ? askResource : undefined} sourceLink={(docId, nodeId) => {
+              const url = new URL('/workbench/', location.origin)
+              url.searchParams.set('file', fileFor(docId)!.id); url.searchParams.set('node-id', nodeId)
+              return url.href
+            }}>
           {tabs.map((f) => (
             <DeskPane
               key={f.id}
@@ -612,6 +774,7 @@ function DeskWorkspace({ account }: { account: Account }) {
               onSpecRewrite={rewriteSentence}
             />
           ))}
+          </EmbeddedWorkspace>
           {error && layout.active !== home && (
             <button
               className="desk-toast"
@@ -625,23 +788,20 @@ function DeskWorkspace({ account }: { account: Account }) {
         {layout.chat && (
           <DeskAgent
             account={account}
+            active={layout.active}
             files={tabs}
             cursors={cursors}
             handles={handles}
             states={states}
-            selected={layout.picked}
-            toggle={(id) =>
-              setLayout((s) => ({
-                ...s,
-                picked: s.picked.includes(id)
-                  ? s.picked.filter((i) => i !== id)
-                  : [...s.picked, id],
-              }))
-            }
-            draft={layout.draft}
-            setDraft={(draft) => setLayout((s) => ({ ...s, draft }))}
+            selected={picked}
+            toggle={(id) => selectTargets(picked.includes(id) ? picked.filter(i => i !== id) : [...picked, id])}
+            changedScope={!!changedScope}
+            confirmScope={() => selectTargets(picked.filter(id => layout.tabs.includes(id)), true)}
+            draft={composer?.text || ''}
+            setDraft={setDraft}
             jobs={jobs}
             run={run}
+            transition={transition}
             locked={locks.current}
             close={() => setLayout((s) => ({ ...s, chat: false }))}
             open={open}

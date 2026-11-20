@@ -16,7 +16,8 @@ function token(id: string, user = 'resource-user', scope = 'write') {
   const body = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ doc: id, sub: user, name: user, scope, aud: 'hcd-core', iat: now, exp: now + 3600 })}`
   return `${body}.${createHmac('sha256', secret).update(body).digest('base64url')}`
 }
-async function freePort() { const server = createServer(); await new Promise<void>(done => server.listen(0, '127.0.0.1', done)); const port = (server.address() as { port: number }).port; await new Promise<void>(done => server.close(() => done())); return port }
+const testHost=process.env.HCD_CANVAS_TEST_HOST || '127.0.0.1', urlHost=testHost.includes(':')?'['+testHost+']':testHost
+async function freePort() { const server = createServer(); await new Promise<void>(done => server.listen(0, testHost, done)); const port = (server.address() as { port: number }).port; await new Promise<void>(done => server.close(() => done())); return port }
 function cli(args: string[]) { const result = spawnSync(binary, args, { encoding: 'utf8' }); if (result.status !== 0) throw new Error(result.stderr || result.stdout) }
 function start(command: string, args: string[], extra: NodeJS.ProcessEnv) {
   const env = { ...process.env, ...extra }; delete env.HCD_DATABASE_URL; delete env.HCD_S3_BUCKET; delete env.HCD_DEFAULT_THEME
@@ -44,7 +45,8 @@ async function reopenTab(page: Page, id: string) {
   await expect(active(page)).toHaveAttribute('data-document-id', id)
 }
 async function boxCanvas(page: Page) {
-  await active(page).getByRole('button', { name: '框选区域', exact: true }).click()
+  await active(page).getByRole('button', { name: '操作', exact: true }).click()
+  await active(page).locator('.board-commands').getByRole('button', { name: '框选区域', exact: true }).click()
   const surface = (await active(page).locator('.canvas-surface').boundingBox())!
   await page.mouse.move(surface.x + 230, surface.y + 245)
   await page.mouse.down()
@@ -59,7 +61,11 @@ async function insert(page: Page, id: string, range?: string, blockId?: string) 
   await page.getByRole('button', { name: '插入白板', exact: true }).click()
   await expect(page.getByRole('dialog', { name: '插入资源引用' })).toBeHidden()
   const card = active(page).locator(`.resource-card[data-resource-document="${id}"]`).last()
-  await expect(card).toBeVisible()
+  await expect(card).toHaveAttribute('data-ready','true')
+  await expect.poll(()=>card.evaluate(el=>{
+    const outer=el.parentElement!, style=getComputedStyle(outer)
+    return Math.abs(outer.offsetHeight - (el as HTMLElement).offsetHeight - parseFloat(style.paddingTop)-parseFloat(style.paddingBottom))
+  })).toBeLessThanOrEqual(1)
   const bounds = (await card.boundingBox())!; await page.mouse.click(bounds.x + 20, bounds.y + 20)
   await expect(active(page).getByRole('button', { name: 'AI 编辑源内容', exact: true })).toBeVisible()
 }
@@ -89,7 +95,7 @@ test.beforeAll(async () => {
     cli(['hdoc', 'import', source, '--output', resolve(service, `${id}.hcd`), '--document-id', id])
   }
   const apiPort = await freePort(), collabPort = await freePort(), uiPort = await freePort()
-  apiUrl = `http://127.0.0.1:${apiPort}`; uiUrl = `http://127.0.0.1:${uiPort}`
+  apiUrl = `http://${urlHost}:${apiPort}`; uiUrl = `http://${urlHost}:${uiPort}`
   const flowchart = {
     title: '灰度发布流程', layout: 'flowchart', items: [],
     diagram: { groups: [], nodes: [
@@ -126,12 +132,12 @@ test.beforeAll(async () => {
       res.end(JSON.stringify({ status: 'completed', output }))
     } catch { res.writeHead(400).end() }
   })
-  await new Promise<void>(done => model.listen(0, '127.0.0.1', done))
-  const env = { HCD_TOKEN_SECRET: secret, HCD_API_URL: apiUrl, HCD_API_TARGET: apiUrl, HCD_COLLAB_PORT: String(collabPort), VITE_HCD_COLLAB_URL: `ws://127.0.0.1:${collabPort}`, HCD_VITE_CACHE_DIR: resolve(root, 'vite-cache'), HCD_AI_ENABLED: 'true', OPENAI_API_KEY: 'resource-test-only', HCD_OPENAI_BASE_URL: `http://127.0.0.1:${(model.address() as { port: number }).port}/v1`, HCD_OPENAI_MODEL: 'resource-test' }
-  start(binary, ['hdoc', 'serve', '--root', service, '--bind', `127.0.0.1:${apiPort}`], env)
+  await new Promise<void>(done => model.listen(0, testHost, done))
+  const env = { HCD_TOKEN_SECRET: secret, HCD_API_URL: apiUrl, HCD_API_TARGET: apiUrl, HCD_COLLAB_BIND:testHost, HCD_COLLAB_PORT: String(collabPort), VITE_HCD_COLLAB_URL: `ws://${urlHost}:${collabPort}`, HCD_VITE_CACHE_DIR: resolve(root, 'vite-cache'), HCD_AI_ENABLED: 'true', OPENAI_API_KEY: 'resource-test-only', HCD_OPENAI_BASE_URL: `http://${urlHost}:${(model.address() as { port: number }).port}/v1`, HCD_OPENAI_MODEL: 'resource-test' }
+  start(binary, ['hdoc', 'serve', '--root', service, '--bind', `${urlHost}:${apiPort}`], env)
   await expect.poll(async () => { try { return (await fetch(`${apiUrl}/health`)).status } catch { return 0 } }).toBe(200)
   start(resolve(editor, 'node_modules/.bin/tsx'), ['sidecar.ts'], env)
-  start(resolve(editor, 'node_modules/.bin/vite'), ['--host', '127.0.0.1', '--port', String(uiPort), '--strictPort'], env)
+  start(resolve(editor, 'node_modules/.bin/vite'), ['--host', testHost, '--port', String(uiPort), '--strictPort'], { ...env, HCD_API_TARGET: apiUrl.replace('[::1]', 'localhost') })
   await expect.poll(async () => { try { return (await fetch(uiUrl)).status } catch { return 0 } }, { timeout: 30_000 }).toBe(200)
 })
 test.afterAll(() => { for (const child of children) child.kill('SIGTERM'); model?.close(); console.log(`Resource acceptance artifacts: ${root}`) })
@@ -168,7 +174,7 @@ test('spreadsheet range opens and selects the source, with scoped AI dispatch', 
   await open(page, 'resource-sheet'); await expect(active(page).locator('[data-grid-pending]')).toHaveCount(0)
   await open(page, 'resource-board'); await insert(page, 'resource-sheet', 'A1:B3')
   const card = active(page).locator('.resource-card[data-resource-document="resource-sheet"]')
-  await expect(card).toContainText('3600'); await expect(card).toContainText('A1:B3')
+  await expect(card).toContainText('3600'); await expect(card).toHaveAccessibleName(/A1:B3/)
   await active(page).getByRole('button', { name: 'AI 编辑源内容', exact: true }).click()
   await expect(active(page)).toHaveAttribute('data-document-id', 'resource-sheet')
   await expect(page.getByRole('region', { name: '资源引用定位' })).toContainText('已进入源文件')
@@ -191,7 +197,9 @@ test('spreadsheet range opens and selects the source, with scoped AI dispatch', 
   await expect.poll(async () => (await read('resource-sheet', '/sheets/0')).cells.find((cell: any) => cell.text === '项目已更新').address).toBe('A2')
   await tab(page, 'resource-board')
   await expect(card).toContainText('引用位置已变化')
-  await expect(card.getByRole('button', { name: '进入源文件', exact: true })).toBeDisabled()
+  const box=(await card.boundingBox())!
+  await page.mouse.move(box.x+12,box.y+12)
+  await expect(active(page).getByRole('button', { name: '进入引用源文件', exact: true })).toBeDisabled()
 })
 
 test('board access does not grant source access or merge another account AI', async ({ page }) => {
@@ -207,7 +215,9 @@ test('board access does not grant source access or merge another account AI', as
   await open(page, 'resource-doc', 'viewer', 'read'); await tab(page, 'resource-board')
   const card = active(page).locator('.resource-card[data-resource-document="resource-doc"]').last()
   await expect(card).toContainText('白板引用保持关联')
-  await expect(card.getByRole('button', { name: '让 AI 编辑引用', exact: true })).toHaveCount(0)
+  const box=(await card.boundingBox())!
+  await page.mouse.move(box.x+12,box.y+12)
+  await expect(active(page).getByRole('button', { name: 'AI 编辑源内容', exact: true })).toHaveCount(0)
 })
 
 
@@ -223,7 +233,9 @@ test('Word paragraph references locate their stable source block and refresh aft
   await expect(active(page)).toHaveAttribute('data-document-id', 'resource-word')
   await expect(page.getByRole('region', { name: '资源引用定位' })).toContainText('已进入源文件')
   const paragraph = active(page).locator(`.tiptap [data-hcd-block-id="${block.blockId}"]`)
-  await paragraph.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' 引用更新验收')
+  await expect(paragraph).toBeVisible()
+  await expect(active(page).locator('.tiptap[contenteditable=true]')).toBeFocused()
+  await page.keyboard.press('ArrowRight'); await page.keyboard.press('End'); await page.keyboard.insertText(' 引用更新验收')
   await active(page).getByRole('button', { name: '保存点', exact: true }).click()
   await expect.poll(async () => JSON.stringify((await read('resource-word', '/editor')).blocks.find((item: any) => item.blockId === block.blockId))).toContain('引用更新验收')
   await page.getByRole('button', { name: '返回白板', exact: true }).click()
@@ -678,6 +690,12 @@ test('creating a new teaching board returns a tab with native sections', async (
 test('cross-file generation rejects foreign targets and leaves a changed source draft unapplied', async () => {
   const board = 'transfer-ideas', document = 'transfer-word'
   const base = `${apiUrl}/v1/documents/${board}`
+  const manifest = await read(document, '')
+  if (!manifest.capabilities.structurePatch) {
+    const projected = await fetch(`${apiUrl}/v1/documents/${document}/project`, {method: 'POST',
+      headers: {Authorization: `Bearer ${token(document)}`, 'Content-Type': 'application/json'}, body: JSON.stringify({expectedRevision: manifest.revision})})
+    expect(projected.ok).toBeTruthy()
+  }
   const snapshot = await read(board, '/canvas')
   const request = { id: randomUUID(), sourceEpoch: snapshot.collaborationEpoch, target: { kind: 'existing', documentId: document },
     selection: { kind: 'canvas', revision: snapshot.revision, elementIds: ['idea'], region: { x: 0, y: 0, width: 350, height: 70 } } }

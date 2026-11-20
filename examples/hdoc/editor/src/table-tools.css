@@ -12,6 +12,7 @@
 .hcd-surface [data-hcd-table-menu] .table-delete-action:not(:disabled):hover,.hcd-surface [data-hcd-table-menu] .table-delete-action:not(:disabled):focus-visible{background:#dc454512;color:#dc4545}
 .hcd-surface [data-hcd-table-menu] .table-delete-all{border-top:1px solid var(--line,#e2e8f0);margin-top:5px;border-radius:0 0 6px 6px}
 .hcd-surface [data-hcd-table-menu] button:disabled{opacity:.4;cursor:default}
+.hcd-surface .table-cell-actions{border-top:1px solid var(--line,#e2e8f0);margin-top:5px;padding-top:5px}
 .hcd-surface .insert-table-tool{position:relative;display:inline-flex}
 .hcd-surface .insert-table-tool>button{display:inline-flex;align-items:center;gap:6px}
 .hcd-surface .insert-table-popover{position:fixed;pointer-events:auto;z-index:60;width:240px;padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--surface,#fff);color:var(--ink);box-shadow:0 12px 40px #192e4a20}

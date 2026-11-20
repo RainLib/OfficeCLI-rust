@@ -15,6 +15,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { verifySharing } from "./verify-sharing.mjs";
+import { verifyMentions } from "./verify-mentions.mjs";
+import { faultPublicationCallbacks, verifyPublicationJobs } from "./verify-publication-jobs.mjs";
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   repo = resolve(app, "../.."),
@@ -80,6 +82,7 @@ checks.push(
   "explicit bootstrap and repeated init never overwrite existing accounts or signing identity",
 );
 let supervisor, browser;
+const publicationFault = await faultPublicationCallbacks(root);
 async function poll(check, timeout = 45000) {
   let last;
   const end = Date.now() + timeout;
@@ -251,6 +254,8 @@ try {
   });
   assert.equal(uploaded.status, 201, JSON.stringify(uploaded.value));
   const fileId = uploaded.value.file.id;
+  const contentSearch = "/workspace/api/content-search?q=" + encodeURIComponent("Immutable source baseline");
+  assert.deepEqual((await call(contentSearch, { account: reader })).value.files, []);
   assert.equal(
     (await call("/workspace/api/files", { account: reader })).value.files
       .length,
@@ -292,6 +297,10 @@ try {
     },
   });
   assert.equal(grant.status, 204, JSON.stringify(grant.value));
+  const sharedContent = await call(contentSearch, { account: reader });
+  assert.equal(sharedContent.status, 200, JSON.stringify(sharedContent.value));
+  assert.deepEqual(sharedContent.value.files.map(file => file.id), [fileId]);
+  assert(sharedContent.value.files[0].hits.some(hit => hit.preview.includes("Immutable source baseline")));
   const ownerSession = await launch(admin, fileId),
     readSession = await launch(reader, fileId);
   const duplicate = await launch(admin, fileId, ownerSession.sessionId);
@@ -499,6 +508,71 @@ try {
   checks.push(
     "history restore creates a new HCD revision without replacing a confirmed business version",
   );
+  const teammate = await login("reader", memberPassword);
+  const projectBase = "/workspace/api/projects";
+  async function createProject(name) {
+    const result = await call(projectBase, { account: admin, method: "POST", data: { name } });
+    assert.equal(result.status, 201, JSON.stringify(result.value));
+    return result.value.project.id;
+  }
+  const projectId = await createProject("项目验收"), otherProject = await createProject("另一项目");
+  const project = projectBase + "/" + projectId;
+  assert.equal((await call(project, { account: teammate })).status, 404);
+  const addFolder = (name, parentId) => call(project + "/folders", { account: admin, method: "POST", data: { name, parentId } });
+  const parentFolder = (await addFolder("资料", null)).value.folder.id;
+  const childFolder = (await addFolder("会议", parentFolder)).value.folder.id;
+  assert.equal((await call(project + "/folders/" + parentFolder, { account: admin, method: "PATCH", data: { parentId: childFolder } })).status, 409);
+  const projectFile = (await call("/workspace/api/files?filename=project-data.txt&projectId=" + projectId + "&folderId=" + childFolder,
+    { account: admin, method: "POST", bytes: Buffer.from("Project ledger private baseline.") })).value.file;
+  assert.deepEqual(projectFile.location, { projectId, folderId: childFolder });
+  const filePath = "/workspace/api/files/" + projectFile.id;
+  assert.equal((await call(filePath, { account: teammate })).status, 403);
+  const setRole = (role, inProject = projectId) => call(projectBase + "/" + inProject + "/members/" + readerId,
+    { account: admin, method: "PUT", data: { role } });
+  assert.equal((await setRole("viewer")).status, 204);
+  assert.equal((await call(project, { account: teammate })).value.folders.length, 2);
+  const scopedSearch = await call("/workspace/api/content-search?q=Project+ledger&projectId=" + projectId, { account: teammate });
+  assert.deepEqual(scopedSearch.value.files.map(file => file.id), [projectFile.id]);
+  assert.equal((await call(project + "/folders", { account: teammate, method: "POST", data: { name: "不能新建" } })).status, 403);
+  const viewerLaunch = await launch(teammate, projectFile.id);
+  assert.equal((await call(doc(viewerLaunch, "/auth"), { account: teammate, token: viewerLaunch.token })).value.scope, "read");
+  assert((await call(filePath + "/mentionable", { account: admin })).value.people.some(person => person.id === readerId));
+  assert.equal((await setRole("editor")).status, 204);
+  assert.equal((await setRole("editor", otherProject)).status, 204);
+  assert.equal((await call(filePath + "/location", { account: teammate, method: "PUT", data: { projectId: otherProject, folderId: childFolder } })).status, 404);
+  assert.equal((await call(filePath + "/location", { account: teammate, method: "PUT", data: { projectId: otherProject } })).status, 403);
+  assert.equal((await call(filePath + "/location", { account: teammate, method: "PUT", data: { projectId, folderId: parentFolder } })).status, 200);
+  const editorLaunch = await launch(teammate, projectFile.id);
+  const editorAuth = (await call(doc(editorLaunch, "/auth"), { account: teammate, token: editorLaunch.token })).value;
+  assert.equal(editorAuth.scope, "write");
+  const projection = (await call(doc(editorLaunch, "/editor"), { account: teammate, token: editorLaunch.token })).value;
+  const hit = (await call(doc(editorLaunch, "/search?q=Project+ledger"), { account: teammate, token: editorLaunch.token })).value.hits[0];
+  const target = (await call(doc(editorLaunch, "/nodes/" + hit.nodeId), { account: teammate, token: editorLaunch.token })).value;
+  const edited = "Project ledger updated by its editor.";
+  const writeProject = () => call(doc(editorLaunch, "/node-patch"), { account: teammate, token: editorLaunch.token, method: "POST",
+    headers: { "X-HCD-Collaboration-Epoch": String(editorAuth.collaborationEpoch) },
+    data: { schemaVersion: "hcd-patch/1", documentId: editorLaunch.documentId, patchId: randomUUID(), baseRevision: projection.revision,
+      operations: [{ op: "text.splice", nodeId: hit.nodeId, start: 0, deleteCount: [...target.text].length,
+        insertText: edited, precondition: { nodeHash: target.nodeHash } }] },
+  });
+  const projectEdit = await writeProject();
+  assert.equal(projectEdit.status, 200, JSON.stringify(projectEdit.value));
+  await stop();
+  await start();
+  assert.equal((await call(filePath, { account: teammate })).value.file.location.folderId, parentFolder);
+  assert(JSON.stringify((await call(doc(editorLaunch, "/editor"), { account: teammate, token: editorLaunch.token })).value).includes(edited));
+  assert.equal((await setRole("viewer")).status, 204);
+  assert.equal((await writeProject()).status, 403);
+  assert.equal((await call(doc(editorLaunch, "/editor"), { account: teammate, token: editorLaunch.token })).status, 200);
+  assert.equal((await call(filePath + "/acl", { account: admin, method: "PUT",
+    data: { userId: readerId, profile: "viewer", operations: ["document.view"] } })).status, 204);
+  assert.equal((await setRole(null)).status, 204);
+  assert.equal((await setRole(null, otherProject)).status, 204);
+  assert.equal((await call(filePath, { account: teammate })).value.file.location, null);
+  assert.equal((await call(project, { account: teammate })).status, 404);
+  assert.equal((await call(filePath + "/acl/" + readerId, { account: admin, method: "DELETE" })).status, 204);
+  assert.equal((await call(doc(editorLaunch, "/editor"), { account: teammate, token: editorLaunch.token })).status, 403);
+  checks.push("Project folders, scoped search, inherited editing and file moves survive a real restart. An already-issued editor session loses write access on downgrade. Removing the project role preserves a direct file grant and hides the directory.");
   if (process.env.OFFICECLI_SKIP_BROWSER !== "1") {
     const { chromium } = await import(
       join(repo, "examples/hdoc/editor/node_modules/@playwright/test/index.mjs")
@@ -816,6 +890,12 @@ try {
     );
     assert.equal(blocked.length, 0);
     await verifySharing({ call, admin, fileId: browserFileId, base, browser, ownerPage: page, artifacts, checks, restrictNetwork });
+    const mentionReader = await login("reader", memberPassword);
+    await verifyMentions({ call, launch, admin, reader: mentionReader, base, browser, ownerPage: page, artifacts, checks, restrictNetwork,
+      restart: async () => { await stop(); await start(); } });
+    await verifyPublicationJobs({ base, root, ownerPage: page, call, launch, admin,
+      publisher: await login("reader", memberPassword), artifacts, checks, fault: publicationFault,
+      restart: async () => { await stop(); await start(); } });
     await browser.close();
     browser = null;
   }
@@ -864,5 +944,6 @@ try {
 } finally {
   if (browser) await browser.close();
   await stop();
+  await publicationFault.close();
   log.end();
 }

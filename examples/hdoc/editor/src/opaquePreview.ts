@@ -7,10 +7,11 @@ import { applyWordGrid } from '../../../../crates/hcd-core/src/docx_layout.js'
 import { inlineTableEditing } from './inlineTableEditing.ts'
 import { tableStructureControls } from './tableStructureControls.ts'
 import { patchPreviewDom } from './patchPreviewDom.ts'
+import { WORD_PICTURE_SELECTOR, wordPictureTarget, type WordPictureTarget } from './wordPictureLayout.ts'
 
 /** Display canonical complex blocks without flattening them into editable text.
  * The iframe has no scripts, network access, forms or navigation controls. */
-export function opaquePreviewExtension(session: Session, locale: EditorLocale = 'zh-CN', resources: SemanticResources = createSemanticResources(()=>session), pendingCell?: {current: string | null}) {
+export function opaquePreviewExtension(session: Session, locale: EditorLocale = 'zh-CN', resources: SemanticResources = createSemanticResources(()=>session), pendingCell?: {current: string | null}, openPicture?: (target: WordPictureTarget) => void) {
   return HcdOpaque.extend({
     addNodeView() {
       return ({ node: initialNode, editor, getPos }) => {
@@ -71,8 +72,17 @@ export function opaquePreviewExtension(session: Session, locale: EditorLocale = 
             const sheet = doc.querySelector('#canonical-styles')!
             if (sheet.textContent !== styles) sheet.textContent = styles
             const hasTable = !!content.querySelector('table')
+            const pictures = openPicture && session.scope === 'write' ? Array.from(content.querySelectorAll<HTMLImageElement>(WORD_PICTURE_SELECTOR)) : []
+            for (const image of pictures) {
+              const label = localizeSource(locale, '图片版式')
+              image.tabIndex = 0
+              image.setAttribute('role', 'button')
+              image.setAttribute('aria-label', image.alt ? `${label} · ${image.alt}` : label)
+              image.dataset.hcdPictureAction = 'true'
+            }
             frame.title = localizeSource(locale, hasTable ? '文档表格' : '复杂内容预览')
-            frame.inert = !hasTable; frame.style.pointerEvents = hasTable ? 'auto' : 'none'
+            const interactive = hasTable || !!pictures.length
+            frame.inert = !interactive; frame.style.pointerEvents = interactive ? 'auto' : 'none'
             if (block.editableTextNodeIds?.length) table = inlineTableEditing({ editor, getNode: () => node, getPos, doc,
               editableIds: block.editableTextNodeIds,
               label: (cell, paragraph) => `${localizeSource(locale, '单元格')} ${cell} · ${localizeSource(locale, '段落')} ${paragraph}`,
@@ -109,7 +119,9 @@ export function opaquePreviewExtension(session: Session, locale: EditorLocale = 
         const measure = () => {
           const content = frame.contentDocument?.querySelector('.hcd-opaque-content')
           if (!content || disposed) return
-          const height = `${Math.max(1, Math.ceil(content.getBoundingClientRect().height))}px`
+          const box = content.getBoundingClientRect()
+          const overlays = [...content.querySelectorAll('img:is([data-hcd-effective-wrap="behind"],[data-hcd-effective-wrap="inFront"])')]
+          const height = `${Math.max(1, Math.ceil(Math.max(box.height, ...overlays.map(image => image.getBoundingClientRect().bottom - box.top))))}px`
           if (frame.style.height !== height) frame.style.height = height
         }
         frame.onload = () => {
@@ -118,6 +130,21 @@ export function opaquePreviewExtension(session: Session, locale: EditorLocale = 
           if (!content) return
           doc.body.dataset.hcdSourceFormat = session.format; doc.body.dataset.hcdProfile = 'semantic-flow'
           doc.body.dataset.hcdTextHitboxes = 'off'; doc.body.dataset.hcdImageHitboxes = 'off'
+          if (openPicture) {
+            const selectPicture = (event: Event) => {
+              if (!editor.isEditable) return
+              const image = (event.target as Element | null)?.closest<HTMLImageElement>('[data-hcd-picture-action="true"]')
+              const target = image && wordPictureTarget(image)
+              if (!target) return
+              event.preventDefault()
+              event.stopPropagation()
+              openPicture(target)
+            }
+            doc.addEventListener('click', selectPicture)
+            doc.addEventListener('keydown', event => {
+              if (event.key === 'Enter' || event.key === ' ') selectPicture(event)
+            })
+          }
           ready = true
           observer = new ResizeObserver(measure); observer.observe(content)
           void refresh()
@@ -125,7 +152,7 @@ export function opaquePreviewExtension(session: Session, locale: EditorLocale = 
         }
         const typography = session.format === 'docx' ? 'font:12pt "Times New Roman",serif;line-height:normal' : 'font:16px/1.6 HCDSans,HCDEmoji,HCDFallback,"Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif'
         const embeddedPage = 'margin:0!important;padding:0!important;width:100%!important;min-width:0!important;max-width:none!important;height:auto!important;min-height:0!important;background:transparent!important;box-shadow:none!important'
-        frame.srcdoc = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blob: data:; style-src 'unsafe-inline'; font-src data: blob:; base-uri 'none'; form-action 'none'"><style>body{${typography}}html{margin:0;padding:0;background:transparent}.hcd-opaque-content{display:flow-root;content-visibility:visible;contain:none}</style><style id="canonical-styles"></style><style>.hcd-opaque-content{display:flow-root!important;content-visibility:visible!important;contain:none!important}</style></head><body style="${embeddedPage}"><section class="hcd-chunk hcd-opaque-content"></section></body></html>`
+        frame.srcdoc = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blob: data:; style-src 'unsafe-inline'; font-src data: blob:; base-uri 'none'; form-action 'none'"><style>body{${typography}}html{margin:0;padding:0;background:transparent}.hcd-opaque-content{display:flow-root;content-visibility:visible;contain:none}</style><style id="canonical-styles"></style><style>.hcd-opaque-content{display:flow-root!important;content-visibility:visible!important;contain:none!important}img[data-hcd-picture-action]{cursor:pointer}img[data-hcd-picture-action]:is(:hover,:focus-visible){outline:2px solid #327e6e;outline-offset:3px}</style></head><body style="${embeddedPage}"><section class="hcd-chunk hcd-opaque-content"></section></body></html>`
         return { dom, ignoreMutation: () => true,
           stopEvent: event => event.target === frame || event.target instanceof Node && !!dom.querySelector('[data-hcd-table-controls]')?.contains(event.target),
           update(next) {

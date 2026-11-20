@@ -113,6 +113,69 @@ async function reauthorizeHost(documentName: string, token: string) {
   return access
 }
 const checkpoints = new Map<string, Promise<number>>()
+const storageTasks = new Set<Promise<unknown>>()
+const messages = new Map<object, () => void>()
+let backupPause: { id: string; resumed: Promise<void>; release: () => void } | null = null
+
+function trackStorage<T>(work: Promise<T>): Promise<T> {
+  storageTasks.add(work)
+  const done = () => storageTasks.delete(work)
+  void work.then(done, done)
+  return work
+}
+
+function autoCheckpoint(documentName: string) {
+  const item = pending.get(documentName)
+  if (item) item.timer = null
+  if (!backupPause) void checkpoint(documentName).catch(() => {})
+}
+
+function resumeAfterBackup(id?: string) {
+  if (!backupPause || id !== undefined && id !== backupPause.id) return
+  const pause = backupPause
+  backupPause = null
+  pause.release()
+  for (const [name, item] of pending) {
+    if (!item.timer && !checkpoints.has(name)) item.timer = setTimeout(() => autoCheckpoint(name), 0)
+  }
+}
+
+// Only the Workspace supervisor has this IPC channel. Pause at a message
+// boundary so queued Yjs updates can continue on the same connection after backup.
+if (process.send) {
+  process.on('disconnect', () => resumeAfterBackup())
+  process.on('message', (message: { type?: string; id?: string }) => {
+    if (!message?.id) return
+    const { type, id } = message
+    if (type === 'backup-resume') {
+      resumeAfterBackup(id)
+      process.send?.({ type, id }, () => {})
+      return
+    }
+    if (type !== 'backup-freeze' || backupPause) return
+    let release = () => {}
+    const resumed = new Promise<void>(done => { release = done })
+    const pause = { id, release, resumed }
+    backupPause = pause
+    void (async () => {
+      // onChange is detached by the collaboration library, but marks its work
+      // in storageTasks before awaiting so accepted updates enter the snapshot.
+      while (storageTasks.size || checkpoints.size) await Promise.allSettled([...storageTasks, ...checkpoints.values()])
+      if (backupPause !== pause) return
+      const names = [...pending.keys()]
+      // Keep the checkpoint fan-out bounded for large collaborative rooms.
+      for (let start = 0; start < names.length; start += 4) {
+        await Promise.all(names.slice(start, start + 4).map(checkpoint))
+        if (backupPause !== pause) return
+      }
+      process.send?.({ type, id, flushed: names.length }, () => {})
+    })().catch(() => {
+      resumeAfterBackup(id)
+      process.send?.({ type, id, error: '协作修改尚未完成落盘，未生成备份。' }, () => {})
+    })
+  })
+}
+
 let pendingSequence = Date.now() * 1000
 class StaleRoomError extends Error {}
 async function markPending(documentName: string, dirty: boolean) {
@@ -141,7 +204,7 @@ function schedule(documentId: string, document: Y.Doc, author?: Contributor) {
   item.last = now
   if (item.timer) clearTimeout(item.timer)
   const due = Math.min(item.last + 30_000, item.first + 60_000)
-  item.timer = setTimeout(() => void checkpoint(documentId).catch(() => {}), Math.max(0, due - now))
+  item.timer = setTimeout(() => autoCheckpoint(documentId), Math.max(0, due - now))
   pending.set(documentId, item)
   announceSave(documentId, 'editing')
 }
@@ -210,14 +273,17 @@ async function storeCheckpoint(documentId: string): Promise<number> {
     for (const [id, contributor] of item.authors) if (contributor.version <= version) item.authors.delete(id)
     if (item.unknownVersion <= version) item.unknownVersion = 0
     item.first = Date.now()
-    if (item.version === version) await markPending(documentId, false)
+    if (item.version === version) {
+      await markPending(documentId, false)
+      if (pending.get(documentId) === item && item.version === version) pending.delete(documentId)
+    }
     announceSave(documentId, 'saved', saved.revision)
     console.log(`HCD checkpoint ${documentId} revision ${saved.revision}`)
     return saved.revision
   } catch (error) {
     console.error(error)
     announceSave(documentId, 'failed')
-    if (pending.get(documentId) === item) item.timer = setTimeout(() => void checkpoint(documentId).catch(() => {}), 5000)
+    if (pending.get(documentId) === item) item.timer = setTimeout(() => autoCheckpoint(documentId), 5000)
     throw error
   } finally {
     item.saving = false
@@ -262,15 +328,23 @@ const server = new Server({
   },
   async beforeHandleMessage({ documentName, connection, context }) {
     const host = context as HostContext
-    if (!host.hostIntegration) return
-    try {
-      const access = await reauthorizeHost(documentName, host.token || '')
-      connection.readOnly = access.scope !== 'write'
-    } catch (error) {
-      connection.readOnly = true
-      connection.close()
-      throw error
+    if (host.hostIntegration) {
+      try {
+        const access = await reauthorizeHost(documentName, host.token || '')
+        connection.readOnly = access.scope !== 'write'
+      } catch (error) {
+        connection.readOnly = true
+        connection.close()
+        throw error
+      }
     }
+    if (!process.send) return
+    while (backupPause) await backupPause.resumed
+    void trackStorage(new Promise<void>(done => messages.set(connection, done)))
+  },
+  async afterHandleMessage({ connection }) {
+    messages.get(connection)?.()
+    messages.delete(connection)
   },
   async onDisconnect({ context }) {
     const timer = hostConnections.get(context as HostContext)
@@ -278,54 +352,64 @@ const server = new Server({
     hostConnections.delete(context as HostContext)
   },
   async onLoadDocument({ documentName }) {
-    const selected = room(documentName)
-    const format = await documentFormat(selected.documentId)
-    if (isFixed(format)) return new Y.Doc()
-    const response = await request(selected.documentId, '/collaboration/state', {}, selected.epoch)
-    if (response.ok) {
-      // Upgrade existing rooms once, on the server, so two opening browsers
-      // cannot both insert duplicate collaborative runs into an old atom.
-      const document = new Y.Doc()
-      Y.applyUpdate(document, new Uint8Array(await response.arrayBuffer()))
-      migrateOpaqueRuns(document)
-      if (!document.getMap('hcd-room').has('generation')) document.getMap('hcd-room').set('generation', randomUUID())
+    while (backupPause) await backupPause.resumed
+    return trackStorage((async () => {
+      const selected = room(documentName)
+      const format = await documentFormat(selected.documentId)
+      if (isFixed(format)) return new Y.Doc()
+      const response = await request(selected.documentId, '/collaboration/state', {}, selected.epoch)
+      if (response.ok) {
+        // Upgrade existing rooms once, on the server, so two opening browsers
+        // cannot both insert duplicate collaborative runs into an old atom.
+        const document = new Y.Doc()
+        Y.applyUpdate(document, new Uint8Array(await response.arrayBuffer()))
+        migrateOpaqueRuns(document)
+        if (!document.getMap('hcd-room').has('generation')) document.getMap('hcd-room').set('generation', randomUUID())
+        await persistRoom(documentName, document)
+        return document
+      }
+      if (response.status !== 404) throw new Error(`HCD collaboration load failed: ${await response.text()}`)
+      const projection = await currentProjection(selected.documentId)
+      const document = TiptapTransformer.toYdoc(projectionToJson(projection), 'default', schemaExtensions)
+      document.getMap('hcd-room').set('generation', randomUUID())
       await persistRoom(documentName, document)
       return document
-    }
-    if (response.status !== 404) throw new Error(`HCD collaboration load failed: ${await response.text()}`)
-    const projection = await currentProjection(selected.documentId)
-    const document = TiptapTransformer.toYdoc(projectionToJson(projection), 'default', schemaExtensions)
-    document.getMap('hcd-room').set('generation', randomUUID())
-    await persistRoom(documentName, document)
-    return document
+    })())
   },
   async onStoreDocument({ documentName, document }) {
-    const selected = room(documentName)
-    if (isFixed(await documentFormat(selected.documentId))) return
-    try { await persistRoom(documentName, document) } catch (error) {
-      announceSave(documentName, 'failed')
-      throw error
-    }
+    // The synchronous pause check precedes any storage work. Dirty rooms are
+    // persisted by the forced checkpoint while the backup pause is in effect.
+    if (backupPause) return
+    return trackStorage((async () => {
+      const selected = room(documentName)
+      if (isFixed(await documentFormat(selected.documentId))) return
+      try { await persistRoom(documentName, document) } catch (error) {
+        announceSave(documentName, 'failed')
+        throw error
+      }
+    })())
   },
   async onChange({ documentName, document, transactionOrigin, context }) {
     // Hocuspocus invokes onChange without awaiting its promise. A stale room
     // during reconnect must not become an unhandled rejection and terminate
     // collaboration for every document served by this process.
-    try {
-      if (isFixed(await documentFormat(room(documentName).documentId))) return
-      if (transactionOrigin === 'hcd-canonical-ids') return
-      schedule(documentName, document, (context as HostContext | undefined)?.author)
-      await markPending(documentName, true)
-    } catch (error) {
-      announceSave(documentName, 'failed')
-      if (error instanceof StaleRoomError) {
-        const item = pending.get(documentName)
-        if (item?.timer) clearTimeout(item.timer)
-        pending.delete(documentName)
-        server.hocuspocus.closeConnections(documentName)
+    return trackStorage((async () => {
+      try {
+        if (isFixed(await documentFormat(room(documentName).documentId))) return
+        if (transactionOrigin === 'hcd-canonical-ids') return
+        schedule(documentName, document, (context as HostContext | undefined)?.author)
+        await markPending(documentName, true)
+      } catch (error) {
+        announceSave(documentName, 'failed')
+        if (error instanceof StaleRoomError) {
+          const item = pending.get(documentName)
+          if (item?.timer) clearTimeout(item.timer)
+          pending.delete(documentName)
+          server.hocuspocus.closeConnections(documentName)
+        }
+        console.error('HCD collaboration change rejected:', error)
       }
-      console.error('HCD collaboration change rejected:', error)
-    }
+    })())
   },
   async onStateless({ documentName, document, connection, payload }) {
     if (connection.readOnly) return

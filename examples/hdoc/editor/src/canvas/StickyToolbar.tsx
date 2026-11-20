@@ -11,7 +11,6 @@ import {
   Pencil,
   Plus,
   Strikethrough,
-  UserRoundPen,
 } from 'lucide-react'
 import type { CSSProperties } from 'react'
 
@@ -63,10 +62,8 @@ export function safeBoardLink(value: string) {
 type Props = {
   color: string
   format: NoteFormat
-  signed: boolean
   onColor: (v: string) => void
   onFormat: (v: NoteFormat) => void
-  onSigned: () => void
   onEdit?: () => void
   onNext?: () => void
   x?: number
@@ -197,15 +194,6 @@ export function StickyToolbar(p: Props) {
         onClick={() => toggle('align')}
       >
         <Align />
-      </button>
-      <button
-        type="button"
-        aria-label="显示署名"
-        title="显示署名"
-        aria-pressed={p.signed}
-        onClick={p.onSigned}
-      >
-        <UserRoundPen />
       </button>
       {p.onEdit && (
         <button

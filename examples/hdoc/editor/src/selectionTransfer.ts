@@ -30,12 +30,14 @@ export type TransferForm = {
 }
 
 const textFormats = new Set(['docx', 'md', 'html', 'txt'])
-export const supportsTransfer = (session: Session) => !session.hostIntegration
-  && !!workspaceIdentity(session) && (textFormats.has(session.format) || session.format === 'excalidraw')
+export const supportsTransfer = (session: Session) => !!workspaceIdentity(session) &&
+  (session.hostIntegration
+    ? textFormats.has(session.format) && ['document.copy', 'document.ai'].every(op => session.operations?.includes(op))
+    : textFormats.has(session.format) || session.format === 'excalidraw')
 
 export function sameTransferWorkspace(a: Session, b: Session) {
   const identity = workspaceIdentity(a)
-  return !!identity && !a.hostIntegration && !b.hostIntegration && JSON.stringify(identity) === JSON.stringify(workspaceIdentity(b))
+  return !!identity && !!a.hostIntegration === !!b.hostIntegration && JSON.stringify(identity) === JSON.stringify(workspaceIdentity(b))
 }
 
 export function transferTarget(source: Session, target: Session) {
@@ -93,12 +95,12 @@ function textPosition(node: ProseMirrorNode, start: number, scalar: number, isEn
   return result
 }
 
-export function locateDocumentTransfer(editor: Editor, location: Extract<TransferLocation, { kind: 'document' | 'text' }>) {
+export function documentTransferRange(doc: ProseMirrorNode, location: Extract<TransferLocation, { kind: 'document' | 'text' }>) {
   const span = location.kind === 'text' ? location.spans[0] : undefined
   const blockId = location.kind === 'document' ? location.blockIds[0] : span?.blockId
   if (!blockId) throw new Error('找不到需要定位的段落。')
   let selected: { from: number; to: number } | undefined
-  editor.state.doc.descendants((node, pos) => {
+  doc.descendants((node, pos) => {
     if (node.attrs.hcdBlockId !== blockId) return
     const from = textPosition(node, pos + 1, span?.start ?? 0, false)
     const to = span ? textPosition(node, pos + 1, span.end, true) : from
@@ -106,6 +108,13 @@ export function locateDocumentTransfer(editor: Editor, location: Extract<Transfe
     return false
   })
   if (!selected) throw new Error('选区所在的段落已变化。')
+  return selected
+}
+
+export function locateDocumentTransfer(editor: Editor, location: Extract<TransferLocation, { kind: 'document' | 'text' }>) {
+  const selected = documentTransferRange(editor.state.doc, location)
+  const blockId = location.kind === 'document' ? location.blockIds[0] : location.spans[0]?.blockId
+  if (!blockId) throw new Error('找不到需要定位的段落。')
   editor.commands.setTextSelection(selected)
   editor.view.dom.querySelector(`[data-hcd-block-id="${CSS.escape(blockId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'instant' })
 }

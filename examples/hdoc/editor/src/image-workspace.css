@@ -29,6 +29,9 @@
 .hcd-surface .image-body { flex:1; min-height:0; display:flex; gap:14px; }
 .hcd-surface .image-stage-panel { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; border-radius:26px; background:var(--surface); padding:24px; overflow:hidden; }
 .hcd-surface .image-toolbar { flex:none; display:flex; align-items:center; gap:7px; min-height:36px; }
+.hcd-surface .image-toolbar-row { display:flex; align-items:center; gap:6px; }
+.hcd-surface .image-toolbar-row > .image-toolbar { flex:1; min-width:0; }
+.hcd-surface .im-file-actions { align-items:stretch; }
 .hcd-surface .image-toolbar button { font-size:11px; white-space:nowrap; }
 .hcd-surface .im-spacer { flex:1; }
 .hcd-surface .image-canvas-viewport { flex:1; min-height:100px; position:relative; overflow:hidden; touch-action:none; overscroll-behavior:contain; cursor:grab; outline:none; user-select:none; isolation:isolate; }

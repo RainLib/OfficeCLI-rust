@@ -1,11 +1,21 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react'
+import { extensibleShape, shapeBox } from './boardShapes'
+import { EdgeShapePicker } from './EdgeShapePicker'
+import { commentTime } from './BoardBlockEditor'
+import { MentionText, type BoardMention } from './BoardMentions'
+import { BoardEdgeHandles } from './BoardEdgeHandles'
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react'
 import { CaptureUpdateAction, newElementWith, viewportCoordsToSceneCoords } from '@excalidraw/excalidraw'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
-import { noteDirections, type NoteDirection } from './sceneGeometry'
+import { pointOnSide, type NoteDirection } from './sceneGeometry'
 import { PaintMask,usePaintStack } from './paintStack'
 import { noteTextStyle } from './StickyToolbar'
-import { boardTag, stickyLabel } from './boardObjects'
+import { boardTag, connectNotes, stickyLabel } from './boardObjects'
 
+function containsPoint(el: Parameters<typeof shapeBox>[0], point: {x:number; y:number}) {
+  const box = shapeBox(el), dx = point.x - box.x - box.width/2, dy = point.y - box.y - box.height/2
+  const c = Math.cos(box.angle), s = Math.sin(box.angle)
+  return Math.abs(dx*c + dy*s) <= box.width/2 && Math.abs(dy*c - dx*s) <= box.height/2
+}
 function paperViews(editor: ExcalidrawImperativeAPI) {
   const { scrollX, scrollY, zoom: { value: z } } = editor.getAppState()
   const elements = editor.getSceneElements()
@@ -13,12 +23,18 @@ function paperViews(editor: ExcalidrawImperativeAPI) {
     const tag = boardTag(el)
     if (!tag || !(el.type === 'rectangle' && tag.kind === 'sticky' || el.type === 'ellipse' && tag.kind === 'comment')) return []
     const label = tag.noteFormat && stickyLabel(elements,el.id)
-    return [{ id: el.id, tag, body: label?.originalText, fontSize: label?.fontSize ?? 20, left: (el.x + scrollX) * z, top: (el.y + scrollY) * z,
+    const comment = tag.kind === 'comment' ? {text:String(el.customData?.officeComment||''), time:el.customData?.createdAt ?? el.updated,
+      mentions:el.customData?.mentions as BoardMention[]|undefined, image:!!el.customData?.imageFileId,
+      recipients:elements.filter(item=>item.id===el.id || boardTag(item)?.root===el.id && boardTag(item)?.part==='reply')
+        .flatMap(item=>Array.isArray(item.customData?.mentions)?item.customData.mentions.map((m:BoardMention)=>m?.id):[])}:undefined
+    return [{ id: el.id, tag, comment, body: label?.originalText, fontSize: label?.fontSize ?? 20, left: (el.x + scrollX) * z, top: (el.y + scrollY) * z,
       width: el.width * z, height: el.height * z, angle: el.angle, z, opacity: el.opacity / 100 }]
   })
 }
 
-export function BoardPaperLayer({ editor, editing, canPoint, writable, open, onNeighbor, selected, onPinDrop }: {
+export function BoardPaperLayer({ editor, editing, canPoint, writable, open, onNeighbor, selected, personId, peekComments, onPinDrop }: {
+  peekComments:boolean
+  personId?:string
   onPinDrop:(id:string,point:{x:number;y:number},origin:{x:number;y:number})=>void
   onNeighbor: (id: string, direction: NoteDirection, drop?:{x:number;y:number}) => void; selected: string
   editor: ExcalidrawImperativeAPI; editing?: string; canPoint: boolean; writable: boolean; open: (id: string) => void
@@ -37,26 +53,30 @@ export function BoardPaperLayer({ editor, editing, canPoint, writable, open, onN
   }, [editor])
   const layer = useRef<HTMLDivElement>(null)
   const [hover, setHover] = useState('')
-  const quick=useRef<{x:number;y:number;id:string;dir:NoteDirection}|null>(null)
-  const [ghost,setGhost]=useState<{left:number;top:number}|null>(null)
-  const suppressClick=useRef(false)
+  const [picker, setPicker] = useState<{id: string; side: NoteDirection} | null>(null)
+  useEffect(() => { if (!canPoint || !writable) setPicker(null) }, [canPoint, writable])
+  const [selectedShape,setSelectedShape]=useState('')
+  useEffect(()=>{
+    const sync=()=>{const selected=editor.getAppState().selectedElementIds; const ids=editor.getSceneElements().filter(el=>selected[el.id] && !el.customData?.officeShapeAnchor).map(el=>el.id);setSelectedShape(ids.length===1?ids[0]:'')}
+    sync();return editor.onChange(sync)
+  },[editor])
   useEffect(() => {
     const surface = layer.current?.closest('.canvas-surface')
     if (!surface || !canPoint || !writable) { setHover(''); return }
     const move = (event: Event) => {
       const e = event as globalThis.PointerEvent
-      if (e.buttons) { if(!quick.current)setHover(''); return }
+      if (e.buttons) return
       const target = e.target as Element
-      if (target.closest('.board-note-neighbors')) return
+      if (target.closest('.board-note-neighbors, .board-edge-palette')) return
       if (!(target instanceof HTMLCanvasElement)) { setHover(''); return }
       const app = editor.getAppState()
       const pos = viewportCoordsToSceneCoords(e, app)
       const all = editor.getSceneElements()
-      const hit = [...all].reverse().find(el => el.opacity && pos.x >= el.x && pos.y >= el.y && pos.x <= el.x+el.width && pos.y <= el.y+el.height)
+      const hit = [...all].reverse().find(el => el.opacity && el.type !== 'freedraw' && (el.type !== 'line' || extensibleShape(el)) && el.type !== 'arrow' && containsPoint(el, pos))
       const root = hit?.type === 'text' && hit.containerId ? all.find(el => el.id === hit.containerId) : hit
-      if (root && boardTag(root)?.kind === 'sticky' && !root.locked) { setHover(root.id); return }
+      if (root && (boardTag(root)?.kind === 'sticky' || extensibleShape(root)) && !root.locked) { setHover(root.id); return }
       setHover(old => {
-        const nearby = all.find(el => el.id === old), margin = 20/app.zoom.value
+        const nearby = all.find(el => el.id === old), margin = 46/app.zoom.value
         return nearby && !hit && pos.x >= nearby.x-margin && pos.x <= nearby.x+nearby.width+margin &&
           pos.y >= nearby.y-margin && pos.y <= nearby.y+nearby.height+margin ? old : ''
       })
@@ -66,7 +86,11 @@ export function BoardPaperLayer({ editor, editing, canPoint, writable, open, onN
     surface.addEventListener('pointerleave', leave)
     return () => { surface.removeEventListener('pointermove', move); surface.removeEventListener('pointerleave', leave) }
   }, [editor, canPoint, writable])
-  const activeNote = canPoint && writable && views.find(v => v.tag.kind === 'sticky' && v.id === (hover || selected))
+  const activeNote = canPoint && writable && !picker && views.find(v => v.tag.kind === 'sticky' && v.id === (hover || selected))
+  const app=editor.getAppState(), z=app.zoom.value
+  const ordinary=canPoint && writable && editor.getSceneElements().find(el=>el.id===(picker?.id || hover || selectedShape) && extensibleShape(el) && !el.locked)
+  const bounds=ordinary && shapeBox(ordinary)
+  const active=activeNote || (ordinary && bounds && {id:ordinary.id,left:(bounds.x+app.scrollX)*z,top:(bounds.y+app.scrollY)*z,width:bounds.width*z,height:bounds.height*z,angle:bounds.angle})
   function finish(e: PointerEvent<HTMLButtonElement>, id: string) {
     const start = drag.current
     drag.current = null
@@ -84,21 +108,26 @@ export function BoardPaperLayer({ editor, editing, canPoint, writable, open, onN
     e.currentTarget.dataset.dragged = 'true'
   }
   return <div className="board-paper-layer" ref={layer}>
-    {views.map(({ id, tag, body, fontSize, left, top, width, height, angle, z, opacity }) => {
+    {views.map(({ id, tag, comment, body, fontSize, left, top, width, height, angle, z, opacity }) => {
       if (tag.kind === 'sticky') return editing === id ? null :
         <PaintMask key={id} api={editor} scene={stack} id={id} x={left/z-editor.getAppState().scrollX} y={top/z-editor.getAppState().scrollY} width={width/z} height={height/z} angle={angle} scale={z}>{maskImage=>
         <div className="board-paper-shadow" data-note-id={id} style={{ maskImage,left, top, width, height, opacity, transform: `rotate(${angle}rad)` }}>
           {body && tag.noteFormat && Object.keys(tag.noteFormat).length>0 && <div className="note-formatted-body" style={{...noteTextStyle(tag.noteFormat,fontSize),left:15*z,top:15*z,width:Math.max(1,width/z-30),transform:`scale(${z})`}}>{tag.noteFormat.list?body.split('\n').map((s,i)=><div key={i}>• {s}</div>):body}</div>}
-          {tag.showAuthor !== false && tag.author && <span style={{ left: 15 * z, right: 15 * z, bottom: 11 * z, fontSize: 12 * z }}>{tag.author}</span>}
         </div>}</PaintMask>
       const size = Math.max(27, Math.min(44, width))
       const initial = Array.from(tag.author?.trim() || '')[0]
-      return <button key={id} type="button" className="board-comment-pin" data-resolved={!!tag.resolved}
-        aria-label={`打开${tag.author || '协作者'}的评论`} title={tag.resolved ? '已解决的评论' : tag.author + '的评论'}
-        tabIndex={canPoint ? 0 : -1} style={{ left, top: top + height - size, width: size, height: size,
-          pointerEvents: canPoint ? 'auto' : 'none' }}
+      const pinTop = top + height - size
+      const opensLeft = app.width - left < 240 && left > app.width - left - size
+      const opensUp = app.height - pinTop < 100 && pinTop > app.height - pinTop - size
+      return <button key={id} type="button" className="board-comment-pin" data-resolved={!!tag.resolved} data-mentioned={!!personId && comment?.recipients.includes(personId)}
+        data-opens-left={opensLeft} data-opens-up={opensUp}
+        aria-label={`打开${tag.author || '协作者'}的评论`}
+        aria-describedby={comment ? 'comment-peek-' + id : undefined}
+        tabIndex={canPoint ? 0 : -1} style={{ left, top: pinTop, width: size, height: size,
+          '--pin-size': size + 'px', '--pin-room': Math.max(size, (opensLeft ? left + size : app.width - left) - 6) + 'px',
+          pointerEvents: canPoint || peekComments ? 'auto' : 'none' } as CSSProperties}
         onPointerDown={e => {
-          if (e.button !== 0) return
+          if (e.button !== 0 || !canPoint) return
           drag.current = { x: e.clientX, y: e.clientY, moved: false }
           delete e.currentTarget.dataset.dragged
           e.currentTarget.setPointerCapture(e.pointerId)
@@ -110,27 +139,31 @@ export function BoardPaperLayer({ editor, editing, canPoint, writable, open, onN
           if (drag.current.moved) e.currentTarget.style.translate = `${dx}px ${dy}px`
         }}
         onPointerUp={e => finish(e, id)} onPointerCancel={e => { drag.current = null; e.currentTarget.style.translate = '' }}
-        onClick={e => { if (e.currentTarget.dataset.dragged) { delete e.currentTarget.dataset.dragged; return } open(id) }}>
-        <svg viewBox="0 0 36 36" aria-hidden="true">
-          <path d="M2 17.8C2 9 9 2 17.8 2S34 9 34 17.8 27 33.5 18 33.5H4.5A2.5 2.5 0 0 1 2 31Z" fill="var(--pin-shell)" stroke="white" strokeWidth="2.2"/>
-          <circle cx="18" cy="17.6" r="10.6" fill="var(--pin-avatar)"/>
+        onClick={e => { if (e.currentTarget.dataset.dragged) { delete e.currentTarget.dataset.dragged; return } if(canPoint)open(id) }}>
+        <span className="board-comment-surface">
+          {comment && <span id={'comment-peek-' + id} className="board-comment-peek" role="tooltip">
+            <b>{tag.author || '协作者'}</b> <time>{commentTime(comment.time)}</time>
+            <span className="board-peek-text"><MentionText text={comment.text || (comment.image?'图片':'')} mentions={comment.mentions}/></span>
+          </span>}
+        </span>
+        <svg className="board-comment-avatar" viewBox="0 0 36 36" aria-hidden="true">
+          <circle cx="18" cy="18" r="13" fill="var(--pin-avatar)"/>
           {tag.resolved ? <path d="m13 18 3.2 3 7-7" fill="none" stroke="var(--pin-shell)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/> :
             initial ? <text x="18" y="18" dy=".33em" textAnchor="middle" fill="var(--pin-shell)" fontSize="12" fontFamily="system-ui,sans-serif" fontWeight="650">{initial}</text> :
             <path d="M12 23c0-6 12-6 12 0m-6-5a3 3 0 1 0 0-6 3 3 0 0 0 0 6" fill="var(--pin-shell)"/>}
         </svg>
       </button>
     })}
-    {activeNote && !editor.getAppState().selectedElementsAreBeingDragged && !editor.getSceneElements().find(el=>el.id===activeNote.id)?.locked &&
-      <div className="board-note-neighbors" role="group" aria-label="相邻便签"
-        style={{left:activeNote.left,top:activeNote.top,width:activeNote.width,height:activeNote.height,transform:`rotate(${activeNote.angle}rad)`}}>
-        {(Object.keys(noteDirections) as NoteDirection[]).map(dir=><button key={dir} type="button" data-side={dir}
-          aria-label={'向'+noteDirections[dir]+'新增便利贴'} title={'向'+noteDirections[dir]+'新增便利贴'}
-          onPointerDown={e=>{if(e.button!==0)return;e.stopPropagation();suppressClick.current=false;quick.current={id:activeNote.id,dir,x:e.clientX,y:e.clientY};e.currentTarget.setPointerCapture(e.pointerId)}}
-          onPointerMove={e=>{const g=quick.current,rect=layer.current?.getBoundingClientRect();if(!g||!rect||Math.hypot(e.clientX-g.x,e.clientY-g.y)<5)return;setGhost({left:e.clientX-rect.left-activeNote.width/2,top:e.clientY-rect.top-activeNote.width/2})}}
-          onPointerCancel={()=>{quick.current=null;setGhost(null)}}
-          onPointerUp={e=>{const g=quick.current;quick.current=null;setGhost(null);if(!g||Math.hypot(e.clientX-g.x,e.clientY-g.y)<5)return;suppressClick.current=true;setHover('');onNeighbor(g.id,g.dir,viewportCoordsToSceneCoords(e,editor.getAppState()))}}
-          onClick={e=>{e.stopPropagation();if(suppressClick.current){suppressClick.current=false;return}setHover('');onNeighbor(activeNote.id,dir)}}><span>+</span></button>)}
-      </div>}
-    {ghost&&activeNote&&<div className="neighbor-ghost" style={{...ghost,width:activeNote.width,height:activeNote.width,background:editor.getSceneElements().find(el=>el.id===activeNote.id)?.backgroundColor}}/>}
+    {active && !app.selectedElementsAreBeingDragged && <BoardEdgeHandles key={active.id} editor={editor} box={active} note={!!activeNote} act={(id,side,drop)=>{
+      if(activeNote){onNeighbor(id,side,drop);return}
+      if(!ordinary)return
+      if (!drop) { setPicker({id, side}); return }
+      const target=[...editor.getSceneElements()].reverse().find(el=>el.id!==id && !el.locked && (extensibleShape(el) || boardTag(el)?.kind==='sticky') && containsPoint(el, drop))
+      connectNotes(editor,id,side,target?.id || drop)
+    }}/>}
+    {picker && ordinary && active && <EdgeShapePicker key={picker.id + picker.side} side={picker.side}
+      anchor={pointOnSide({x:active.left,y:active.top,width:active.width,height:active.height,angle:active.angle},picker.side,25)}
+      width={app.width} height={app.height} close={()=>setPicker(null)}
+      choose={shape=>{connectNotes(editor,ordinary.id,picker.side,{shape});setHover('');setPicker(null)}}/>}
   </div>
 }

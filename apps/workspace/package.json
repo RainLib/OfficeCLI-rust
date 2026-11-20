@@ -10,11 +10,19 @@
     "init": "node cli.mjs init",
     "start": "node cli.mjs start",
     "build": "node scripts/build.mjs",
+    "package": "node scripts/package.mjs",
     "test": "node --test src/*.test.mjs",
     "test:acceptance": "node scripts/verify.mjs",
+    "test:backup": "node scripts/verify-backup.mjs",
+    "test:deployment": "node scripts/verify-deployment.mjs",
     "test:canvas": "node scripts/verify-canvas.mjs",
     "test:tenants": "node scripts/verify-tenants.mjs",
     "test:workbench": "node ../../examples/hdoc/embed-host/verify-workbench.mjs",
+    "test:workbench-undo": "node scripts/verify-workbench-undo.mjs",
+    "test:workbench-sheet-undo": "node scripts/verify-workbench-sheet-undo.mjs",
+    "test:workbench-review": "node scripts/verify-workbench-review.mjs",
+    "test:workbench-pptx": "node scripts/verify-workbench-pptx.mjs",
+    "test:workbench-native": "node scripts/verify-workbench-native.mjs",
     "test:embed": "node ../../examples/hdoc/embed-host/verify.mjs"
   }
 }

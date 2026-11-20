@@ -1,4 +1,5 @@
-import { planWorkbench } from "./workbench-planner.mjs";
+import { organizeBoardSections, planWorkbench, planWorkbenchFile } from "./workbench-planner.mjs";
+import { createWorkbenchJobs } from "./workbench-jobs.mjs";
 import { createRequire } from "node:module";
 import { createSelectionGrants, supportsSelectionFormat } from "./selection-grants.mjs";
 import { createServer, request as httpRequest } from "node:http";
@@ -29,11 +30,18 @@ import {
   documentId,
 } from "./provider.mjs";
 import { Sharing, GUEST_COOKIE } from "./sharing.mjs";
+import { createProjects } from "./projects.mjs";
+import { createMentionInbox } from "./mention-inbox.mjs";
+import { createPublicationJobs } from "./publication-jobs.mjs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const COOKIE = "officecli_workspace";
 const formats = {
   excalidraw: "application/vnd.excalidraw+json",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  csv: "text/csv",
+  tsv: "text/tab-separated-values",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   pdf: "application/pdf",
@@ -109,11 +117,27 @@ export function createWorkspaceServer({
   editorAssets,
   modelIds = [],
   workbenchModel = null,
+  captureBackup,
+  publicAvailable = () => true,
 }) {
   const provider = createProvider(store, config, keys, { modelIds }),
     pending = new Map();
   const sharing = new Sharing(store, config, keys);
+  const projects = createProjects(store);
+  const inbox = createMentionInbox({ store, engine, config });
+  const publicationJobs = createPublicationJobs({ store, engine, config, serviceKey: keys.service, launch });
   const grants = createSelectionGrants({ store, config, engine });
+  function checkedActions(actions) {
+    const { parseSelectionMutation } = selectionTransport();
+    return actions.map(action => ({ ...action,
+      args: parseSelectionMutation(action.tool, { ...action.args, requestId: randomUUID() }) }));
+  }
+  const workbenchJobs = createWorkbenchJobs({ store, grants, launch, engine,
+    planFile: async input => checkedActions(await planWorkbenchFile(input, workbenchModel)),
+  });
+  let backupPaused = false, callbacksPaused = false;
+  const admitted = new Set(), callbacks = new Set();
+  const selectionTransport = () => createRequire(import.meta.url)(join(adminAssets, "../selection-mcp.cjs"));
   const workspace = {
     tenantId: config.tenantId,
     name: config.name,
@@ -173,6 +197,7 @@ export function createWorkspaceServer({
     const receipt = version.receipt ? JSON.parse(version.receipt) : null;
     return {
       id: file.id,
+      resourceDocumentId: documentId(config, file.id),
       name: file.name,
       format: file.format,
       ownerId: file.owner_id,
@@ -185,16 +210,10 @@ export function createWorkspaceServer({
       createdAt: file.created_at,
       modifiedAt: file.modified_at,
       operations: provider.permissions(user, file),
+      location: projects.visibleLocation(user, file.id),
       canDelegateSelection: config.selectionMcp === true && supportsSelectionFormat(file.format) && !user.is_guest &&
         ["document.view", "document.edit", "document.ai"].every(op => selectionPermissions.includes(op)),
-      canManage:
-        user.role === "admin" ||
-        file.owner_id === user.id ||
-        store.get(
-          "SELECT profile FROM acl WHERE file_id=? AND user_id=?",
-          file.id,
-          user.id,
-        )?.profile === "manager",
+      canManage: store.canManage(user, file),
       lastPublishedRevision: receipt?.revision ?? null,
       documentId: store.get(
         "SELECT id FROM launches WHERE file_id=? LIMIT 1",
@@ -206,8 +225,9 @@ export function createWorkspaceServer({
   };
   async function engine(
     path,
-    { method = "GET", data, token = keys.service, headers = {} } = {},
+    { method = "GET", data, token = keys.service, headers = {}, signal } = {},
   ) {
+    const timeout = AbortSignal.timeout(120_000);
     const response = await fetch(config.engineUrl + path, {
       method,
       headers: {
@@ -216,7 +236,7 @@ export function createWorkspaceServer({
         ...headers,
       },
       ...(data === undefined ? {} : { body: JSON.stringify(data) }),
-      signal: AbortSignal.timeout(120_000),
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
       redirect: "error",
     });
     const text = await response.text();
@@ -447,10 +467,52 @@ export function createWorkspaceServer({
         workspace,
       });
     check(!account.user.is_guest, 403, "访客仅可访问分享给自己的文档，请通过分享链接打开。");
+    if (path === "/mentions" && method === "GET") {
+      const incomplete = await inbox.refresh();
+      const current = session(request);
+      check(!current.user.is_guest, 403, "请登录工作空间查看提及。");
+      return send(response, 200, { ...inbox.list(current.user, url.searchParams.get("before")), incomplete });
+    }
+    if (path === "/mentions/read" && method === "POST") {
+      csrf(request, account);
+      inbox.markAllRead(account.user);
+      return send(response, 204);
+    }
+    const mentionRead = /^\/mentions\/([a-f0-9-]{36})\/read$/.exec(path);
+    if (mentionRead && method === "POST") {
+      csrf(request, account);
+      return send(response, 200, { item: inbox.markRead(account.user, mentionRead[1]) });
+    }
     if (path === "/embed/selection" && method === "PUT")
       return send(response, 200, await grants.set(account, await jsonBody(request)));
-    if (path === "/agent-plan" && method === "POST") {
-      const { prompt, tokens } = await jsonBody(request);
+    if (path === "/board-document-preview" && method === "POST") {
+      check(workbenchModel, 409, "工作台尚未配置模型。");
+      const { boardId, sources, sections } = await jsonBody(request);
+      check(Array.isArray(sources) && sources.length <= 128 && Array.isArray(sections) && sections.length > 0 && sections.length <= 128
+        && sections.every(s => s && typeof s.id === "string" && s.id.length <= 256 && typeof s.heading === "string" && Array.isArray(s.lines) && s.lines.every(t => typeof t === "string"))
+        && new Set(sections.map(s => s.id)).size === sections.length && JSON.stringify(sections).length <= 64000, 400, "请选择较小的白板选区。");
+      const board = store.file(boardId);
+      check(board.format === "excalidraw", 400, "请选择一份白板。");
+      for (const id of new Set([boardId, ...sources])) {
+        const file = store.file(id);
+        for (const op of ["document.view", "document.copy", "document.ai"]) store.permit(account.user, file, op);
+      }
+      return send(response, 200, { sections: await organizeBoardSections(workbenchModel, sections) });
+    }
+    if (path === "/agent-jobs" && method === "GET")
+      return send(response, 200, { jobs: workbenchJobs.list(account) });
+    const jobAction = /^\/agent-jobs\/([a-f0-9-]+)\/(approve|retry|recheck|undo)$/.exec(path);
+    if (jobAction && method === "POST") {
+      const { files, token, reviews } = await jsonBody(request);
+      if (jobAction[2] === "undo") return send(response, 200, await workbenchJobs.undo(account, jobAction[1], files));
+      if (jobAction[2] === "recheck") {
+        const grant = token === undefined ? undefined : grants.authenticate("Bearer " + token);
+        return send(response, 202, workbenchJobs.recheck(account, jobAction[1], files, grant));
+      }
+      return send(response, 202, workbenchJobs.transition(account, jobAction[1], jobAction[2], files, reviews));
+    }
+    if ((path === "/agent-plan" || path === "/agent-jobs") && method === "POST") {
+      const { id, prompt, tokens } = await jsonBody(request);
       check(
         typeof prompt === "string" &&
           prompt.trim() &&
@@ -461,30 +523,31 @@ export function createWorkspaceServer({
         400,
         "请选择任务文件并输入指令。",
       );
-      const targets = await Promise.all(
-        tokens.map(async (token) => {
+      const compile = async () => {
+        const selections = tokens.map(token => {
           const grant = grants.authenticate("Bearer " + token);
           check(
             grant.userId === account.user.id && grant.browser === account.hash,
             403,
             "文件选区属于其他会话。",
           );
-          return { fileId: grant.fileId, ...(await grants.call(grant, "read_selection", {})) };
-        }),
-      );
-      check(
-        new Set(targets.map((t) => t.fileId)).size === targets.length,
-        400,
-        "目标文件不能重复。",
-      );
-      const stops=tokens.map(token=>grants.planning(grants.authenticate("Bearer "+token)));
-      let plan;
-      try {
-        plan=await planWorkbench(prompt.trim(), targets, workbenchModel);
-        return send(response,200,plan);
-      } finally {
-        stops.forEach((stop,i)=>stop(!plan?.actions?.some(a=>a.fileId===targets[i].fileId)));
-      }
+          return grant;
+        });
+        check(new Set(selections.map(grant => grant.fileId)).size === selections.length, 400, "目标文件不能重复。");
+        const targets = await Promise.all(selections.map(async grant =>
+          ({ fileId: grant.fileId, ...(await grants.call(grant, "read_selection", {})) })));
+        const stops = selections.map(grants.planning);
+        let plan;
+        try {
+          plan = await planWorkbench(prompt.trim(), targets, workbenchModel, path === "/agent-jobs");
+          if (path === "/agent-jobs") plan.actions = checkedActions(plan.actions);
+          return { plan, selections, sources: targets };
+        } finally {
+          stops.forEach((stop, i) => stop(path === "/agent-jobs" || !plan?.actions?.some(a => a.fileId === targets[i].fileId)));
+        }
+      };
+      if (path === "/agent-jobs") return send(response, 201, await workbenchJobs.create(account, id, prompt.trim(), compile));
+      return send(response, 200, (await compile()).plan);
     }
     if (path === "/agent-activity/stream" && method === "GET") {
       response.writeHead(200, {
@@ -635,6 +698,40 @@ export function createWorkspaceServer({
         user: publicUser(store.get("SELECT * FROM users WHERE id=?", user.id)),
       });
     }
+    if (path === "/projects") {
+      if (method === "GET") return send(response, 200, { projects: projects.list(account.user) });
+      if (method === "POST") {
+        const value = await jsonBody(request);
+        return send(response, 201, { project: projects.create(session(request).user, value) });
+      }
+    }
+    const projectPath = /^\/projects\/([a-f0-9-]+)(?:\/(folders|members)(?:\/([a-f0-9-]+))?)?$/.exec(path);
+    if (projectPath) {
+      const [, id, part, item] = projectPath, user = account.user;
+      if (!part && method === "GET") return send(response, 200, projects.details(user, id));
+      if (!part && method === "PATCH") {
+        const value = await jsonBody(request);
+        return send(response, 200, { project: projects.rename(session(request).user, id, value) });
+      }
+      if (part === "folders") {
+        if (!item && method === "POST" || item && method === "PATCH") {
+          const value = await jsonBody(request);
+          return send(response, item ? 200 : 201, { folder: projects.saveFolder(session(request).user, id, value, item ?? null) });
+        }
+        if (item && method === "DELETE") {
+          projects.removeFolder(user, id, item);
+          return send(response, 204);
+        }
+      }
+      if (part === "members") {
+        if (!item && method === "GET") return send(response, 200, projects.members(user, id));
+        if (item && method === "PUT") {
+          const data = await jsonBody(request);
+          projects.setMember(session(request).user, id, item, data?.role);
+          return send(response, 204);
+        }
+      }
+    }
     if (path === "/files" && method === "GET") {
       const files = store
         .all("SELECT * FROM files ORDER BY modified_at DESC")
@@ -644,13 +741,56 @@ export function createWorkspaceServer({
         .map((file) => summary(account.user, file));
       return send(response, 200, { files });
     }
+    if (path === "/content-search" && method === "GET") {
+      const q = (url.searchParams.get("q") || "").trim();
+      const cursor = url.searchParams.get("after") || "";
+      check(q && Array.from(q).length <= 128 && !q.includes("\0") && (!cursor || uuid(cursor)), 400, "请输入要查找的内容。");
+      const scanSize = 48;
+      const projectId = url.searchParams.get("projectId");
+      if (projectId !== null) {
+        check(uuid(projectId), 400, "项目 ID 无效。");
+        check(store.projectRole(account.user, projectId), 404, "项目不存在或无权访问。");
+      }
+      const batch = projectId === null ? store.all("SELECT * FROM files WHERE id>? ORDER BY id LIMIT ?", cursor, scanSize)
+        : store.all(`SELECT files.* FROM files JOIN project_files pf ON pf.file_id=files.id
+          WHERE pf.project_id=? AND files.id>? ORDER BY files.id LIMIT ?`, projectId, cursor, scanSize);
+      const candidates = batch.filter(file => store.permissions(account.user, file).includes("document.view"));
+      const page = candidates.slice(0, 6);
+      const next = candidates.length > page.length ? page.at(-1).id : batch.length === scanSize ? batch.at(-1).id : null;
+      const params = new URLSearchParams({ q, workspace: "true" });
+      const controller = new AbortController();
+      response.once("close", () => controller.abort());
+      const results = await Promise.allSettled(page.map(async file => {
+        const existing = store.get(`SELECT id FROM launches WHERE file_id=? AND user_id=?
+          AND browser_hash=? AND closed=0 AND expires>? ORDER BY expires DESC LIMIT 1`,
+        file.id, account.user.id, account.hash, now());
+        const { token, documentId } = await launch(account, file, existing?.id || randomUUID());
+        const result = await engine(`/v1/documents/${documentId}/search?${params}`, { token, signal: controller.signal });
+        return { id: file.id, name: file.name, format: file.format, ...result };
+      }));
+      if (controller.signal.aborted) return;
+      const current = session(request);
+      if (projectId !== null)
+        check(store.projectRole(current.user, projectId), 404, "项目不存在或无权访问。");
+      const files = [], unavailable = [];
+      results.forEach((result, index) => {
+        const file = page[index];
+        if (!store.permissions(current.user, file).includes("document.view") ||
+          projectId !== null && store.fileLocation(file.id)?.projectId !== projectId) return;
+        if (result.status === "fulfilled") {
+          if (result.value.hits.length || result.value.truncated) files.push(result.value);
+        } else unavailable.push({ id: file.id, name: file.name });
+      });
+      return send(response, 200, { files, unavailable, next });
+    }
     if (path === "/files" && method === "POST") {
-      let name, bytes;
+      let name, bytes, destination;
       if (
         request.headers["content-type"]?.split(";")[0] === "application/json"
       ) {
         const data = await jsonBody(request);
         name = String(data.name || "").trim();
+        destination = { projectId: data.projectId, folderId: data.folderId };
         check(
           /\.(docx|xlsx|pptx|txt|md|html|excalidraw)$/i.test(name),
           400,
@@ -677,6 +817,7 @@ export function createWorkspaceServer({
             );
       } else {
         name = url.searchParams.get("filename") || "";
+        destination = { projectId: url.searchParams.get("projectId"), folderId: url.searchParams.get("folderId") };
         bytes = await body(request, 256 * 1024 * 1024);
       }
       check(
@@ -687,14 +828,16 @@ export function createWorkspaceServer({
       const raw = name.split(".").at(-1).toLowerCase(),
         format = { jpg: "jpeg", markdown: "md", htm: "html" }[raw] || raw;
       check(formats[format], 415, "不支持此文件类型。");
+      const actor = session(request).user;
       const file = store.createFile(
-        store.user(account.user.id),
+        actor,
         name,
         format,
         formats[format],
         bytes,
+        projects.destination(actor, destination),
       );
-      return send(response, 201, { file: summary(account.user, file) });
+      return send(response, 201, { file: summary(actor, file) });
     }
     const fileMatch = /^\/files\/([a-f0-9-]+)(.*)$/.exec(path);
     if (fileMatch) {
@@ -703,6 +846,11 @@ export function createWorkspaceServer({
       store.permit(account.user, file, "document.view");
       if (!action && method === "GET")
         return send(response, 200, { file: summary(account.user, file) });
+      if (action === "/location" && method === "PUT") {
+        const value = await jsonBody(request), actor = session(request).user;
+        projects.moveFile(actor, file, value);
+        return send(response, 200, { file: summary(actor, file) });
+      }
       if (action === "/editor-session" && method === "POST") {
         const data = await jsonBody(request);
         const result = await launch(account, file, data.sessionId);
@@ -810,6 +958,20 @@ export function createWorkspaceServer({
         response.end(bytes);
         return;
       }
+      if (action === "/mentionable" && method === "GET") {
+        store.permit(account.user, file, "document.view", "document.edit");
+        const people = store.all(
+          `SELECT u.id, u.display_name AS name FROM users u
+           WHERE u.disabled = 0 AND u.id NOT IN (SELECT user_id FROM guest_identities)
+           AND (u.id = ? OR EXISTS (SELECT 1 FROM acl a, json_each(a.operations) op
+             WHERE a.file_id = ? AND a.user_id = u.id AND op.value = 'document.view')
+             OR EXISTS (SELECT 1 FROM project_files pf JOIN projects p ON p.id=pf.project_id
+               LEFT JOIN project_members m ON m.project_id=p.id AND m.user_id=u.id
+               WHERE pf.file_id=? AND (p.owner_id=u.id OR m.user_id IS NOT NULL)))
+           ORDER BY u.display_name, u.id`, file.owner_id, file.id, file.id,
+        );
+        return send(response, 200, { people });
+      }
       if (action === "/acl" && method === "GET") {
         store.manage(account.user, file);
         return send(response, 200, {
@@ -901,6 +1063,26 @@ export function createWorkspaceServer({
           .map((row) => ({ ...row, body: JSON.parse(row.body) })),
       });
     }
+    if (path === "/publication-jobs" && method === "GET") {
+      admin(account);
+      return send(response, 200, await publicationJobs.list(account.user, url.searchParams.get("before")));
+    }
+    const jobPath = /^\/publication-jobs\/([a-f0-9-]{36})\/(reconcile|retry|artifact|copy|event-retry)$/.exec(path);
+    if (jobPath) {
+      const current = () => { const value = session(request); admin(value); return value; };
+      const [, id, operation] = jobPath;
+      check(uuid(id), 400, "回写任务无效。");
+      if (operation === "artifact" && method === "GET") {
+        const { response: output, size, fileName } = await publicationJobs.download(id, current);
+        response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": size,
+          "Cache-Control": "no-store", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}` });
+        return await pipeline(Readable.fromWeb(output.body), response);
+      }
+      if (operation !== "artifact" && method === "POST") {
+        csrf(request, current());
+        return send(response, 200, await publicationJobs.action(id, operation, current));
+      }
+    }
     if (path === "/audit" && method === "GET") {
       admin(account);
       return send(response, 200, {
@@ -962,13 +1144,15 @@ export function createWorkspaceServer({
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "same-origin");
     response.setHeader("X-Frame-Options", "SAMEORIGIN");
+    let finish;
     try {
       check(typeof request.url === "string" && /^\/(?!\/)/.test(request.url) && !request.url.includes("\\"), 400, "请求路径无效。");
       const url = new URL(request.url, config.publicUrl);
+      const pathname = url.pathname;
+      const snapshot = /^\/workspace\/internal\/backup\/([0-9a-f-]{36})$/.exec(pathname);
       const internal =
-        url.pathname.startsWith("/officecli-provider/") ||
-        url.pathname === "/officecli-events/v1/events" ||
-        url.pathname.startsWith("/workspace/objects/");
+        !!snapshot || pathname.startsWith("/officecli-provider/") ||
+        pathname === "/officecli-events/v1/events" || pathname.startsWith("/workspace/objects/");
       check(!(publicIngress && internal), 404, "接口不存在。");
       check(
         [
@@ -978,6 +1162,35 @@ export function createWorkspaceServer({
         421,
         "服务域名不匹配。",
       );
+      if (!internal && !publicAvailable()) {
+        request.resume();
+        return send(response, 503, { error: "工作空间正在启动，稍后可重试。" }, { "Retry-After": "2" });
+      }
+      if (snapshot) {
+        check(captureBackup && request.method === "POST" && uuid(snapshot[1]) && !request.headers.origin &&
+          ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress) &&
+          equal(request.headers.authorization || "", `Bearer ${keys.service}`), 404, "接口不存在。");
+        request.resume();
+        return send(response, 201, await captureBackup(snapshot[1]));
+      }
+      if (captureBackup) {
+        const read = ["GET", "HEAD"].includes(request.method);
+        const statefulRead = pathname === "/workspace/api/mentions" || pathname === "/workspace/api/content-search" ||
+          pathname === "/v1/admin/jobs" || pathname.startsWith("/v1/downloads/") || pathname.includes("/export/");
+        const providerWrite = internal && !read && pathname !== "/officecli-provider/v1/permissions/resolve";
+        const publicWrite = !internal && (!read || statefulRead);
+        if (providerWrite || publicWrite) {
+          if (providerWrite ? callbacksPaused : backupPaused) {
+            request.resume();
+            return send(response, 503, { code: "workspace_snapshot", error: "工作空间正在取备份快照，请稍后重试。" }, { "Retry-After": "2" });
+          }
+          const active = providerWrite ? callbacks : admitted;
+          let done;
+          const work = new Promise(resolve => { done = resolve; });
+          active.add(work);
+          finish = () => { active.delete(work); done(); };
+        }
+      }
       if (url.pathname.startsWith("/workspace/objects/")) {
         const result = await provider.object(
           request,
@@ -1026,7 +1239,7 @@ export function createWorkspaceServer({
         if (request.headers.origin) origin(request);
         const grant = grants.authenticate(request.headers.authorization);
         if (request.method !== "POST") return send(response, 405, { error: "MCP 使用 POST。" }, { Allow: "POST" });
-        const { handleSelectionMcp } = createRequire(import.meta.url)(join(adminAssets, "../selection-mcp.cjs"));
+        const { handleSelectionMcp } = selectionTransport();
         return await handleSelectionMcp(request, response, await jsonBody(request), grant, grants.call);
       }
       if (url.pathname.startsWith("/workspace/api/"))
@@ -1128,9 +1341,15 @@ export function createWorkspaceServer({
             ? error.message
             : "业务服务暂时不可用，请稍后重试。",
       });
+    } finally {
+      finish?.();
     }
   }
   function handleUpgrade(request, socket, head) {
+    if (!publicAvailable()) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+      return;
+    }
     try {
       check(
         request.url?.split("?")[0] === "/collaboration" &&
@@ -1175,5 +1394,18 @@ export function createWorkspaceServer({
   server.on("upgrade", handleUpgrade);
   server.requestTimeout = 180_000;
   server.headersTimeout = 30_000;
-  return { server, handleRequest, handleUpgrade, provider, engine, session };
+  return { server, handleRequest, handleUpgrade, provider, engine, session,
+    pauseForBackup() {
+      backupPaused = true;
+      return Promise.allSettled([...admitted, workbenchJobs.pause()]);
+    },
+    pauseProviderCallbacks() {
+      callbacksPaused = true;
+      return Promise.allSettled([...callbacks]);
+    },
+    resumeAgentJobs() {
+      backupPaused = false;
+      callbacksPaused = false;
+      if (workspace.selectionMcp) workbenchJobs.resume();
+    } };
 }

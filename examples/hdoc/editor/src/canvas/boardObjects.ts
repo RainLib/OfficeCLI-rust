@@ -6,7 +6,9 @@ import {
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 
+import { boardShape, extensibleShape, shapeBox, type ShapeKind } from './boardShapes'
 import type { NoteFormat } from './StickyToolbar'
+import { pointOnSide, type NoteDirection } from './sceneGeometry'
 
 export type BoardPoint = { x: number; y: number }
 export type BoardBox = BoardPoint & { width: number; height: number }
@@ -56,7 +58,7 @@ export function stickyLabel(elements: readonly ExcalidrawElement[], id?: string)
 
 export function saveSticky(
   editor: ExcalidrawImperativeAPI, at: BoardPoint, text: string, paper: string, author: string,
-  height: number, existing?: ExcalidrawElement, width = stickySize, format?: NoteFormat, signed?: boolean,
+  height: number, existing?: ExcalidrawElement, width = stickySize, format?: NoteFormat, mentions?: import('./BoardMentions').BoardMention[],
 ) {
   const id = existing?.id ?? newId('sticky')
   const elements = editor.getSceneElementsIncludingDeleted()
@@ -65,7 +67,7 @@ export function saveSticky(
   const [sheet, label] = convertToExcalidrawElements([{
     type: 'rectangle', id, ...at, width: existing?.width ?? width, height,
     fillStyle: 'solid', backgroundColor: paper, strokeColor: 'transparent', roughness: 0,
-    customData: tag({ kind: 'sticky', root: id, author, ...(format && {noteFormat:format}), ...(signed!==undefined && {showAuthor:signed}) }),
+    customData: { ...tag({ kind: 'sticky', root: id, author, ...(format && {noteFormat:format}) }), ...(mentions && {mentions}) },
     label: { text: body, strokeColor: previous?.strokeColor ?? ink, fontSize: format?.size ?? previous?.fontSize ?? stickyFont,
       fontFamily: previous?.fontFamily ?? 2, textAlign: 'left', verticalAlign: 'top' },
   }], { regenerateIds: false })
@@ -76,7 +78,7 @@ export function saveSticky(
   }) : label
   const newSheet = existing ? newElementWith(existing, {
     height: Math.max(existing.height, height), backgroundColor: paper,
-    customData: { ...existing.customData, officeBoard: { ...boardTag(existing), ...(format && {noteFormat:format}), ...(signed!==undefined && {showAuthor:signed}) } },
+    customData: { ...existing.customData, ...(mentions && {mentions}), officeBoard: { ...boardTag(existing), ...(format && {noteFormat:format}) } },
     boundElements: previous ? existing.boundElements : [...(existing.boundElements ?? []), { type: 'text', id: newText.id }],
   }) : sheet
   editor.updateScene({
@@ -87,22 +89,68 @@ export function saveSticky(
   return id
 }
 
-export function connectNotes(editor:ExcalidrawImperativeAPI,sourceId:string,targetId:string) {
-  const all=editor.getSceneElementsIncludingDeleted(),a=all.find(el=>el.id===sourceId),b=all.find(el=>el.id===targetId)
-  if(!a||!b)return
-  const dx=b.x+b.width/2-a.x-a.width/2,dy=b.y+b.height/2-a.y-a.height/2
-  if(Math.abs(dx)+Math.abs(dy)<1)return
-  const edgePoint=(el:ExcalidrawElement,sign:number)=>{
-    const t=Math.min(el.width/2/Math.abs(dx),el.height/2/Math.abs(dy))
-    return {x:el.x+el.width/2+sign*dx*t,y:el.y+el.height/2+sign*dy*t}
+export function connectNotes(editor: ExcalidrawImperativeAPI, sourceId: string, side: NoteDirection,
+  target: string | BoardPoint | { shape: ShapeKind }) {
+  const all: ExcalidrawElement[] = [...editor.getSceneElementsIncludingDeleted()]
+  const source = all.find(el => el.id === sourceId && !el.isDeleted && !el.locked)
+  if (!source) return
+  let neighbor: ExcalidrawElement | undefined
+  if (typeof target === 'object' && 'shape' in target) {
+    const box = shapeBox(source), horizontal = side === 'left' || side === 'right'
+    const center = pointOnSide(box, side, 60 + (horizontal ? box.width : box.height) / 2)
+    const at = { x: center.x - box.width / 2, y: center.y - box.height / 2 }
+    const occupied = all.filter(el => extensibleShape(el) || !el.isDeleted && boardTag(el)?.kind === 'sticky').map(shapeBox)
+    const x = at.x, y = at.y
+    for (let slot = 1; occupied.some(o => at.x < o.x + o.width && at.x + box.width > o.x && at.y < o.y + o.height && at.y + box.height > o.y); slot++) {
+      const offset = Math.ceil(slot / 2) * (slot % 2 ? 1 : -1)
+      if (horizontal) at.y = y + offset * (box.height + 16)
+      else at.x = x + offset * (box.width + 16)
+    }
+    const { shape } = boardShape(target.shape, { ...at, width: box.width, height: box.height }, {
+      strokeColor: source.strokeColor, backgroundColor: source.backgroundColor, strokeWidth: source.strokeWidth,
+      roughness: source.roughness, fillStyle: source.fillStyle,
+    })
+    neighbor = convertToExcalidrawElements([shape], { regenerateIds: false })[0]
+    all.push(neighbor)
   }
-  const start=edgePoint(a,1),end=edgePoint(b,-1),id=newId('connector')
-  const [edge]=convertToExcalidrawElements([{id,type:'arrow',...start,points:[[0,0],[end.x-start.x,end.y-start.y]],
-    roughness:0,strokeWidth:2,strokeColor:'#746790',endArrowhead:'arrow'}],{regenerateIds:false})
-  if(edge.type!=='arrow')return
-  const bind=(elementId:string)=>({elementId,focus:0,gap:1,fixedPoint:null})
-  editor.updateScene({elements:[...all.map(el=>el.id===a.id||el.id===b.id?newElementWith(el,{boundElements:[...(el.boundElements||[]),{type:'arrow',id}]}):el),
-    newElementWith(edge,{startBinding:bind(a.id),endBinding:bind(b.id)})],captureUpdate:CaptureUpdateAction.IMMEDIATELY})
+  const destination = neighbor ?? (typeof target === 'string' ? all.find(el => el.id === target && !el.isDeleted && !el.locked) : undefined)
+  if (typeof target === 'string' && !destination) return
+  // Polygon outlines are native lines. Group each with a transparent native
+  // binding target on first connection so dragging and undo work in Excalidraw.
+  function bindingTarget(el: ExcalidrawElement) {
+    if (el.type !== 'line') return el
+    const group = el.id + '-ports'
+    const existing = all.find(item => item.groupIds.includes(group) && item.customData?.officeShapeAnchor && !item.isDeleted)
+    if (existing) return existing
+    const box = shapeBox(el)
+    const [anchor] = convertToExcalidrawElements([{ type: 'rectangle', id: newId('port'), ...box,
+      strokeColor: 'transparent', backgroundColor: 'transparent', opacity: 0,
+      customData: { officeShapeAnchor: true }, groupIds: [group] }], { regenerateIds: false })
+    all.splice(all.indexOf(el), 1, newElementWith(el, { groupIds: [group] }), anchor)
+    return anchor
+  }
+  const a = bindingTarget(source), b = destination && bindingTarget(destination)
+  const start = pointOnSide(a, side)
+  let end: BoardPoint
+  if (b) {
+    const cx = b.x + b.width / 2, cy = b.y + b.height / 2
+    const dx = start.x - cx, dy = start.y - cy
+    const nx = dx / Math.max(0.1, b.width / 2), ny = dy / Math.max(0.1, b.height / 2)
+    const divisor = b.type === 'ellipse' ? Math.hypot(nx, ny) : b.type === 'diamond' ? Math.abs(nx) + Math.abs(ny) : Math.max(Math.abs(nx), Math.abs(ny))
+    end = divisor ? { x: cx + dx / divisor, y: cy + dy / divisor } : { x: cx, y: cy }
+  } else end = target as BoardPoint
+  if (Math.hypot(end.x - start.x, end.y - start.y) < 1) return
+  const id = newId('connector')
+  const [edge] = convertToExcalidrawElements([{ id, type: 'arrow', ...start, points: [[0, 0], [end.x-start.x, end.y-start.y]],
+    roughness: 0, strokeWidth: 2, strokeColor: '#746790', endArrowhead: 'arrow' }], { regenerateIds: false })
+  if (edge.type !== 'arrow') return
+  const bind = (elementId: string) => ({ elementId, focus: 0, gap: 1, fixedPoint: null })
+  editor.updateScene({
+    elements: [...all.map(el => el === a || el === b ? newElementWith(el, { boundElements: [...(el.boundElements || []), { type: 'arrow', id }] }) : el),
+      newElementWith(edge, { startBinding: bind(a.id), endBinding: b ? bind(b.id) : null })],
+    ...(neighbor && b && { appState: { selectedElementIds: { [neighbor.id]: true, [b.id]: true } as Record<string, true> } }),
+    captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+  })
 }
 
 export function specElements(
@@ -199,6 +247,7 @@ export function insertComment(
   at: BoardPoint,
   author: string,
   text: string,
+  metadata: {createdAt:number;authorId?:string;mentions:import('./BoardMentions').BoardMention[];imageFileId?:string},
 ) {
   const id = newId('comment')
   insertBoardShapes(
@@ -218,6 +267,7 @@ export function insertComment(
         customData: {
           ...tag({ kind: 'comment', root: id, author }),
           officeComment: text,
+          ...metadata,
         },
         label: {
           text: author.slice(0, 1) || '·',

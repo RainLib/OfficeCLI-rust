@@ -16,6 +16,8 @@
 .hcd-surface[data-theme] .slide-number { color:var(--muted); font-size:10px; line-height:1; font-variant-numeric:tabular-nums; }
 .hcd-surface[data-theme] .slide-card.is-active .slide-number { color:var(--accent); }
 .hcd-surface[data-theme] .slide-actions { position:absolute; z-index:2; top:7px; right:7px; display:flex; gap:2px; padding:3px; border:1px solid var(--line); border-radius:8px; background:var(--surface-raised); box-shadow:0 2px 10px #0001; opacity:0; pointer-events:none; transition:opacity .12s; }
+/* Entering a control directly must reveal the action strip even after a reorder. */
+.hcd-surface[data-theme] .slide-actions > button { pointer-events:auto; }
 .hcd-surface[data-theme] .slide-card:hover .slide-actions,.hcd-surface[data-theme] .slide-card:focus-within .slide-actions { opacity:1; pointer-events:auto; }
 .hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .slide-actions button { display:flex; align-items:center; justify-content:center; width:24px; height:24px; min-height:0; padding:4px; border:0; background:transparent; color:var(--muted); border-radius:5px; }
 .hcd-surface[data-theme] .workspace.fixed-workspace .page-navigator .slide-actions button:hover { background:var(--hover); color:var(--ink); }
@@ -62,3 +64,36 @@
 @media(max-width:760px) { .hcd-surface[data-theme] .header-actions .properties-trigger { display:none; } }
 @media(hover:none) { .hcd-surface[data-theme] .slide-actions { opacity:1; pointer-events:auto; } }
 @media(prefers-reduced-motion:reduce) { .hcd-surface[data-theme] :is(.slide-actions,.page-thumbnail) { transition:none; } }
+
+.slide-command-group svg { width:15px; height:15px; flex:none; }
+.hcd-surface .content-toolbar-actions .slide-play { background:var(--accent-soft); color:var(--accent); }
+.hcd-surface dialog.slide-show { position:fixed; inset:0; box-sizing:border-box; margin:0; width:100%; height:100dvh; max-width:none; max-height:none; padding:0; border:0; background:#16181d; color:white; }
+.slide-show[open] { display:grid; grid-template-rows:minmax(0,1fr) 60px; }
+.slide-show .slide-show-stage { display:grid; place-items:center; min-height:0; overflow:hidden; text-align:center; }
+.hcd-surface .slide-show .page-thumbnail { display:block; position:relative; width:100%; overflow:hidden; border:0; border-radius:0; box-shadow:none; }
+.slide-show footer { display:flex; justify-content:center; align-items:center; gap:12px; }
+.hcd-surface .slide-show footer button { width:34px; height:34px; border:0; border-radius:10px; background:#30333c; color:white; }
+.slide-show footer output { font-variant-numeric:tabular-nums; }
+.hcd-surface dialog.hcd-dialog.pptx-master-dialog { width:min(440px,calc(100vw - 28px)); border:1px solid var(--line); background:var(--surface); color:var(--ink); }
+.pptx-master-dialog::backdrop { background:#18202060; }
+.pptx-master-dialog header, .pptx-master-dialog footer { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.hcd-surface .pptx-master-dialog h2 { margin:0; }
+.pptx-master-dialog dl { display:grid; gap:8px; border-block:1px solid var(--line); padding:12px 0; }
+.pptx-master-dialog dl div { display:grid; grid-template-columns:84px minmax(0,1fr); gap:8px; }
+.pptx-master-dialog dd { margin:0; overflow-wrap:anywhere; }
+.pptx-master-dialog dt, .hcd-surface .pptx-master-dialog .pptx-master-inheritance { color:var(--muted); }
+.pptx-master-color { display:grid; gap:6px; }
+.pptx-master-color div { display:flex; gap:8px; }
+.hcd-surface .pptx-master-dialog input { color:var(--ink); background:var(--stage); border-color:var(--line); }
+.hcd-surface .pptx-master-dialog input[type="color"] { width:39px; height:38px; padding:4px; }
+.hcd-surface .pptx-master-dialog input[type="text"] { width:108px; font-variant-numeric:tabular-nums; }
+.hcd-surface .pptx-master-dialog [role="alert"] { color:var(--danger,#ac3636); }
+.pptx-master-dialog footer { justify-content:flex-end; margin-top:16px; }
+.pptx-master-sections { display:flex; gap:4px; padding:4px; margin-bottom:16px; border-radius:10px; background:var(--stage); }
+.pptx-master-sections button { flex:1; border:0; background:transparent; }
+.pptx-master-sections button[aria-pressed="true"] { background:var(--surface); color:var(--accent); box-shadow:0 1px 4px #152c2610; }
+.pptx-master-text { display:grid; gap:12px; }
+.pptx-master-text-row { display:flex; gap:10px; }
+.pptx-master-text label { display:grid; gap:5px; min-width:0; flex:1; font-size:12px; color:var(--muted); }
+.hcd-surface .pptx-master-text :is(input, select) { width:100%; min-width:0; min-height:34px; box-sizing:border-box; padding:6px 8px; border:1px solid var(--line); border-radius:8px; color:var(--ink); background:var(--stage); }
+.pptx-master-dialog { max-height:calc(100dvh - 32px); overflow:auto; }

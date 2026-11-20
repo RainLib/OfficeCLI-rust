@@ -139,6 +139,43 @@ test('real inpaint stages, region lease, owner cancellation, pixel boundaries an
   const content = await client.callTool({ name: 'hcd_image_edit', arguments: { document_id: id, action: 'info' } }); expect(content.isError).not.toBe(true); await client.close()
 })
 
+test('applying AI to a layered image keeps the existing pixels in their layers', async () => {
+  const { documentId: id } = await upload()
+  const initial = (await json(id, '/image')).imageLayers
+  const patch = async (revision: number, state: typeof initial, stack = state.stack) => json(id, '/node-patch', {
+    schemaVersion: 'hcd-patch/63', documentId: id, patchId: randomBytes(16).toString('hex'), baseRevision: revision,
+    operations: [{ op: 'image.layers.set', nodeId: state.nodeId, stack, precondition: { visualHash: state.visualHash } }],
+  })
+  expect((await patch(0, initial)).revision).toBe(1)
+  const job = await json(id, '/image/jobs', {
+    expectedRevision: 1, mask: mask.toString('base64'), prompt: '调整指定区域的颜色', agents: 1, feather: 0,
+  })
+  await expect.poll(async () => (await json(id, '/image/jobs')).jobs.find((item: { jobId: string; status: string }) =>
+    item.jobId === job.jobId)?.status, { timeout: 40_000 }).toBe('ready')
+  expect((await json(id, `/image/jobs/${job.jobId}/apply`, { expectedRevision: 1 })).revision).toBe(2)
+  const state = (await json(id, '/image')).imageLayers
+  expect(state.stack.layers.slice(0, -1)).toEqual(initial.stack.layers)
+  const [x, y, width, height] = job.region
+  const replacement = state.stack.layers.at(-1)
+  expect(replacement).toMatchObject({ name: '局部重绘结果', blend: 'replace', visible: true, x, y, width, height })
+  const readPixels = async (route: string) => {
+    const response = await request(id, route)
+    expect(response.status).toBe(200)
+    const bitmap = await loadImage(Buffer.from(await response.arrayBuffer()))
+    const canvas = createCanvas(bitmap.width, bitmap.height)
+    const context = canvas.getContext('2d')
+    context.drawImage(bitmap, 0, 0)
+    return Buffer.from(context.getImageData(0, 0, bitmap.width, bitmap.height).data)
+  }
+  const saved = await readPixels('/image/content?revision=2')
+  expect(saved.equals(await readPixels(`/image/jobs/${job.jobId}/content`))).toBe(true)
+  const withoutReplacement = { ...state.stack, layers: [...initial.stack.layers, { ...replacement, visible: false }] }
+  expect((await patch(2, state, withoutReplacement)).revision).toBe(3)
+  const original = await readPixels('/image/content?revision=1')
+  expect(original.equals(saved)).toBe(false)
+  expect(original.equals(await readPixels('/image/content?revision=3'))).toBe(true)
+})
+
 test('overlapping jobs wait, failures release leases, and copies validate actual encoding', async () => {
   const doc = await upload(), id = doc.documentId
   const r = { expectedRevision: 0, mask: mask.toString('base64'), prompt: 'FORCE_FAILURE', agents: 1, feather: 0 }

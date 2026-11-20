@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { check, hash, now, random, uuid } from "./store.mjs";
 import { documentId } from "./provider.mjs";
-import { sheetTarget, selectedCells, sheetEdit } from "./workbench-targets.mjs";
+import { sheetTarget, selectedCells, relocateSheetSelection, sheetEdit } from "./workbench-targets.mjs";
+import { textUndo, sheetUndo } from "./workbench-undo.mjs";
+import { readCellRuns } from "./workbench-cell-runs.mjs";
 
 const integer = (value) => Number.isSafeInteger(value) && value >= 0;
 const stale = "选区或文件版本已改变，请在编辑器里重新选择。";
 const textFormats = new Set(["docx", "md", "txt", "html"]);
+const sheetFormats = new Set(["xlsx", "csv", "tsv"]);
 export const supportsSelectionFormat = (format) =>
-  format === "excalidraw" || format === "xlsx" || textFormats.has(format);
+  format === "excalidraw" || sheetFormats.has(format) || textFormats.has(format);
 
 function specLines(element) {
   const tag = element.customData?.officeBoard;
@@ -49,7 +52,7 @@ function validateTarget(file, value) {
     400,
     "选区需要修订和协作版本。",
   );
-  if (file.format === "xlsx" && target?.kind === "sheet")
+  if (sheetFormats.has(file.format) && target?.kind === "sheet")
     return sheetTarget(target);
   if (
     target?.kind === "append" &&
@@ -146,6 +149,16 @@ export function createSelectionGrants({ store, config, engine }) {
   }
   function publish(userId) {
     for (const listener of watchers.get(userId) || []) listener();
+  }
+  function startActivity(userId, fileId, requestId, agentName) {
+    for (const [key, old] of activity) if (old.until < now()) activity.delete(key);
+    const event = { userId, fileId, requestId, agentName, phase: "editing", at: Date.now(), until: now() + 180 };
+    activity.set(`${userId}:${fileId}:${requestId}`, event);
+    publish(userId);
+    return (revision) => {
+      Object.assign(event, { phase: revision === undefined ? "failed" : "complete", revision, at: Date.now(), until: now() + 45 });
+      publish(userId);
+    };
   }
   function recentActivity(account) {
     const visible = [];
@@ -267,11 +280,14 @@ export function createSelectionGrants({ store, config, engine }) {
       }
       return {};
     }
-    if (sheet)
+    if (sheet) {
+      const cells = selectedCells(grant.target, data);
+      grant.cellNodes = cells.map(({ cell }) => cell?.nodeId ?? null);
       return {
-        cells: selectedCells(grant.target, data),
+        cells,
         sheetName: data.sheetName,
       };
+    }
     if (grant.target.kind === "append")
       return {
         afterBlockId: board
@@ -323,6 +339,10 @@ export function createSelectionGrants({ store, config, engine }) {
         stale,
       );
       return { block, span, text };
+    });
+    grant.spanSources = spans.map(({ block, text }) => {
+      const value = block.content.inlines.map(run => run.text).join("");
+      return { blockHash: block.blockHash, text, unique: value.indexOf(text) === value.lastIndexOf(text) };
     });
     return { spans };
   }
@@ -411,6 +431,58 @@ export function createSelectionGrants({ store, config, engine }) {
     access(grant);
     return grant;
   }
+
+  function snapshot(grant) {
+    access(grant);
+    return { documentId: grant.documentId, revision: grant.revision, collaborationEpoch: grant.epoch,
+      target: grant.target, cellNodes: grant.cellNodes, spanSources: grant.spanSources };
+  }
+
+  async function withWorkbenchSelection(account, file, launchId, launch, saved, use) {
+    check(saved && saved.documentId === launch.documentId, 409, "请打开此文件并重新确认选区。");
+    const base = "/v1/documents/" + saved.documentId;
+    const original = saved.target;
+    const [data, auth] = await Promise.all([
+      engine(base + (original.kind === "sheet" ? "/sheets/" + original.sheetId : file.format === "excalidraw" ? "/canvas" : "/editor"),
+        { token: launch.token }),
+      engine(base + "/auth", { token: launch.token }),
+    ]);
+    check(auth.documentId === saved.documentId && integer(data.revision) && integer(auth.collaborationEpoch), 409, stale);
+    let target = original;
+    if (original.kind === "sheet") {
+      target = data.revision === saved.revision
+        ? { ...original, sheetIndex: data.sheetIndex }
+        : relocateSheetSelection(original, data, saved.cellNodes);
+    } else if (original.kind === "document" && data.revision !== saved.revision) {
+      const blocks = new Map(data.blocks.map(block => [block.blockId, block]));
+      const spans = original.spans.map((span, index) => {
+        const block = blocks.get(span.blockId);
+        const source = saved.spanSources?.[index];
+        check(block && !block.readOnly && block.region === "body" && block.content.kind !== "opaque" && source, 409, stale);
+        if (block.blockHash === source.blockHash) return span;
+        const current = block.content.inlines.map(run => run.text).join("");
+        const offset = current.indexOf(source.text);
+        check(source.unique && offset >= 0 && current.lastIndexOf(source.text) === offset, 409, stale);
+        const start = [...current.slice(0, offset)].length;
+        return { ...span, start, end: start + span.end - span.start };
+      });
+      target = { ...original, spans };
+    } else if (original.kind === "spec") {
+      check(auth.collaborationEpoch === saved.collaborationEpoch, 409, stale);
+    }
+    const instanceId = randomUUID();
+    const key = account.hash + ":" + instanceId;
+    try {
+      const authorization = await set(account, {
+        instanceId, generation: 1, fileId: file.id, launchId,
+        selection: { documentId: saved.documentId, revision: data.revision, collaborationEpoch: auth.collaborationEpoch, target },
+      });
+      return await use(authenticate("Bearer " + authorization.token));
+    } finally {
+      discard(instances.get(key));
+      instances.delete(key);
+    }
+  }
   // Ephemeral activity is intentionally separate from grants and patches.
   // The same agent identity moves from the source to the committed range.
   function presenceIdentity(grant, actor) {
@@ -436,6 +508,213 @@ export function createSelectionGrants({ store, config, engine }) {
     timer.unref();
     return (clear)=>{clearInterval(timer);if(clear){try{pulse(grant,true)}catch{}}};
   }
+  async function prepareMutation(grant, name, args, captureUndo = false) {
+    const expectedRevision = grant.revision;
+    const board = grant.format === "excalidraw",
+      sheet = grant.target.kind === "sheet",
+      append = grant.target.kind === "append";
+    check(
+      name ===
+        (append
+          ? "append_to_file"
+          : sheet
+            ? "edit_selected_cells"
+            : board && grant.target.kind !== "spec"
+              ? "edit_canvas_selection"
+              : "replace_selected_text"),
+      400,
+      "该工具不适用于当前选区。",
+    );
+    const specOnly =
+      board &&
+      !append &&
+      Array.isArray(args.edits) &&
+      args.edits.length > 0 &&
+      args.edits.every(
+        (e) =>
+          grant.specSources?.has(e.id) &&
+          e.specSplice &&
+          Object.keys(e).every((k) => k === "id" || k === "specSplice"),
+      );
+    const { spans, elements, cells, afterBlockId } = await inspect(
+      grant,
+      specOnly,
+    );
+    const appended = append ? (captureUndo && args.items || [{ text: args.text, title: args.title }]) : [];
+    let operations, textEdits;
+    let batch,
+      schemaVersion = board ? "officecli-canvas/1" : "hcd-patch/4";
+    if(grant.target.kind==="spec") {
+      const {id,block,start,end,expected}=grant.target;
+      check(Array.isArray(args.replacements) && args.replacements.length===1 && typeof args.replacements[0]==="string" && args.replacements[0].length<=16000 && !/[\r\n]/.test(args.replacements[0]),400,"选句改写需要一段替换文字。");
+      operations=[{op:"spec.splice",id,block,start,end,expected,insert:args.replacements[0]}];
+    } else if (sheet)
+      ({ operations, schemaVersion } = sheetEdit(
+        grant.target,
+        cells,
+        args.edits,
+      ));
+    else if (append && board) {
+      const planned = await engine(
+        "/v1/documents/" + grant.documentId + "/canvas/layout",
+        {
+          token: access(grant),
+          method: "POST",
+          data: {
+            expectedRevision: grant.revision,
+            patchId: args.requestId,
+            composition: {
+              title: args.title || "工作笔记",
+              layout: "grid",
+              items: appended.map(({ text, title }) => ({ kind: "note", title: title || "笔记", body: text })),
+            },
+          },
+        },
+      );
+      check(
+        planned.collaborationEpoch === grant.epoch &&
+          planned.batch?.vacantRegions?.length,
+        409,
+        stale,
+      );
+      batch = planned.batch;
+      operations = batch.operations;
+    } else if (append) {
+      // All inserts share the existing anchor. Apply in reverse so the
+      // paragraphs appear in the planned order after that anchor.
+      operations = [...appended].reverse().map(({ text }) => ({
+          op: "block.insert",
+          afterBlockId,
+          block: { kind: "paragraph", inlines: [{ text }] },
+      }));
+    } else if (spans) {
+      check(
+        args.replacements.length === spans.length && args.replacements.some(value => typeof value === "string"),
+        400,
+        "每个选区都需要一个替换文本。",
+      );
+      textEdits = spans.flatMap((source, i) => args.replacements[i] === null ? [] : [{ ...source, replacement: args.replacements[i] }]);
+      operations = textEdits.map(({ block, span, replacement }) => replaceSpan(block, span, replacement));
+    } else {
+      const byId = new Map(elements.map((e) => [e.id, e]));
+      check(
+        new Set(args.edits.map((e) => e.id)).size === args.edits.length,
+        400,
+        "同一对象只能修改一次。",
+      );
+      operations = args.edits.map(
+        ({ id, text, specSplice, strokeColor, backgroundColor, dx, dy }) => {
+          const e = byId.get(id);
+          check(e, 403, "对象位于已授权选区之外。");
+          if (specSplice) {
+            check(
+              specOnly,
+              400,
+              "Spec 局部改写需要单独提交并指向授权的段落。",
+            );
+            const { block, start, end, expected, insert } = specSplice;
+            const source = grant.specSources.get(id)[block];
+            check(
+              typeof source === "string" &&
+                integer(block) &&
+                typeof insert === "string" &&
+                integer(start) &&
+                integer(end) &&
+                start <= end &&
+                end <= Array.from(source).length &&
+                Array.from(source).slice(start, end).join("") === expected,
+              409,
+              stale,
+            );
+            return {
+              op: "spec.splice",
+              id,
+              block,
+              start,
+              end,
+              expected,
+              insert,
+            };
+          }
+          const changes = {};
+          if (text !== undefined) {
+            check(e.type === "text", 400, "只有文字对象可以替换文字。");
+            changes.text = text;
+            changes.originalText = text;
+          }
+          if (strokeColor !== undefined) changes.strokeColor = strokeColor;
+          if (backgroundColor !== undefined)
+            changes.backgroundColor = backgroundColor;
+          if (dx !== undefined) changes.x = e.x + dx;
+          if (dy !== undefined) changes.y = e.y + dy;
+          check(
+            Object.keys(changes).length > 0,
+            400,
+            "请选择要修改的对象属性。",
+          );
+          return {
+            op: "element.update",
+            id,
+            before: Object.fromEntries(
+              Object.keys(changes).map((key) => [key, e[key] ?? null]),
+            ),
+            changes,
+          };
+        },
+      );
+    }
+    const data = batch ?? {
+      schemaVersion, documentId: grant.documentId, patchId: args.requestId, baseRevision: expectedRevision, operations,
+    };
+    const route = board ? "/canvas/patch" : sheet ? "/node-patch" : "/patch";
+    const preview = append ? appended.map(({ title, text }) => ({ label: title || "新增内容", before: "", after: text }))
+      : sheet ? args.edits.map(({ address, value }) => ({ label: address,
+          before: cells.find(cell => cell.address === address)?.cell?.text ?? "", after: value }))
+      : textEdits ? textEdits.map(({ text, replacement }) => ({ label: "选中文字", before: text, after: replacement }))
+      : operations.flatMap(operation => operation.op === "spec.splice"
+          ? [{ label: "Spec 选句", before: operation.expected, after: operation.insert }]
+          : Object.entries(operation.changes).filter(([field]) => field !== "originalText").map(([field, after]) => ({
+              label: { text: "白板文字", strokeColor: "描边", backgroundColor: "填充", x: "横向位置", y: "纵向位置" }[field] || field,
+              before: operation.before[field], after,
+            })));
+    let undoCells = cells;
+    if (captureUndo && sheet && grant.format === "xlsx") {
+      const targets = new Set(args.edits.map(edit => edit.address));
+      const runs = await readCellRuns(engine, access(grant), grant.documentId, grant.revision,
+        cells.filter(entry => targets.has(entry.address)).map(entry => entry.cell));
+      access(grant);
+      undoCells = cells.map(entry => ({ ...entry, cell: entry.cell && { ...entry.cell,
+        ...(runs.has(entry.cell.nodeId) && { xlsxRuns: runs.get(entry.cell.nodeId) }) } }));
+    }
+    const undo = !captureUndo ? undefined : textEdits ? textUndo(textEdits, operations, textEdits.map(edit => edit.replacement))
+      : sheet ? sheetUndo(grant.target, undoCells, args.edits, grant.format)
+      : !append && board && operations.every(operation => operation.op === "element.update") &&
+        !operations.some(operation => Object.hasOwn(operation.changes, "text") && specLines(elements.find(element => element.id === operation.id)))
+        ? { kind: "canvas" } : undefined;
+    return { route, data, epoch: grant.epoch, strict: !specOnly && grant.target.kind !== "spec", preview, undo };
+  }
+
+  async function commitPrepared(token, prepared, actor) {
+    return engine("/v1/documents/" + prepared.data.documentId + prepared.route, {
+      token, method: "POST",
+      headers: {
+        "X-HCD-Collaboration-Epoch": String(prepared.epoch),
+        ...agentHeaders(actor),
+        ...(prepared.strict && { "X-HCD-Expected-Revision": String(prepared.data.baseRevision) }),
+        ...(prepared.preserveReferences && { "X-HCD-Preserve-References": "true" }),
+      },
+      data: prepared.data,
+    });
+  }
+
+  async function prepareReview(grant, jobId, name, args) {
+    access(grant);
+    check(!grant.receipt && !grant.busy && !grant.review, 409, "选区已用于其他提交，请重新选择。");
+    grant.review = jobId;
+    try { return await prepareMutation(grant, name, args, true); }
+    catch (error) { delete grant.review; throw error; }
+  }
+
   async function call(grant, name, args, identity) {
     const actor = presenceIdentity(grant, identity);
     access(grant);
@@ -483,241 +762,35 @@ export function createSelectionGrants({ store, config, engine }) {
                 }),
       };
     }
-    const board = grant.format === "excalidraw",
-      sheet = grant.target.kind === "sheet",
-      append = grant.target.kind === "append";
-    check(
-      name ===
-        (append
-          ? "append_to_file"
-          : sheet
-            ? "edit_selected_cells"
-            : board && grant.target.kind !== "spec"
-              ? "edit_canvas_selection"
-              : "replace_selected_text"),
-      400,
-      "该工具不适用于当前选区。",
-    );
     const intent = JSON.stringify([name, args]);
     if (grant.receipt && grant.intent === intent) return grant.receipt;
     check(
-      !grant.receipt && !grant.busy,
+      !grant.receipt && !grant.busy && !grant.review,
       409,
       "当前授权正在提交或已经使用，请重新选择。",
     );
     grant.busy = true;
-    const event = {
-      userId: grant.userId,
-      agentName: actor.name,
-      fileId: grant.fileId,
-      requestId: args.requestId,
-      phase: "editing",
-      at: Date.now(),
-      until: now() + 180,
-    };
-    const activityKey = grant.digest + args.requestId;
-    for (const [key, old] of activity)
-      if (old.until < now()) activity.delete(key);
-    activity.set(activityKey, event);
-    publish(grant.userId);
+    const finish = startActivity(grant.userId, grant.fileId, args.requestId, actor.name);
     try {
-      const specOnly =
-        board &&
-        !append &&
-        Array.isArray(args.edits) &&
-        args.edits.length > 0 &&
-        args.edits.every(
-          (e) =>
-            grant.specSources?.has(e.id) &&
-            e.specSplice &&
-            Object.keys(e).every((k) => k === "id" || k === "specSplice"),
-        );
-      const { spans, elements, cells, afterBlockId } = await inspect(
-        grant,
-        specOnly,
-      );
-      let operations;
-      let batch,
-        schemaVersion = board ? "officecli-canvas/1" : "hcd-patch/4";
-      if(grant.target.kind==="spec") {
-        const {id,block,start,end,expected}=grant.target;
-        check(Array.isArray(args.replacements) && args.replacements.length===1 && typeof args.replacements[0]==="string" && args.replacements[0].length<=16000 && !/[\r\n]/.test(args.replacements[0]),400,"选句改写需要一段替换文字。");
-        operations=[{op:"spec.splice",id,block,start,end,expected,insert:args.replacements[0]}];
-        pulse(grant,false,"writing",actor);
-      } else if (sheet)
-        ({ operations, schemaVersion } = sheetEdit(
-          grant.target,
-          cells,
-          args.edits,
-        ));
-      else if (append && board) {
-        const planned = await engine(
-          "/v1/documents/" + grant.documentId + "/canvas/layout",
-          {
-            token: access(grant),
-            method: "POST",
-            data: {
-              expectedRevision: grant.revision,
-              patchId: args.requestId,
-              composition: {
-                title: args.title || "工作笔记",
-                layout: "grid",
-                items: [
-                  {
-                    kind: "note",
-                    title: args.title || "笔记",
-                    body: args.text,
-                  },
-                ],
-              },
-            },
-          },
-        );
-        check(
-          planned.collaborationEpoch === grant.epoch &&
-            planned.batch?.vacantRegions?.length,
-          409,
-          stale,
-        );
-        batch = planned.batch;
-        operations = batch.operations;
-      } else if (append) {
-        operations = [
-          {
-            op: "block.insert",
-            afterBlockId,
-            block: { kind: "paragraph", inlines: [{ text: args.text }] },
-          },
-        ];
-      } else if (spans) {
-        check(
-          args.replacements.length === spans.length,
-          400,
-          "每个选区都需要一个替换文本。",
-        );
-        operations = spans.map(({ block, span }, i) =>
-          replaceSpan(block, span, args.replacements[i]),
-        );
-      } else {
-        const byId = new Map(elements.map((e) => [e.id, e]));
-        check(
-          new Set(args.edits.map((e) => e.id)).size === args.edits.length,
-          400,
-          "同一对象只能修改一次。",
-        );
-        operations = args.edits.map(
-          ({ id, text, specSplice, strokeColor, backgroundColor, dx, dy }) => {
-            const e = byId.get(id);
-            check(e, 403, "对象位于已授权选区之外。");
-            if (specSplice) {
-              check(
-                specOnly,
-                400,
-                "Spec 局部改写需要单独提交并指向授权的段落。",
-              );
-              const { block, start, end, expected, insert } = specSplice;
-              const source = grant.specSources.get(id)[block];
-              check(
-                typeof source === "string" &&
-                  integer(block) &&
-                  typeof insert === "string" &&
-                  integer(start) &&
-                  integer(end) &&
-                  start <= end &&
-                  end <= Array.from(source).length &&
-                  Array.from(source).slice(start, end).join("") === expected,
-                409,
-                stale,
-              );
-              return {
-                op: "spec.splice",
-                id,
-                block,
-                start,
-                end,
-                expected,
-                insert,
-              };
-            }
-            const changes = {};
-            if (text !== undefined) {
-              check(e.type === "text", 400, "只有文字对象可以替换文字。");
-              changes.text = text;
-              changes.originalText = text;
-            }
-            if (strokeColor !== undefined) changes.strokeColor = strokeColor;
-            if (backgroundColor !== undefined)
-              changes.backgroundColor = backgroundColor;
-            if (dx !== undefined) changes.x = e.x + dx;
-            if (dy !== undefined) changes.y = e.y + dy;
-            check(
-              Object.keys(changes).length > 0,
-              400,
-              "请选择要修改的对象属性。",
-            );
-            return {
-              op: "element.update",
-              id,
-              before: Object.fromEntries(
-                Object.keys(changes).map((key) => [key, e[key] ?? null]),
-              ),
-              changes,
-            };
-          },
-        );
-      }
-      const token = access(grant);
-      const result = await engine(
-        "/v1/documents/" +
-          grant.documentId +
-          (board ? "/canvas/patch" : sheet ? "/node-patch" : "/patch"),
-        {
-          token,
-          method: "POST",
-          headers: {
-            "X-HCD-Collaboration-Epoch": String(grant.epoch),
-            ...agentHeaders(actor),
-            ...(specOnly || grant.target.kind === "spec"
-              ? {}
-              : { "X-HCD-Expected-Revision": String(grant.revision) }),
-          },
-          data: batch ?? {
-            schemaVersion,
-            documentId: grant.documentId,
-            patchId: args.requestId,
-            baseRevision: grant.revision,
-            operations,
-          },
-        },
-      );
+      const prepared = await prepareMutation(grant, name, args);
+      pulse(grant, false, "writing", actor);
+      const result = await commitPrepared(access(grant), prepared, actor);
       const receipt = {
         documentId: grant.documentId,
         requestId: args.requestId,
         revision: result.revision ?? result.newRevision,
-        changed: operations.length,
+        changed: prepared.data.operations.length,
         ...(grant.target.kind==="spec" && {specUndo:{id:grant.target.id,revision:result.revision,epoch:grant.epoch}}),
       };
       grant.receipt = receipt;
-      Object.assign(event, {
-        phase: "complete",
-        revision: receipt.revision,
-        at: Date.now(),
-        until: now() + 45,
-      });
       grant.intent = intent;
       store.audit(grant.userId, "embed.selection.edited", grant.fileId);
       return receipt;
-    } catch (error) {
-      Object.assign(event, {
-        phase: "failed",
-        at: Date.now(),
-        until: now() + 45,
-      });
-      throw error;
     } finally {
       grant.busy = false;
-      publish(grant.userId);
+      finish(grant.receipt?.revision);
     }
   }
-  return { set, authenticate, call, recentActivity, subscribe, planning };
+  return { set, authenticate, call, recentActivity, subscribe, planning, snapshot, withWorkbenchSelection,
+    prepareReview, commitPrepared, startActivity };
 }

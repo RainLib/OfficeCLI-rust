@@ -3,6 +3,7 @@ import { assertPatchSupported, forgetCapabilities, readCapabilities } from './ca
 export type Session = {
   documentId: string
   title?: string
+  locale?: string
   token: string
   /** Live credential getter for an embedded session renewed without remounting. */
   accessToken?: () => string
@@ -18,6 +19,8 @@ export type Session = {
   hostIntegration?: boolean
   hideNativeChat?: boolean
   canvasLayout?: 'panel' | 'fill'
+  /** The host tab already displays the file name. */
+  integratedToolbar?: boolean
   operations?: string[]
 }
 

@@ -157,7 +157,7 @@ async function main() {
     { ...process.env, OFFICECLI_BOOTSTRAP_PASSWORD: adminPassword },
   );
   service = spawn(process.execPath, [cli, "start", "--root", root, "--assets", assets], {
-    env: { ...process.env, OFFICECLI_AI_ENABLED: "false",
+    env: { ...process.env, OFFICECLI_AI_ENABLED: process.env.OFFICECLI_DEMO_ENGINE_AI === "true" ? "true" : "false",
       ...(model ? { OFFICECLI_WORKBENCH_OLLAMA_MODEL: model, OFFICECLI_WORKBENCH_OLLAMA_URL: process.env.OFFICECLI_DEMO_OLLAMA_URL || "http://127.0.0.1:11434" } : {}),
     },
     stdio: ["ignore", "ignore", "inherit"],
