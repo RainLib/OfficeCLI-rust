@@ -3,7 +3,8 @@
 mod storage;
 pub use canvas_core::{Batch, CanvasError, Operation, Region, Scene, Selection, PROTOCOL};
 pub use storage::{
-    apply_batch, apply_batch_with_rewrite, read_scene, rewrite_inverse, store_initial_scene,
+    apply_batch, apply_batch_with_rewrite, read_elements, read_scene, rewrite_inverse,
+    store_initial_scene,
 };
 
 pub fn node_id(document_id: &str, element_id: &str) -> String {

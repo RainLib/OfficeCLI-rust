@@ -1848,6 +1848,7 @@ fn commit_document_theme(
         grid_filter_changed: false,
         grid_values_reordered: false,
         pdf_layout_changed: false,
+        pptx_scene_changed: false,
         converted_formula_node_ids: Vec::new(),
         grid_row_insertions: Vec::new(),
         grid_row_deletions: Vec::new(),
@@ -1860,6 +1861,9 @@ fn commit_document_theme(
         slide_removals: Vec::new(),
         slide_reorders: Vec::new(),
         slide_copies: Vec::new(),
+        slide_group_edit: None,
+        pptx_master_backgrounds: bundle.revision(manifest.revision)?.pptx_master_backgrounds,
+        pptx_master_text_styles: bundle.revision(manifest.revision)?.pptx_master_text_styles,
         structural_change: false,
     };
     manifest.revision = new_revision;

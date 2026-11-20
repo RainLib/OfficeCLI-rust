@@ -354,6 +354,27 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     &descriptor.html_href,
                 ));
             }
+            match crate::image_layers::saved_stack(&html) {
+                Ok(Some(stack))
+                    if !crate::image_layers::standalone(&manifest.source.format)
+                        || stack
+                            .layers
+                            .iter()
+                            .any(|layer| !asset_hashes.contains(&layer.asset_hash)) =>
+                {
+                    issues.push(issue(
+                        "IMAGE_LAYERS_INVALID",
+                        "图层素材未登记或不属于独立图片".into(),
+                        &descriptor.html_href,
+                    ));
+                }
+                Err(error) => issues.push(issue(
+                    "IMAGE_LAYERS_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                )),
+                _ => {}
+            }
             match validate_html_fragment_bytes(html.as_bytes(), &asset_hashes) {
                 Ok(fragments) => {
                     for fragment in fragments {
@@ -853,6 +874,9 @@ fn validate_revision_chain(
                 || !record.dirty_grid_parts.is_empty()
                 || record.grid_filter_changed
                 || record.pdf_layout_changed
+                || record.pptx_scene_changed
+                || !record.pptx_master_backgrounds.is_empty()
+                || !record.pptx_master_text_styles.is_empty()
                 || record.index_prefix != "indexes/rev-00000000000000000000"
             {
                 issues.push(issue(
@@ -882,7 +906,9 @@ fn validate_revision_chain(
                         && record.annotation_root_hash == historical.annotation_root_hash
                         && record.index_root_href == historical.index_root_href
                         && record.index_prefix == historical.index_prefix
-                        && record.asset_index_href == historical.asset_index_href => {},
+                        && record.asset_index_href == historical.asset_index_href
+                        && record.pptx_master_backgrounds == historical.pptx_master_backgrounds
+                        && record.pptx_master_text_styles == historical.pptx_master_text_styles => {},
                     _ => issues.push(issue(
                         "REVISION_RESTORE_TARGET_INVALID",
                         "restore revision must reference the exact roots and indexes of an earlier revision".to_string(),
@@ -1021,6 +1047,15 @@ fn validate_patch_revision(
     // with it, and an empty slide leaves neither behind. A slide move is the one
     // shape of its own: the index it rewrote says the same chunks in a different
     // order, so there are no nodes and no source part, only chunks that moved.
+    // Earlier PPTX object patches used source slide parts without mapped node
+    // changes too. Their revision records predate the explicit scene flag.
+    let legacy_pptx_scene = record.dirty_node_ids.is_empty()
+        && !record.dirty_source_parts.is_empty()
+        && record
+            .dirty_source_parts
+            .iter()
+            .all(|part| part.starts_with("ppt/slides/") && part.ends_with(".xml"));
+    let scene_changed = record.pptx_scene_changed || legacy_pptx_scene;
     let content_changed = !record.dirty_node_ids.is_empty()
         || !record.dirty_grid_parts.is_empty()
         || !record.sheet_renames.is_empty()
@@ -1031,15 +1066,55 @@ fn validate_patch_revision(
         || !record.slide_reorders.is_empty()
         || !record.slide_copies.is_empty()
         || record.grid_filter_changed
-        || record.pdf_layout_changed;
+        || record.pdf_layout_changed
+        || scene_changed;
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
-            || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())
+            || (scene_changed && record.dirty_source_parts.is_empty())
+            || (!scene_changed
+                && record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty()))
     {
         issues.push(issue(
             "REVISION_DIRTY_SET_INCONSISTENT",
             "dirty node/chunk/source-part sets do not consistently describe a content change"
                 .to_string(),
+            path,
+        ));
+    }
+    if record.pptx_master_backgrounds.iter().any(|(part, color)| {
+        !crate::pptx_design::valid_master_part(part)
+            || !crate::pptx_design::valid_pptx_background(color)
+    }) || !restore
+        && !record.pptx_scene_changed
+        && previous.is_some_and(|previous| {
+            previous.pptx_master_backgrounds != record.pptx_master_backgrounds
+        })
+    {
+        issues.push(issue(
+            "REVISION_PPTX_MASTER_BACKGROUND_INVALID",
+            "master backgrounds must be validated native parts and change with a scene revision"
+                .into(),
+            path,
+        ));
+    }
+    if record.pptx_master_text_styles.iter().any(|(part, styles)| {
+        let mut seen = std::collections::HashSet::new();
+        !crate::pptx_design::valid_master_part(part)
+            || styles.len() > 27
+            || styles.iter().any(|style| {
+                !seen.insert((style.kind.as_str(), style.level))
+                    || crate::pptx_design::validate_master_text_style(style).is_err()
+            })
+    }) || !restore
+        && !record.pptx_scene_changed
+        && previous.is_some_and(|previous| {
+            previous.pptx_master_text_styles != record.pptx_master_text_styles
+        })
+    {
+        issues.push(issue(
+            "REVISION_PPTX_MASTER_TEXT_INVALID",
+            "master text styles must be validated native parts and change with a scene revision"
+                .into(),
             path,
         ));
     }
@@ -1379,6 +1454,7 @@ fn validate_map_entry(
                 .as_deref()
                 .is_some_and(|v| v.starts_with("hcd:image:")))
             || (source.is_spreadsheet() && entry.source.node_kind == "cell")
+            || (source.format == "pdf" && crate::pdf_ocr::valid_source_anchor(&entry.source))
             || (source.format == "pptx"
                 && entry.source.node_kind == "slide-text"
                 && entry
@@ -1494,7 +1570,7 @@ fn validate_textual_source_range(
     }
 }
 
-fn valid_sha256(value: &str) -> bool {
+pub(crate) fn valid_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

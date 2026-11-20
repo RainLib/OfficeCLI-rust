@@ -199,7 +199,7 @@ pub(super) fn live_dirty(
                     }
                     continue;
                 }
-                if original.contains_key(&entry.node_id) {
+                if original.contains_key(&entry.node_id) || restored_text(&entry) {
                     parts.insert(entry.source.part.clone());
                     nodes.insert(entry.node_id);
                 }
@@ -309,7 +309,28 @@ pub(super) fn document(
         .and_then(|b| widths.get(b.block_id.as_str()))
         .map(|p| p.0)
         .unwrap_or(section_width);
-    let entries = original_entries(bundle)?;
+    let mut entries = original_entries(bundle)?;
+    let manifest = manifest_at_revision(bundle, &bundle.manifest()?, revision)?;
+    if hcd_core::docx_review::read(bundle, &manifest)?
+        .decisions
+        .iter()
+        .any(|decision| {
+            !decision.accept && decision.change.kind == hcd_core::docx_review::TrackedKind::Delete
+        })
+    {
+        for page in 0..manifest.index_page_count {
+            for chunk in bundle.read_index_page(&manifest, page)?.chunks {
+                for entry in bundle
+                    .read_map(&chunk)?
+                    .entries
+                    .into_iter()
+                    .filter(restored_text)
+                {
+                    entries.insert(entry.node_id.clone(), entry);
+                }
+            }
+        }
+    }
     let ordinals: HashMap<_, _> = entries
         .iter()
         .filter(|(_, e)| e.source.part == "word/document.xml")
@@ -404,6 +425,11 @@ fn html_element(block: &EditorBlockView) -> Result<Element, HcdError> {
     })
     .ok_or_else(|| bad("table HTML is empty"))
 }
+fn restored_text(entry: &NodeMapEntry) -> bool {
+    entry.source.part == "word/document.xml"
+        && entry.source.node_kind == "text"
+        && entry.source.text_ordinal >= hcd_core::docx_review::RESTORED_TEXT_BASE
+}
 fn escaped(s: &str) -> String {
     quick_xml::escape::escape(s).into_owned()
 }
@@ -476,6 +502,98 @@ struct Cell<'a> {
     native: Option<&'a Element>,
     native_row: Option<&'a Element>,
 }
+fn canonical_ids(e: &Element, out: &mut Vec<String>) {
+    if let Some(id) = e.attr("data-hcd-id") {
+        out.push(id.into());
+    }
+    for child in e.elements() {
+        canonical_ids(child, out);
+    }
+}
+
+/// A merged cell owns complete bodies from multiple original cells. Keep those
+/// bodies (including pictures, hyperlinks and run properties) in canonical
+/// order instead of copying only the first cell or flattening them to text.
+fn cell_body(
+    html: &Element,
+    template: Option<&Element>,
+    origins: &HashMap<String, (&Element, &Element)>,
+    ordinals: &HashMap<&str, u64>,
+    updates: &BTreeMap<u64, TextUpdate>,
+) -> Result<String, HcdError> {
+    let mut groups: Vec<(Option<&Element>, Vec<Xml>)> = vec![];
+    for child in &html.children {
+        let mut ids = vec![];
+        if let Xml::Element(element) = child {
+            canonical_ids(element, &mut ids);
+        }
+        let sources = ids
+            .iter()
+            .filter_map(|id| origins.get(id).map(|(_, cell)| *cell))
+            .collect::<Vec<_>>();
+        let source = sources.first().copied();
+        if sources
+            .iter()
+            .any(|other| source.is_some_and(|first| !std::ptr::eq(first, *other)))
+        {
+            return Err(bad("a table paragraph crosses original cell boundaries"));
+        }
+        let same = groups
+            .last()
+            .is_some_and(|(previous, _)| match (*previous, source) {
+                (Some(a), Some(b)) => std::ptr::eq(a, b),
+                (None, None) => true,
+                _ => false,
+            });
+        if same {
+            groups.last_mut().unwrap().1.push(child.clone());
+        } else {
+            groups.push((source, vec![child.clone()]));
+        }
+    }
+    let mut out = String::new();
+    let mut seen = HashSet::new();
+    for (source, children) in groups {
+        let mut group = html.clone();
+        group.children = children;
+        if group.elements().next().is_none() {
+            continue;
+        }
+        let Some(source) = source else {
+            out.push_str(&new_cell_text(&group, template)?);
+            continue;
+        };
+        if !seen.insert(source as *const Element as usize) {
+            return Err(bad("original cell paragraphs were interleaved"));
+        }
+        let introduced_text = hcd_core::extract_html_text_nodes(&group.raw())?
+            .iter()
+            .any(|(id, value)| !ordinals.contains_key(id.as_str()) && !value.is_empty());
+        if introduced_text {
+            let body = source
+                .elements()
+                .filter(|element| element.name != "tcPr")
+                .collect::<Vec<_>>();
+            if !matches!(body.as_slice(), [paragraph] if paragraph.name == "p" && paragraph.elements().all(|element| element.name == "pPr"))
+            {
+                return Err(bad("The original cell contains content that cannot be replaced by newly entered text"));
+            }
+            out.push_str(&new_cell_text(&group, Some(source))?);
+        } else {
+            for child in &source.children {
+                match child {
+                    Xml::Element(e) if e.name != "tcPr" => out.push_str(&rewritten(e, updates)?),
+                    Xml::Raw(s) => out.push_str(s),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("<w:p/>");
+    }
+    Ok(out)
+}
 fn table(
     html: &Element,
     native: Option<&Element>,
@@ -494,14 +612,6 @@ fn table(
     }
     let native_rows = native.map(rows).unwrap_or_default();
     let html_rows = rows(html);
-    fn ids(e: &Element, out: &mut Vec<String>) {
-        if let Some(id) = e.attr("data-hcd-id") {
-            out.push(id.into());
-        }
-        for child in e.elements() {
-            ids(child, out);
-        }
-    }
     let mut origins = HashMap::new();
     if let Some(old) = original_html {
         for (html_row, native_row) in rows(old).iter().zip(&native_rows) {
@@ -511,7 +621,7 @@ fn table(
                 .zip(native_row.elements().filter(|e| e.name == "tc"))
             {
                 let mut keys = vec![];
-                ids(html_cell, &mut keys);
+                canonical_ids(html_cell, &mut keys);
                 for id in keys {
                     origins.insert(id, (*native_row, native_cell));
                 }
@@ -548,7 +658,7 @@ fn table(
                 .find_map(|id| ordinals.get(id.as_str()))
                 .copied();
             let mut anchors = vec![];
-            ids(cell, &mut anchors);
+            canonical_ids(cell, &mut anchors);
             let origin = anchors
                 .iter()
                 .find_map(|id| origins.get(id))
@@ -698,33 +808,10 @@ fn table(
             out.push_str("</w:tcPr>");
             if cell.row != r {
                 out.push_str("<w:p/>");
-            } else if let Some(source) = cell.native {
-                let introduced_text = hcd_core::extract_html_text_nodes(&cell.html.raw())?
-                    .iter()
-                    .any(|(id, value)| !ordinals.contains_key(id.as_str()) && !value.is_empty());
-                if introduced_text {
-                    let body = source
-                        .elements()
-                        .filter(|element| element.name != "tcPr")
-                        .collect::<Vec<_>>();
-                    if !matches!(body.as_slice(), [paragraph] if paragraph.name == "p" && paragraph.elements().all(|element| element.name == "pPr"))
-                    {
-                        return Err(bad("The original cell contains content that cannot be replaced by newly entered text"));
-                    }
-                    out.push_str(&new_cell_text(cell.html, Some(source))?);
-                } else {
-                    for child in &source.children {
-                        match child {
-                            Xml::Element(e) if e.name != "tcPr" => {
-                                out.push_str(&rewritten(e, updates)?)
-                            }
-                            Xml::Raw(s) => out.push_str(s),
-                            _ => {}
-                        }
-                    }
-                }
             } else {
-                out.push_str(&new_cell_text(cell.html, template)?);
+                out.push_str(&cell_body(
+                    cell.html, template, &origins, ordinals, updates,
+                )?);
             }
             out.push_str("</w:tc>");
         }
@@ -1065,5 +1152,168 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn native_cell_merge_split_keep_all_source_bodies_marks_and_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/hdoc/editor/e2e/fixtures/word-table-edit.docx");
+        let source = temp.path().join("source.docx");
+        std::fs::copy(fixture, &source).unwrap();
+        let mut package = oxml::OxmlPackage::open(source.to_str().unwrap(), true).unwrap();
+        let original_xml = package.read_part_xml("word/document.xml").unwrap();
+        let witness = "<w:bookmarkStart w:id=\"21\" w:name=\"MergeWitness\"/><w:r><w:rPr><w:u w:val=\"single\"/><w:color w:val=\"842245\"/></w:rPr><w:t xml:space=\"preserve\">Value 01</w:t></w:r><w:bookmarkEnd w:id=\"21\"/>";
+        let xml = original_xml.replacen(
+            "<w:r><w:t xml:space=\"preserve\">Value 01</w:t></w:r>",
+            witness,
+            1,
+        );
+        assert_ne!(xml, original_xml);
+        package.write_part_xml("word/document.xml", &xml).unwrap();
+        package.save().unwrap();
+        let source_before = std::fs::read(&source).unwrap();
+        let root = temp.path().join("table.hcd");
+        crate::import_docx(
+            &source,
+            &root,
+            &crate::ImportOptions::new("merge-roundtrip"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        project_editor(&bundle, 0).unwrap();
+        let initial = editor_projection(&bundle, None).unwrap();
+        let table = initial
+            .blocks
+            .iter()
+            .find(|b| b.read_only_html.is_some())
+            .unwrap()
+            .clone();
+        let apply = |schema: &str, mut operation: serde_json::Value| {
+            let state = editor_projection(&bundle, None).unwrap();
+            let live = state
+                .blocks
+                .iter()
+                .find(|b| b.block_id == table.block_id)
+                .unwrap();
+            operation["blockId"] = table.block_id.clone().into();
+            operation["precondition"] = serde_json::json!({"blockHash":live.block_hash});
+            let patch: StructurePatchBatch = serde_json::from_value(serde_json::json!({"schemaVersion":schema,"documentId":initial.document_id,"patchId":format!("merge-{}",state.revision),"baseRevision":state.revision,"operations":[operation]})).unwrap();
+            apply_structure_patch(&bundle, &patch, state.revision).unwrap();
+        };
+        apply(
+            "hcd-patch/67",
+            serde_json::json!({"op":"table.cells.merge","tableIndex":0,"range":{"row":0,"column":0,"rows":2,"columns":2}}),
+        );
+        let merged = editor_projection(&bundle, None).unwrap();
+        let merged_table = merged
+            .blocks
+            .iter()
+            .find(|b| b.block_id == table.block_id)
+            .unwrap();
+        assert_eq!(
+            merged_table.editable_text_node_ids,
+            table.editable_text_node_ids
+        );
+        let merged_xml = temp.path().join("merged.docx");
+        assert_eq!(
+            export_docx(&root, &source, &merged_xml, &ExportOptions::default())
+                .unwrap()
+                .level,
+            FidelityLevel::High
+        );
+        let output = oxml::OxmlPackage::open(merged_xml.to_str().unwrap(), false).unwrap();
+        let native = output.read_part_xml("word/document.xml").unwrap();
+        let doc = roxmltree::Document::parse(&native).unwrap();
+        let first = doc
+            .descendants()
+            .find(|n| {
+                n.has_tag_name((
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                    "tc",
+                ))
+            })
+            .unwrap();
+        let text = first
+            .descendants()
+            .filter(|n| n.tag_name().name() == "t")
+            .filter_map(|n| n.text())
+            .collect::<String>();
+        assert_eq!(text, "ROW 00Value 00ROW 01Value 01");
+        assert!(native.contains(witness));
+        assert!(
+            native.contains("<w:gridSpan w:val=\"2\"/>")
+                && native.contains("<w:vMerge w:val=\"restart\"/>")
+        );
+        for part in package.list_parts() {
+            if part.trim_start_matches('/') != "word/document.xml" {
+                assert_eq!(
+                    package.read_part_bytes(part).unwrap(),
+                    output.read_part_bytes(part).unwrap(),
+                    "changed part {part}"
+                );
+            }
+        }
+        apply(
+            "hcd-patch/67",
+            serde_json::json!({"op":"table.cell.split","tableIndex":0,"row":0,"column":0}),
+        );
+        let state = editor_projection(&bundle, None).unwrap();
+        let split = state
+            .blocks
+            .iter()
+            .find(|b| b.block_id == table.block_id)
+            .unwrap();
+        assert_eq!(
+            split.editable_text_node_ids.len(),
+            table.editable_text_node_ids.len() + 3
+        );
+        let blank = split
+            .editable_text_node_ids
+            .iter()
+            .find(|id| !table.editable_text_node_ids.contains(id))
+            .unwrap();
+        let patch = serde_json::from_value(serde_json::json!({"schemaVersion":"hcd-patch/1","documentId":initial.document_id,"patchId":"after-split-input","baseRevision":state.revision,"operations":[{"op":"text.splice","nodeId":blank,"start":0,"deleteCount":0,"insertText":"拆分后新内容 🙂","precondition":{"nodeHash":hcd_core::hash_bytes(b"")}}]})).unwrap();
+        hcd_core::apply_patch(&bundle, &patch, state.revision).unwrap();
+        let filename = temp.path().join("split.docx");
+        export_docx(&root, &source, &filename, &ExportOptions::default()).unwrap();
+        let reopened = temp.path().join("reopened.hcd");
+        crate::import_docx(
+            &filename,
+            &reopened,
+            &crate::ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened = editor_projection(&Bundle::open(reopened).unwrap(), None).unwrap();
+        let html = reopened
+            .blocks
+            .iter()
+            .find_map(|b| b.read_only_html.as_ref())
+            .unwrap();
+        assert!(
+            html.contains("拆分后新内容 🙂")
+                && html.contains("Value 01")
+                && html.contains("font-weight:700")
+                && html.contains("#842245")
+        );
+        // A guarded restore can undo the shape without rolling back other body blocks.
+        apply(
+            "hcd-patch/4",
+            serde_json::json!({"op":"table.restore","sourceRevision":merged.revision,"afterBlockId":null}),
+        );
+        let restored = editor_projection(&bundle, None).unwrap();
+        assert_eq!(
+            restored
+                .blocks
+                .iter()
+                .find(|b| b.block_id == table.block_id)
+                .unwrap()
+                .block_hash,
+            merged_table.block_hash
+        );
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+        assert_eq!(std::fs::read(source).unwrap(), source_before);
     }
 }

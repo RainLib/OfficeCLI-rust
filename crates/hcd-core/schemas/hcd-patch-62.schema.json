@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:62",
+  "title": "Positioned PDF OCR transcription",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/62" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op", "pages"],
+        "properties": {
+          "op": { "const": "pdf.ocr.apply" },
+          "pages": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {
+              "type": "object", "additionalProperties": false, "required": ["page", "lines"],
+              "properties": {
+                "page": { "type": "integer", "minimum": 1, "maximum": 100000 },
+                "lines": {
+                  "type": "array", "minItems": 1, "maxItems": 1024,
+                  "items": {
+                    "type": "object", "additionalProperties": false, "required": ["text", "confidence", "bounds"],
+                    "properties": {
+                      "text": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                      "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+                      "bounds": {
+                        "type": "object", "additionalProperties": false, "required": ["left", "top", "right", "bottom"],
+                        "properties": {
+                          "left": { "$ref": "#/$defs/coordinate" }, "top": { "$ref": "#/$defs/coordinate" },
+                          "right": { "$ref": "#/$defs/coordinate" }, "bottom": { "$ref": "#/$defs/coordinate" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": { "coordinate": { "type": "number", "minimum": 0, "maximum": 1 } }
+}

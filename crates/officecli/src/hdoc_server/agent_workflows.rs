@@ -963,7 +963,7 @@ pub(super) async fn execute(
         response = workflow.public()?;
         all.insert(workflow_id.clone(), workflow);
     }
-    tokio::spawn(drive(state, workflow_id, generation, driver_grants));
+    integration::backup::spawn(drive(state, workflow_id, generation, driver_grants));
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 

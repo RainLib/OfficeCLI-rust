@@ -21,6 +21,10 @@ pub struct SearchHit {
     pub sheet_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_number: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +127,8 @@ pub fn search_bundle(
                         sheet_id: descriptor.grid.as_ref().map(|grid| grid.sheet_id.clone()),
                         sheet_name: descriptor.grid.as_ref().map(|grid| grid.sheet_name.clone()),
                         page_number,
+                        block_id: None,
+                        element_id: None,
                     });
                 }
             }
@@ -134,6 +140,102 @@ pub fn search_bundle(
             .sort_by_key(|hit| (hit.page_number, hit.chunk_sequence));
     }
     Ok(result)
+}
+
+/// Workspace hits carry the anchor the corresponding editor can open. A
+/// semantic paragraph is searched as a whole, including across inline styles.
+pub fn search_workspace(bundle: &Bundle, query: &str) -> Result<SearchResult, HcdError> {
+    let query = query.trim();
+    if !(1..=MAX_QUERY_CHARS).contains(&query.chars().count()) {
+        return Err(HcdError::InvalidPatch(format!(
+            "search query must contain 1-{MAX_QUERY_CHARS} characters"
+        )));
+    }
+    let manifest = bundle.manifest()?;
+    let revision = manifest.revision;
+    let mut hits = Vec::new();
+    let mut add_hits =
+        |value: &str, node_id: &str, region: &str, block: Option<&str>, element: Option<&str>| {
+            for (offset, preview) in matching_previews(value, query) {
+                if hits.len() == MAX_SEARCH_HITS {
+                    return false;
+                }
+                hits.push(SearchHit {
+                    chunk_sequence: 0,
+                    region: region.into(),
+                    node_id: node_id.into(),
+                    offset,
+                    preview,
+                    sheet_id: None,
+                    sheet_name: None,
+                    page_number: None,
+                    block_id: block.map(str::to_owned),
+                    element_id: element.map(str::to_owned),
+                });
+            }
+            true
+        };
+    let complete = if manifest.source.format == "excalidraw" {
+        let scene = crate::canvas::read_scene(bundle, Some(revision))?;
+        scene
+            .elements
+            .iter()
+            .filter(|item| item["isDeleted"] != true)
+            .all(|item| {
+                let Some(id) = item["id"].as_str() else {
+                    return true;
+                };
+                let node = crate::canvas::node_id(&manifest.document_id, id);
+                let value = item["customData"]["officeComment"]
+                    .as_str()
+                    .or_else(|| item["originalText"].as_str())
+                    .or_else(|| item["text"].as_str());
+                value.is_none_or(|value| add_hits(value, &node, "canvas", None, Some(id)))
+            })
+    } else if matches!(
+        manifest.source.format.as_str(),
+        "docx" | "md" | "txt" | "html"
+    ) {
+        let projected = match crate::editor_projection(bundle, Some(revision)) {
+            Ok(projected) => projected,
+            Err(HcdError::Unsupported(_)) => return search_bundle(bundle, None, query),
+            Err(err) => return Err(err),
+        };
+        projected.blocks.iter().all(|block| {
+            if block.read_only || block.region != "body" {
+                block.content.inlines.iter().all(|run| {
+                    add_hits(
+                        &run.text,
+                        run.node_id.as_deref().unwrap_or(&block.block_id),
+                        &block.region,
+                        Some(&block.block_id),
+                        None,
+                    )
+                })
+            } else {
+                let text = block
+                    .content
+                    .inlines
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>();
+                add_hits(
+                    &text,
+                    &block.block_id,
+                    &block.region,
+                    Some(&block.block_id),
+                    None,
+                )
+            }
+        })
+    } else {
+        return search_bundle(bundle, None, query);
+    };
+    Ok(SearchResult {
+        revision,
+        hits,
+        truncated: !complete,
+    })
 }
 
 fn matching_previews(text: &str, query: &str) -> Vec<(usize, String)> {

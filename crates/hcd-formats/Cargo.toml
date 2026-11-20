@@ -11,6 +11,7 @@ oxml = { path = "../oxml" }
 pdf-handler = { path = "../pdf-handler" }
 hayro = { workspace = true }
 handler-common = { path = "../handler-common" }
+xlsx-handler = { path = "../xlsx-handler" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 quick-xml = { workspace = true }

@@ -13,7 +13,7 @@ fn source_mode() -> String {
     "source-backed".into()
 }
 
-fn public_record(record: &Publication) -> Value {
+pub(super) fn public_record(record: &Publication) -> Value {
     json!({"publicationId":record.publication_id,"documentId":record.document_id,
         "revision":record.revision,"expectedVersion":record.expected_version,"state":record.state,
         "receipt":record.receipt,"error":record.error,"fidelity":record.fidelity,
@@ -46,7 +46,7 @@ pub(in crate::hdoc_server) async fn publish(
     Json(request): Json<PublishRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     // Own the future even if a browser disconnects while commit is in flight.
-    tokio::spawn(async move { run_publication(&state, &id, &headers, request).await })
+    super::backup::spawn(async move { run_publication(&state, &id, &headers, request).await })
         .await
         .map_err(internal)?
 }
@@ -72,8 +72,9 @@ async fn run_publication(
         .store
         .mapping(id)
         .ok_or_else(|| bad("unmanaged document"))?;
+    repair_recorded_commit(integration, &mut mapping)?;
     let mut record = match integration.store.publication(&request.publication_id)? {
-        Some(record) => {
+        Some(mut record) => {
             if record.document_id != id
                 || record.actor_id != session.actor.id
                 || record.revision != request.expected_revision
@@ -84,7 +85,16 @@ async fn run_publication(
                 ));
             }
             if record.state == "committed" {
+                apply_committed_mapping(integration, &mut mapping, &record)?;
                 return Ok((StatusCode::OK, Json(public_record(&record))));
+            }
+            if mapping.pending_publication.as_deref() != Some(&record.publication_id) {
+                if reconcile(integration, &mut mapping, &mut record).await? == "committed" {
+                    return Ok((StatusCode::OK, Json(public_record(&record))));
+                }
+                return Err(conflict(
+                    "publication is no longer the pending job for this document",
+                ));
             }
             record
         }
@@ -113,6 +123,7 @@ async fn run_publication(
                 publication_id: request.publication_id,
                 document_id: id.into(),
                 actor_id: session.actor.id.clone(),
+                origin_session_id: Some(session.session_id.clone()),
                 revision: request.expected_revision,
                 expected_version: mapping.external_head.clone(),
                 state: "queued".into(),
@@ -180,29 +191,14 @@ async fn execute(
 ) -> Result<Value, ApiError> {
     let context = integration.provider.context(session);
     if record.intent.is_some() {
-        let status: Value = integration
-            .provider
-            .post(
-                &integration
-                    .provider
-                    .file_path(&mapping.external_file_id, "/publications/status"),
-                json!({"context":context,"publicationId":record.publication_id}),
-            )
-            .await?;
-        if status["publicationId"] != record.publication_id {
-            return Err(unavailable("publication status identity mismatch"));
+        let (status, receipt) = provider_status(integration, session, mapping, record).await?;
+        if let Some(receipt) = receipt {
+            return Ok(receipt);
         }
-        match status["state"].as_str() {
-            Some("committed") => {
-                return validate_receipt(record, mapping, status["receipt"].clone())
-            }
-            Some("conflict" | "rejected") => {
-                return Err(conflict(
-                    "Provider publication requires explicit conflict handling",
-                ))
-            }
-            Some("unknown" | "prepared" | "expired") => {}
-            _ => return Err(unavailable("invalid publication status")),
+        if matches!(status.as_str(), "conflict" | "rejected") {
+            return Err(conflict(
+                "Provider publication requires explicit conflict handling",
+            ));
         }
     }
     require_publish(integration, session).await?;
@@ -372,40 +368,153 @@ fn validate_receipt(
     Ok(receipt)
 }
 
+async fn provider_status(
+    integration: &Integration,
+    session: &Session,
+    mapping: &Mapping,
+    record: &Publication,
+) -> Result<(String, Option<Value>), ApiError> {
+    let status: Value = integration.provider.post(
+        &integration.provider.file_path(&mapping.external_file_id, "/publications/status"),
+        json!({"context":integration.provider.context(session),"publicationId":record.publication_id}),
+    ).await?;
+    if status["publicationId"] != record.publication_id {
+        return Err(unavailable("publication status identity mismatch"));
+    }
+    let receipt = match status["state"].as_str() {
+        Some("committed") => Some(validate_receipt(
+            record,
+            mapping,
+            status["receipt"].clone(),
+        )?),
+        Some("unknown" | "prepared" | "expired" | "conflict" | "rejected") => None,
+        _ => return Err(unavailable("invalid publication status")),
+    };
+    Ok((
+        status["state"].as_str().expect("validated status").into(),
+        receipt,
+    ))
+}
+
+pub(super) async fn reconcile(
+    integration: &Integration,
+    mapping: &mut Mapping,
+    record: &mut Publication,
+) -> Result<String, ApiError> {
+    if record.state == "committed" {
+        apply_committed_mapping(integration, mapping, record)?;
+        return Ok("committed".into());
+    }
+    if record.intent.is_none() {
+        return Ok("notSent".into());
+    }
+    let original = integration.store.publication_session(record, mapping)?;
+    let (status, receipt) = provider_status(integration, &original, mapping, record).await?;
+    if let Some(receipt) = receipt {
+        finish(integration, mapping, record, receipt)?;
+    }
+    Ok(status)
+}
+
+fn repair_recorded_commit(
+    integration: &Integration,
+    mapping: &mut Mapping,
+) -> Result<(), ApiError> {
+    if let Some(record) = pending_record(integration, mapping)?.filter(|r| r.state == "committed") {
+        apply_committed_mapping(integration, mapping, &record)?;
+    }
+    Ok(())
+}
+
+fn pending_record(
+    integration: &Integration,
+    mapping: &Mapping,
+) -> Result<Option<Publication>, ApiError> {
+    let Some(id) = &mapping.pending_publication else {
+        return Ok(None);
+    };
+    let record = integration.store.publication(id)?;
+    if record
+        .as_ref()
+        .is_some_and(|r| r.document_id != mapping.document_id)
+    {
+        return Err(internal("pending publication belongs to another document"));
+    }
+    Ok(record)
+}
+
+pub(super) async fn recover_open_mapping(
+    integration: &Integration,
+    mapping: &mut Mapping,
+    observed_head: &str,
+) -> Result<(), ApiError> {
+    repair_recorded_commit(integration, mapping)?;
+    if mapping.external_head != observed_head {
+        if let Some(mut record) = pending_record(integration, mapping)? {
+            reconcile(integration, mapping, &mut record).await?;
+        }
+    }
+    Ok(())
+}
+
 fn finish(
     integration: &Integration,
     mapping: &mut Mapping,
     record: &mut Publication,
     receipt: Value,
 ) -> Result<(), ApiError> {
+    if integration.provider.config.events.is_some() && record.event.is_none() {
+        record.event = Some(
+            json!({"schemaVersion":"officecli-event/1","eventId":record.publication_id,
+            "tenantId":mapping.tenant_id,"appId":mapping.app_id,"externalFileId":mapping.external_file_id,
+            "documentId":mapping.document_id,"sequence":mapping.sequence + 1,"occurredAt":provider::date_now(),
+            "type":"publication.committed","payload":{"receipt":receipt}}),
+        );
+    }
+    record.state = "committed".into();
+    record.receipt = Some(receipt);
+    record.error = None;
+    // Keep the pending pointer until the receipt and outbox event are durable.
+    integration.store.save_publication(record)?;
+    apply_committed_mapping(integration, mapping, record)
+}
+
+fn apply_committed_mapping(
+    integration: &Integration,
+    mapping: &mut Mapping,
+    record: &Publication,
+) -> Result<(), ApiError> {
+    let mut changed = false;
     if mapping
         .last_published_revision
         .is_none_or(|r| r < record.revision)
     {
+        let receipt =
+            validate_receipt(record, mapping, record.receipt.clone().unwrap_or_default())?;
         mapping.external_head = receipt["externalVersion"]
             .as_str()
             .expect("validated version")
             .into();
         mapping.last_published_revision = Some(record.revision);
+        changed = true;
     }
     if mapping.pending_publication.as_deref() == Some(&record.publication_id) {
         mapping.pending_publication = None;
+        changed = true;
     }
-    if integration.provider.config.events.is_some() && record.event.is_none() {
-        mapping.sequence += 1;
-        record.event = Some(
-            json!({"schemaVersion":"officecli-event/1","eventId":record.publication_id,
-            "tenantId":mapping.tenant_id,"appId":mapping.app_id,"externalFileId":mapping.external_file_id,
-            "documentId":mapping.document_id,"sequence":mapping.sequence,"occurredAt":provider::date_now(),
-            "type":"publication.committed","payload":{"receipt":receipt}}),
-        );
+    let sequence = record
+        .event
+        .as_ref()
+        .and_then(|event| event["sequence"].as_u64())
+        .unwrap_or(0);
+    if sequence > mapping.sequence {
+        mapping.sequence = sequence;
+        changed = true;
     }
-    integration.store.save_mapping(mapping)?;
-    record.state = "committed".into();
-    record.receipt = Some(receipt);
-    record.error = None;
-    // The final receipt and pending event share a single durable record.
-    integration.store.save_publication(record)
+    if changed {
+        integration.store.save_mapping(mapping)?;
+    }
+    Ok(())
 }
 
 pub(in crate::hdoc_server) fn start_events(state: &ServerState) {
@@ -416,10 +525,16 @@ pub(in crate::hdoc_server) fn start_events(state: &ServerState) {
     else {
         return;
     };
+    let backup = state.backup.clone();
     tokio::spawn(async move {
         loop {
-            if let Err(error) = deliver_events(&integration).await {
-                eprintln!("integration event delivery: {}", error.1);
+            {
+                let permit = backup.as_ref().and_then(super::backup::Gate::try_work);
+                if backup.is_none() || permit.is_some() {
+                    if let Err(error) = deliver_events(&integration).await {
+                        eprintln!("integration event delivery: {}", error.1);
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -443,8 +558,15 @@ async fn deliver_events(integration: &Integration) -> Result<(), ApiError> {
             .store
             .publication(&id)?
             .ok_or_else(|| internal("event record disappeared"))?;
-        if record.event_delivered || record.state != "committed" {
+        if record.event_delivered
+            || record.event_dead_letter
+            || record.event_next_at > now()
+            || record.state != "committed"
+        {
             continue;
+        }
+        if let Some(mut mapping) = integration.store.mapping(&record.document_id) {
+            apply_committed_mapping(integration, &mut mapping, &record)?;
         }
         let status = integration
             .provider

@@ -10,12 +10,16 @@ mod pptx;
 pub mod registry;
 mod textual;
 mod theme_fonts;
+pub mod worksheet_pivots;
+pub mod worksheet_values;
 mod xlsx;
 
 use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
 pub use common::{ExportOptions, ImportOptions, PdfRasterMode};
+pub use hcd_docx::validate_picture_target as validate_docx_picture_target;
+pub use hcd_docx::{edit_word_review, read_word_review, WordReviewEdit};
 pub use pdf::validate_pdf_source_export;
 pub use theme_fonts::{
     apply_theme_fonts, pdf_body_face, pdf_text_forecast, PdfBodyFace, PdfFaceOptions,
@@ -46,6 +50,8 @@ where
     (format.import)(source, output.as_ref(), options, &mut emit)
 }
 
+pub use pdf::render_pdf_raster;
+
 pub fn export_document(
     bundle: impl AsRef<Path>,
     source: impl AsRef<Path>,
@@ -60,15 +66,102 @@ pub fn export_document(
             manifest.source.format
         ))
     })?;
-    let mut report = (format.export)(&opened, source.as_ref(), target.as_ref(), options)?;
-    let images = native_images::apply(&opened, target.as_ref(), options.revision)?;
-    if images > 0 {
+    let groups = if manifest.source.format == "pptx" {
+        pptx::groups::GroupExport::prepare(&opened, options.revision)?
+    } else {
+        pptx::groups::GroupExport::default()
+    };
+    let output = target.as_ref();
+    let staged = if groups.is_empty() {
+        None
+    } else {
+        if output.exists() {
+            return Err(HcdError::InvalidBundle(format!(
+                "target already exists: {}",
+                output.display()
+            )));
+        }
+        let dir = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        Some(tempfile::tempdir_in(dir)?)
+    };
+    let staged_path = staged
+        .as_ref()
+        .map(|scratch| scratch.path().join("presentation.pptx"));
+    let target = staged_path.as_deref().unwrap_or(output);
+    let mut initial_options = options.clone();
+    if staged.is_some() {
+        initial_options.fidelity_report = None;
+    }
+    let mut report = (format.export)(&opened, source.as_ref(), target, &initial_options)?;
+    let images = native_images::apply(&opened, target, options.revision)?;
+    let charts = if manifest.source.format == "xlsx" {
+        xlsx::worksheet_charts::export(&opened, target, options.revision)?
+    } else {
+        0
+    };
+    let conditions = if manifest.source.format == "xlsx" {
+        xlsx::worksheet_conditions::export(&opened, target, options.revision)?
+    } else {
+        0
+    };
+    let pivots = if manifest.source.format == "xlsx" {
+        xlsx::worksheet_pivots::export(&opened, target, options.revision)?
+    } else {
+        0
+    };
+    let animations = if manifest.source.format == "pptx" {
+        pptx::animations::export(&opened, target, options.revision)?
+    } else {
+        0
+    };
+    let group_slides = groups.write(target)?;
+    if staged.is_some() {
+        tempfile::TempPath::try_from_path(target)?
+            .persist_noclobber(output)
+            .map_err(|error| error.error)?;
+    }
+    if images != 0
+        || charts != 0
+        || conditions != 0
+        || pivots != 0
+        || animations != 0
+        || staged.is_some()
+    {
         if report.level == hcd_core::FidelityLevel::Exact {
             report.level = hcd_core::FidelityLevel::High;
         }
-        report.preserved.push(format!(
-            "{images} HCD-created image assets embedded with explicit native dimensions"
-        ));
+        if images > 0 {
+            report.preserved.push(format!(
+                "{images} HCD-created image assets embedded with explicit native dimensions"
+            ));
+        }
+        if charts > 0 {
+            report.preserved.push(format!(
+                "{charts} worksheet chart changes written as native DrawingML linked to worksheet cells"
+            ));
+        }
+        if conditions > 0 {
+            report.preserved.push(format!(
+                "{conditions} worksheet conditional-format changes stored as native rules and differential styles"
+            ));
+        }
+        if pivots > 0 {
+            report.preserved.push(format!(
+                "{pivots} PivotTable changes exported with editable Excel definitions, typed cache records and materialized worksheet cells"
+            ));
+        }
+        if animations > 0 {
+            report.preserved.push(format!(
+                "{animations} slide animation tracks written as native PresentationML timing"
+            ));
+        }
+        if group_slides > 0 {
+            report.preserved.push(format!("{group_slides} slide drawing trees retain native editable groups and stable member IDs"));
+        }
         common::write_fidelity_report(options, &report)?;
     }
     Ok(report)

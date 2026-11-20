@@ -106,6 +106,11 @@ fn read_stored(bundle: &Bundle, revision: u64) -> Result<(Scene, Vec<AssetDescri
     Ok((scene, assets))
 }
 
+/// Read the saved objects without loading their image assets.
+pub fn read_elements(bundle: &Bundle, revision: u64) -> Result<Vec<serde_json::Value>, HcdError> {
+    Ok(read_stored(bundle, revision)?.0.elements)
+}
+
 pub fn read_scene(bundle: &Bundle, revision: Option<u64>) -> Result<Scene, HcdError> {
     let (mut scene, assets) = read_stored(bundle, revision.unwrap_or(bundle.manifest()?.revision))?;
     for (id, file) in &mut scene.files {

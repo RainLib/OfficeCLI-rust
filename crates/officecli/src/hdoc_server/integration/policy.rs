@@ -7,6 +7,16 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
     if parts[0] == "agent-runs" {
         return Ok(vec!["document.view", "document.edit", "document.ai"]);
     }
+    if parts[0] == "selection-transfers" {
+        return match (method, parts.as_slice()) {
+            ("GET" | "HEAD", ["selection-transfers", _, "source"]) => Ok(vec!["document.view"]),
+            ("POST", ["selection-transfers"] | ["selection-transfers", _, "apply"])
+            | ("GET" | "HEAD" | "DELETE", ["selection-transfers", _]) => {
+                Ok(vec!["document.view", "document.copy", "document.ai"])
+            }
+            _ => Err(denied("unclassified selection transfer operation")),
+        };
+    }
     if matches!(parts[0], "agent-workflows" | "image-jobs" | "mcp")
         || route.starts_with("/image/jobs")
         || route.starts_with("/image/copies")
@@ -19,16 +29,22 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
     if read {
         match parts[0] {
             "revisions" => required.push("history.view"),
+            "patch-receipts" if parts.len() == 2 => {
+                required.extend(["document.edit", "document.ai"])
+            }
             "export" | "downloads" => {}
             ""
             | "auth"
             | "capabilities"
             | "editor"
+            | "word-review"
             | "index"
             | "chunks"
             | "search"
             | "nodes"
             | "sheets"
+            | "sheet-charts"
+            | "sheet-pivot-preview"
             | "assets"
             | "styles"
             | "presentation"
@@ -41,17 +57,36 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
             | "collaboration"
             | "image" => {}
             "canvas" => {}
+            "grid-filter" if route == "/grid-filter" => {}
+            "pdf-layout" if route == "/pdf-layout" => {}
+            "pdf-ocr" if route == "/pdf-ocr" => {}
+            "pdf-render" if parts.len() == 2 => {}
             _ => return Err(denied("unclassified host document route")),
         }
     } else {
         match (method, parts[0]) {
             ("POST", "canvas") if matches!(route, "/canvas/presence" | "/canvas/layout") => {}
-            ("POST", "canvas") if matches!(route, "/canvas/patch" | "/canvas/spec-undo") => {
+            ("POST", "canvas")
+                if matches!(
+                    route,
+                    "/canvas/patch" | "/canvas/spec-undo" | "/canvas/materials/plan"
+                ) =>
+            {
                 required.push("document.edit")
             }
-            ("POST", "project" | "patch" | "node-patch" | "checkpoints" | "collaboration") => {
+            ("PUT", "canvas") if route == "/canvas/reactions" => required.push("document.edit"),
+            (
+                "POST",
+                "project" | "patch" | "node-patch" | "checkpoints" | "collaboration"
+                | "word-review",
+            ) => required.push("document.edit"),
+            // Both routes operate on an editor's own write intent. Review only
+            // reads the receipt, but it still requires the same edit authority
+            // as the grid patch whose author and payload it checks.
+            ("POST", "node-patch-review") if route == "/node-patch-review" => {
                 required.push("document.edit")
             }
+            ("POST", "grid-sort") if route == "/grid-sort" => required.push("document.edit"),
             ("PUT", "collaboration") => required.push("document.edit"),
             ("POST", "restore") => {
                 required.extend(["document.edit", "history.view", "history.restore"])
@@ -59,6 +94,7 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
             ("PUT", "theme") => required.push("theme.assign"),
             ("POST", "publications") => required.extend(["document.edit", "document.publish"]),
             ("POST", "downloads") => {}
+            ("POST", "assets") if route == "/assets" => required.push("document.edit"),
             ("POST", "image") if route == "/image/commit" => required.push("document.edit"),
             _ => return Err(denied("unclassified host document operation")),
         }
@@ -252,5 +288,29 @@ mod canvas_layout_tests {
             vec!["document.view", "document.edit"]
         );
         assert!(operation_requirements("POST", "/canvas/unknown").is_err());
+        for (method, path) in [
+            ("PUT", "/canvas/reactions"),
+            ("POST", "/canvas/materials/plan"),
+        ] {
+            assert_eq!(
+                operation_requirements(method, path).unwrap(),
+                vec!["document.view", "document.edit"]
+            );
+        }
+        assert_eq!(
+            operation_requirements("GET", "/grid-filter").unwrap(),
+            vec!["document.view"]
+        );
+        for path in ["/node-patch-review", "/grid-sort"] {
+            assert_eq!(
+                operation_requirements("POST", path).unwrap(),
+                vec!["document.view", "document.edit"]
+            );
+            assert!(operation_requirements("GET", path).is_err());
+            assert!(operation_requirements("PUT", path).is_err());
+            assert!(operation_requirements("POST", &format!("{path}/other")).is_err());
+        }
+        assert!(operation_requirements("POST", "/canvas/reactions").is_err());
+        assert!(operation_requirements("PUT", "/canvas/unknown").is_err());
     }
 }

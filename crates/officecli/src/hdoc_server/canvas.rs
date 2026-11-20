@@ -388,6 +388,63 @@ pub(super) async fn patch(
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
+fn protect_referenced_objects(scene: &Scene, removing: &HashSet<&str>) -> Result<(), ApiError> {
+    let groups: HashSet<_> = scene
+        .elements
+        .iter()
+        .filter(|element| {
+            element["id"]
+                .as_str()
+                .is_some_and(|id| removing.contains(id))
+        })
+        .flat_map(|element| {
+            element["groupIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect();
+    for element in scene.elements.iter().filter(|element| {
+        element["isDeleted"] != true
+            && !element["id"]
+                .as_str()
+                .is_some_and(|id| removing.contains(id))
+    }) {
+        let targets = [
+            &element["frameId"],
+            &element["containerId"],
+            &element["startBinding"]["elementId"],
+            &element["endBinding"]["elementId"],
+            &element["customData"]["officeBoard"]["root"],
+        ]
+        .into_iter()
+        .chain(
+            element["boundElements"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|binding| &binding["id"]),
+        );
+        if targets
+            .filter_map(Value::as_str)
+            .any(|id| removing.contains(id))
+            || element["groupIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|id| groups.contains(id))
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "其他画布对象仍与新增内容相连，已保留这些编辑。".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn patch_locked(
     state: &ServerState,
     id: &str,
@@ -414,6 +471,27 @@ pub(super) async fn patch_locked(
         }
     }
     let scene = hcd_core::canvas::read_scene(&bundle, None).map_err(hcd_error)?;
+    if headers
+        .get("x-hcd-preserve-references")
+        .is_some_and(|value| value == "true")
+    {
+        let removing = batch
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                canvas_core::Operation::Remove { id, .. } => Ok(id.as_str()),
+                _ => Err(bad("撤销新增内容只能移除本次新增对象。")),
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
+        protect_referenced_objects(&scene, &removing)?;
+        canvas_reactions::protect_reacted_objects(
+            state,
+            id,
+            collaboration_epoch(state, id).await?,
+            &removing,
+        )
+        .await?;
+    }
     let scope = agent_selection(state, id, headers, actor, &scene).await?;
     if let Some(run_id) = headers
         .get("x-hcd-agent-run-id")

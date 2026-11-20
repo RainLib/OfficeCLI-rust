@@ -63,6 +63,7 @@ pub fn restore_revision(
         grid_values_reordered: false,
         grid_filter_changed: false,
         pdf_layout_changed: false,
+        pptx_scene_changed: false,
         grid_row_insertions: Vec::new(),
         grid_row_deletions: Vec::new(),
         grid_column_insertions: Vec::new(),
@@ -74,6 +75,9 @@ pub fn restore_revision(
         slide_removals: Vec::new(),
         slide_reorders: Vec::new(),
         slide_copies: Vec::new(),
+        slide_group_edit: None,
+        pptx_master_backgrounds: target_record.pptx_master_backgrounds,
+        pptx_master_text_styles: target_record.pptx_master_text_styles,
         structural_change: true,
     };
     head.theme_revision_id = historical.theme_revision_id.clone();

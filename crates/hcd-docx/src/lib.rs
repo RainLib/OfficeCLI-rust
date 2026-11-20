@@ -3,7 +3,8 @@
 mod exporter;
 mod importer;
 
-pub use exporter::{export_docx, validate_source_export, ExportOptions};
+pub use exporter::review::{edit_word_review, read_word_review, WordReviewEdit};
+pub use exporter::{export_docx, validate_picture_target, validate_source_export, ExportOptions};
 pub use importer::{import_docx, ImportOptions};
 
 #[cfg(test)]

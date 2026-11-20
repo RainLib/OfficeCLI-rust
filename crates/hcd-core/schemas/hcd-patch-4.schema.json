@@ -98,13 +98,17 @@
       }
     },
     "tableInsert": {
-      "description": "Insert an empty table in a rich semantic body. At most 10000 logical cells.",
+      "description": "Insert a table in a rich semantic body. Optional plain-text values must match the declared dimensions and fit in 1 MiB. At most 10000 logical cells.",
       "type": "object", "additionalProperties": false, "required": ["op", "afterBlockId", "rows", "columns"],
       "properties": {
         "op": { "const": "table.insert" },
         "afterBlockId": { "oneOf": [{ "$ref": "#/$defs/nodeId" }, { "type": "null" }] },
         "rows": { "type": "integer", "minimum": 1, "maximum": 1000 },
-        "columns": { "type": "integer", "minimum": 1, "maximum": 128 }
+        "columns": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "values": {
+          "type": "array", "minItems": 1, "maxItems": 1000,
+          "items": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "type": "string" } }
+        }
       }
     },
     "typedTextFormat": {

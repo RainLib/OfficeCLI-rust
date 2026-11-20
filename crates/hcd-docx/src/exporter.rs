@@ -1,3 +1,4 @@
+use hcd_core::docx_review::{DocxReview, RESTORED_TEXT_BASE};
 use hcd_core::{
     extract_html_font_nodes, extract_html_text_nodes, hash_file, Bundle, FidelityLevel,
     FidelityReport, HcdError, HcdManifest, HtmlFontNode, NodeMapEntry, HCD_SCHEMA_VERSION,
@@ -9,8 +10,12 @@ use quick_xml::{Reader, Writer};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+mod pictures;
+pub(super) mod review;
 mod rich_text;
 mod structure;
+mod tracked;
+pub use pictures::validate_picture_target;
 
 /// Validate native body reconciliation without creating a target file.
 pub fn validate_source_export(
@@ -25,18 +30,29 @@ pub fn validate_source_export(
         ));
     }
     let revision = revision.unwrap_or(head.revision);
-    let (_, nodes, structural) = dirty_state_through(bundle, revision)?;
     let manifest = manifest_at_revision(bundle, &head, revision)?;
+    let review_state = hcd_core::docx_review::read(bundle, &manifest)?;
+    if !review_state.is_empty() {
+        let temp = tempfile::tempdir()?;
+        let (parts, _) =
+            prepare_native_parts(bundle, source, &manifest, &review_state, temp.path())?;
+        review::materialize(bundle, source, revision, &parts, &review_state)?;
+        return Ok(());
+    }
+    let (_, nodes, structural) = dirty_state_through(bundle, revision)?;
+    let picture_layouts = pictures::layouts(bundle, &manifest)?;
     if structural {
         structure::live_dirty(bundle, &manifest, &nodes)?;
-        let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
-        let xml = archive
-            .read_control_part("word/document.xml", 64 * 1024 * 1024)
-            .map_err(package_error)?;
-        let xml = std::str::from_utf8(&xml).map_err(|e| HcdError::InvalidBundle(e.to_string()))?;
-        structure::document(bundle, revision, xml, &BTreeMap::new())?;
+        let xml = pictures::read_body(source)?;
+        let reconciled = structure::document(bundle, revision, &xml, &BTreeMap::new())?;
+        if !picture_layouts.is_empty() {
+            pictures::rewrite(&reconciled, &picture_layouts)?;
+        }
     } else {
         reject_image_source_export(bundle, &manifest, &nodes)?;
+        if !picture_layouts.is_empty() {
+            pictures::rewrite(&pictures::read_body(source)?, &picture_layouts)?;
+        }
     }
     Ok(())
 }
@@ -78,23 +94,75 @@ pub fn export_docx(
         )));
     }
 
-    let revision_manifest = manifest_at_revision(&bundle, &head, revision)?;
-    let (mut dirty_parts, mut dirty_node_ids, structural) = dirty_state_through(&bundle, revision)?;
-    if structural {
-        (dirty_parts, dirty_node_ids) =
-            structure::live_dirty(&bundle, &revision_manifest, &dirty_node_ids)?;
-    } else {
-        reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
+    let manifest = manifest_at_revision(&bundle, &head, revision)?;
+    let temp_dir = tempfile::tempdir()?;
+    let review_state = hcd_core::docx_review::read(&bundle, &manifest)?;
+    let (mut replacements, facts) =
+        prepare_native_parts(&bundle, source, &manifest, &review_state, temp_dir.path())?;
+    let mut additions = HashMap::new();
+    if !review_state.is_empty() {
+        let review = review::materialize(&bundle, source, revision, &replacements, &review_state)?;
+        for (part, existed, content) in review.changed_parts()? {
+            let path = temp_dir
+                .path()
+                .join(format!("review-{}", safe_temp_name(part)));
+            std::fs::write(&path, content)?;
+            if existed {
+                replacements.insert(part.into(), path);
+            } else {
+                additions.insert(part.into(), path);
+            }
+        }
     }
-    let updates_by_part =
-        collect_text_by_part(&bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
+    let changed = StreamingOxmlRewriter::rewrite_with_additions(
+        source,
+        target,
+        &replacements,
+        &additions,
+        "word/document.xml",
+    )
+    .map_err(package_error)?;
+    report_export(changed, facts, &head, &review_state, options)
+}
+
+struct ExportFacts {
+    pinned_faces: usize,
+    structural: bool,
+    placed_pictures: usize,
+}
+
+fn prepare_native_parts(
+    bundle: &Bundle,
+    source: &Path,
+    manifest: &HcdManifest,
+    review: &DocxReview,
+    temp: &Path,
+) -> Result<(HashMap<String, PathBuf>, ExportFacts), HcdError> {
+    let revision = manifest.revision;
+    let picture_layouts = pictures::layouts(bundle, manifest)?;
+    let (mut dirty_parts, mut dirty_node_ids, structural) = dirty_state_through(bundle, revision)?;
+    if structural || !review.decisions.is_empty() {
+        (dirty_parts, dirty_node_ids) = structure::live_dirty(bundle, manifest, &dirty_node_ids)?;
+    } else {
+        reject_image_source_export(bundle, manifest, &dirty_node_ids)?;
+    }
+    let mut updates_by_part =
+        collect_text_by_part(bundle, manifest, &dirty_parts, &dirty_node_ids)?;
     let pinned_faces = updates_by_part
         .values()
         .flat_map(|updates| updates.values())
         .filter(|update| update.font.is_some())
         .count();
+    let restored = updates_by_part
+        .get_mut(pictures::BODY_PART)
+        .map(|updates| updates.split_off(&RESTORED_TEXT_BASE))
+        .unwrap_or_default();
+    if review.decisions.is_empty() && !restored.is_empty() {
+        return Err(HcdError::InvalidBundle(
+            "restored text is missing its Word review decision".into(),
+        ));
+    }
 
-    let temp_dir = tempfile::tempdir()?;
     let mut replacement_paths = HashMap::new();
     if !updates_by_part.is_empty() {
         let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
@@ -104,7 +172,7 @@ pub fn export_docx(
                     "source part {part} referenced by HCD is missing"
                 )));
             }
-            let replacement_path = temp_dir.path().join(safe_temp_name(part));
+            let replacement_path = temp.join(safe_temp_name(part));
             let output = std::fs::File::create(&replacement_path)?;
             if structural && part == "word/document.xml" {
                 let xml = archive
@@ -114,7 +182,7 @@ pub fn export_docx(
                     .map_err(|e| HcdError::InvalidBundle(e.to_string()))?;
                 std::fs::write(
                     &replacement_path,
-                    structure::document(&bundle, revision, xml, replacements)?,
+                    structure::document(bundle, revision, xml, replacements)?,
                 )?;
             } else {
                 archive
@@ -133,18 +201,54 @@ pub fn export_docx(
             .read_control_part("word/document.xml", 64 * 1024 * 1024)
             .map_err(package_error)?;
         let xml = std::str::from_utf8(&xml).map_err(|e| HcdError::InvalidBundle(e.to_string()))?;
-        let path = temp_dir.path().join("document.xml");
+        let path = temp.join("document.xml");
         std::fs::write(
             &path,
-            structure::document(&bundle, revision, xml, &BTreeMap::new())?,
+            structure::document(bundle, revision, xml, &BTreeMap::new())?,
         )?;
         replacement_paths.insert("word/document.xml".into(), path);
     }
 
-    let changed =
-        StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "word/document.xml")
-            .map_err(package_error)?;
+    if !review.decisions.is_empty() {
+        let xml = if let Some(path) = replacement_paths.get(pictures::BODY_PART) {
+            std::fs::read_to_string(path)?
+        } else {
+            pictures::read_body(source)?
+        };
+        let path = temp.join("tracked-revisions.xml");
+        std::fs::write(&path, tracked::rewrite(&xml, &review.decisions, &restored)?)?;
+        replacement_paths.insert(pictures::BODY_PART.into(), path);
+    }
 
+    if !picture_layouts.is_empty() {
+        let xml = if let Some(path) = replacement_paths.get(pictures::BODY_PART) {
+            std::fs::read_to_string(path)?
+        } else {
+            pictures::read_body(source)?
+        };
+        let placed = pictures::rewrite(&xml, &picture_layouts)?;
+        let path = temp.join("picture-layout.xml");
+        std::fs::write(&path, placed)?;
+        replacement_paths.insert(pictures::BODY_PART.into(), path);
+    }
+
+    Ok((
+        replacement_paths,
+        ExportFacts {
+            pinned_faces,
+            structural,
+            placed_pictures: picture_layouts.len(),
+        },
+    ))
+}
+
+fn report_export(
+    changed: Vec<String>,
+    facts: ExportFacts,
+    head: &HcdManifest,
+    review: &DocxReview,
+    options: &ExportOptions,
+) -> Result<FidelityReport, HcdError> {
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if changed.is_empty() {
@@ -158,13 +262,23 @@ pub fn export_docx(
                 "paragraph and run formatting".to_string(),
                 "relationships, media, numbering, headers and footers".to_string(),
             ];
-            if structural {
+            if facts.structural {
                 preserved.push("canonical table rows, columns, grid widths and merges reconciled into the original OOXML body".into());
             }
-            if pinned_faces > 0 {
+            if facts.pinned_faces > 0 {
                 preserved.push(format!(
-                    "run fonts pinned by text.font on {pinned_faces} mapped node(s)"
+                    "run fonts pinned by text.font on {} mapped node(s)",
+                    facts.pinned_faces
                 ));
+            }
+            if facts.placed_pictures > 0 {
+                preserved.push(format!("native Word placement updated for {} picture(s), retaining their embedded media, dimensions and drawing identities", facts.placed_pictures));
+            }
+            if !review.comments.is_empty() || !review.resolved.is_empty() {
+                preserved.push("native Word review comments, replies and resolved states".into());
+            }
+            if !review.decisions.is_empty() {
+                preserved.push("selected Word revision decisions, pending native revisions and restored Word runs".into());
             }
             preserved
         },
@@ -210,24 +324,7 @@ fn manifest_at_revision(
     head: &HcdManifest,
     revision: u64,
 ) -> Result<HcdManifest, HcdError> {
-    if revision == head.revision {
-        return Ok(head.clone());
-    }
-    let record = bundle.revision(revision)?;
-    let mut manifest = head.clone();
-    manifest.revision = revision;
-    manifest.root_hash = record.root_hash;
-    manifest.annotation_root_hash = record.annotation_root_hash;
-    manifest.annotation_href =
-        (manifest.annotation_root_hash != hcd_core::hash_bytes(b"[]")).then(|| {
-            format!(
-                "annotations/sha256/{}.json{}",
-                manifest.annotation_root_hash,
-                manifest.storage_codec.suffix()
-            )
-        });
-    manifest.index_prefix = record.index_prefix;
-    manifest.index_root_href = record.index_root_href;
+    let (manifest, _) = hcd_core::manifest_at_revision(bundle, head, Some(revision))?;
     Ok(manifest)
 }
 

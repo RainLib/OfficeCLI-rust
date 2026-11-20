@@ -5,6 +5,7 @@ pub mod handler;
 pub mod html_preview;
 pub mod modifier;
 pub mod navigation;
+pub mod ocr_text;
 mod page_subset;
 pub mod reader;
 pub mod render;

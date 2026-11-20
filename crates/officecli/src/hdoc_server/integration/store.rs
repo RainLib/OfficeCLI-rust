@@ -46,6 +46,8 @@ pub(super) struct Publication {
     pub publication_id: String,
     pub document_id: String,
     pub actor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_session_id: Option<String>,
     pub revision: u64,
     pub expected_version: String,
     pub state: String,
@@ -183,6 +185,34 @@ impl Store {
             return Ok(None);
         }
         read(&path).map(Some).map_err(internal)
+    }
+    /// The original binding is used only to query an existing host receipt.
+    pub fn publication_session(
+        &self,
+        record: &Publication,
+        mapping: &Mapping,
+    ) -> Result<Session, ApiError> {
+        let matches = |session: &Session| {
+            session.document_id == record.document_id
+                && session.external_file_id == mapping.external_file_id
+                && session.actor.id == record.actor_id
+        };
+        if let Some(origin) = &record.origin_session_id {
+            if let Some(session) = self.session_record(origin)?.filter(matches) {
+                return Ok(session);
+            }
+        } else {
+            // Earlier records predate the explicit origin binding.
+            for path in records(&self.root.join("sessions")).map_err(internal)? {
+                let session: Session = read(&path).map_err(internal)?;
+                if matches(&session) {
+                    return Ok(session);
+                }
+            }
+        }
+        Err(conflict(
+            "the original publication session binding is unavailable",
+        ))
     }
     pub fn save_session(&self, session: &Session) -> Result<(), ApiError> {
         let mut sessions = self.sessions.write().expect("integration sessions lock");

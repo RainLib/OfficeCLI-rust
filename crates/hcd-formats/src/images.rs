@@ -3,78 +3,15 @@ use crate::common::{
     base_manifest, emit_started, finish_import, source_identity_with_extensions, ExportOptions,
     ImportOptions,
 };
+pub use hcd_core::image_layers::{decode_raster, png_bytes, MAX_IMAGE_BYTES};
 use hcd_core::{
     hash_bytes, stable_node_id, AssetDescriptor, Bundle, BundleWriter, ChunkSourceMap, HcdError,
     HcdManifest, ImportEvent, NodeMapEntry, SourceAnchor, HCD_SCHEMA_VERSION,
 };
-use image::{DynamicImage, ImageDecoder, ImageFormat};
-use std::{io::Cursor, path::Path};
-
-pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+use image::{DynamicImage, ImageFormat};
+use std::path::Path;
 pub fn is_image_format(format: &str) -> bool {
     crate::registry::format_for_extension(format).is_some_and(|format| format.raster_image)
-}
-
-/// Reject animation explicitly: static editing must never silently drop frames.
-pub fn decode_raster(bytes: &[u8]) -> Result<(DynamicImage, &'static str), HcdError> {
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-        return Err(HcdError::ResourceLimit("图片不得为空或超过 32 MiB".into()));
-    }
-    let format = image::guess_format(bytes).map_err(|e| HcdError::Unsupported(e.to_string()))?;
-    let ext = match format {
-        ImageFormat::Png => "png",
-        ImageFormat::Jpeg => "jpg",
-        ImageFormat::WebP => "webp",
-        _ => {
-            return Err(HcdError::Unsupported(
-                "支持静态 PNG、JPEG、WebP 图片".into(),
-            ))
-        }
-    };
-    if format == ImageFormat::WebP
-        && image::codecs::webp::WebPDecoder::new(Cursor::new(bytes))
-            .map_err(raster_error)?
-            .has_animation()
-    {
-        return Err(HcdError::Unsupported(
-            "动态 WebP 请先明确选择要编辑的帧".into(),
-        ));
-    }
-    if format == ImageFormat::Png
-        && image::codecs::png::PngDecoder::new(Cursor::new(bytes))
-            .map_err(raster_error)?
-            .is_apng()
-            .map_err(raster_error)?
-    {
-        return Err(HcdError::Unsupported(
-            "动态 PNG 请先明确选择要编辑的帧".into(),
-        ));
-    }
-    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
-    let mut decoder = reader.into_decoder().map_err(raster_error)?;
-    let (w, h) = decoder.dimensions();
-    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 32_000_000 {
-        return Err(HcdError::ResourceLimit("图片像素数不得超过 3200 万".into()));
-    }
-    let orientation = decoder.orientation().map_err(raster_error)?;
-    let mut image = DynamicImage::from_decoder(decoder).map_err(raster_error)?;
-    image.apply_orientation(orientation);
-    Ok((image, ext))
-}
-fn raster_error(e: image::ImageError) -> HcdError {
-    HcdError::Unsupported(format!("图片解码失败：{e}"))
-}
-pub fn png_bytes(image: &DynamicImage) -> Result<Vec<u8>, HcdError> {
-    let mut data = Cursor::new(Vec::new());
-    image
-        .write_to(&mut data, ImageFormat::Png)
-        .map_err(raster_error)?;
-    Ok(data.into_inner())
 }
 
 pub(crate) fn import_image<F: FnMut(&ImportEvent) -> Result<(), HcdError>>(
@@ -185,7 +122,8 @@ pub fn export_image(
     target: &Path,
     options: &ExportOptions,
 ) -> Result<hcd_core::FidelityReport, HcdError> {
-    let bytes = image_content(bundle, options.revision)?;
+    let revision = options.revision.unwrap_or(bundle.manifest()?.revision);
+    let bytes = image_content(bundle, Some(revision))?;
     let (image, _) = decode_raster(&bytes)?;
     let ext = target
         .extension()
@@ -211,15 +149,24 @@ pub fn export_image(
     } else {
         image
     };
+    let layered = hcd_core::image_layers::saved_snapshot(bundle, revision)?.is_some();
     image
         .save_with_format(target, format)
-        .map_err(raster_error)?;
+        .map_err(|error| HcdError::Unsupported(format!("图片编码失败：{error}")))?;
     // Browser export also provides quality-controlled lossy WebP; the Rust encoder is lossless.
+    let mut flattened =
+        vec!["Export uses the selected raster encoder; WebP is lossless in CLI".into()];
+    if layered {
+        flattened.push(
+            "Visible image layers are composited. The editable stack is retained in HCD archives."
+                .into(),
+        );
+    }
     let report = hcd_core::FidelityReport {
         schema_version: "hcd-fidelity/1".into(),
         level: hcd_core::FidelityLevel::High,
         preserved: vec!["Raster dimensions and current revision".into()],
-        flattened: vec!["Export uses the selected raster encoder; WebP is lossless in CLI".into()],
+        flattened,
         dropped: vec![],
         warnings: vec![],
     };
@@ -260,6 +207,70 @@ mod tests {
                 .width(),
             24
         );
+    }
+    #[test]
+    fn layer_graph_and_transparent_replacement_survive_archive_and_restore() {
+        use hcd_core::image_layers::{self, ImageLayer, ImageLayerBlend};
+        use image::{Rgba, RgbaImage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(16, 16, Rgba([255, 30, 10, 255]))
+            .save(&source)
+            .unwrap();
+        let folder = dir.path().join("picture.hcd");
+        import_image(&source, &folder, &ImportOptions::new("picture"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&folder).unwrap();
+        let mut state = image_layers::snapshot(&bundle, 0, (16, 16)).unwrap();
+        let pixels = png_bytes(&DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            4,
+            4,
+            Rgba([0, 0, 0, 0]),
+        )))
+        .unwrap();
+        let asset = bundle
+            .stage_asset_from_reader("png", &mut pixels.as_slice())
+            .unwrap();
+        let mut layer = ImageLayer::at("patch".into(), "透明角".into(), asset.hash, (2, 2, 4, 4));
+        layer.blend = ImageLayerBlend::Replace;
+        state.stack.layers.push(layer);
+        let patch = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "hcd-patch/63", "documentId": "picture", "patchId": "layer-check", "baseRevision": 0,
+            "operations": [{"op": "image.layers.set", "nodeId": state.node_id, "stack": state.stack,
+                "precondition": {"visualHash": state.visual_hash}}]
+        })).unwrap();
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        assert_eq!(
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap().revision,
+            1
+        );
+        let image = |bundle, revision| {
+            decode_raster(&image_content(bundle, Some(revision)).unwrap())
+                .unwrap()
+                .0
+                .into_rgba8()
+        };
+        let composite = image(&bundle, 1);
+        assert_eq!(*composite.get_pixel(1, 1), Rgba([255, 30, 10, 255]));
+        assert_eq!(*composite.get_pixel(2, 2), Rgba([0, 0, 0, 0]));
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+        let archive = dir.path().join("export.hcd");
+        hcd_core::pack_archive(&bundle, &archive).unwrap();
+        let target = dir.path().join("reopened.hcd");
+        hcd_core::unpack_archive(&archive, &target).unwrap();
+        let reopened = Bundle::open(target).unwrap();
+        let saved = image_layers::snapshot(&reopened, 1, (16, 16)).unwrap();
+        assert_eq!(saved.stack, state.stack);
+        hcd_core::restore_revision(&reopened, 0, 1).unwrap();
+        assert!(
+            !image_layers::snapshot(&reopened, 2, (16, 16))
+                .unwrap()
+                .persisted
+        );
+        assert_eq!(image(&reopened, 2), image(&bundle, 0));
     }
     #[test]
     fn reject_bad_payload_and_renamed_extension() {

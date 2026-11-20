@@ -13,4 +13,5 @@ sha2 = { workspace = true }
 quick-xml = { workspace = true }
 tempfile = { workspace = true }
 flate2 = "1"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 zip = { workspace = true }

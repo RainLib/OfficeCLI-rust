@@ -307,7 +307,7 @@ pub(super) async fn create(
     }
     let worker_state = state.clone();
     let worker_job = job.clone();
-    tokio::spawn(async move {
+    integration::backup::spawn(async move {
         let result = generate(&worker_state, &worker_job, config).await;
         let mut jobs = worker_state.image_jobs.lock().await;
         if let Some(job) = jobs.get_mut(&worker_job.job_id) {

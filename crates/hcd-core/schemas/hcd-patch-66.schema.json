@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:66",
+  "title": "HTML Canonical Document shared master text style",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/66"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "op",
+          "chunkId",
+          "style"
+        ],
+        "properties": {
+          "op": {
+            "const": "pptx.master.text-style"
+          },
+          "chunkId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "style": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "level"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "title",
+                  "body",
+                  "other"
+                ]
+              },
+              "level": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9
+              },
+              "format": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "bold": {
+                    "type": "boolean"
+                  },
+                  "italic": {
+                    "type": "boolean"
+                  },
+                  "underline": {
+                    "type": "boolean"
+                  },
+                  "fontSizePt": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 256
+                  },
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$"
+                  }
+                }
+              },
+              "font": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "latin": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "eastAsia": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "bidi": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              }
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "format"
+                ],
+                "properties": {
+                  "format": {
+                    "minProperties": 1
+                  }
+                }
+              },
+              {
+                "required": [
+                  "font"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

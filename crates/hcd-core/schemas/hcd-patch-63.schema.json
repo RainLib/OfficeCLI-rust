@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:63",
+  "title": "Editable raster layers",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/63"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "op",
+          "nodeId",
+          "stack",
+          "precondition"
+        ],
+        "properties": {
+          "op": {
+            "const": "image.layers.set"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^n_[0-9a-f]{32}$"
+          },
+          "stack": {
+            "$ref": "#/$defs/stack"
+          },
+          "precondition": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "visualHash"
+            ],
+            "properties": {
+              "visualHash": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8192
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": -32768,
+      "maximum": 32768
+    },
+    "stack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height",
+        "layers"
+      ],
+      "properties": {
+        "width": {
+          "$ref": "#/$defs/dimension"
+        },
+        "height": {
+          "$ref": "#/$defs/dimension"
+        },
+        "layers": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/layer"
+          }
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "assetHash",
+        "x",
+        "y",
+        "width",
+        "height",
+        "visible",
+        "opacity"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z_-]{1,64}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "assetHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "x": {
+          "$ref": "#/$defs/offset"
+        },
+        "y": {
+          "$ref": "#/$defs/offset"
+        },
+        "width": {
+          "$ref": "#/$defs/dimension"
+        },
+        "height": {
+          "$ref": "#/$defs/dimension"
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "opacity": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "blend": {
+          "enum": [
+            "normal",
+            "replace"
+          ]
+        }
+      }
+    }
+  }
+}

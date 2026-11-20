@@ -1,4 +1,4 @@
-use crate::{hash_bytes, HcdError, ImageGeometry, ImageGeometryUnit};
+use crate::{hash_bytes, DocxPictureLayout, HcdError, ImageGeometry, ImageGeometryUnit};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::BTreeMap;
@@ -111,6 +111,19 @@ pub struct HtmlImageNode {
     pub visual_hash: String,
     pub asset_hash: Option<String>,
     pub geometry: Option<ImageGeometry>,
+    pub docx_drawing_id: Option<u32>,
+    pub docx_picture_layout: Option<DocxPictureLayout>,
+}
+
+pub(crate) fn image_visual_hash_with_layout(
+    asset: Option<&str>,
+    geometry: Option<&ImageGeometry>,
+    layout: Option<&DocxPictureLayout>,
+) -> String {
+    let base = image_visual_hash(asset, geometry);
+    let Some(layout) = layout else { return base };
+    let value = serde_json::to_string(layout).expect("layout serialization is infallible");
+    hash_bytes(format!("officecli-hcd-word-picture/1\0{base}\0{value}").as_bytes())
 }
 
 pub fn image_visual_hash(asset_hash: Option<&str>, geometry: Option<&ImageGeometry>) -> String {
@@ -161,7 +174,21 @@ pub fn extract_html_image_nodes(html: &str) -> Result<BTreeMap<String, HtmlImage
                 };
                 let asset_hash = attributes.get("data-hcd-asset-hash").cloned();
                 let geometry = image_geometry_from_attributes(&attributes)?;
-                let actual_hash = image_visual_hash(asset_hash.as_deref(), geometry.as_ref());
+                let docx_drawing_id = attributes
+                    .get("data-hcd-drawing-id")
+                    .and_then(|id| id.parse::<u32>().ok());
+                let docx_picture_layout = attributes
+                    .get("data-hcd-docx-picture-layout")
+                    .map(|config| serde_json::from_str::<DocxPictureLayout>(config))
+                    .transpose()?;
+                if let Some(layout) = docx_picture_layout.as_ref() {
+                    crate::validate_docx_picture_layout(layout)?;
+                }
+                let actual_hash = image_visual_hash_with_layout(
+                    asset_hash.as_deref(),
+                    geometry.as_ref(),
+                    docx_picture_layout.as_ref(),
+                );
                 if actual_hash != *declared_hash {
                     return Err(HcdError::InvalidBundle(format!(
                         "image node {node_id} visual hash {declared_hash} does not match {actual_hash}"
@@ -174,6 +201,8 @@ pub fn extract_html_image_nodes(html: &str) -> Result<BTreeMap<String, HtmlImage
                             visual_hash: actual_hash,
                             asset_hash,
                             geometry,
+                            docx_drawing_id,
+                            docx_picture_layout,
                         },
                     )
                     .is_some()
@@ -597,20 +626,14 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
         if property == "transform-origin"
             && !matches!(
                 normalized_value.as_str(),
-                "center" | "top" | "bottom" | "left" | "right"
+                "center" | "top" | "bottom" | "left" | "right" | "top left"
             )
         {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS transform-origin {value} is not allowed"
             )));
         }
-        if property == "transform"
-            && !(normalized_value.starts_with("rotate(")
-                && normalized_value.ends_with("deg)")
-                && normalized_value[7..normalized_value.len() - 4]
-                    .parse::<f64>()
-                    .is_ok())
-        {
+        if property == "transform" && !valid_transform(&normalized_value) {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS transform {value} is not allowed"
             )));
@@ -631,6 +654,27 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
         }
     }
     Ok(())
+}
+
+fn valid_transform(value: &str) -> bool {
+    let number = |text: &str| {
+        text.parse::<f64>()
+            .is_ok_and(|number| number.is_finite() && number.abs() <= 1e12)
+    };
+    if let Some(angle) = value
+        .strip_prefix("rotate(")
+        .and_then(|text| text.strip_suffix("deg)"))
+    {
+        return number(angle);
+    }
+    let Some(matrix) = value
+        .strip_prefix("matrix(")
+        .and_then(|text| text.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let mut entries = matrix.split(',');
+    (0..6).all(|_| entries.next().is_some_and(number)) && entries.next().is_none()
 }
 
 /// Escapes text for an HTML or XML text run.

@@ -1228,12 +1228,19 @@ fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, boo
     let patch_json = read_patch_json(&command.patch)?;
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
     let header: serde_json::Value = serde_json::from_str(&patch_json)?;
-    let result = if header["schemaVersion"] == hcd_core::HCD_PATCH_SCHEMA_VERSION_4 {
+    let result = if matches!(
+        header["schemaVersion"].as_str(),
+        Some(hcd_core::HCD_PATCH_SCHEMA_VERSION_4 | hcd_core::HCD_PATCH_SCHEMA_VERSION_67)
+    ) {
         let patch: hcd_core::StructurePatchBatch = serde_json::from_str(&patch_json)?;
         hcd_core::apply_structure_patch(&bundle, &patch, command.expected_revision)
     } else {
         let patch: PatchBatch = serde_json::from_str(&patch_json)?;
-        hcd_core::apply_patch(&bundle, &patch, command.expected_revision)
+        hcd_formats::worksheet_pivots::apply_workbook_patch(
+            &bundle,
+            &patch,
+            command.expected_revision,
+        )
     }
     .map_err(handler_error)?;
     render(
@@ -1729,27 +1736,35 @@ fn semantic_export(
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     if target == "pdf" && manifest.profile == "fixed-layout" && manifest.source.format == "pdf" {
-        let pages =
+        let raster =
             super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path, pdf_pages)?;
         hcd_formats::append_created_images(bundle, output_path, Some(revision))
             .map_err(handler_error)?;
+        let mut preserved = vec![format!(
+            "{} HCD page rasters and physical page dimensions",
+            raster.pages
+        )];
+        if raster.edited_text {
+            preserved.push("edited text boxes are redrawn over their original page images".into());
+        }
+        if raster.ocr_pages > 0 {
+            preserved.push(format!(
+                "searchable, visually transparent OCR text on {} pages",
+                raster.ocr_pages
+            ));
+        }
         let report = FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             level: FidelityLevel::Visual,
-            preserved: if revision == 0 {
-                vec![format!("{pages} HCD page rasters and physical page dimensions")]
-            } else {
-                vec![format!("{pages} HCD page rasters and physical page dimensions"),
-                    "edited text boxes are redrawn over their original page images".to_string()]
-            },
-            flattened: vec!["original PDF page text and vector structure are represented by page images".to_string()],
-            dropped: vec!["original selectable PDF text layer and object metadata".to_string()],
+            preserved,
+            flattened: vec!["original visible PDF text and vector structure are represented by page images".to_string()],
+            dropped: vec!["original visible PDF text structure and object metadata".to_string()],
             warnings: vec![FidelityWarning {
                 code: if revision == 0 { "HCD_PDF_RASTER_ONLY_EXPORT" } else { "HCD_PDF_EDITED_VISUAL_EXPORT" }.to_string(),
-                message: if revision == 0 {
-                    "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for selectable text and exact PDF structure"
-                } else {
+                message: if raster.edited_text {
                     "edited text is drawn over bounded white masks on the original page rasters; placement and font metrics are approximate, so inspect the exported PDF preview before delivery"
+                } else {
+                    "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for the original visible text and exact PDF structure"
                 }.to_string(),
                 node_id: None, source_part: None,
             }],

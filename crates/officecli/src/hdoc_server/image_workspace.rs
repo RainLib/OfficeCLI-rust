@@ -2,6 +2,7 @@
 //! Candidates never mutate a document until a guarded apply succeeds.
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
+use hcd_core::image_layers::{self, ImageLayer, ImageLayerBlend};
 use hcd_formats::images::{
     decode_raster, image_content, is_image_format, png_bytes, MAX_IMAGE_BYTES,
 };
@@ -207,16 +208,18 @@ pub(super) async fn info(
     authorize(&state, &headers, &id, false)?;
     let b = image_bundle(&state, &id)?;
     let m = b.manifest().map_err(hcd_error)?;
-    let data = image_content(&b, None).map_err(hcd_error)?;
+    let data = image_content(&b, Some(m.revision)).map_err(hcd_error)?;
     let (img, _) = decode_raster(&data).map_err(hcd_error)?;
+    let layers =
+        image_layers::snapshot(&b, m.revision, (img.width(), img.height())).map_err(hcd_error)?;
     if integration::access(&state, &headers, &id).await?.is_some() {
         return Ok(Json(
-            json!({"documentId":id,"revision":m.revision,"width":img.width(),"height":img.height(),"format":m.source.format,"bytes":data.len(),"sourceBytes":m.source.size_bytes,"hasAlpha":img.to_rgba8().pixels().any(|p|p[3]<255),"imageModel":"","planningModel":"","aiAvailable":false,"aiReason":"当前宿主接入尚未启用 AI 委托","exportFormats":["png","jpeg","webp"],"maxAgents":0}),
+            json!({"documentId":id,"revision":m.revision,"width":img.width(),"height":img.height(),"format":m.source.format,"bytes":data.len(),"sourceBytes":m.source.size_bytes,"hasAlpha":img.to_rgba8().pixels().any(|p|p[3]<255),"imageModel":"","planningModel":"","aiAvailable":false,"aiReason":"当前宿主接入尚未启用 AI 委托","exportFormats":["png","jpeg","webp"],"maxAgents":0,"imageLayers":layers}),
         ));
     }
     let config = agent_runs::Config::load();
     Ok(Json(
-        json!({"documentId":id,"revision":m.revision,"width":img.width(),"height":img.height(),"format":m.source.format,"bytes":data.len(),"sourceBytes":m.source.size_bytes,"hasAlpha":img.to_rgba8().pixels().any(|p|p[3]<255),"imageModel":image_jobs::model(),"planningModel":config.as_ref().map(|c|c.model.as_str()).unwrap_or("gpt-6.1-sol"),"aiAvailable":config.is_ok(),"aiReason":config.err().map(|e|e.1),"exportFormats":["png","jpeg","webp"],"maxAgents":4}),
+        json!({"documentId":id,"revision":m.revision,"width":img.width(),"height":img.height(),"format":m.source.format,"bytes":data.len(),"sourceBytes":m.source.size_bytes,"hasAlpha":img.to_rgba8().pixels().any(|p|p[3]<255),"imageModel":image_jobs::model(),"planningModel":config.as_ref().map(|c|c.model.as_str()).unwrap_or("gpt-6.1-sol"),"aiAvailable":config.is_ok(),"aiReason":config.err().map(|e|e.1),"exportFormats":["png","jpeg","webp"],"maxAgents":4,"imageLayers":layers}),
     ))
 }
 pub(super) async fn content(
@@ -228,6 +231,35 @@ pub(super) async fn content(
     authorize(&state, &headers, &id, false)?;
     let b = image_bundle(&state, &id)?;
     let bytes = image_content(&b, query.revision).map_err(hcd_error)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "private, no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+pub(super) async fn layer_thumbnail(
+    State(state): State<ServerState>,
+    Path((id, hash)): Path<(String, String)>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = image_bundle(&state, &id)?;
+    let head = bundle.manifest().map_err(hcd_error)?.revision;
+    let revision = query.revision.unwrap_or(head);
+    if revision > head {
+        return Err(bad("图层版本超出当前文档版本"));
+    }
+    static THUMBNAILS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let _slot = THUMBNAILS.acquire().await.map_err(internal)?;
+    let bytes =
+        tokio::task::spawn_blocking(move || image_layers::thumbnail(&bundle, revision, &hash))
+            .await
+            .map_err(internal)?
+            .map_err(hcd_error)?;
     Ok((
         [
             (header::CONTENT_TYPE, "image/png"),
@@ -265,24 +297,67 @@ pub(super) async fn commit(
         &state,
         &b,
         &actor,
-        r.expected_revision,
         &img,
         &headers,
-        &uuid::Uuid::new_v4().to_string(),
+        PixelCommit {
+            expected: r.expected_revision,
+            patch_id: &uuid::Uuid::new_v4().to_string(),
+            region: None,
+        },
     )
     .await?;
     Ok(Json(json!({"revision":revision})))
 }
-async fn commit_pixels(
-    state: &ServerState,
-    b: &Bundle,
-    actor: &Claims,
+struct PixelCommit<'a> {
     expected: u64,
+    patch_id: &'a str,
+    region: Option<[u32; 4]>,
+}
+
+fn pixels_patch(
+    b: &Bundle,
     img: &DynamicImage,
-    headers: &HeaderMap,
-    patch_id: &str,
-) -> Result<u64, ApiError> {
-    let id = &b.manifest().map_err(hcd_error)?.document_id;
+    commit: &PixelCommit<'_>,
+) -> Result<PatchBatch, ApiError> {
+    let id = b.manifest().map_err(hcd_error)?.document_id;
+    let expected = commit.expected;
+    let patch_id = commit.patch_id;
+    if let Some(mut snapshot) = image_layers::saved_snapshot(b, expected).map_err(hcd_error)? {
+        let (name, x, y, raster) = if let Some([x, y, width, height]) = commit.region {
+            if (img.width(), img.height()) != (snapshot.stack.width, snapshot.stack.height)
+                || width == 0
+                || height == 0
+                || x.checked_add(width).is_none_or(|edge| edge > img.width())
+                || y.checked_add(height).is_none_or(|edge| edge > img.height())
+            {
+                return Err(bad("重绘区域超出图片范围"));
+            }
+            (
+                "局部重绘结果",
+                x,
+                y,
+                std::borrow::Cow::Owned(img.crop_imm(x, y, width, height)),
+            )
+        } else {
+            snapshot.stack.width = img.width();
+            snapshot.stack.height = img.height();
+            ("调整结果", 0, 0, std::borrow::Cow::Borrowed(img))
+        };
+        let bytes = png_bytes(&raster).map_err(hcd_error)?;
+        let staged = b
+            .stage_asset_from_reader("png", &mut bytes.as_slice())
+            .map_err(hcd_error)?;
+        let mut layer = ImageLayer::at(
+            hcd_core::stable_node_id(&[&id, patch_id, "image-result"]),
+            name.into(),
+            staged.hash,
+            (x as i32, y as i32, raster.width(), raster.height()),
+        );
+        layer.blend = ImageLayerBlend::Replace;
+        snapshot.stack.layers.push(layer);
+        return serde_json::from_value(json!({"schemaVersion":"hcd-patch/63","documentId":id,"patchId":patch_id,"baseRevision":expected,
+            "operations":[{"op":"image.layers.set","nodeId":snapshot.node_id,"stack":snapshot.stack,"precondition":{"visualHash":snapshot.visual_hash}}]})).map_err(internal);
+    }
     let node = hcd_core::extract_image_page(b, None, 1)
         .map_err(hcd_error)?
         .entries
@@ -293,7 +368,20 @@ async fn commit_pixels(
     let staged = b
         .stage_asset_from_reader("png", &mut data.as_slice())
         .map_err(hcd_error)?;
-    let patch:PatchBatch=serde_json::from_value(json!({"schemaVersion":"hcd-patch/3","documentId":id,"patchId":patch_id,"baseRevision":expected,"operations":[{"op":"image.replace","nodeId":node.node.node_id,"assetHash":staged.hash,"precondition":{"visualHash":node.node.visual_hash}},{"op":"image.geometry","nodeId":node.node.node_id,"geometry":{"x":0,"y":0,"width":f64::from(img.width())*0.75,"height":f64::from(img.height())*0.75,"unit":"pt"},"precondition":{"visualHash":node.node.visual_hash}}]})).map_err(internal)?;
+    serde_json::from_value(json!({"schemaVersion":"hcd-patch/3","documentId":id,"patchId":patch_id,"baseRevision":expected,"operations":[{"op":"image.replace","nodeId":node.node.node_id,"assetHash":staged.hash,"precondition":{"visualHash":node.node.visual_hash}},{"op":"image.geometry","nodeId":node.node.node_id,"geometry":{"x":0,"y":0,"width":f64::from(img.width())*0.75,"height":f64::from(img.height())*0.75,"unit":"pt"},"precondition":{"visualHash":node.node.visual_hash}}]})).map_err(internal)
+}
+
+async fn commit_pixels(
+    state: &ServerState,
+    b: &Bundle,
+    actor: &Claims,
+    img: &DynamicImage,
+    headers: &HeaderMap,
+    commit: PixelCommit<'_>,
+) -> Result<u64, ApiError> {
+    let id = &b.manifest().map_err(hcd_error)?.document_id;
+    let expected = commit.expected;
+    let patch = pixels_patch(b, img, &commit)?;
     agent_team::check_write(
         state,
         id,
@@ -644,7 +732,7 @@ pub(super) async fn start(
     }
     let state_job = state.clone();
     let work = job.clone();
-    tokio::spawn(async move {
+    integration::backup::spawn(async move {
         let task = run(&state_job, &work, &source, &mask, config);
         let result = tokio::select! {v=tokio::time::timeout(Duration::from_secs(350),task)=>v.unwrap_or_else(|_|Err(bad("图片任务超时，区域锁已释放"))),_=cancelled(&work)=>Err(bad("已取消"))};
         let mut jobs = state_job.image_edits.lock().await;
@@ -1097,10 +1185,13 @@ pub(super) async fn apply(
         &state,
         &b,
         &actor,
-        r.expected_revision,
         &img,
         &headers,
-        &format!("image-apply-{job_id}"),
+        PixelCommit {
+            expected: r.expected_revision,
+            patch_id: &format!("image-apply-{job_id}"),
+            region: Some(j.region),
+        },
     )
     .await;
     let mut jobs = state.image_edits.lock().await;
@@ -1252,10 +1343,13 @@ mod tests {
                 &state,
                 &bundle,
                 &actor,
-                0,
                 &image,
                 &headers,
-                &format!("image-apply-{}", job.job_id)
+                PixelCommit {
+                    expected: 0,
+                    patch_id: &format!("image-apply-{}", job.job_id),
+                    region: Some(job.region),
+                },
             )
             .await
             .unwrap(),

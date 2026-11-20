@@ -233,6 +233,8 @@ pub struct TextStyle {
     /// unsqueezed run and moves the line.
     pub horizontal_scaling: f32,
     pub bg_color: Option<PdfColor>,
+    #[serde(default)]
+    pub invisible: bool,
 }
 
 impl Default for TextStyle {
@@ -246,6 +248,7 @@ impl Default for TextStyle {
             word_spacing: 0.0,
             horizontal_scaling: 100.0,
             bg_color: None,
+            invisible: false,
         }
     }
 }
@@ -1628,6 +1631,7 @@ struct TextState {
     word_spacing: f32,
     leading: f32,
     horizontal_scale: f32,
+    invisible: bool,
     rise: f32,
     fill_color: Option<PdfColor>,
     stroke_color: Option<PdfColor>,
@@ -1659,6 +1663,7 @@ struct SavedGraphicsState {
     fill_color: Option<PdfColor>,
     stroke_color: Option<PdfColor>,
     line_width: f32,
+    invisible: bool,
 }
 
 impl Default for TextState {
@@ -1673,6 +1678,7 @@ impl Default for TextState {
             word_spacing: 0.0,
             leading: 0.0,
             horizontal_scale: 1.0,
+            invisible: false,
             rise: 0.0,
             fill_color: None,
             stroke_color: None,
@@ -1714,6 +1720,7 @@ fn is_pdf_operator(token: &str) -> bool {
             | "Tw"
             | "TL"
             | "Tz"
+            | "Tr"
             | "Ts"
             | "Tj"
             | "TJ"
@@ -1844,7 +1851,13 @@ fn add_or_merge_text_block(
         };
         let same_color = colors_equal(last.style.fill_color.as_ref(), state.fill_color.as_ref());
 
-        if same_y && close_x && same_font && same_size && same_color {
+        if same_y
+            && close_x
+            && same_font
+            && same_size
+            && same_color
+            && last.style.invisible == state.invisible
+        {
             // If there's a small gap, inject a space character between segments
             if gap > 0.15 * effective_font_size
                 && !last.text.ends_with(' ')
@@ -1882,6 +1895,7 @@ fn add_or_merge_text_block(
                 char_spacing: state.char_spacing,
                 word_spacing: state.word_spacing,
                 horizontal_scaling: state.horizontal_scale * 100.0,
+                invisible: state.invisible,
                 bg_color,
             },
             bt_start_line: state.bt_start_line,
@@ -2794,6 +2808,13 @@ fn parse_page_content_stream_inner(
                             state.horizontal_scale = parse_float(value) / 100.0;
                         }
                     }
+                    "Tr" => {
+                        if let Some(value) =
+                            operands.last().and_then(|value| value.parse::<u8>().ok())
+                        {
+                            state.invisible = matches!(value, 3 | 7);
+                        }
+                    }
                     "Ts" => {
                         if let Some(value) = operands.last() {
                             state.rise = parse_float(value);
@@ -2871,6 +2892,7 @@ fn parse_page_content_stream_inner(
                             fill_color: state.fill_color.clone(),
                             stroke_color: state.stroke_color.clone(),
                             line_width: state.line_width,
+                            invisible: state.invisible,
                         });
                         state.last_rect = None;
                     }
@@ -2885,6 +2907,7 @@ fn parse_page_content_stream_inner(
                             state.fill_color = restored.fill_color;
                             state.stroke_color = restored.stroke_color;
                             state.line_width = restored.line_width;
+                            state.invisible = restored.invisible;
                         }
                         state.last_rect = None;
                     }

@@ -95,6 +95,15 @@ impl PdfHandler {
         )
     }
 
+    pub fn add_ocr_text(&self, pages: &[crate::ocr_text::OcrTextPage]) -> Result<(), HandlerError> {
+        if !self.editable {
+            return Err(HandlerError::OperationFailed(
+                "PDF opened in read-only mode".into(),
+            ));
+        }
+        crate::ocr_text::append_ocr_text(self.reader.borrow_mut().document_mut(), pages)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add_table_grid(
         &self,

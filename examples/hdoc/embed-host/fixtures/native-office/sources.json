@@ -1,0 +1,11 @@
+{
+  "description": "Original synthetic Office/image sources; browser and native validators use the same immutable files.",
+  "sha256": {
+    "native-conditions-source.xlsx": "b1a79f887662bc3c82cc111653c86dde9bac6799808f408b2616074cc820581d",
+    "pivot-source.xlsx": "cabd1003707e5c911498cd6c73622d27ecdb63e943c697f9a266ea76fb934882",
+    "workshop-scan.pdf": "6e0519a810d524884e9adf1a82bb7501de22e9a6132437ee156149ca0024b413",
+    "橙色卡片.png": "172bcd953a0d62ab19717e5f05aca58dcf364415acca3b182354a725a27941ed",
+    "素材原件.png": "8635c64837ad5746e20f0213ddbfa31216b498107bbe77d711ad9f869c3bad1e",
+    "蓝色卡片.png": "b853c9ac7f1055d8ea86fc82bdfd7110b54da61ce0c226791b0a2cb0c4c2c8b8"
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:58",
+  "title": "HTML Canonical Document worksheet conditional formatting",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/58" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op", "sheetId", "conditionId", "config"],
+        "properties": {
+          "op": { "const": "xlsx.condition.set" },
+          "sheetId": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "conditionId": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+          "config": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/worksheetConditionConfig" }] }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "worksheetConditionConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["range", "operator", "values"],
+      "properties": {
+        "range": { "$ref": "#/$defs/chartRange" },
+        "operator": { "enum": ["greaterThan", "greaterThanOrEqual", "lessThan", "lessThanOrEqual", "equal", "notEqual", "between", "notBetween"] },
+        "values": {
+          "type": "array", "minItems": 1, "maxItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 40 }
+        },
+        "fill": { "type": "string", "pattern": "^#[a-fA-F0-9]{6}$" },
+        "color": { "type": "string", "pattern": "^#[a-fA-F0-9]{6}$" },
+        "stopIfTrue": { "type": "boolean" }
+      },
+      "anyOf": [{ "required": ["fill"] }, { "required": ["color"] }],
+      "if": { "properties": { "operator": { "enum": ["between", "notBetween"] } } },
+      "then": { "properties": { "values": { "minItems": 2 } } },
+      "else": { "properties": { "values": { "maxItems": 1 } } }
+    },
+    "chartRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startRow", "endRow", "startColumn", "endColumn"],
+      "properties": {
+        "startRow": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "endRow": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "startColumn": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "endColumn": { "type": "integer", "minimum": 1, "maximum": 16384 }
+      }
+    }
+  }
+}

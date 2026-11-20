@@ -1,294 +1,11 @@
 //! Revision-scoped worksheet inspection. Formula results are recalculated from
 //! expressions and native literals, never from a formula's imported cache.
 use super::*;
-use quick_xml::{events::Event, Reader};
+use hcd_core::WorksheetChartKind;
+use hcd_formats::worksheet_values::{chart_data, read_sheets, Calculation, Cell, Sheet};
+use oxml::chart_preview::{render_preview_svg, ChartPreview, ChartSeries};
 use std::cell::{Cell as Counter, RefCell};
-use xlsx_handler::formula::{evaluate_with_resolver, CellResolver, FormulaResult};
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Cell {
-    address: String,
-    node_id: String,
-    node_hash: String,
-    text: String,
-    text_editable: bool,
-    number_editable: bool,
-    number_value: Option<String>,
-    value_type: String,
-    formula: Option<String>,
-    formula_editable: bool,
-    #[serde(skip)]
-    is_formula: bool,
-    #[serde(skip)]
-    raw: Option<String>,
-}
-struct Sheet {
-    id: String,
-    name: String,
-    literal_types_complete: bool,
-    cells: std::collections::BTreeMap<String, Cell>,
-}
-struct Calculation<'a> {
-    sheets: &'a [Sheet],
-    sheet: usize,
-    stack: &'a RefCell<Vec<(usize, String)>>,
-    budget: &'a Counter<usize>,
-    error: &'a RefCell<Option<String>>,
-}
-impl Calculation<'_> {
-    fn fail(&self, code: &str) -> FormulaResult {
-        *self.error.borrow_mut() = Some(code.into());
-        FormulaResult::Error(code.into())
-    }
-    fn value(&self, sheet: usize, address: &str) -> FormulaResult {
-        if self.budget.get() == 0 || self.stack.borrow().len() >= 32 {
-            return self.fail("calculation_limit");
-        }
-        self.budget.set(self.budget.get() - 1);
-        if !self.sheets[sheet].literal_types_complete {
-            // Older imports dropped empty inline strings entirely. Even a
-            // missing address cannot safely be treated as blank in those files.
-            return self.fail("literal_type_metadata_missing");
-        }
-        let key = (sheet, address.replace('$', "").to_uppercase());
-        let Some(cell) = self.sheets[sheet].cells.get(&key.1) else {
-            return FormulaResult::Blank;
-        };
-        if cell.is_formula {
-            let Some(formula) = &cell.formula else {
-                return self.fail("unsupported_formula");
-            };
-            if self.stack.borrow().contains(&key) {
-                return self.fail("circular_reference");
-            }
-            if let Err(error) = xlsx_handler::formula::check_formula_support(formula) {
-                return self.fail(&error);
-            }
-            self.stack.borrow_mut().push(key);
-            let result = evaluate_with_resolver(
-                formula.trim_start_matches('='),
-                &Calculation { sheet, ..*self },
-            );
-            self.stack.borrow_mut().pop();
-            if matches!(&result, FormulaResult::Number(v) if !v.is_finite()) {
-                return self.fail("#NUM!");
-            }
-            result
-        } else {
-            xlsx_handler::formula::evaluate_literal(
-                &cell.value_type,
-                cell.raw.as_deref().filter(|value| !value.is_empty()),
-                &cell.text,
-            )
-        }
-    }
-    fn reference<'a>(&self, reference: &'a str) -> Option<(usize, &'a str)> {
-        if let Some((name, address)) = reference.rsplit_once('!') {
-            let name = name.trim_matches('\'').replace("''", "'");
-            self.sheets
-                .iter()
-                .position(|s| s.name.eq_ignore_ascii_case(&name))
-                .map(|i| (i, address))
-        } else {
-            Some((self.sheet, reference))
-        }
-    }
-}
-impl CellResolver for Calculation<'_> {
-    fn evaluation_failure(&self) -> Option<String> {
-        self.error.borrow().clone()
-    }
-    fn resolve_cell(&self, reference: &str) -> FormulaResult {
-        self.value(self.sheet, reference)
-    }
-    fn resolve_sheet_cell(&self, reference: &str) -> FormulaResult {
-        self.reference(reference)
-            .map(|(s, a)| self.value(s, a))
-            .unwrap_or_else(|| self.fail("#REF!"))
-    }
-    fn expand_range(&self, reference: &str) -> Vec<(String, FormulaResult)> {
-        let invalid = || vec![(reference.into(), self.fail("unsupported_range"))];
-        let Some((sheet, address)) = self.reference(reference) else {
-            return invalid();
-        };
-        let Some((a, b)) = address.split_once(':') else {
-            return invalid();
-        };
-        let a = a.replace('$', "");
-        let b = b.replace('$', "");
-        let (Some(a), Some(b)) = (
-            xlsx_handler::CellRef::parse(&a),
-            xlsx_handler::CellRef::parse(&b),
-        ) else {
-            return invalid();
-        };
-        let rows = a.row.abs_diff(b.row) as u64 + 1;
-        let cols = a.col.abs_diff(b.col) as u64 + 1;
-        if rows * cols > 20_000 || rows * cols > self.budget.get() as u64 {
-            return invalid();
-        }
-        let mut values = Vec::new();
-        for row in a.row.min(b.row)..=a.row.max(b.row) {
-            for col in a.col.min(b.col)..=a.col.max(b.col) {
-                let address = format!("{}{row}", xlsx_handler::formula::types::index_to_col(col));
-                values.push((address.clone(), self.value(sheet, &address)));
-            }
-        }
-        values
-    }
-}
-
-fn read_sheets(bundle: &Bundle) -> Result<Vec<Sheet>, ApiError> {
-    let manifest = bundle.manifest().map_err(hcd_error)?;
-    if manifest.source.format != "xlsx" {
-        return Err(bad("sheet inspection requires XLSX"));
-    }
-    let mut sheets: Vec<Sheet> = Vec::new();
-    let mut bytes = 0usize;
-    let mut count = 0;
-    for page in 0..manifest.index_page_count {
-        for chunk in bundle
-            .read_index_page(&manifest, page)
-            .map_err(hcd_error)?
-            .chunks
-        {
-            let Some(grid) = &chunk.grid else { continue };
-            if grid.kind != hcd_core::GridChunkKind::Cells {
-                continue;
-            }
-            let sheet = if let Some(i) = sheets.iter().position(|s| s.id == grid.sheet_id) {
-                i
-            } else {
-                sheets.push(Sheet {
-                    id: grid.sheet_id.clone(),
-                    name: grid.sheet_name.clone(),
-                    literal_types_complete: true,
-                    cells: Default::default(),
-                });
-                sheets.len() - 1
-            };
-            let html = bundle.read_chunk(&chunk).map_err(hcd_error)?;
-            bytes += html.len();
-            if bytes > 16 * 1024 * 1024 {
-                return Err(bad("worksheet inspection exceeds 16 MiB; use chunks/nodes"));
-            }
-            let texts = hcd_core::extract_html_text_nodes(&html).map_err(hcd_error)?;
-            let map = bundle.read_map(&chunk).map_err(hcd_error)?;
-            let entries: HashMap<_, _> = map
-                .entries
-                .iter()
-                .map(|entry| (entry.node_id.as_str(), entry))
-                .collect();
-            let mut reader = Reader::from_str(&html);
-            reader.config_mut().check_end_names = false;
-            let mut attrs = HashMap::new();
-            let mut literal_types_complete = false;
-            loop {
-                match reader.read_event() {
-                    Ok(Event::Start(e)) if e.name().as_ref() == b"table" => {
-                        literal_types_complete |= e.attributes().flatten().any(|attribute| {
-                            attribute.key.as_ref() == b"data-hcd-literal-types"
-                                && attribute.value.as_ref() == b"1"
-                        });
-                    }
-                    Ok(Event::Start(e)) if e.name().as_ref() == b"td" => {
-                        attrs.clear();
-                        for a in e.attributes().flatten() {
-                            attrs.insert(
-                                String::from_utf8_lossy(a.key.as_ref()).to_string(),
-                                a.decode_and_unescape_value(reader.decoder())
-                                    .map_err(bad)?
-                                    .into_owned(),
-                            );
-                        }
-                    }
-                    Ok(Event::Start(e))
-                        if e.name().as_ref() == b"span" && attrs.contains_key("data-hcd-cell") =>
-                    {
-                        let node = e
-                            .attributes()
-                            .flatten()
-                            .find(|a| a.key.as_ref() == b"data-hcd-id")
-                            .map(|a| a.unescape_value().map(|v| v.into_owned()))
-                            .transpose()
-                            .map_err(bad)?;
-                        if let Some(node) = node {
-                            if let Some(entry) = entries.get(node.as_str()) {
-                                count += 1;
-                                if count > 20_000 {
-                                    return Err(bad("worksheet inspection exceeds 20000 cells; use chunks/nodes"));
-                                }
-                                let address = attrs["data-hcd-cell"].clone();
-                                sheets[sheet].cells.insert(
-                                    address.clone(),
-                                    Cell {
-                                        address,
-                                        node_id: node.clone(),
-                                        node_hash: entry.node_hash.clone(),
-                                        text: texts.get(&node).cloned().unwrap_or_default(),
-                                        text_editable: entry.source.editable,
-                                        number_editable: entry.source.editable
-                                            && attrs
-                                                .get("data-hcd-formula")
-                                                .is_none_or(|s| s != "true")
-                                            && attrs.get("data-hcd-raw-value").is_some_and(
-                                                |value| {
-                                                    value.parse::<f64>().is_ok_and(f64::is_finite)
-                                                },
-                                            ),
-                                        number_value: if attrs
-                                            .get("data-hcd-formula")
-                                            .is_some_and(|s| s == "true")
-                                        {
-                                            None
-                                        } else {
-                                            attrs
-                                                .get("data-hcd-raw-value")
-                                                .filter(|value| {
-                                                    value.parse::<f64>().is_ok_and(f64::is_finite)
-                                                })
-                                                .cloned()
-                                        },
-                                        value_type: attrs
-                                            .get("data-hcd-value-type")
-                                            .cloned()
-                                            .unwrap_or_else(|| {
-                                                // Legacy values remain readable; the sheet
-                                                // marker separately gates verified calculation.
-                                                if attrs
-                                                    .get("data-hcd-raw-value")
-                                                    .is_some_and(|v| !v.is_empty())
-                                                {
-                                                    "number".into()
-                                                } else {
-                                                    "string".into()
-                                                }
-                                            }),
-                                        formula: attrs.get("data-hcd-formula-expression").cloned(),
-                                        formula_editable: attrs
-                                            .get("data-hcd-formula-editable")
-                                            .is_some_and(|s| s == "true"),
-                                        is_formula: attrs
-                                            .get("data-hcd-formula")
-                                            .is_some_and(|s| s == "true"),
-                                        raw: attrs.get("data-hcd-raw-value").cloned(),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    Ok(Event::End(e)) if e.name().as_ref() == b"td" => attrs.clear(),
-                    Ok(Event::Eof) => break,
-                    Err(e) => return Err(bad(e)),
-                    _ => {}
-                }
-            }
-            sheets[sheet].literal_types_complete &= literal_types_complete;
-        }
-    }
-    Ok(sheets)
-}
+use xlsx_handler::formula::FormulaResult;
 
 /// A worksheet column is an independent edit region, even when several
 /// columns share one rendering chunk. Formula nodes belong to regions too.
@@ -305,7 +22,12 @@ pub(super) fn column_key(sheet: &str, column: usize) -> String {
 
 pub(super) fn columns(bundle: &Bundle) -> Result<Vec<ColumnRegion>, ApiError> {
     let mut regions = vec![];
-    for (sheet_index, sheet) in read_sheets(bundle)?.into_iter().enumerate() {
+    let manifest = bundle.manifest().map_err(hcd_error)?;
+    for (sheet_index, sheet) in read_sheets(bundle, &manifest)
+        .map_err(hcd_error)?
+        .into_iter()
+        .enumerate()
+    {
         let mut columns: std::collections::BTreeMap<usize, Vec<Cell>> = Default::default();
         for cell in sheet.cells.into_values() {
             if let Some(address) = xlsx_handler::CellRef::parse(&cell.address) {
@@ -341,9 +63,18 @@ pub(super) fn columns(bundle: &Bundle) -> Result<Vec<ColumnRegion>, ApiError> {
     Ok(regions)
 }
 
+#[cfg(test)]
 pub(super) fn inspect(bundle: &Bundle, selected: usize) -> Result<Value, ApiError> {
     let manifest = bundle.manifest().map_err(hcd_error)?;
-    let sheets = read_sheets(bundle)?;
+    let sheets = read_sheets(bundle, &manifest).map_err(hcd_error)?;
+    inspect_loaded(&manifest, &sheets, selected)
+}
+
+fn inspect_loaded(
+    manifest: &hcd_core::HcdManifest,
+    sheets: &[Sheet],
+    selected: usize,
+) -> Result<Value, ApiError> {
     let sheet = sheets
         .get(selected)
         .ok_or_else(|| bad("sheet index out of bounds"))?;
@@ -357,7 +88,7 @@ pub(super) fn inspect(bundle: &Bundle, selected: usize) -> Result<Value, ApiErro
         let stack = RefCell::new(Vec::new());
         let error = RefCell::new(None);
         let calculation = Calculation {
-            sheets: &sheets,
+            sheets,
             sheet: selected,
             stack: &stack,
             budget: &budget,
@@ -382,15 +113,115 @@ pub(super) fn inspect(bundle: &Bundle, selected: usize) -> Result<Value, ApiErro
 
 pub(super) async fn read(
     State(state): State<ServerState>,
-    Path((id, index)): Path<(String, usize)>,
+    Path((id, sheet)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    tokio::task::spawn_blocking(move || inspect(&bundle, index))
-        .await
-        .map_err(internal)?
+    tokio::task::spawn_blocking(move || {
+        let manifest = bundle.manifest().map_err(hcd_error)?;
+        let sheets = read_sheets(&bundle, &manifest).map_err(hcd_error)?;
+        let selected = sheet
+            .parse::<usize>()
+            .ok()
+            .or_else(|| sheets.iter().position(|candidate| candidate.id == sheet))
+            .ok_or_else(|| bad("worksheet not found"))?;
+        inspect_loaded(&manifest, &sheets, selected)
+    })
+    .await
+    .map_err(internal)?
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PivotQuery {
+    revision: u64,
+    pivot_id: String,
+    config: String,
+}
+
+pub(super) async fn pivot_preview(
+    State(state): State<ServerState>,
+    Path((id, sheet)): Path<(String, String)>,
+    Query(query): Query<PivotQuery>,
+    headers: HeaderMap,
+) -> Result<Json<hcd_formats::worksheet_pivots::PivotPreview>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    if query.config.len() > 8192 {
+        return Err(bad("PivotTable request is too large"));
+    }
+    let config = serde_json::from_str(&query.config).map_err(bad)?;
+    let bundle = open(&state, &id)?;
+    tokio::task::spawn_blocking(move || {
+        hcd_formats::worksheet_pivots::preview_current(
+            &bundle,
+            query.revision,
+            &sheet,
+            &query.pivot_id,
+            &config,
+        )
         .map(Json)
+        .map_err(hcd_error)
+    })
+    .await
+    .map_err(internal)?
+}
+
+pub(super) async fn charts(
+    State(state): State<ServerState>,
+    Path((id, sheet)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    tokio::task::spawn_blocking(move || {
+        let manifest = bundle.manifest().map_err(hcd_error)?;
+        let charts: Vec<_> = hcd_core::worksheet_charts(&bundle, &manifest, Some(&sheet))
+            .map_err(hcd_error)?
+            .into_iter()
+            .filter(|(_, chart)| !chart.removed)
+            .collect();
+        let (sheets, limited) = if charts.iter().any(|(_, chart)| !chart.source_missing) {
+            match read_sheets(&bundle, &manifest) {
+                Ok(sheets) => (sheets, false),
+                Err(hcd_core::HcdError::ResourceLimit(_)) => (Vec::new(), true),
+                Err(error) => return Err(hcd_error(error)),
+            }
+        } else {
+            (Vec::new(), false)
+        };
+        let charts: Vec<_> = charts.into_iter().map(|(_, chart)| {
+            let data = chart_data(&sheets, &sheet, &chart);
+            let kind = match chart.config.kind {
+                WorksheetChartKind::Column => "bar",
+                WorksheetChartKind::Bar => "horizontalBar",
+                WorksheetChartKind::Line => "line",
+                WorksheetChartKind::Pie => "pie",
+            };
+            let series = data.as_ref().into_iter().flat_map(|data| {
+                data.series.iter().enumerate().map(|(index, series)| ChartSeries {
+                    name: if series.name.is_empty() { format!("Series {}", index + 1) } else { series.name.clone() },
+                    name_formula: None,
+                    categories: data.categories.clone(),
+                    categories_formula: None,
+                    x_values: Vec::new(),
+                    x_values_formula: None,
+                    values: series.values.iter().map(|value| value.unwrap_or(f64::NAN)).collect(),
+                    values_formula: None,
+                    bubble_sizes: Vec::new(),
+                    bubble_sizes_formula: None,
+                })
+            }).collect();
+            let svg = render_preview_svg(&ChartPreview {
+                title: chart.config.title.clone(),
+                chart_kinds: vec![kind.into()],
+                series,
+            });
+            json!({"id":chart.id,"config":chart.config,"sourceMissing":chart.source_missing,"data":data,"svg":svg})
+        }).collect();
+        Ok(json!({"revision":manifest.revision,"calculationLimited":limited,"charts":charts}))
+    }).await.map_err(internal)?.map(Json)
 }
 
 #[cfg(test)]
@@ -402,6 +233,7 @@ mod tests {
             name: "Scores".into(),
             literal_types_complete: true,
             cells: Default::default(),
+            merges: Vec::new(),
         };
         for (address, text) in formulas {
             let formula = text.starts_with('=');
@@ -522,6 +354,7 @@ mod tests {
             name: "Old import".into(),
             literal_types_complete: false,
             cells: Default::default(),
+            merges: Vec::new(),
         }];
         let stack = RefCell::new(Vec::new());
         let budget = Counter::new(100);

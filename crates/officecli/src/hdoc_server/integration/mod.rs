@@ -1,7 +1,10 @@
 //! Host-owned identity/files, engine-owned durable editing state.
+pub(super) mod backup;
+pub(super) mod mentions;
 mod policy;
 mod provider;
 mod publication;
+pub(super) mod recovery;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -313,10 +316,12 @@ async fn exchange(
     if descriptor.id != request.external_file_id {
         return Err(bad("Provider descriptor ID mismatch"));
     }
-    let mapping = if let Some(mapping) = integration.store.mapping(&document_id) {
-        if mapping.external_file_id != request.external_file_id
-            || mapping.external_head != descriptor.version
-        {
+    let mapping = if let Some(mut mapping) = integration.store.mapping(&document_id) {
+        if mapping.external_file_id != request.external_file_id {
+            return Err(denied("managed mapping has a different host file"));
+        }
+        publication::recover_open_mapping(integration, &mut mapping, &descriptor.version).await?;
+        if mapping.external_head != descriptor.version {
             return Err(conflict("business file changed outside this HCD workspace; explicit conflict handling is required"));
         }
         mapping

@@ -195,7 +195,7 @@ fn missing() -> ApiError {
 }
 
 fn owner(actor: &Claims) -> Result<&str, ApiError> {
-    if actor.integration_session.is_some() || actor.worker_generation.is_some() {
+    if actor.worker_generation.is_some() {
         return Err(denied("跨文件生成需要工作台用户授权。"));
     }
     actor
@@ -215,11 +215,11 @@ fn prefixed_grant(headers: &HeaderMap, name: &'static str) -> Result<HeaderMap, 
     Ok(result)
 }
 
-fn target_grant(
+async fn target_grant(
     state: &ServerState,
     headers: &HeaderMap,
     id: &str,
-    account: &str,
+    source: &Claims,
     write: bool,
 ) -> Result<(HeaderMap, Claims), ApiError> {
     let grant = prefixed_grant(headers, TARGET_GRANT)?;
@@ -228,8 +228,21 @@ fn target_grant(
     } else {
         claims(state, &grant, id)?
     };
-    if owner(&actor)? != account {
+    if owner(&actor)? != owner(source)?
+        || actor.integration_session.is_some() != source.integration_session.is_some()
+    {
         return Err(denied("来源和目标必须属于同一访问身份。"));
+    }
+    if source.integration_session.is_some() {
+        let decision = integration::access(state, &grant, id)
+            .await?
+            .ok_or_else(|| denied("缺少业务系统对目标文件的授权。"))?;
+        let operations: &[&str] = if write {
+            &["document.view", "document.edit"]
+        } else {
+            &["document.view"]
+        };
+        decision.require(operations)?;
     }
     Ok((grant, actor))
 }
@@ -470,6 +483,18 @@ pub(super) async fn start(
         return Err(bad("生成要求超过 4000 字。"));
     }
     let config = agent_runs::Config::load()?;
+    if actor.integration_session.is_some() {
+        if request.selection.is_canvas() || matches!(&request.target, Target::New { .. }) {
+            return Err(denied("请选择业务工作台中已有的目标白板。"));
+        }
+        let decision = integration::access(&state, &headers, &id)
+            .await?
+            .ok_or_else(|| denied("缺少业务系统对源文档的授权。"))?;
+        decision.require(&["document.view", "document.copy", "document.ai"])?;
+        if !decision.constraints.model_ids.contains(&config.model) {
+            return Err(denied("该模型未获得源文档的使用授权。"));
+        }
+    }
     let guard = state.collaboration_lock.lock().await;
     if path(&state, request.id).exists() {
         let previous = load(&state, &id, request.id)?;
@@ -500,7 +525,7 @@ pub(super) async fn start(
             if document_id == &id {
                 return Err(bad("请选择另一份目标文件。"));
             }
-            target_grant(&state, &headers, document_id, account, true)?;
+            target_grant(&state, &headers, document_id, &actor, true).await?;
             validate_existing_target(
                 &open(&state, document_id)?,
                 request.selection.is_canvas(),
@@ -552,7 +577,7 @@ pub(super) async fn start(
         .await
         .insert(run.request.id, cancel);
     drop(guard);
-    tokio::spawn(async move {
+    integration::backup::spawn(async move {
         let _permit = permit;
         let result = tokio::select! {
             result = make_draft(&config, &run.request, selected) => Some(result),
@@ -986,7 +1011,11 @@ pub(super) async fn apply(
         None
     };
     let existing_grant = if new_upload.is_none() {
-        Some(target_grant(&state, &headers, &target_id, account, true)?.0)
+        Some(
+            target_grant(&state, &headers, &target_id, &source_actor, true)
+                .await?
+                .0,
+        )
     } else {
         None
     };
@@ -1125,7 +1154,7 @@ pub(super) async fn source(
     if run.status != Status::Applied {
         return Err(missing());
     }
-    target_grant(&state, &headers, run.destination(), owner(&actor)?, false)?;
+    target_grant(&state, &headers, run.destination(), &actor, false).await?;
     open(&state, run.destination())?;
     let source = open(&state, &id)?;
     let selected = read_selection(&source, &run.request.selection)?;

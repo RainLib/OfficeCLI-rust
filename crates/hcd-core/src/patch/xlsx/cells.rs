@@ -764,6 +764,233 @@ pub(in crate::patch) fn xlsx_cells(html: &str) -> Result<Vec<XlsxCellSpan>, HcdE
     Ok(result)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XlsxAddedLiteral {
+    pub id: String,
+    pub hash: String,
+    pub sheet_id: String,
+    pub row: u32,
+    pub column: u32,
+}
+
+/// Identify editable literals that first appeared in a committed write.
+pub fn xlsx_added_literals(
+    bundle: &Bundle,
+    record: &RevisionRecord,
+) -> Result<Vec<XlsxAddedLiteral>, HcdError> {
+    let head = bundle.manifest()?;
+    let Some(parent) = record.parent_revision else {
+        return Ok(Vec::new());
+    };
+    if !head.source.is_spreadsheet() || record.dirty_node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (after, _) = crate::manifest_at_revision(bundle, &head, Some(record.revision))?;
+    let chunks: HashSet<_> = record.dirty_chunk_ids.iter().map(String::as_str).collect();
+    let dirty: HashSet<_> = record.dirty_node_ids.iter().map(String::as_str).collect();
+    let mut candidates = HashMap::new();
+    for page in 0..after.index_page_count {
+        for descriptor in bundle.read_index_page(&after, page)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != crate::GridChunkKind::Cells
+                || !chunks.contains(descriptor.chunk_id.as_str())
+            {
+                continue;
+            }
+            for entry in bundle.read_map_verified(&descriptor)?.entries {
+                if entry.source.node_kind != "cell"
+                    || !entry.source.editable
+                    || !entry.source.created_in_hcd
+                    || !dirty.contains(entry.node_id.as_str())
+                {
+                    continue;
+                }
+                let Some(address) = entry.source.paragraph_id.as_deref() else {
+                    continue;
+                };
+                let Some((row, column)) = xlsx_cell_coordinates(address) else {
+                    continue;
+                };
+                candidates.insert(
+                    (grid.sheet_id.clone(), row, column),
+                    (entry.node_id, entry.node_hash),
+                );
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A shifted or rewritten HCD-owned cell is already present in the parent.
+    let candidates_ids: HashSet<_> = candidates.values().map(|(id, _)| id.clone()).collect();
+    let sheets: HashSet<_> = candidates
+        .keys()
+        .map(|(sheet, _, _)| sheet.clone())
+        .collect();
+    let mut previous_ids = HashSet::new();
+    let (before, _) = crate::manifest_at_revision(bundle, &head, Some(parent))?;
+    for page in 0..before.index_page_count {
+        for descriptor in bundle.read_index_page(&before, page)?.chunks {
+            let Some(grid) = descriptor.grid.as_ref() else {
+                continue;
+            };
+            if grid.kind != crate::GridChunkKind::Cells || !sheets.contains(&grid.sheet_id) {
+                continue;
+            }
+            for entry in bundle.read_map_verified(&descriptor)?.entries {
+                if candidates_ids.contains(entry.node_id.as_str()) {
+                    previous_ids.insert(entry.node_id);
+                }
+                if let Some((row, column)) = entry
+                    .source
+                    .paragraph_id
+                    .as_deref()
+                    .and_then(xlsx_cell_coordinates)
+                {
+                    candidates.remove(&(grid.sheet_id.clone(), row, column));
+                }
+            }
+        }
+    }
+    let mut added: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, (id, _))| !previous_ids.contains(id))
+        .map(|((sheet_id, row, column), (id, hash))| XlsxAddedLiteral {
+            id,
+            hash,
+            sheet_id,
+            row,
+            column,
+        })
+        .collect();
+    added.sort_unstable_by(|a, b| {
+        (&a.sheet_id, a.row, a.column).cmp(&(&b.sheet_id, b.row, b.column))
+    });
+    Ok(added)
+}
+
+pub(in crate::patch) fn collect_xlsx_cell_clears<'a>(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    patch: &'a PatchBatch,
+) -> Result<HashMap<&'a str, (&'a str, &'a str)>, HcdError> {
+    let mut clears = HashMap::new();
+    let mut creations = HashMap::new();
+    for operation in &patch.operations {
+        if let PatchOperation::XlsxCellClear {
+            node_id,
+            sheet_id,
+            created_revision,
+            precondition,
+        } = operation
+        {
+            clears.insert(
+                node_id.as_str(),
+                (sheet_id.as_str(), precondition.node_hash.as_str()),
+            );
+            creations.insert(node_id.as_str(), *created_revision);
+        }
+    }
+    let Some(first) = creations.values().min().copied() else {
+        return Ok(clears);
+    };
+    let mut revisions = BTreeMap::<u64, Vec<&str>>::new();
+    for (&id, &revision) in &creations {
+        revisions.entry(revision).or_default().push(id);
+    }
+    for (revision, ids) in revisions {
+        let record = bundle.revision(revision)?;
+        let added: HashMap<_, _> = xlsx_added_literals(bundle, &record)?
+            .into_iter()
+            .map(|row| (row.id, (row.sheet_id, row.hash)))
+            .collect();
+        for id in ids {
+            let (sheet, hash) = clears[id];
+            if !added.get(id).is_some_and(|(s, h)| s == sheet && h == hash) {
+                return Err(HcdError::PreconditionFailed(
+                    "XLSX cell was not created by this revision".into(),
+                ));
+            }
+        }
+    }
+    for revision in first + 1..=manifest.revision {
+        let record = bundle.revision(revision)?;
+        if (record.structural_change
+            && record
+                .patch_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("restore-")))
+            || record
+                .dirty_node_ids
+                .iter()
+                .chain(&record.removed_node_ids)
+                .any(|id| {
+                    creations
+                        .get(id.as_str())
+                        .is_some_and(|created| revision > *created)
+                })
+        {
+            return Err(HcdError::PreconditionFailed(
+                "XLSX cell has been edited since the original write".into(),
+            ));
+        }
+    }
+    if let Some(href) = &manifest.annotation_href {
+        let set: AnnotationSet = read_json_bounded(
+            &bundle.resolve_href(href)?,
+            MAX_CONTROL_PART_BYTES,
+            "annotation set",
+        )?;
+        if set
+            .annotations
+            .iter()
+            .any(|entry| clears.contains_key(entry.node_id.as_str()))
+        {
+            return Err(HcdError::PreconditionFailed(
+                "XLSX cell has a linked annotation".into(),
+            ));
+        }
+    }
+    Ok(clears)
+}
+
+pub(in crate::patch) fn clear_xlsx_cell(
+    html: &mut String,
+    entry: &NodeMapEntry,
+) -> Result<(), HcdError> {
+    let (row, column) = entry
+        .source
+        .paragraph_id
+        .as_deref()
+        .and_then(xlsx_cell_coordinates)
+        .ok_or_else(|| HcdError::InvalidBundle("XLSX cell has no valid address".into()))?;
+    let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
+    let cell = xlsx_cells(html)?
+        .into_iter()
+        .find(|cell| cell.row == row && cell.column == column)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle("XLSX cell is missing from canonical HTML".into())
+        })?;
+    let tag = &html[cell.start..=cell.tag_end];
+    if !html[cell.start..cell.end].contains(&marker)
+        || cell.merged_range.is_some()
+        || xlsx_attribute(tag, "data-hcd-formula") == Some("true")
+        || xlsx_attribute(tag, "data-hcd-value-type") != Some("string")
+    {
+        return Err(HcdError::PreconditionFailed(
+            "XLSX cell is no longer an independent literal".into(),
+        ));
+    }
+    html.replace_range(
+        cell.start..cell.end,
+        &format!("<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{column}\"></td>"),
+    );
+    Ok(())
+}
+
 pub(in crate::patch) fn insert_xlsx_cell(
     html: &mut String,
     source_map: &mut crate::ChunkSourceMap,

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:64",
+  "title": "HTML Canonical Document slide groups",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/64" },
+    "documentId": { "$ref": "#/$defs/identifier" },
+    "patchId": { "$ref": "#/$defs/identifier" },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": { "oneOf": [{ "$ref": "#/$defs/create" }, { "$ref": "#/$defs/ungroup" }] }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "nodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
+    "create": {
+      "type": "object", "additionalProperties": false, "required": ["op", "chunkId", "nodeIds"],
+      "properties": {
+        "op": { "const": "pptx.group.create" },
+        "chunkId": { "$ref": "#/$defs/identifier" },
+        "nodeIds": { "type": "array", "minItems": 2, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/nodeId" } }
+      }
+    },
+    "ungroup": {
+      "type": "object", "additionalProperties": false, "required": ["op", "chunkId", "groupId"],
+      "properties": {
+        "op": { "const": "pptx.group.ungroup" },
+        "chunkId": { "$ref": "#/$defs/identifier" },
+        "groupId": { "$ref": "#/$defs/nodeId" }
+      }
+    }
+  }
+}

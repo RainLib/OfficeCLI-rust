@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:60",
+  "title": "HTML Canonical Document slide animation track",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/60" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op", "chunkId", "effects"],
+        "properties": {
+          "op": { "const": "pptx.animations.set" },
+          "chunkId": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "effects": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["target", "kind", "trigger", "durationMs", "delayMs"],
+              "properties": {
+                "target": { "type": "string", "pattern": "^(s[1-9][0-9]{0,9}|n_[0-9a-fA-F]{32})$" },
+                "kind": { "enum": ["appear", "fadeIn", "flyIn", "disappear", "fadeOut"] },
+                "trigger": { "enum": ["onClick", "withPrevious", "afterPrevious"] },
+                "durationMs": { "type": "integer", "minimum": 1, "maximum": 60000 },
+                "delayMs": { "type": "integer", "minimum": 0, "maximum": 60000 }
+              },
+              "if": { "properties": { "kind": { "enum": ["appear", "disappear"] } } },
+              "then": { "properties": { "durationMs": { "const": 1 } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

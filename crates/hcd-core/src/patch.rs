@@ -1,11 +1,15 @@
 mod pdf;
 mod pptx;
+mod pptx_group;
+mod pptx_master;
 mod validation;
 mod xlsx;
 
 use pdf::*;
 use pptx::*;
+use pptx_group::require_pptx_group_patch;
 use validation::validate_patch_identity;
+pub use xlsx::cells::{xlsx_added_literals, XlsxAddedLiteral};
 use xlsx::*;
 
 use crate::bundle::{
@@ -41,8 +45,16 @@ use std::fs;
 
 mod grid_filter;
 mod grid_sort;
+mod worksheet_charts;
+mod worksheet_conditions;
+mod worksheet_pivots;
 pub use grid_filter::{worksheet_filter, GridFilterView};
 pub use grid_sort::{sort_grid, GridSortDirection, GridSortRequest};
+mod docx_pictures;
+pub use docx_pictures::validate_docx_picture_layout;
+pub use worksheet_charts::{valid_worksheet_chart_id, validate_worksheet_chart, worksheet_charts};
+pub use worksheet_conditions::validate_worksheet_condition;
+pub use worksheet_pivots::{pivot_output_range, validate_worksheet_pivot, worksheet_pivots};
 
 const MAX_PATCH_OPERATIONS: usize = 10_000;
 const MAX_PATCH_INSERT_BYTES: usize = 2 * 1024 * 1024;
@@ -81,6 +93,7 @@ struct ImageChange {
     asset_hash: Option<String>,
     geometry: Option<ImageGeometry>,
     visual_hash: String,
+    layers: Option<crate::image_layers::ImageLayerStack>,
 }
 
 /// What an index rebuild needs after a page or a tab leaves the document:
@@ -164,6 +177,15 @@ pub fn apply_patch(
     patch: &PatchBatch,
     expected_revision: u64,
 ) -> Result<ApplyResult, HcdError> {
+    apply_patch_with_pivot(bundle, patch, expected_revision, None)
+}
+
+pub fn apply_patch_with_pivot(
+    bundle: &Bundle,
+    patch: &PatchBatch,
+    expected_revision: u64,
+    snapshot: Option<crate::PivotSnapshot>,
+) -> Result<ApplyResult, HcdError> {
     let _write_guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
     if manifest.revision > crate::MAX_REVISION {
@@ -194,11 +216,24 @@ pub fn apply_patch(
                 matches!(
                     operation,
                     PatchOperation::ImageInsert { .. }
+                        | PatchOperation::ImageLayersSet { .. }
                         | PatchOperation::PdfTextInsert { .. }
                         | PatchOperation::PdfTextGeometry { .. }
                         | PatchOperation::PdfTextDelete { .. }
                         | PatchOperation::PdfPageLayoutSet { .. }
+                        | PatchOperation::PdfOcrApply { .. }
                         | PatchOperation::PptxTextInsert { .. }
+                        | PatchOperation::PptxShapeInsert { .. }
+                        | PatchOperation::PptxObjectsTransform { .. }
+                        | PatchOperation::PptxGroupCreate { .. }
+                        | PatchOperation::PptxGroupUngroup { .. }
+                        | PatchOperation::PptxAnimationsSet { .. }
+                        | PatchOperation::PptxMasterBackgroundSet { .. }
+                        | PatchOperation::PptxMasterTextStyleSet { .. }
+                        | PatchOperation::XlsxChartSet { .. }
+                        | PatchOperation::XlsxConditionSet { .. }
+                        | PatchOperation::XlsxPivotSet { .. }
+                        | PatchOperation::DocxPictureLayoutSet { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::PptxTextDelete { .. }
                         | PatchOperation::PptxRunFormat { .. }
@@ -209,6 +244,7 @@ pub fn apply_patch(
                         | PatchOperation::XlsxCellLayout { .. }
                         | PatchOperation::XlsxCellNumberFormat { .. }
                         | PatchOperation::XlsxCellSet { .. }
+                        | PatchOperation::XlsxCellClear { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaToValue { .. }
                         | PatchOperation::XlsxFormulaToNumber { .. }
@@ -264,7 +300,15 @@ pub fn apply_patch(
     let splices = collect_splices(patch)?;
     let styles = collect_styles(patch)?;
     let fonts = collect_fonts(patch)?;
-    let images = collect_image_changes(patch)?;
+    let mut images = collect_image_changes(patch)?;
+    let word_picture = match patch.operations.as_slice() {
+        [PatchOperation::DocxPictureLayoutSet {
+            node_id,
+            layout,
+            precondition,
+        }] => Some((node_id, layout, precondition)),
+        _ => None,
+    };
     let image_insertions = crate::image_insert::collect(patch);
     let mut flow_image_tail = None;
     if !image_insertions.is_empty()
@@ -290,9 +334,57 @@ pub fn apply_patch(
     }
     let mut inserted_images = 0;
     let pdf_insertions = collect_pdf_insertions(patch);
+    let pdf_ocr_pages = match patch.operations.as_slice() {
+        [PatchOperation::PdfOcrApply { pages }] => {
+            crate::pdf_ocr::prepare_ocr_pages(bundle, &manifest, pages)?
+        }
+        _ => BTreeMap::new(),
+    };
     let pdf_geometry = collect_pdf_geometry(patch);
     let pdf_deletions = collect_pdf_deletions(patch);
     let pptx_insertions = collect_pptx_insertions(patch);
+    let pptx_object_chunk = pptx_object_chunk(patch);
+    let mut applied_pptx_objects = false;
+    let mut slide_group_edit = None;
+    let pptx_animation = match patch.operations.as_slice() {
+        [PatchOperation::PptxAnimationsSet { chunk_id, effects }] => {
+            pptx::validate_slide_animation_targets(bundle, &manifest, chunk_id, effects)?;
+            Some((chunk_id.as_str(), effects.as_slice()))
+        }
+        _ => None,
+    };
+    let master_background = match patch.operations.as_slice() {
+        [PatchOperation::PptxMasterBackgroundSet { chunk_id, color }] => {
+            let part = pptx::slide_master_part(bundle, &manifest, chunk_id)?;
+            Some((part, color.to_ascii_lowercase()))
+        }
+        _ => None,
+    };
+    let mut pptx_master_backgrounds = if manifest.source.format == "pptx" {
+        bundle.revision(manifest.revision)?.pptx_master_backgrounds
+    } else {
+        BTreeMap::new()
+    };
+    if let Some((part, color)) = &master_background {
+        pptx_master_backgrounds.insert(part.clone(), color.clone());
+    }
+    let master_text = match patch.operations.as_slice() {
+        [PatchOperation::PptxMasterTextStyleSet { chunk_id, style }] => {
+            Some((pptx::slide_master_part(bundle, &manifest, chunk_id)?, style))
+        }
+        _ => None,
+    };
+    let mut pptx_master_text_styles = if manifest.source.format == "pptx" {
+        bundle.revision(manifest.revision)?.pptx_master_text_styles
+    } else {
+        BTreeMap::new()
+    };
+    if let Some((part, style)) = &master_text {
+        crate::pptx_design::upsert_master_text(
+            pptx_master_text_styles.entry(part.clone()).or_default(),
+            style,
+        );
+    }
     let pptx_geometry = collect_pptx_geometry(patch);
     let pptx_deletions = collect_pptx_deletions(patch);
     let pptx_formats = collect_pptx_formats(patch);
@@ -317,12 +409,15 @@ pub fn apply_patch(
     let xlsx_blank_merge = collect_xlsx_blank_merge(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch)?;
+    let xlsx_cell_clears = collect_xlsx_cell_clears(bundle, &manifest, patch)?;
     let xlsx_formula = collect_xlsx_formula_set(patch)?;
-    let shifted_grid = if !xlsx_cell_set.is_empty() || xlsx_blank_merge.is_some() {
+    let created_cell_generation = if !xlsx_cell_set.is_empty() || xlsx_blank_merge.is_some() {
         (1..=manifest.revision).try_fold(false, |found, revision| {
             let record = bundle.revision(revision)?;
             Ok::<_, HcdError>(
                 found
+                    // An address that has been cleared must mint a new identity.
+                    || !record.removed_node_ids.is_empty()
                     || !record.grid_row_insertions.is_empty()
                     || !record.grid_row_deletions.is_empty()
                     || !record.grid_column_insertions.is_empty()
@@ -359,6 +454,11 @@ pub fn apply_patch(
         }
         _ => None,
     };
+    let chart_change = worksheet_charts::resolve_chart_change(bundle, &manifest, patch)?;
+    let condition_change =
+        worksheet_conditions::resolve_condition_change(bundle, &manifest, patch)?;
+    let pivot_changes =
+        worksheet_pivots::resolve_pivot_changes(bundle, &manifest, patch, snapshot)?;
     let pdf_layout = match patch.operations.first() {
         Some(PatchOperation::PdfPageLayoutSet { pages }) => {
             let source_page_count = crate::pdf_page_count(bundle, &manifest)?;
@@ -489,8 +589,10 @@ pub fn apply_patch(
         .chain(styles.keys().cloned())
         .chain(fonts.keys().cloned())
         .chain(images.keys().cloned())
+        .chain(word_picture.map(|(id, _, _)| id.clone()))
         .chain(xlsx_merges.keys().cloned())
         .chain(xlsx_unmerges.keys().cloned())
+        .chain(xlsx_cell_clears.keys().map(|id| (*id).to_string()))
         .chain(xlsx_formula.keys().cloned())
         .chain(pptx_geometry.keys().cloned())
         .chain(pptx_deletions.keys().cloned())
@@ -512,11 +614,17 @@ pub fn apply_patch(
         || !styles.is_empty()
         || !fonts.is_empty()
         || !images.is_empty()
+        || word_picture.is_some()
         || !image_insertions.is_empty()
         || !pdf_insertions.is_empty()
+        || !pdf_ocr_pages.is_empty()
         || !pdf_geometry.is_empty()
         || !pdf_deletions.is_empty()
         || !pptx_insertions.is_empty()
+        || pptx_object_chunk.is_some()
+        || pptx_animation.is_some()
+        || master_background.is_some()
+        || master_text.is_some()
         || !pptx_geometry.is_empty()
         || !pptx_deletions.is_empty()
         || !pptx_formats.is_empty()
@@ -529,6 +637,7 @@ pub fn apply_patch(
         || xlsx_blank_merge.is_some()
         || !xlsx_unmerges.is_empty()
         || !xlsx_cell_set.is_empty()
+        || !xlsx_cell_clears.is_empty()
         || !xlsx_formula.is_empty()
         || xlsx_row_append.is_some()
         || xlsx_row_insert.is_some()
@@ -549,6 +658,9 @@ pub fn apply_patch(
         || pptx_slide_reorder.is_some()
         || pptx_slide_copy.is_some()
         || auto_filter.is_some()
+        || chart_change.is_some()
+        || condition_change.is_some()
+        || !pivot_changes.is_empty()
         || pdf_layout.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
@@ -617,6 +729,12 @@ pub fn apply_patch(
         .values()
         .filter_map(|change| change.asset_hash.as_deref())
         .chain(
+            images
+                .values()
+                .filter_map(|change| change.layers.as_ref())
+                .flat_map(|stack| stack.layers.iter().map(|layer| layer.asset_hash.as_str())),
+        )
+        .chain(
             image_insertions
                 .values()
                 .flatten()
@@ -631,6 +749,16 @@ pub fn apply_patch(
         asset_by_hash.insert(hash.to_string(), staged.clone());
         asset_index.push(staged);
     }
+    for change in images.values_mut().filter(|change| change.layers.is_some()) {
+        let stack = change.layers.as_ref().expect("validated layer change");
+        let data = crate::image_layers::render(bundle, stack, &asset_by_hash)?;
+        let staged = bundle.stage_asset_from_reader("png", &mut data.as_slice())?;
+        change.asset_hash = Some(staged.hash.clone());
+        if !asset_by_hash.contains_key(&staged.hash) {
+            asset_by_hash.insert(staged.hash.clone(), staged.clone());
+            asset_index.push(staged);
+        }
+    }
     asset_index.sort_by(|left, right| left.hash.cmp(&right.hash));
     asset_index.dedup_by(|left, right| left.hash == right.hash);
     let asset_index_href =
@@ -644,6 +772,36 @@ pub fn apply_patch(
         let mut page = bundle.read_index_page(&manifest, page_number)?;
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
+            if let Some(grid) = descriptor.grid.as_mut() {
+                let moved = worksheet_charts::shift_worksheet_charts(grid, patch);
+                let change = chart_change
+                    .as_ref()
+                    .filter(|change| change.chunk_id == descriptor.chunk_id);
+                if let Some(change) = change {
+                    grid.charts.clone_from(&change.charts);
+                }
+                let conditions_shifted = worksheet_conditions::shift_conditions(grid, patch);
+                let conditions = condition_change
+                    .as_ref()
+                    .filter(|(id, _)| *id == descriptor.chunk_id);
+                if let Some((_, rules)) = conditions {
+                    grid.conditions.clone_from(rules);
+                }
+                let pivots = pivot_changes.get(&descriptor.chunk_id);
+                if let Some(pivots) = pivots {
+                    grid.pivots.clone_from(pivots);
+                }
+                if moved
+                    || change.is_some()
+                    || conditions_shifted
+                    || conditions.is_some()
+                    || pivots.is_some()
+                {
+                    page_changed = true;
+                    dirty_chunks.insert(descriptor.chunk_id.clone());
+                    dirty_parts.extend(grid.sheet_part.iter().cloned());
+                }
+            }
             if let Some(layout) = pdf_layout.filter(|_| descriptor.sequence == 0) {
                 if descriptor.pdf_layout == layout {
                     return Err(HcdError::PreconditionFailed(
@@ -691,7 +849,21 @@ pub fn apply_patch(
                 }
             }
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
+            let ocr_page = pdf_ocr_pages.get(&descriptor.chunk_id);
             let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
+            let has_slide_objects = pptx_object_chunk == Some(descriptor.chunk_id.as_str());
+            let slide_animation = pptx_animation
+                .filter(|(chunk_id, _)| *chunk_id == descriptor.chunk_id)
+                .map(|(_, effects)| effects);
+            let prune_slide_animation = !pptx_deletions.is_empty()
+                && descriptor.region == "slide"
+                && !descriptor.continuation;
+            let master_background_here = master_background
+                .as_ref()
+                .filter(|_| descriptor.region == "slide");
+            let master_text_here = master_text
+                .as_ref()
+                .filter(|_| descriptor.region == "slide");
             let inserted_visuals = image_insertions.get(&descriptor.chunk_id);
             let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let cell_row_extension = xlsx_cell_row_extensions.get(&descriptor.chunk_id).copied();
@@ -865,8 +1037,14 @@ pub fn apply_patch(
                 .collect();
             if candidates.is_empty()
                 && insertions.is_none()
+                && ocr_page.is_none()
                 && cell_insertions.is_empty()
                 && slide_insertions.is_none()
+                && !has_slide_objects
+                && slide_animation.is_none()
+                && !prune_slide_animation
+                && master_background_here.is_none()
+                && master_text_here.is_none()
                 && inserted_visuals.is_none()
                 && !blank_merge_here
                 && !append_here
@@ -923,6 +1101,47 @@ pub fn apply_patch(
                     )));
                 }
                 found_nodes.insert(entry.node_id.clone(), current_text.chars().count());
+                if let Some((id, layout, precondition)) =
+                    word_picture.filter(|(id, _, _)| *id == &entry.node_id)
+                {
+                    let current = image_nodes.get(id).ok_or_else(|| {
+                        HcdError::InvalidPatch("Word picture has no visual state".into())
+                    })?;
+                    // The persisted layout is consumed separately from text and
+                    // image-binary rewrites during source-backed export.
+                    docx_pictures::apply(
+                        &mut html,
+                        entry,
+                        current,
+                        layout.as_ref(),
+                        &precondition.visual_hash,
+                    )?;
+                    chunk_changed = true;
+                    continue;
+                }
+                if let Some(&(sheet_id, node_hash)) = xlsx_cell_clears.get(entry.node_id.as_str()) {
+                    if entry.source.node_kind != "cell"
+                        || !entry.source.editable
+                        || !entry.source.created_in_hcd
+                        || entry.node_hash != node_hash
+                        || descriptor
+                            .grid
+                            .as_ref()
+                            .is_none_or(|grid| grid.sheet_id != sheet_id)
+                    {
+                        return Err(HcdError::PreconditionFailed(
+                            "XLSX cell no longer matches its original write".into(),
+                        ));
+                    }
+                    clear_xlsx_cell(&mut html, entry)?;
+                    html_nodes.remove(&entry.node_id);
+                    deleted_here.push(entry.node_id.clone());
+                    removed_nodes.insert(entry.node_id.clone());
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                    continue;
+                }
                 if entry.source.node_kind == "image"
                     && (styles.contains_key(&entry.node_id)
                         || fonts.contains_key(&entry.node_id)
@@ -946,6 +1165,14 @@ pub fn apply_patch(
                             entry.node_id
                         ))
                     })?;
+                    if crate::image_layers::standalone(&manifest.source.format)
+                        && change.layers.is_none()
+                        && crate::image_layers::saved_stack(&html)?.is_some()
+                    {
+                        return Err(HcdError::Unsupported(
+                            "图片已有图层，请通过图层操作提交修改".into(),
+                        ));
+                    }
                     if current.visual_hash != change.visual_hash {
                         return Err(HcdError::PreconditionFailed(format!(
                             "image node {} expected visual hash {}, actual {}",
@@ -964,10 +1191,35 @@ pub fn apply_patch(
                         replace_image_asset(&mut html, &entry.node_id, asset)?;
                     }
                     if let Some(geometry) = change.geometry.as_ref() {
+                        if manifest.source.format == "pptx" {
+                            let (_, width, height) = pptx_slide_page(&html)?;
+                            if geometry.unit != crate::ImageGeometryUnit::Emu
+                                || [geometry.x, geometry.y, geometry.width, geometry.height]
+                                    .iter()
+                                    .any(|value| *value < 0.0 || value.fract() != 0.0)
+                                || geometry.x + geometry.width > width as f64
+                                || geometry.y + geometry.height > height as f64
+                            {
+                                return Err(HcdError::InvalidPatch(
+                                    "PPTX image must use integral EMU within its slide".into(),
+                                ));
+                            }
+                        }
                         replace_image_geometry(&mut html, &entry.node_id, geometry)?;
                     }
-                    let new_visual_hash =
-                        image_visual_hash(asset_hash.as_deref(), geometry.as_ref());
+                    if let Some(stack) = change.layers.as_ref() {
+                        set_element_attribute(
+                            &mut html,
+                            &entry.node_id,
+                            crate::image_layers::ATTRIBUTE,
+                            &stack.encode()?,
+                        )?;
+                    }
+                    let new_visual_hash = crate::html::image_visual_hash_with_layout(
+                        asset_hash.as_deref(),
+                        geometry.as_ref(),
+                        current.docx_picture_layout.as_ref(),
+                    );
                     set_element_attribute(
                         &mut html,
                         &entry.node_id,
@@ -980,6 +1232,8 @@ pub fn apply_patch(
                             visual_hash: new_visual_hash,
                             asset_hash,
                             geometry,
+                            docx_drawing_id: current.docx_drawing_id,
+                            docx_picture_layout: current.docx_picture_layout.clone(),
                         },
                     );
                     dirty_nodes.insert(entry.node_id.clone());
@@ -1032,6 +1286,15 @@ pub fn apply_patch(
                         }
                     }
                     let replacement = splice_text(current_text, node_splices)?;
+                    let pdf_ocr = matches!(
+                        entry.source.node_kind.as_str(),
+                        crate::pdf_ocr::OCR_NODE_KIND | "pdf-source-ocr"
+                    );
+                    if pdf_ocr && !crate::pdf_ocr::valid_ocr_text(&replacement) {
+                        return Err(HcdError::InvalidPatch(
+                            "set a single bounded line of recognized text".into(),
+                        ));
+                    }
                     let replacement_hash = hash_bytes(replacement.as_bytes());
                     let mut rich = crate::extract_docx_inline_runs(&html)?;
                     let mut grid_rich = crate::extract_xlsx_inline_runs(&html)?;
@@ -1080,7 +1343,7 @@ pub fn apply_patch(
                     if manifest.source.is_spreadsheet() && entry.source.node_kind == "cell" {
                         set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
                     }
-                    if manifest.source.format == "pdf" {
+                    if manifest.source.format == "pdf" && !pdf_ocr {
                         set_element_attribute(
                             &mut html,
                             &entry.node_id,
@@ -1544,12 +1807,14 @@ pub fn apply_patch(
                     .entries
                     .retain(|entry| !deleted_here.contains(&entry.node_id));
                 descriptor.node_count = source_map.entries.len();
-                descriptor.block_count = descriptor
-                    .block_count
-                    .checked_sub(deleted_here.len())
-                    .ok_or_else(|| {
-                        HcdError::InvalidBundle("fixed-page block count underflow".to_string())
-                    })?;
+                if descriptor.grid.is_none() {
+                    descriptor.block_count = descriptor
+                        .block_count
+                        .checked_sub(deleted_here.len())
+                        .ok_or_else(|| {
+                            HcdError::InvalidBundle("fixed-page block count underflow".to_string())
+                        })?;
+                }
                 descriptor.node_bloom = node_bloom(
                     source_map
                         .entries
@@ -1564,6 +1829,7 @@ pub fn apply_patch(
                     source_map.entries.last().map(|entry| entry.node_id.clone());
             }
 
+            let count_before_insertion = source_map.entries.len();
             if let Some(insertions) = insertions {
                 for insertion in insertions {
                     insert_pdf_text(&mut html, &mut source_map, insertion)?;
@@ -1571,8 +1837,24 @@ pub fn apply_patch(
                     dirty_nodes.insert(insertion.node_id.clone());
                     dirty_parts.insert(format!("pdf/pages/{}", insertion.page));
                 }
-                descriptor.node_count += insertions.len();
-                descriptor.block_count += insertions.len();
+            }
+            if let Some(page) = ocr_page {
+                let nodes = crate::pdf_ocr::write_ocr_page(
+                    &mut html,
+                    &mut source_map,
+                    &manifest.document_id,
+                    page,
+                )?;
+                for (node_id, text) in nodes {
+                    dirty_nodes.insert(node_id.clone());
+                    html_nodes.insert(node_id, text);
+                }
+                dirty_parts.insert(format!("pdf/pages/{}", page.page));
+            }
+            let additions = source_map.entries.len() - count_before_insertion;
+            if additions > 0 {
+                descriptor.node_count += additions;
+                descriptor.block_count += additions;
                 descriptor.node_bloom = node_bloom(
                     source_map
                         .entries
@@ -1588,6 +1870,50 @@ pub fn apply_patch(
                 descriptor.last_node_id =
                     source_map.entries.last().map(|entry| entry.node_id.clone());
                 chunk_changed = true;
+            }
+            if has_slide_objects {
+                let (part, added_blocks, topology) =
+                    apply_pptx_objects(&mut html, &mut source_map, patch)?;
+                slide_group_edit = topology.map(|edit| crate::pptx_group::SlideGroupEdit {
+                    slide_part: part.clone(),
+                    edit,
+                });
+                descriptor.block_count += added_blocks;
+                dirty_parts.insert(part);
+                applied_pptx_objects = true;
+                chunk_changed = true;
+            }
+            if slide_animation.is_some() || prune_slide_animation {
+                use crate::pptx_animation::{
+                    read_pptx_animation_track, write_pptx_animation_track,
+                };
+                let mut track = read_pptx_animation_track(&html)?;
+                let len = track.effects.len();
+                track
+                    .effects
+                    .retain(|effect| !pptx_deletions.contains_key(&effect.target));
+                if let Some(effects) = slide_animation {
+                    track.effects = effects.to_vec();
+                }
+                if slide_animation.is_some() || len != track.effects.len() {
+                    track.edited = true;
+                    let (part, _, _) = pptx::pptx_slide_page(&html)?;
+                    write_pptx_animation_track(&mut html, &track)?;
+                    dirty_parts.insert(part);
+                    chunk_changed = true;
+                }
+            }
+            if let Some((part, color)) = master_background_here {
+                if pptx::update_slide_master_background(&mut html, part, color)? {
+                    dirty_parts.insert(part.clone());
+                    chunk_changed = true;
+                }
+            }
+            if let Some((part, style)) = master_text_here {
+                if pptx_master::update_master_text(&mut html, part, style)? {
+                    dirty_parts.insert(part.clone());
+                    chunk_changed = true;
+                }
             }
             if let Some(insertions) = inserted_visuals {
                 if flow_image_tail
@@ -1689,7 +2015,7 @@ pub fn apply_patch(
                             .and_then(|grid| grid.sheet_part.as_deref()),
                         &manifest.document_id,
                         insertion,
-                        shifted_grid.then_some(manifest.revision),
+                        created_cell_generation.then_some(manifest.revision),
                     )?;
                     html_nodes.insert(node_id.clone(), insertion.text.clone());
                     descriptor.node_count += 1;
@@ -1739,7 +2065,7 @@ pub fn apply_patch(
                         .and_then(|grid| grid.sheet_part.as_deref()),
                     &manifest.document_id,
                     &insertion,
-                    shifted_grid.then_some(manifest.revision),
+                    created_cell_generation.then_some(manifest.revision),
                 )?;
                 merge_xlsx_cells(&mut html, merge)?;
                 html_nodes.insert(node_id.clone(), String::new());
@@ -2195,6 +2521,11 @@ pub fn apply_patch(
             )));
         }
     }
+    if let Some(chunk_id) = pptx_object_chunk {
+        if !applied_pptx_objects {
+            return Err(HcdError::NodeNotFound(chunk_id.to_string()));
+        }
+    }
     for insertion in pptx_insertions.values().flatten() {
         if !dirty_nodes.contains(&insertion.node_id) {
             return Err(HcdError::NodeNotFound(format!(
@@ -2452,7 +2783,9 @@ pub fn apply_patch(
     // the way a move numbers the list it put in a different order.
     if let Some(copy) = pptx_slide_copy.as_ref() {
         let cloned = clone_pptx_slide_chunks(bundle, &manifest, copy, &kept_index_descriptors)?;
-        let copied_count = cloned.len();
+        let cloned_notes =
+            clone_pptx_note_chunks(bundle, &manifest, copy, &kept_index_descriptors)?;
+        let copied_count = cloned.len() + cloned_notes.len();
         let Some(last_of_page) = copy.page_chunk_ids.last() else {
             return Err(HcdError::InvalidBundle(
                 "PPTX slide copy found a page with no chunks".to_string(),
@@ -2467,8 +2800,36 @@ pub fn apply_patch(
             ));
         };
         for (offset, descriptor) in cloned.into_iter().enumerate() {
+            if copy.snapshot {
+                let map = bundle.read_map_verified(&descriptor)?;
+                // Images are materialized separately from the scene and assets;
+                // declaring a source image as text-dirty rejects native export.
+                dirty_nodes.extend(
+                    map.entries
+                        .into_iter()
+                        .filter(|entry| entry.source.node_kind != "image")
+                        .map(|entry| entry.node_id),
+                );
+            }
             dirty_chunks.insert(descriptor.chunk_id.clone());
             kept_index_descriptors.insert(at + 1 + offset, descriptor);
+        }
+        if copy.snapshot {
+            dirty_parts.insert(copy.new_slide_part.clone());
+        }
+        for descriptor in cloned_notes {
+            let map = bundle.read_map_verified(&descriptor)?;
+            dirty_nodes.extend(
+                map.entries
+                    .into_iter()
+                    .filter(|entry| entry.source.node_kind != "image")
+                    .map(|entry| entry.node_id),
+            );
+            dirty_chunks.insert(descriptor.chunk_id.clone());
+            kept_index_descriptors.push(descriptor);
+        }
+        if let Some(part) = &copy.new_note_part {
+            dirty_parts.insert(part.clone());
         }
         if kept_index_descriptors.len() != manifest.chunk_count + copied_count {
             return Err(HcdError::InvalidBundle(format!(
@@ -2694,6 +3055,13 @@ pub fn apply_patch(
                 .is_some_and(|value| value == "true"),
         grid_filter_changed: wrote_auto_filter,
         pdf_layout_changed: pdf_layout.is_some(),
+        pptx_scene_changed: applied_pptx_objects
+            || pptx_animation.is_some()
+            || master_background.is_some()
+            || master_text.is_some()
+            || pptx_slide_copy
+                .as_ref()
+                .is_some_and(|copy| copy.snapshot || copy.new_note_part.is_some()),
         grid_row_insertions: xlsx_row_insert
             .as_ref()
             .into_iter()
@@ -2812,6 +3180,9 @@ pub fn apply_patch(
                 source_slide_part: copy.slide_part.clone(),
             })
             .collect(),
+        slide_group_edit,
+        pptx_master_backgrounds,
+        pptx_master_text_styles,
         structural_change: false,
     };
     bundle.write_revision(&record)?;
@@ -2989,6 +3360,8 @@ pub fn get_image_node(bundle: &Bundle, node_id: &str) -> Result<ImageNodeLookup,
                     visual_hash: image.visual_hash.clone(),
                     asset_hash: image.asset_hash.clone(),
                     geometry: image.geometry.clone(),
+                    docx_drawing_id: image.docx_drawing_id,
+                    docx_picture_layout: image.docx_picture_layout.clone(),
                     source: entry.source.clone(),
                 },
             });
@@ -3038,6 +3411,8 @@ pub fn extract_image_page(
                     visual_hash: image.visual_hash.clone(),
                     asset_hash: image.asset_hash.clone(),
                     geometry: image.geometry.clone(),
+                    docx_drawing_id: image.docx_drawing_id,
+                    docx_picture_layout: image.docx_picture_layout.clone(),
                     source: entry.source.clone(),
                 },
             });
@@ -3609,6 +3984,11 @@ fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageCha
                 node_id,
                 precondition,
                 ..
+            }
+            | PatchOperation::ImageLayersSet {
+                node_id,
+                precondition,
+                ..
             } => (node_id, &precondition.visual_hash),
             _ => continue,
         };
@@ -3624,6 +4004,10 @@ fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageCha
             )));
         }
         match operation {
+            PatchOperation::ImageLayersSet { stack, .. } => {
+                change.geometry = Some(stack.geometry());
+                change.layers = Some(stack.clone());
+            }
             PatchOperation::ImageReplace { asset_hash, .. } => {
                 if change.asset_hash.replace(asset_hash.clone()).is_some() {
                     return Err(HcdError::InvalidPatch(format!(
@@ -4189,6 +4573,7 @@ fn apply_annotations(
         AnnotationSet {
             schema_version: manifest.schema_version.clone(),
             annotations: Vec::new(),
+            docx_review: Default::default(),
         }
     };
     let previous_count = set.annotations.len();
@@ -4222,6 +4607,16 @@ fn apply_annotations(
             | PatchOperation::TextFontClear { .. }
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::PptxTextInsert { .. }
+            | PatchOperation::PptxShapeInsert { .. }
+            | PatchOperation::PptxObjectsTransform { .. }
+            | PatchOperation::PptxGroupCreate { .. }
+            | PatchOperation::PptxGroupUngroup { .. }
+            | PatchOperation::PptxAnimationsSet { .. }
+            | PatchOperation::PptxMasterBackgroundSet { .. }
+            | PatchOperation::PptxMasterTextStyleSet { .. }
+            | PatchOperation::XlsxChartSet { .. }
+            | PatchOperation::XlsxConditionSet { .. }
+            | PatchOperation::XlsxPivotSet { .. }
             | PatchOperation::PptxShapeGeometry { .. }
             | PatchOperation::PptxTextDelete { .. }
             | PatchOperation::PptxRunFormat { .. }
@@ -4234,9 +4629,11 @@ fn apply_annotations(
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
             | PatchOperation::PdfPageLayoutSet { .. }
+            | PatchOperation::PdfOcrApply { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
+            | PatchOperation::XlsxCellClear { .. }
             | PatchOperation::XlsxFormulaSet { .. }
             | PatchOperation::XlsxFormulaToValue { .. }
             | PatchOperation::XlsxFormulaToNumber { .. }
@@ -4264,6 +4661,8 @@ fn apply_annotations(
             | PatchOperation::NodeStyle { .. }
             | PatchOperation::ImageInsert { .. }
             | PatchOperation::ImageReplace { .. }
+            | PatchOperation::ImageLayersSet { .. }
+            | PatchOperation::DocxPictureLayoutSet { .. }
             | PatchOperation::ImageGeometry { .. } => {}
         }
     }
@@ -4300,7 +4699,7 @@ fn validate_annotation_ranges(
     Ok(())
 }
 
-fn find_idempotent_result(
+pub(crate) fn find_idempotent_result(
     bundle: &Bundle,
     manifest: &crate::HcdManifest,
     patch_id: &str,
@@ -6041,7 +6440,7 @@ mod tests {
     }
 
     #[test]
-    fn pptx_slide_copy_refuses_a_page_hcd_created_or_hcd_rewrote() {
+    fn pptx_slide_copy_snapshots_created_and_rewritten_pages() {
         let temp = tempfile::tempdir().unwrap();
         // A page HCD created has no page in the source package to copy from.
         let bundle = slide_deck(&temp.path().join("created"), 2);
@@ -6070,10 +6469,13 @@ mod tests {
                         .contains("ppt/slides/slide3.xml")
             })
             .expect("the created page is in the index");
-        let error = apply_patch(&bundle, &copy_slide_patch(&added.chunk_id, 1), 1)
-            .expect_err("a page the source package never had cannot be copied");
-        assert!(error.to_string().contains("created in HCD"), "{error}");
-        assert_eq!(bundle.manifest().unwrap().revision, 1);
+        apply_patch(&bundle, &copy_slide_patch(&added.chunk_id, 1), 1).unwrap();
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert!(bundle
+            .revision(2)
+            .unwrap()
+            .dirty_source_parts
+            .contains(&"ppt/slides/slide4.xml".to_string()));
 
         // A page HCD rewrote would be copied from the words the source package
         // still holds rather than the ones the bundle shows, so it waits.
@@ -6105,15 +6507,16 @@ mod tests {
             other.revision(1).unwrap().dirty_source_parts,
             vec!["ppt/slides/slide1.xml".to_string()]
         );
-        let error = apply_patch(&other, &copy_slide_patch(&slide_chunk(0), 1), 1)
-            .expect_err("a rewritten page is not copied from the source package");
-        assert!(error.to_string().contains("rewrote"), "{error}");
+        apply_patch(&other, &copy_slide_patch(&slide_chunk(0), 1), 1).unwrap();
+        let copied = pptx_copied_node_id("deck", "ppt/slides/slide3.xml", &node.node.node_id);
+        assert_eq!(get_text_node(&other, &copied).unwrap().node.text, "changed");
+        assert!(other.revision(2).unwrap().dirty_node_ids.contains(&copied));
         // The page nobody typed into is still there to copy.
-        apply_patch(&other, &copy_slide_patch(&slide_chunk(1), 1), 1).unwrap();
+        apply_patch(&other, &copy_slide_patch(&slide_chunk(1), 2), 2).unwrap();
         assert_eq!(
             bundle.manifest().unwrap().chunk_count,
-            3,
-            "the refused copy left a chunk behind"
+            4,
+            "the created page and its copy both remain"
         );
         assert!(crate::validate_bundle(&bundle).unwrap().valid);
         assert!(crate::validate_bundle(&other).unwrap().valid);

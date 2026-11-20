@@ -28,6 +28,7 @@ pub(super) struct PptxSlideAddTarget {
     pub(super) slide_part: String,
     pub(super) width_emu: u64,
     pub(super) height_emu: u64,
+    design: Option<crate::pptx_design::PptxSlideDesign>,
 }
 
 /// Slide a patch asks to drop: the page it names, and the part that page points
@@ -70,6 +71,13 @@ pub(super) struct PptxSlideCopyTarget {
     /// Every chunk of the page, in the order the index holds them: a page whose
     /// table reaches over several chunks is copied chunk for chunk.
     pub(super) page_chunk_ids: Vec<String>,
+    /// The note page is a separate canonical part, associated through the
+    /// source slide's actual relationship. Legacy bundles may lack it.
+    pub(super) note_part: Option<String>,
+    pub(super) new_note_part: Option<String>,
+    pub(super) note_chunk_ids: Vec<String>,
+    /// A modified or newly created source needs its canonical snapshot written to the copy.
+    pub(super) snapshot: bool,
 }
 
 /// One page as the index holds it: the part its section names, and every chunk
@@ -279,6 +287,349 @@ pub(super) fn valid_pptx_geometry(geometry: PptxShapeGeometry) -> bool {
         && (1..=100_000_000).contains(&geometry.height_emu)
 }
 
+pub(super) fn require_pptx_object_patch(
+    manifest: &crate::HcdManifest,
+    patch: &PatchBatch,
+    chunk_id: &str,
+) -> Result<(), HcdError> {
+    if manifest.source.format != "pptx"
+        || patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_55
+        || patch.operations.len() != 1
+    {
+        return Err(HcdError::Unsupported(
+            "slide objects require one PPTX operation with hcd-patch/55".into(),
+        ));
+    }
+    validate_identifier("chunkId", chunk_id)
+}
+
+pub(super) fn pptx_object_chunk(patch: &PatchBatch) -> Option<&str> {
+    match patch.operations.first() {
+        Some(
+            PatchOperation::PptxShapeInsert { chunk_id, .. }
+            | PatchOperation::PptxObjectsTransform { chunk_id, .. }
+            | PatchOperation::PptxGroupCreate { chunk_id, .. }
+            | PatchOperation::PptxGroupUngroup { chunk_id, .. },
+        ) => Some(chunk_id),
+        _ => None,
+    }
+}
+
+fn geometry_fits_slide(geometry: PptxShapeGeometry, width: u64, height: u64) -> bool {
+    geometry
+        .x_emu
+        .checked_add(geometry.width_emu)
+        .is_some_and(|x| x <= width)
+        && geometry
+            .y_emu
+            .checked_add(geometry.height_emu)
+            .is_some_and(|y| y <= height)
+}
+
+pub(super) fn apply_pptx_objects(
+    html: &mut String,
+    map: &mut crate::ChunkSourceMap,
+    patch: &PatchBatch,
+) -> Result<(String, usize, Option<crate::pptx_group::GroupEdit>), HcdError> {
+    let (part, width, height) = pptx_slide_page(html)?;
+    match &patch.operations[0] {
+        PatchOperation::PptxShapeInsert {
+            geometry,
+            preset,
+            fill,
+            stroke,
+            ..
+        } => {
+            if !geometry_fits_slide(*geometry, width, height) {
+                return Err(HcdError::InvalidPatch(
+                    "PPTX shape is outside the slide".into(),
+                ));
+            }
+            let node_id = stable_node_id(&[&patch.document_id, &patch.patch_id, "pptx-shape"]);
+            let preset_name = preset.drawingml();
+            let radius = match preset {
+                crate::PptxPreset::Rect => "0",
+                crate::PptxPreset::RoundRect => "12px",
+                crate::PptxPreset::Ellipse => "50%",
+            };
+            let borders = ["top", "right", "bottom", "left"]
+                .map(|side| format!("border-{side}:1pt solid {stroke}"))
+                .join(";");
+            let mut tag = format!(
+                "<div class=\"hcd-slide-shape\" data-hcd-id=\"{node_id}\" data-hcd-created-preset=\"{preset_name}\" data-hcd-shape-fill=\"{fill}\" data-hcd-shape-stroke=\"{stroke}\" data-hcd-x-emu=\"0\" style=\"position:absolute;background-color:{fill};{borders};border-radius:{radius}\">"
+            );
+            write_pptx_shape_geometry(&mut tag, *geometry)?;
+            if let Some(start) = html.find(PPTX_EMPTY_SLIDE_MARK) {
+                html.replace_range(start..start + PPTX_EMPTY_SLIDE_MARK.len(), "");
+            }
+            let end = html.rfind("</section>").ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX slide closing tag is missing".into())
+            })?;
+            html.insert_str(end, &format!("{tag}</div>"));
+            Ok((part, 1, None))
+        }
+        PatchOperation::PptxObjectsTransform { objects, .. } => {
+            for object in objects {
+                if !geometry_fits_slide(object.geometry, width, height) {
+                    return Err(HcdError::InvalidPatch(
+                        "PPTX object is outside the slide".into(),
+                    ));
+                }
+                move_pptx_object(html, map, object)?;
+            }
+            Ok((part, 0, None))
+        }
+        PatchOperation::PptxGroupCreate { .. } | PatchOperation::PptxGroupUngroup { .. } => {
+            let edit = super::pptx_group::apply_slide_group(html, map, patch)?;
+            Ok((part, 0, Some(edit)))
+        }
+        _ => unreachable!("validated slide object patch"),
+    }
+}
+
+pub(super) fn validate_slide_animation_targets(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    chunk_id: &str,
+    effects: &[crate::pptx_animation::PptxAnimation],
+) -> Result<(), HcdError> {
+    let mut found = false;
+    let mut remaining: HashSet<_> = effects
+        .iter()
+        .map(|effect| effect.target.as_str())
+        .collect();
+    'pages: for page in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page)?.chunks {
+            let head = descriptor.region == "slide" && !descriptor.continuation;
+            if found && (head || descriptor.region != "slide") {
+                break 'pages;
+            }
+            if head && descriptor.chunk_id == chunk_id {
+                found = true;
+            }
+            if !found {
+                continue;
+            }
+            let html = bundle.read_chunk_verified(&descriptor)?;
+            if head && crate::pptx_animation::read_pptx_animation_track(&html)?.locked {
+                return Err(HcdError::Unsupported(
+                    "the slide contains native animations that cannot be replaced losslessly"
+                        .into(),
+                ));
+            }
+            for tag in html
+                .split('<')
+                .skip(1)
+                .filter_map(|rest| rest.split_once('>').map(|(tag, _)| tag))
+            {
+                if xlsx_attribute(tag, "data-hcd-pptx-grouped") == Some("true") {
+                    continue;
+                }
+                for name in ["shape", "picture", "chart", "table"] {
+                    if let Some(id) = xlsx_attribute(tag, &format!("data-hcd-{name}-id")) {
+                        remaining.remove(format!("s{id}").as_str());
+                    }
+                }
+                if xlsx_attribute(tag, "data-hcd-created-preset").is_some()
+                    || xlsx_attribute(tag, "data-hcd-created-image").is_some()
+                {
+                    if let Some(id) = xlsx_attribute(tag, "data-hcd-id") {
+                        remaining.remove(id);
+                    }
+                }
+            }
+            if remaining
+                .iter()
+                .any(|target| crate::pptx_animation::valid_authored_target(target))
+            {
+                let map = bundle.read_map_verified(&descriptor)?;
+                for entry in map.entries {
+                    if entry.source.created_in_hcd && entry.source.node_kind == "slide-text" {
+                        remaining.remove(entry.node_id.as_str());
+                    }
+                }
+            }
+            if remaining.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+    if !found {
+        return Err(HcdError::NodeNotFound(chunk_id.into()));
+    }
+    Err(HcdError::InvalidPatch(
+        "slide animation target is missing from the selected slide".into(),
+    ))
+}
+
+pub(super) fn slide_master_part(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    chunk_id: &str,
+) -> Result<String, HcdError> {
+    for page in 0..manifest.index_page_count {
+        if let Some(descriptor) =
+            bundle
+                .read_index_page(manifest, page)?
+                .chunks
+                .iter()
+                .find(|chunk| {
+                    chunk.region == "slide" && !chunk.continuation && chunk.chunk_id == chunk_id
+                })
+        {
+            let html = bundle.read_chunk_verified(descriptor)?;
+            return crate::pptx_design::read_pptx_design(&html)?
+                .map(|design| design.master_part)
+                .ok_or_else(|| {
+                    HcdError::Unsupported("this slide bundle has no native master metadata".into())
+                });
+        }
+    }
+    Err(HcdError::NodeNotFound(chunk_id.into()))
+}
+
+pub(super) fn update_slide_master_background(
+    html: &mut String,
+    master_part: &str,
+    color: &str,
+) -> Result<bool, HcdError> {
+    let Some(mut design) = crate::pptx_design::read_pptx_design(html)? else {
+        return Ok(false);
+    };
+    if design.master_part != master_part {
+        return Ok(false);
+    }
+    design.master_color = Some(color.into());
+    if let Some(inherited) = design.inherited_color() {
+        super::update_start_tag_style(
+            html,
+            "class=\"hcd-slide\"",
+            &BTreeMap::from([("background-color".into(), inherited.into())]),
+            false,
+        )?;
+    }
+    crate::pptx_design::write_pptx_design(html, &design)?;
+    Ok(true)
+}
+
+fn default_slide_design(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+) -> Result<Option<crate::pptx_design::PptxSlideDesign>, HcdError> {
+    use crate::pptx_design::read_pptx_design;
+    let (original, _) = crate::manifest_at_revision(bundle, manifest, Some(0))?;
+    for page in (0..original.index_page_count).rev() {
+        for descriptor in bundle.read_index_page(&original, page)?.chunks.iter().rev() {
+            if descriptor.region != "slide" || descriptor.continuation {
+                continue;
+            }
+            if let Some(mut design) = read_pptx_design(&bundle.read_chunk_verified(descriptor)?)? {
+                let backgrounds = bundle.revision(manifest.revision)?.pptx_master_backgrounds;
+                if let Some(color) = backgrounds.get(&design.master_part) {
+                    design.master_color = Some(color.clone());
+                }
+                if let Some(styles) = bundle
+                    .revision(manifest.revision)?
+                    .pptx_master_text_styles
+                    .get(&design.master_part)
+                {
+                    for style in styles {
+                        crate::pptx_design::upsert_master_text(
+                            &mut design.master_text_styles,
+                            style,
+                        );
+                    }
+                }
+                design.slide_background = false;
+                return Ok(Some(design));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn move_pptx_object(
+    html: &mut String,
+    map: &mut crate::ChunkSourceMap,
+    object: &crate::PptxObjectMove,
+) -> Result<(), HcdError> {
+    let (start, end) = element_start_tag_range(html, &object.node_id)
+        .map_err(|_| HcdError::NodeNotFound(object.node_id.clone()))?;
+    let tag = &html[start..=end];
+    if xlsx_attribute(tag, "data-hcd-pptx-grouped") == Some("true") {
+        return Err(HcdError::Unsupported(
+            "select an ungrouped PPTX object".into(),
+        ));
+    }
+    let mut positioned = tag.to_string();
+    if super::pptx_group::move_group_object(&mut positioned, object.before, object.geometry)? {
+        html.replace_range(start..=end, &positioned);
+        return Ok(());
+    }
+    if xlsx_attribute(tag, "data-hcd-node-kind") == Some("image") {
+        let images = extract_html_image_nodes(html)?;
+        let current = images
+            .get(&object.node_id)
+            .ok_or_else(|| HcdError::InvalidBundle("PPTX picture metadata is missing".into()))?;
+        let to_image = |geometry: PptxShapeGeometry| crate::ImageGeometry {
+            x: geometry.x_emu as f64,
+            y: geometry.y_emu as f64,
+            width: geometry.width_emu as f64,
+            height: geometry.height_emu as f64,
+            unit: crate::ImageGeometryUnit::Emu,
+        };
+        if current.geometry.as_ref() != Some(&to_image(object.before)) {
+            return Err(HcdError::PreconditionFailed(
+                "PPTX picture bounds changed".into(),
+            ));
+        }
+        if xlsx_attribute(tag, "data-hcd-picture-id").is_none()
+            && xlsx_attribute(tag, "data-hcd-created-image") != Some("true")
+        {
+            return Err(HcdError::Unsupported(
+                "PPTX picture has no native locator".into(),
+            ));
+        }
+        let geometry = to_image(object.geometry);
+        replace_image_geometry(html, &object.node_id, &geometry)?;
+        return set_element_attribute(
+            html,
+            &object.node_id,
+            "data-hcd-visual-hash",
+            &image_visual_hash(current.asset_hash.as_deref(), Some(&geometry)),
+        );
+    }
+    if tag.starts_with("<div class=\"hcd-slide-shape\"")
+        && (xlsx_attribute(tag, "data-hcd-shape-id").is_some()
+            || xlsx_attribute(tag, "data-hcd-created-preset").is_some())
+    {
+        if pptx_shape_bounds(tag)? != object.before {
+            return Err(HcdError::PreconditionFailed(
+                "PPTX shape bounds changed".into(),
+            ));
+        }
+        let mut tag = tag.to_string();
+        write_pptx_shape_geometry(&mut tag, object.geometry)?;
+        html.replace_range(start..=end, &tag);
+        return Ok(());
+    }
+    let entry = map
+        .entries
+        .iter_mut()
+        .find(|entry| {
+            entry.node_id == object.node_id
+                && entry.source.created_in_hcd
+                && entry.source.node_kind == "slide-text"
+        })
+        .ok_or_else(|| HcdError::Unsupported("PPTX object has no native locator".into()))?;
+    let change = PptxGeometryChange {
+        geometry: object.geometry,
+        expected: object.before,
+        node_hash: entry.node_hash.clone(),
+    };
+    update_pptx_shape_geometry(html, entry, &change)
+}
+
 /// Whether this patch appends a slide. The operation carries no fields: the new
 /// page lands after the last one the bundle has, the same way a new worksheet
 /// tab lands after the last tab.
@@ -354,6 +705,7 @@ pub(super) fn resolve_pptx_slide_add(
         ),
         width_emu,
         height_emu,
+        design: default_slide_design(bundle, manifest)?,
     })
 }
 
@@ -413,16 +765,38 @@ pub(super) fn resolve_pptx_slide_removal(
 ) -> Result<PptxSlideRemovalTarget, HcdError> {
     let mut pages: HashSet<String> = HashSet::new();
     let mut slide_part: Option<String> = None;
+    let mut declared_note: Option<String> = None;
     let mut carriers: Vec<(String, String)> = Vec::new();
+    let mut notes: Vec<(String, String, String)> = Vec::new();
     for page_number in 0..manifest.index_page_count {
         for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            if descriptor.region == "note" {
+                let html = bundle.read_chunk_verified(&descriptor)?;
+                let end = html.find('>').ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX note section is not closed".into())
+                })?;
+                if let Some(owner) = xlsx_attribute(&html[..=end], "data-hcd-notes-owner") {
+                    notes.push((
+                        descriptor.chunk_id,
+                        unescape_attribute(owner),
+                        pptx_slide_page(&html)?.0,
+                    ));
+                }
+                continue;
+            }
             if descriptor.region != "slide" {
                 continue;
             }
-            let (part, _, _) = pptx_slide_page(&bundle.read_chunk(&descriptor)?)?;
+            let html = bundle.read_chunk(&descriptor)?;
+            let (part, _, _) = pptx_slide_page(&html)?;
             pages.insert(part.clone());
             if descriptor.chunk_id == removal.chunk_id {
                 slide_part = Some(part.clone());
+                let end = html.find('>').ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX slide section is not closed".into())
+                })?;
+                declared_note =
+                    xlsx_attribute(&html[..=end], "data-hcd-notes-part").map(unescape_attribute);
             }
             carriers.push((descriptor.chunk_id, part));
         }
@@ -437,12 +811,30 @@ pub(super) fn resolve_pptx_slide_removal(
             "PPTX presentation must keep one slide".to_string(),
         ));
     }
+    let owned_note_parts: HashSet<_> = notes
+        .iter()
+        .filter(|(_, owner, _)| *owner == slide_part)
+        .map(|(_, _, part)| part.as_str())
+        .collect();
+    if owned_note_parts.len() > 1
+        || declared_note.as_deref() != owned_note_parts.iter().next().copied()
+    {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide and notes associations do not agree".into(),
+        ));
+    }
     // A page that spans chunks repeats its section in every one of them, so the
     // whole page leaves whichever chunk the patch named: the chunks in front of
     // that one go with the ones behind it.
     let dropped_chunk_ids: HashSet<String> = carriers
         .into_iter()
         .filter(|(_, part)| *part == slide_part)
+        .chain(
+            notes
+                .into_iter()
+                .filter(|(_, owner, _)| *owner == slide_part)
+                .map(|(id, owner, _)| (id, owner)),
+        )
         .map(|(chunk_id, _)| chunk_id)
         .collect();
     Ok(PptxSlideRemovalTarget {
@@ -629,6 +1021,10 @@ pub(super) fn collect_pptx_slide_copy(patch: &PatchBatch) -> Option<PptxSlideCop
             slide_part: String::new(),
             new_slide_part: String::new(),
             page_chunk_ids: Vec::new(),
+            note_part: None,
+            new_note_part: None,
+            note_chunk_ids: Vec::new(),
+            snapshot: false,
         })
     })
 }
@@ -638,11 +1034,9 @@ pub(super) fn collect_pptx_slide_copy(patch: &PatchBatch) -> Option<PptxSlideCop
 /// own: from the numbers the index holds and the numbers this history has
 /// already spent, so two pages never ask the package for the same name.
 ///
-/// Two bounds come from how the copy is written rather than from HCD's liking.
-/// The export builds the copy out of the source package's page, so a page HCD
-/// created has nothing to build from, and a page HCD rewrote would copy the
-/// words the source still holds instead of the ones the bundle shows. Both are
-/// refused rather than quietly answered with a different page.
+/// Modified and created pages retain their current canonical objects as the
+/// copy's snapshot. The exporter combines that snapshot with the source page's
+/// native parts, so later changes to either page stay independent.
 pub(super) fn resolve_pptx_slide_copy(
     bundle: &Bundle,
     manifest: &crate::HcdManifest,
@@ -688,24 +1082,67 @@ pub(super) fn resolve_pptx_slide_copy(
             rewritten_at = Some(revision);
         }
     }
-    if created_in_hcd {
-        return Err(HcdError::InvalidPatch(format!(
-            "hcd-patch/44 cannot copy {slide_part}: that page was created in HCD, and a copy is written from the page the source package holds"
-        )));
+    let new_slide_part = format!(
+        "ppt/slides/slide{}.xml",
+        highest_number.max(known_parts.len()) + 1
+    );
+    let first_chunk = &pages[placed].chunks[0];
+    let mut declared_note = None;
+    let mut note_part = None;
+    let mut note_chunk_ids = Vec::new();
+    for page in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page)?.chunks {
+            if descriptor.chunk_id == *first_chunk {
+                let html = bundle.read_chunk_verified(&descriptor)?;
+                let end = html.find('>').ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX slide section is not closed".into())
+                })?;
+                declared_note =
+                    xlsx_attribute(&html[..=end], "data-hcd-notes-part").map(unescape_attribute);
+            }
+            if descriptor.region != "note" {
+                continue;
+            }
+            let html = bundle.read_chunk_verified(&descriptor)?;
+            let end = html
+                .find('>')
+                .ok_or_else(|| HcdError::InvalidBundle("PPTX note section is not closed".into()))?;
+            let tag = &html[..=end];
+            if xlsx_attribute(tag, "data-hcd-notes-owner")
+                .map(unescape_attribute)
+                .as_deref()
+                != Some(&slide_part)
+            {
+                continue;
+            }
+            let (part, _, _) = pptx_slide_page(&html)?;
+            if note_part.as_ref().is_some_and(|old| old != &part) {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX slide has more than one associated notes part".into(),
+                ));
+            }
+            note_part = Some(part);
+            note_chunk_ids.push(descriptor.chunk_id);
+        }
     }
-    if let Some(revision) = rewritten_at {
-        return Err(HcdError::InvalidPatch(format!(
-            "hcd-patch/44 cannot copy {slide_part} yet: revision {revision} rewrote that page in HCD, and a copy is written from the page the source package holds"
-        )));
+    if declared_note != note_part {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide and notes associations do not agree".into(),
+        ));
     }
+    let new_note_part = note_part.as_ref().map(|_| {
+        let id = stable_node_id(&[&manifest.document_id, &new_slide_part, "slide-notes"]);
+        format!("ppt/hcd-notes/{}.xml", id.strip_prefix("n_").unwrap_or(&id))
+    });
     Ok(PptxSlideCopyTarget {
         chunk_id: request.chunk_id.clone(),
-        new_slide_part: format!(
-            "ppt/slides/slide{}.xml",
-            highest_number.max(known_parts.len()) + 1
-        ),
+        new_slide_part,
         slide_part,
         page_chunk_ids: pages[placed].chunks.clone(),
+        note_part,
+        new_note_part,
+        note_chunk_ids,
+        snapshot: created_in_hcd || rewritten_at.is_some(),
     })
 }
 
@@ -794,8 +1231,49 @@ pub(super) fn clone_pptx_slide_chunks(
     copy: &PptxSlideCopyTarget,
     descriptors: &[crate::ChunkDescriptor],
 ) -> Result<Vec<crate::ChunkDescriptor>, HcdError> {
-    let mut cloned = Vec::with_capacity(copy.page_chunk_ids.len());
-    for (ordinal, chunk_id) in copy.page_chunk_ids.iter().enumerate() {
+    clone_pptx_owned_chunks(bundle, manifest, copy, descriptors, false)
+}
+
+pub(super) fn clone_pptx_note_chunks(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    copy: &PptxSlideCopyTarget,
+    descriptors: &[crate::ChunkDescriptor],
+) -> Result<Vec<crate::ChunkDescriptor>, HcdError> {
+    clone_pptx_owned_chunks(bundle, manifest, copy, descriptors, true)
+}
+
+fn clone_pptx_owned_chunks(
+    bundle: &Bundle,
+    manifest: &crate::HcdManifest,
+    copy: &PptxSlideCopyTarget,
+    descriptors: &[crate::ChunkDescriptor],
+    note: bool,
+) -> Result<Vec<crate::ChunkDescriptor>, HcdError> {
+    let (chunk_ids, source_part, new_part, region) = if note {
+        if copy.note_chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        (
+            &copy.note_chunk_ids,
+            copy.note_part
+                .as_deref()
+                .ok_or_else(|| HcdError::InvalidBundle("PPTX note has no source part".into()))?,
+            copy.new_note_part
+                .as_deref()
+                .ok_or_else(|| HcdError::InvalidBundle("PPTX note copy has no part".into()))?,
+            "note",
+        )
+    } else {
+        (
+            &copy.page_chunk_ids,
+            copy.slide_part.as_str(),
+            copy.new_slide_part.as_str(),
+            "slide",
+        )
+    };
+    let mut cloned = Vec::with_capacity(chunk_ids.len());
+    for (ordinal, chunk_id) in chunk_ids.iter().enumerate() {
         let source = descriptors
             .iter()
             .find(|descriptor| descriptor.chunk_id == *chunk_id)
@@ -809,35 +1287,49 @@ pub(super) fn clone_pptx_slide_chunks(
         // Every element of the page that names the part it was read from — the
         // section, a picture, a chart — names the copy's part from now on.
         let html = html.replace(
-            &format!(
-                "data-hcd-source-part=\"{}\"",
-                escape_attribute(&copy.slide_part)
-            ),
-            &format!(
-                "data-hcd-source-part=\"{}\"",
-                escape_attribute(&copy.new_slide_part)
-            ),
+            &format!("data-hcd-source-part=\"{}\"", escape_attribute(source_part)),
+            &format!("data-hcd-source-part=\"{}\"", escape_attribute(new_part)),
         );
-        let html = rewrite_pptx_copied_ids(&html, &manifest.document_id, &copy.new_slide_part);
+        let html = if note {
+            let html = html.replace(
+                &format!(
+                    "data-hcd-notes-owner=\"{}\"",
+                    escape_attribute(&copy.slide_part)
+                ),
+                &format!(
+                    "data-hcd-notes-owner=\"{}\"",
+                    escape_attribute(&copy.new_slide_part)
+                ),
+            );
+            if html.contains("data-hcd-note-copy=\"true\"") {
+                html
+            } else {
+                html.replacen("<section class=\"hcd-slide\"", &format!("<section class=\"hcd-slide\" data-hcd-note-copy=\"true\" data-hcd-notes-source-hash=\"{}\"", hash_bytes(source_part.as_bytes())), 1)
+            }
+        } else if let (Some(old), Some(new)) = (&copy.note_part, &copy.new_note_part) {
+            html.replace(
+                &format!("data-hcd-notes-part=\"{}\"", escape_attribute(old)),
+                &format!("data-hcd-notes-part=\"{}\"", escape_attribute(new)),
+            )
+        } else {
+            html
+        };
+        let html = rewrite_pptx_copied_ids(&html, &manifest.document_id, new_part);
         let entries: Vec<crate::NodeMapEntry> = source_map
             .entries
             .iter()
             .map(|entry| crate::NodeMapEntry {
-                node_id: pptx_copied_node_id(
-                    &manifest.document_id,
-                    &copy.new_slide_part,
-                    &entry.node_id,
-                ),
+                node_id: pptx_copied_node_id(&manifest.document_id, new_part, &entry.node_id),
                 node_hash: entry.node_hash.clone(),
                 source: crate::SourceAnchor {
-                    part: copy.new_slide_part.clone(),
+                    part: new_part.to_string(),
                     ..entry.source.clone()
                 },
             })
             .collect();
         let chunk_id = stable_node_id(&[
             &manifest.document_id,
-            &copy.new_slide_part,
+            new_part,
             "slide-chunk",
             &ordinal.to_string(),
         ])
@@ -852,7 +1344,7 @@ pub(super) fn clone_pptx_slide_chunks(
         cloned.push(crate::ChunkDescriptor {
             sequence: 0,
             chunk_id,
-            region: "slide".to_string(),
+            region: region.to_string(),
             html_href,
             html_hash,
             map_href,
@@ -895,8 +1387,20 @@ pub(super) fn mint_pptx_slide_chunk(
     addition: &PptxSlideAddTarget,
 ) -> Result<crate::ChunkDescriptor, HcdError> {
     let px = |value: u64| format!("{:.2}px", value as f64 * 96.0 / 914_400.0);
+    let design = addition
+        .design
+        .as_ref()
+        .map(crate::pptx_design::pptx_design_attribute)
+        .transpose()?
+        .unwrap_or_default();
+    let background = addition
+        .design
+        .as_ref()
+        .and_then(|design| design.inherited_color())
+        .map(|color| format!(";background-color:{color}"))
+        .unwrap_or_default();
     let html = format!(
-        "<section class=\"hcd-slide\" data-hcd-source-part=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\" style=\"position:relative;width:{};height:{}\">{}</section>",
+        "<section class=\"hcd-slide\" data-hcd-source-part=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\"{design} style=\"position:relative;width:{};height:{}{background}\">{}</section>",
         escape_attribute(&addition.slide_part),
         addition.width_emu,
         addition.height_emu,
@@ -1261,14 +1765,14 @@ pub(super) fn apply_run_css(tag: &mut String, format: &PptxRunFormat) -> Result<
         if bold {
             declarations.insert("font-weight".to_string(), "700".to_string());
         } else {
-            declarations.remove("font-weight");
+            declarations.insert("font-weight".to_string(), "400".to_string());
         }
     }
     if let Some(italic) = format.italic {
         if italic {
             declarations.insert("font-style".to_string(), "italic".to_string());
         } else {
-            declarations.remove("font-style");
+            declarations.insert("font-style".to_string(), "normal".to_string());
         }
     }
     if let Some(underline) = format.underline {
@@ -1286,7 +1790,7 @@ pub(super) fn apply_run_css(tag: &mut String, format: &PptxRunFormat) -> Result<
             tokens.push("underline".to_string());
         }
         if tokens.is_empty() {
-            declarations.remove("text-decoration");
+            declarations.insert("text-decoration".to_string(), "none".to_string());
         } else {
             declarations.insert("text-decoration".to_string(), tokens.join(" "));
         }
@@ -1442,17 +1946,7 @@ pub(super) fn update_pptx_shape_geometry(
 
     let (start, end) = enclosing_pptx_shape(html, &entry.node_id, slide_end + 1)?;
     let mut tag = html[start..=end].to_string();
-    let number = |name: &str| -> Result<u64, HcdError> {
-        xlsx_attribute(&tag, name)
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| HcdError::Unsupported(format!("PPTX shape has no {name}")))
-    };
-    let current = PptxShapeGeometry {
-        x_emu: number("data-hcd-x-emu")?,
-        y_emu: number("data-hcd-y-emu")?,
-        width_emu: number("data-hcd-width-emu")?,
-        height_emu: number("data-hcd-height-emu")?,
-    };
+    let current = pptx_shape_bounds(&tag)?;
     if current != change.expected {
         return Err(HcdError::PreconditionFailed(
             "PPTX shape geometry changed since it was selected".to_string(),
@@ -1513,27 +2007,50 @@ pub(super) fn update_pptx_shape_geometry(
             ));
         }
     }
-    let emu_px = |value: u64| format!("{:.2}px", value as f64 * 96.0 / 914_400.0);
-    let updates = BTreeMap::from([
-        ("left".to_string(), emu_px(change.geometry.x_emu)),
-        ("top".to_string(), emu_px(change.geometry.y_emu)),
-        ("width".to_string(), emu_px(change.geometry.width_emu)),
-        ("height".to_string(), emu_px(change.geometry.height_emu)),
-    ]);
-    update_start_tag_style(&mut tag, "data-hcd-x-emu=", &updates, false)?;
-    for (name, value) in [
-        ("data-hcd-x-emu", change.geometry.x_emu),
-        ("data-hcd-y-emu", change.geometry.y_emu),
-        ("data-hcd-width-emu", change.geometry.width_emu),
-        ("data-hcd-height-emu", change.geometry.height_emu),
-    ] {
-        let tag_end = tag.len() - 1;
-        set_attribute_in_range(&mut tag, 0, tag_end, name, &value.to_string())?;
+    if !super::pptx_group::move_group_object(&mut tag, change.expected, change.geometry)? {
+        write_pptx_shape_geometry(&mut tag, change.geometry)?;
     }
-    let tag_end = tag.len() - 1;
-    set_attribute_in_range(&mut tag, 0, tag_end, "data-hcd-geometry-edited", "true")?;
     html.replace_range(start..=end, &tag);
     Ok(())
+}
+
+fn pptx_shape_bounds(tag: &str) -> Result<PptxShapeGeometry, HcdError> {
+    let number = |name: &str| -> Result<u64, HcdError> {
+        xlsx_attribute(tag, name)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| HcdError::Unsupported(format!("PPTX shape has no {name}")))
+    };
+    Ok(PptxShapeGeometry {
+        x_emu: number("data-hcd-x-emu")?,
+        y_emu: number("data-hcd-y-emu")?,
+        width_emu: number("data-hcd-width-emu")?,
+        height_emu: number("data-hcd-height-emu")?,
+    })
+}
+
+fn write_pptx_shape_geometry(
+    tag: &mut String,
+    geometry: PptxShapeGeometry,
+) -> Result<(), HcdError> {
+    let emu_px = |value: u64| format!("{:.2}px", value as f64 * 96.0 / 914_400.0);
+    let updates = BTreeMap::from([
+        ("left".to_string(), emu_px(geometry.x_emu)),
+        ("top".to_string(), emu_px(geometry.y_emu)),
+        ("width".to_string(), emu_px(geometry.width_emu)),
+        ("height".to_string(), emu_px(geometry.height_emu)),
+    ]);
+    update_start_tag_style(tag, "data-hcd-x-emu=", &updates, false)?;
+    for (name, value) in [
+        ("data-hcd-x-emu", geometry.x_emu),
+        ("data-hcd-y-emu", geometry.y_emu),
+        ("data-hcd-width-emu", geometry.width_emu),
+        ("data-hcd-height-emu", geometry.height_emu),
+    ] {
+        let tag_end = tag.len() - 1;
+        set_attribute_in_range(tag, 0, tag_end, name, &value.to_string())?;
+    }
+    let tag_end = tag.len() - 1;
+    set_attribute_in_range(tag, 0, tag_end, "data-hcd-geometry-edited", "true")
 }
 
 /// Align one slide text shape. A request lands on a text node because that is
@@ -1673,6 +2190,13 @@ pub(super) fn validate_pptx_schema(
     manifest: &crate::HcdManifest,
     patch: &PatchBatch,
 ) -> Result<(), HcdError> {
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_55
+        && pptx_object_chunk(patch).is_none()
+    {
+        return Err(HcdError::InvalidPatch(
+            "hcd-patch/55 accepts slide object operations only".into(),
+        ));
+    }
     if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_27
         && (manifest.source.format != "pptx"
             || patch.operations.len() != 1

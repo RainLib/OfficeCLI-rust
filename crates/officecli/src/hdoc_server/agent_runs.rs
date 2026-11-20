@@ -507,7 +507,7 @@ pub(super) async fn launch(
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .insert(fence.clone());
-    tokio::spawn(async move {
+    integration::backup::spawn(async move {
         let execute = async {
             if count > 1
                 && open(&state, &id)?

@@ -1,6 +1,6 @@
 //! Spreadsheet patch plans and format-specific validation.
 use super::*;
-mod cells;
+pub(super) mod cells;
 mod grid;
 mod sheets;
 pub(super) use cells::*;
@@ -212,6 +212,64 @@ pub(super) fn validate_xlsx_schema(
     manifest: &crate::HcdManifest,
     patch: &PatchBatch,
 ) -> Result<(), HcdError> {
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_65 {
+        if manifest.source.format != "xlsx"
+            || !patch
+                .operations
+                .iter()
+                .any(|op| matches!(op, PatchOperation::XlsxRichTextSet { .. }))
+            || patch.operations.iter().any(|op| {
+                !matches!(
+                    op,
+                    PatchOperation::XlsxRichTextSet { .. }
+                        | PatchOperation::XlsxCellClear { .. }
+                        | PatchOperation::XlsxNumberSet { .. }
+                        | PatchOperation::TextSplice { .. }
+                )
+            })
+        {
+            return Err(HcdError::Unsupported(
+                "hcd-patch/65 requires XLSX rich-text restoration with literal value edits only"
+                    .into(),
+            ));
+        }
+        let mut targets = HashSet::new();
+        for node in patch.operations.iter().filter_map(PatchOperation::node_id) {
+            if !targets.insert(node) {
+                return Err(HcdError::InvalidPatch(
+                    "XLSX content batch contains duplicate targets".into(),
+                ));
+            }
+        }
+    }
+    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_54 {
+        if !manifest.source.is_spreadsheet()
+            || !patch
+                .operations
+                .iter()
+                .any(|op| matches!(op, PatchOperation::XlsxCellClear { .. }))
+            || patch.operations.iter().any(|op| {
+                !matches!(
+                    op,
+                    PatchOperation::XlsxCellClear { .. }
+                        | PatchOperation::XlsxNumberSet { .. }
+                        | PatchOperation::TextSplice { .. }
+                )
+            })
+        {
+            return Err(HcdError::Unsupported(
+                "hcd-patch/54 accepts spreadsheet literal cell clears and value edits only".into(),
+            ));
+        }
+        let mut targets = HashSet::new();
+        for node in patch.operations.iter().filter_map(PatchOperation::node_id) {
+            if !targets.insert(node) {
+                return Err(HcdError::InvalidPatch(
+                    "XLSX content batch contains duplicate targets".into(),
+                ));
+            }
+        }
+    }
     if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_19
         && (!manifest.source.is_spreadsheet()
             || !patch

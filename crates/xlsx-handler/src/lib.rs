@@ -15,6 +15,7 @@ pub mod rich_value_image;
 pub mod text_offset;
 pub mod view;
 pub mod workbook_settings;
+pub mod worksheet_conditions;
 
 pub use dom_types::{Cell, CellRef, CellValueType, WorkbookModel, Worksheet};
 pub use handler::ExcelHandler;

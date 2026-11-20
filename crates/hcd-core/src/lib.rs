@@ -3,12 +3,19 @@ mod bundle;
 pub mod canvas;
 mod catalog;
 mod docx_inline;
+pub mod docx_review;
 mod error;
 mod hash;
 mod html;
+mod image_codec;
 mod image_insert;
+pub mod image_layers;
 mod patch;
 mod pdf_layout;
+pub mod pdf_ocr;
+pub mod pptx_animation;
+pub mod pptx_design;
+pub mod pptx_group;
 mod presentation;
 mod restore;
 mod search;
@@ -42,8 +49,11 @@ pub use html::{
     is_safe_hyperlink, validate_css_text, HtmlFontNode, HtmlImageNode,
 };
 pub use patch::{
-    apply_patch, extract_image_page, extract_text_page, get_image_node, get_text_node, sort_grid,
-    worksheet_filter, GridFilterView, GridSortDirection, GridSortRequest,
+    apply_patch, apply_patch_with_pivot, extract_image_page, extract_text_page, get_image_node,
+    get_text_node, pivot_output_range, sort_grid, valid_worksheet_chart_id,
+    validate_docx_picture_layout, validate_worksheet_chart, validate_worksheet_condition,
+    validate_worksheet_pivot, worksheet_charts, worksheet_filter, worksheet_pivots,
+    xlsx_added_literals, GridFilterView, GridSortDirection, GridSortRequest, XlsxAddedLiteral,
 };
 pub use pdf_layout::{
     pdf_page_count, pdf_page_layout, validate_pdf_placements, PDF_BLANK_HEIGHT_PT,
@@ -54,13 +64,13 @@ pub use presentation::{
     HtmlPresentationOptions, HtmlPresentationReport, DEFAULT_HTML_PRESENTATION_MAX_BYTES,
 };
 pub use restore::restore_revision;
-pub use search::{search_bundle, SearchHit, SearchResult};
+pub use search::{search_bundle, search_workspace, SearchHit, SearchResult};
 pub use stats::{bundle_stats, remove_orphan_objects, BundleStats, StorageCategory};
 pub use structure::{
-    apply_structure_patch, editor_projection, project_editor, BlockPrecondition, EditorAlignment,
-    EditorBlockContent, EditorBlockKind, EditorBlockView, EditorInline, EditorProjection,
-    EditorTextFormat, StructureOperation, StructurePatchBatch, TableEditAction,
-    TableRestorePrecondition,
+    apply_structure_patch, editor_projection, project_editor, word_review_anchors,
+    BlockPrecondition, EditorAlignment, EditorBlockContent, EditorBlockKind, EditorBlockView,
+    EditorInline, EditorProjection, EditorTextFormat, StructureOperation, StructurePatchBatch,
+    TableCellRange, TableEditAction, TableRestorePrecondition,
 };
 pub use types::*;
 pub use validate::validate_bundle;
@@ -190,6 +200,31 @@ pub const HCD_PATCH_SCHEMA_V52_JSON: &str = include_str!("../schemas/hcd-patch-5
 
 pub const HCD_PATCH_SCHEMA_VERSION_53: &str = "hcd-patch/53";
 pub const HCD_PATCH_SCHEMA_V53_JSON: &str = include_str!("../schemas/hcd-patch-53.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_54: &str = "hcd-patch/54";
+pub const HCD_PATCH_SCHEMA_V54_JSON: &str = include_str!("../schemas/hcd-patch-54.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_55: &str = "hcd-patch/55";
+pub const HCD_PATCH_SCHEMA_V55_JSON: &str = include_str!("../schemas/hcd-patch-55.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_56: &str = "hcd-patch/56";
+pub const HCD_PATCH_SCHEMA_V56_JSON: &str = include_str!("../schemas/hcd-patch-56.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_57: &str = "hcd-patch/57";
+pub const HCD_PATCH_SCHEMA_V57_JSON: &str = include_str!("../schemas/hcd-patch-57.schema.json");
+pub const HCD_PATCH_SCHEMA_VERSION_58: &str = "hcd-patch/58";
+pub const HCD_PATCH_SCHEMA_V58_JSON: &str = include_str!("../schemas/hcd-patch-58.schema.json");
+pub const HCD_PATCH_SCHEMA_VERSION_59: &str = "hcd-patch/59";
+pub const HCD_PATCH_SCHEMA_VERSION_60: &str = "hcd-patch/60";
+pub const HCD_PATCH_SCHEMA_VERSION_61: &str = "hcd-patch/61";
+pub const HCD_PATCH_SCHEMA_VERSION_62: &str = "hcd-patch/62";
+pub const HCD_PATCH_SCHEMA_VERSION_63: &str = "hcd-patch/63";
+pub const HCD_PATCH_SCHEMA_VERSION_64: &str = "hcd-patch/64";
+pub const HCD_PATCH_SCHEMA_VERSION_65: &str = "hcd-patch/65";
+pub const HCD_PATCH_SCHEMA_VERSION_66: &str = "hcd-patch/66";
+pub const HCD_PATCH_SCHEMA_VERSION_67: &str = "hcd-patch/67";
+pub const HCD_PATCH_SCHEMA_V65_JSON: &str = include_str!("../schemas/hcd-patch-65.schema.json");
+pub const HCD_PATCH_SCHEMA_V59_JSON: &str = include_str!("../schemas/hcd-patch-59.schema.json");
 
 #[cfg(test)]
 mod schema_tests {

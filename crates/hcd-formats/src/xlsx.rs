@@ -1,4 +1,9 @@
+mod pivot_cells;
 mod rich_text;
+pub(crate) mod worksheet_charts;
+pub(crate) mod worksheet_conditions;
+mod worksheet_pivot_xml;
+pub(crate) mod worksheet_pivots;
 use crate::common::{
     append_control_children, attribute, base_manifest, checked_attribute,
     checked_export_state_with_restores, collect_dirty_nodes, current_control_part,
@@ -206,6 +211,7 @@ struct WorksheetScan {
     merged_ranges: MergeCursor,
     view: WorksheetViewMetadata,
     shared_formulas: HashMap<u32, Option<SharedFormulaGroup>>,
+    has_conditions: bool,
 }
 
 #[derive(Clone)]
@@ -560,6 +566,8 @@ where
     default_row_height: Option<f64>,
     view_attributes: String,
     hold_until_row: Option<u32>,
+    conditions: Vec<hcd_core::WorksheetCondition>,
+    pivots: Vec<hcd_core::WorksheetPivot>,
 }
 
 impl<'a, F> SheetChunkWriter<'a, F>
@@ -597,6 +605,8 @@ where
             default_row_height: None,
             view_attributes: view.html_attributes(),
             hold_until_row: None,
+            conditions: Vec::new(),
+            pivots: Vec::new(),
         }
     }
 
@@ -699,6 +709,9 @@ where
                 default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
                 sheet_part: Some(self.part.to_string()),
                 auto_filter: None,
+                charts: Vec::new(),
+                conditions: std::mem::take(&mut self.conditions),
+                pivots: std::mem::take(&mut self.pivots),
             },
         )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
@@ -758,6 +771,9 @@ where
                 default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
                 sheet_part: Some(self.part.to_string()),
                 auto_filter: None,
+                charts: Vec::new(),
+                conditions: std::mem::take(&mut self.conditions),
+                pivots: std::mem::take(&mut self.pivots),
             },
         )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
@@ -2113,9 +2129,12 @@ where
 {
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
     let workbook = workbook_info(&mut archive)?;
+    let mut pivots =
+        worksheet_pivots::import(&mut archive, &workbook.sheets, &options.document_id)?;
     let scratch = tempfile::tempdir()?;
     let mut shared_strings = SharedStringStore::build(&mut archive, scratch.path())?;
     let (rendered_styles, style_catalog) = render_xlsx_styles(&mut archive)?;
+    let mut condition_styles = None;
     let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(&rendered_styles)?;
     let mut format_stats = XlsxFormatStats::default();
@@ -2125,6 +2144,7 @@ where
             mut merged_ranges,
             view,
             shared_formulas,
+            has_conditions,
         } = archive
             .with_part(&sheet.part, |source| {
                 scan_worksheet_metadata(source, &sheet.part)
@@ -2139,6 +2159,15 @@ where
             &mut writer,
             emit,
         );
+        chunks.pivots = pivots.remove(&sheet.part).unwrap_or_default();
+        if has_conditions {
+            let styles = match &condition_styles {
+                Some(styles) => styles,
+                None => condition_styles.insert(worksheet_conditions::read_styles(&mut archive)?),
+            };
+            chunks.conditions =
+                worksheet_conditions::import(&mut archive, sheet, &options.document_id, styles)?;
+        }
         archive
             .with_part(&sheet.part, |source| {
                 parse_worksheet(
@@ -2697,14 +2726,11 @@ where
         let count = sheet_chart_counts
             .entry(chart.sheet_part.clone())
             .or_default();
-        let descriptor = writer.write_grid_chunk(
-            chunk_id,
-            html,
-            map,
-            1,
-            *count > 0,
-            drawing_grid_address(document_id, sheet, &chart.anchor, GridChunkKind::Chart),
-        )?;
+        let mut grid =
+            drawing_grid_address(document_id, sheet, &chart.anchor, GridChunkKind::Chart);
+        grid.charts
+            .extend(worksheet_charts::imported_chart(chart, chart_xml, &preview));
+        let descriptor = writer.write_grid_chunk(chunk_id, html, map, 1, *count > 0, grid)?;
         *count += 1;
         emit(&ImportEvent::ChunkReady { descriptor })?;
     }
@@ -3669,6 +3695,7 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
     let mut shared_members: HashMap<u32, BTreeSet<(u32, u32)>> = HashMap::new();
     let mut shared_member_count = 0usize;
     let mut shared_members_complete = true;
+    let mut has_conditions = false;
     let mut budget = XmlBudget::default();
     loop {
         let event = reader
@@ -3676,6 +3703,11 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
             .map_err(|error| HcdError::InvalidBundle(format!("worksheet {part} XML: {error}")))?;
         budget.observe(&event, part)?;
         match event {
+            Event::Start(ref element)
+                if local_name(element.name().as_ref()) == "conditionalFormatting" =>
+            {
+                has_conditions = true;
+            }
             Event::Start(ref element) if local_name(element.name().as_ref()) == "c" => {
                 current_cell = attribute(element, "r");
             }
@@ -3851,6 +3883,7 @@ fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<Workshee
         merged_ranges: MergeCursor::new(ranges),
         view: selected_view.unwrap_or_default(),
         shared_formulas,
+        has_conditions,
     })
 }
 
@@ -4013,6 +4046,9 @@ fn drawing_grid_address(
         default_row_height_emu: None,
         sheet_part: Some(sheet.part.clone()),
         auto_filter: None,
+        charts: Vec::new(),
+        conditions: Vec::new(),
+        pivots: Vec::new(),
     }
 }
 
@@ -5200,6 +5236,18 @@ pub(crate) fn export_xlsx(
             &drawing_shifts,
             &added_parts,
             &panes,
+        )?;
+        let managed_charts = hcd_core::worksheet_charts(bundle, &manifest, None)?
+            .into_iter()
+            .filter(|(_, chart)| chart.imported)
+            .map(|(_, chart)| worksheet_charts::chart_part(&chart.id))
+            .collect::<BTreeSet<_>>();
+        verify_grid_shift_charts(
+            &mut archive,
+            &workbook,
+            &row_insertions,
+            &column_shifts,
+            &managed_charts,
         )?;
     }
     // A worksheet HCD created has no entry in the source package, so it is
@@ -8631,11 +8679,12 @@ fn collect_structural_drawings(
                                     "XLSX drawing part is outside xl/drawings".to_string(),
                                 ));
                             }
-                            if attribute(element, "data-hcd-anchor-kind").as_deref()
-                                != Some("two-cell")
-                            {
+                            if !matches!(
+                                attribute(element, "data-hcd-anchor-kind").as_deref(),
+                                Some("one-cell" | "two-cell")
+                            ) {
                                 return Err(HcdError::Unsupported(
-                                    "XLSX grid deletion requires two-cell drawing anchors"
+                                    "XLSX grid change requires cell-based drawing anchors"
                                         .to_string(),
                                 ));
                             }
@@ -9230,7 +9279,7 @@ fn rewrite_xlsx_drawing_anchors(
     reader.config_mut().check_end_names = true;
     let mut writer = Writer::new(output);
     let mut buffer = Vec::new();
-    let mut in_two_cell = false;
+    let mut in_cell_anchor = false;
     let mut in_marker = false;
     let mut coordinate = None;
     let mut anchor_count = 0usize;
@@ -9240,16 +9289,16 @@ fn rewrite_xlsx_drawing_anchors(
             .map_err(|error| HcdError::InvalidBundle(format!("XLSX drawing XML: {error}")))?;
         match &event {
             Event::Start(element) => match local_name(element.name().as_ref()) {
-                "twoCellAnchor" => {
-                    in_two_cell = true;
+                "oneCellAnchor" | "twoCellAnchor" => {
+                    in_cell_anchor = true;
                     anchor_count += 1;
                 }
-                "oneCellAnchor" | "absoluteAnchor" => {
+                "absoluteAnchor" => {
                     return Err(HcdError::Unsupported(
                         "XLSX grid deletion cannot shift this drawing anchor kind".to_string(),
                     ))
                 }
-                "from" | "to" if in_two_cell => in_marker = true,
+                "from" | "to" if in_cell_anchor => in_marker = true,
                 "row" | "col" if in_marker => {
                     coordinate = Some(local_name(element.name().as_ref()) == "row")
                 }
@@ -9270,7 +9319,7 @@ fn rewrite_xlsx_drawing_anchors(
             Event::End(element) => match local_name(element.name().as_ref()) {
                 "row" | "col" => coordinate = None,
                 "from" | "to" => in_marker = false,
-                "twoCellAnchor" => in_two_cell = false,
+                "oneCellAnchor" | "twoCellAnchor" => in_cell_anchor = false,
                 _ => {}
             },
             Event::Eof => break,
@@ -9281,7 +9330,7 @@ fn rewrite_xlsx_drawing_anchors(
     }
     if anchor_count == 0 {
         return Err(HcdError::Unsupported(
-            "XLSX drawing has no two-cell anchor".to_string(),
+            "XLSX drawing has no cell-based anchor".to_string(),
         ));
     }
     Ok(())
@@ -9339,6 +9388,7 @@ fn verify_grid_shift_source(
                 let mut buffer = Vec::new();
                 let mut in_other_sheet_formula = false;
                 let mut in_grid_formula = false;
+                let mut inline_depth = 0usize;
                 // The range the filter this worksheet carries covers, which is what
                 // the criteria on its columns count from.
                 let mut filter_range: Option<String> = None;
@@ -9346,6 +9396,16 @@ fn verify_grid_shift_source(
                     let event = reader.read_event_into(&mut buffer).map_err(|error| {
                         PackageError::ReadPartError(format!("{}: {error}", sheet.part))
                     })?;
+                    let inside_inline = inline_depth > 0;
+                    match &event {
+                        Event::Start(element)
+                            if inside_inline || local_name(element.name().as_ref()) == "is" =>
+                        {
+                            inline_depth += 1;
+                        }
+                        Event::End(_) if inside_inline => inline_depth -= 1,
+                        _ => {}
+                    }
                     match event {
                         Event::Start(ref element) | Event::Empty(ref element) => {
                             let name = element.name();
@@ -9366,7 +9426,33 @@ fn verify_grid_shift_source(
                                     "grid shift cannot update worksheet element {tag}"
                                 )));
                             }
+                            // Inline rich-string properties and phonetic offsets describe characters,
+                            // not worksheet coordinates. Keep them within their string; unknown
+                            // extensions and these same tags outside a string remain refused.
+                            let rich_component = inside_inline
+                                && matches!(
+                                    tag,
+                                    "r" | "rPr"
+                                        | "rFont"
+                                        | "charset"
+                                        | "family"
+                                        | "b"
+                                        | "i"
+                                        | "strike"
+                                        | "outline"
+                                        | "shadow"
+                                        | "condense"
+                                        | "extend"
+                                        | "color"
+                                        | "sz"
+                                        | "u"
+                                        | "vertAlign"
+                                        | "scheme"
+                                        | "rPh"
+                                        | "phoneticPr"
+                                );
                             if target
+                                && !rich_component
                                 && !matches!(
                                     tag,
                                     "worksheet"
@@ -9598,6 +9684,16 @@ fn verify_grid_shift_source(
             })
             .map_err(|error| HcdError::Unsupported(error.to_string()))?;
     }
+    Ok(())
+}
+
+fn verify_grid_shift_charts(
+    archive: &mut StreamingOxmlArchive,
+    workbook: &WorkbookInfo,
+    row_insertions: &HashMap<String, Vec<RowShift>>,
+    column_shifts: &HashMap<String, Vec<ColumnShift>>,
+    managed_charts: &BTreeSet<String>,
+) -> Result<(), HcdError> {
     let edited_sheet_names: Vec<_> = workbook
         .sheets
         .iter()
@@ -9610,7 +9706,10 @@ fn verify_grid_shift_source(
         .entries()
         .iter()
         .filter(|entry| {
-            !entry.is_dir && entry.name.starts_with("xl/charts/") && entry.name.ends_with(".xml")
+            !entry.is_dir
+                && entry.name.starts_with("xl/charts/")
+                && entry.name.ends_with(".xml")
+                && !managed_charts.contains(&entry.name)
         })
         .map(|entry| entry.name.clone())
         .collect();
@@ -14036,6 +14135,468 @@ mod tests {
         assert!(worksheet.contains("r=\"G1\" t=\"inlineStr\""));
         assert!(worksheet.contains("<t>Tail</t>"));
         assert!(worksheet.contains("Other"));
+    }
+
+    #[test]
+    fn grid_shifts_preserve_inline_rich_strings_and_phonetic_offsets() {
+        use serde_json::json;
+        let temp = tempfile::tempdir().unwrap();
+        let rich = r#"<r><rPr><rFont val="Arial"/><charset val="0"/><family val="2"/><b/><i val="0"/><strike val="0"/><outline val="0"/><shadow val="0"/><condense val="0"/><extend val="0"/><color theme="4" tint="0.2"/><sz val="14"/><u val="double"/><vertAlign val="superscript"/><scheme val="minor"/></rPr><t>列😀</t></r><r><t xml:space="preserve"> data</t></r><rPh sb="0" eb="1"><t>lie</t></rPh><phoneticPr fontId="0" type="noConversion" alignment="left"/>"#;
+        let make_source = |path: &Path, inside: &str, outside: &str| {
+            create_plain_rows_fixture(path, 3);
+            let parts: Vec<_> = {
+                let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+                (0..archive.len())
+                    .map(|index| {
+                        let mut part = archive.by_index(index).unwrap();
+                        let name = part.name().to_owned();
+                        let mut data = String::new();
+                        part.read_to_string(&mut data).unwrap();
+                        if name == "xl/worksheets/sheet1.xml" {
+                            data = data
+                                .replace(
+                                    "<is><t>Right 2</t></is>",
+                                    &format!("<is>{rich}{inside}</is>"),
+                                )
+                                .replace("</worksheet>", &format!("{outside}</worksheet>"));
+                        }
+                        (name, data)
+                    })
+                    .collect()
+            };
+            let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
+            for (name, data) in parts {
+                zip.start_file(name, SimpleFileOptions::default()).unwrap();
+                zip.write_all(data.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        };
+        let cases = [
+            (
+                "row-insert",
+                12,
+                json!({"op":"xlsx.row.insert","beforeRow":2}),
+                "D3",
+            ),
+            (
+                "row-delete",
+                14,
+                json!({"op":"xlsx.row.delete","row":1}),
+                "D1",
+            ),
+            (
+                "column-insert",
+                13,
+                json!({"op":"xlsx.column.insert","beforeColumn":2}),
+                "E2",
+            ),
+            (
+                "column-delete",
+                15,
+                json!({"op":"xlsx.column.delete","column":1}),
+                "C2",
+            ),
+        ];
+        for (label, version, mut operation, address) in cases {
+            let source = temp.path().join(format!("{label}-source.xlsx"));
+            make_source(&source, "", "");
+            let root = temp.path().join(format!("{label}.hcd"));
+            let manifest =
+                import_xlsx(&source, &root, &ImportOptions::new("grid-rich"), |_| Ok(())).unwrap();
+            let bundle = Bundle::open(&root).unwrap();
+            let sheet = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+                .grid
+                .as_ref()
+                .unwrap()
+                .sheet_id
+                .clone();
+            let original = extract_text_page(&bundle, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|node| node.source.paragraph_id.as_deref() == Some("D2"))
+                .unwrap();
+            let runs = hcd_core::get_text_node(&bundle, &original.node_id)
+                .unwrap()
+                .xlsx_runs;
+            operation["sheetId"] = json!(sheet);
+            let patch: PatchBatch = serde_json::from_value(json!({"schemaVersion":format!("hcd-patch/{version}"),
+                "documentId":"grid-rich","patchId":label,"baseRevision":0,"operations":[operation]})).unwrap();
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+            let exported = temp.path().join(format!("{label}.xlsx"));
+            export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+            let xml = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+            assert!(
+                xml.contains(&format!("r=\"{address}\" t=\"inlineStr\"")),
+                "{label}: {xml}"
+            );
+            assert!(
+                xml.contains(rich),
+                "{label}: original rich XML and phonetic offsets changed"
+            );
+            let reopened = temp.path().join(format!("{label}-reopened.hcd"));
+            import_xlsx(
+                &exported,
+                &reopened,
+                &ImportOptions::new("reopened"),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let reopened = Bundle::open(&reopened).unwrap();
+            let node = extract_text_page(&reopened, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|node| node.source.paragraph_id.as_deref() == Some(address))
+                .unwrap();
+            assert_eq!(node.text, "列😀 data");
+            assert_eq!(
+                hcd_core::get_text_node(&reopened, &node.node_id)
+                    .unwrap()
+                    .xlsx_runs,
+                runs
+            );
+        }
+        for (label, inside, outside, refused) in [
+            ("outside", "", "<r/>", "worksheet element r"),
+            (
+                "extension",
+                "<extLst><ext uri=\"unknown\"/></extLst>",
+                "",
+                "worksheet element ext",
+            ),
+        ] {
+            let source = temp.path().join(format!("{label}-source.xlsx"));
+            make_source(&source, inside, outside);
+            let root = temp.path().join(format!("{label}.hcd"));
+            let manifest =
+                import_xlsx(&source, &root, &ImportOptions::new("grid-rich"), |_| Ok(())).unwrap();
+            let bundle = Bundle::open(&root).unwrap();
+            let sheet = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+                .grid
+                .as_ref()
+                .unwrap()
+                .sheet_id
+                .clone();
+            let patch: PatchBatch = serde_json::from_value(json!({"schemaVersion":"hcd-patch/12",
+                "documentId":"grid-rich","patchId":label,"baseRevision":0,"operations":[
+                    {"op":"xlsx.row.insert","sheetId":sheet,"beforeRow":2}]}))
+            .unwrap();
+            hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+            let error = export_xlsx(
+                &bundle,
+                &source,
+                &temp.path().join(format!("{label}.xlsx")),
+                &ExportOptions::default(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(refused), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn rich_literal_restore_is_atomic_and_reopens_with_native_styles() {
+        use serde_json::json;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.xlsx");
+        create_shared_string_fixture(&source);
+        let root = temp.path().join("rich-undo.hcd");
+        let manifest =
+            import_xlsx(&source, &root, &ImportOptions::new("rich-undo"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+        let sheet = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let at = |address: &str| {
+            entries
+                .iter()
+                .find(|node| node.source.paragraph_id.as_deref() == Some(address))
+                .unwrap()
+                .clone()
+        };
+        let prose = at("C3");
+        let number = at("E3");
+        let apply = |name: &str, version: u32, revision: u64, operations: serde_json::Value| {
+            let patch: PatchBatch = serde_json::from_value(json!({"schemaVersion":format!("hcd-patch/{version}"),
+                "documentId":"rich-undo","patchId":name,"baseRevision":revision,"operations":operations})).unwrap();
+            hcd_core::apply_patch(&bundle, &patch, revision)
+        };
+        apply("ai", 50, 0, json!([
+            {"op":"xlsx.richText.set","nodeId":prose.node_id,"precondition":{"nodeHash":prose.node_hash},
+                "runs":[{"text":"新内容","properties":{"b":{}}}]},
+            {"op":"xlsx.number.set","nodeId":number.node_id,"sheetId":sheet,"value":"8","precondition":{"nodeHash":number.node_hash}},
+            {"op":"xlsx.cell.set","sheetId":sheet,"row":1,"column":8,"text":"临时"}
+        ])).unwrap();
+        let added = hcd_core::xlsx_added_literals(&bundle, &bundle.revision(1).unwrap()).unwrap();
+        let new_cell = added.iter().find(|node| node.column == 8).unwrap();
+        let current = hcd_core::get_text_node(&bundle, &prose.node_id).unwrap();
+        apply("peer", 49, 1, json!([{"op":"xlsx.richText.set","nodeId":prose.node_id,
+            "precondition":{"nodeHash":current.node.node_hash},"runs":[
+                {"text":"新","properties":{"b":{}}},{"text":"📍","properties":{"u":{"val":"double"},"color":{"rgb":"FF336699"}}},
+                {"text":"内容","properties":{"b":{}}}]}])).unwrap();
+        let current = hcd_core::get_text_node(&bundle, &prose.node_id).unwrap();
+        let numeric = hcd_core::get_text_node(&bundle, &number.node_id).unwrap();
+        let restored = json!([{"text":"After merge","properties":{}},
+            {"text":"📍","properties":{"u":{"val":"double"},"color":{"rgb":"FF336699"}}}]);
+        let operations = json!([
+            {"op":"xlsx.richText.set","nodeId":prose.node_id,"precondition":{"nodeHash":current.node.node_hash},"runs":restored},
+            {"op":"xlsx.number.set","nodeId":number.node_id,"sheetId":sheet,"value":"0.256","precondition":{"nodeHash":numeric.node.node_hash}},
+            {"op":"xlsx.cell.clear","nodeId":new_cell.id,"sheetId":sheet,"createdRevision":1,"precondition":{"nodeHash":new_cell.hash}}
+        ]);
+        let before = bundle.manifest().unwrap().root_hash;
+        let mut invalid = operations.clone();
+        invalid[2]["precondition"]["nodeHash"] = json!("0".repeat(64));
+        assert!(apply("bad-clear", 65, 2, invalid).is_err());
+        let mut duplicate = operations.clone();
+        duplicate
+            .as_array_mut()
+            .unwrap()
+            .push(operations[0].clone());
+        assert!(apply("duplicate", 65, 2, duplicate).is_err());
+        assert!(apply("missing-rich", 65, 2, json!([operations[1].clone()])).is_err());
+        assert_eq!(bundle.manifest().unwrap().root_hash, before);
+        assert_eq!(
+            apply("undo", 65, 2, operations.clone()).unwrap().revision,
+            3
+        );
+        assert!(
+            apply("undo", 65, 2, operations.clone())
+                .unwrap()
+                .idempotent_replay
+        );
+        assert!(hcd_core::get_text_node(&bundle, &new_cell.id).is_err());
+        assert_eq!(
+            serde_json::to_value(
+                hcd_core::get_text_node(&bundle, &prose.node_id)
+                    .unwrap()
+                    .xlsx_runs
+                    .unwrap()
+            )
+            .unwrap(),
+            restored
+        );
+        let exported = temp.path().join("restored.xlsx");
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let reopened = temp.path().join("reopened.hcd");
+        import_xlsx(
+            &exported,
+            &reopened,
+            &ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened = Bundle::open(&reopened).unwrap();
+        let cells = extract_text_page(&reopened, None, 100).unwrap().entries;
+        let rich = cells
+            .iter()
+            .find(|node| node.source.paragraph_id.as_deref() == Some("C3"))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                hcd_core::get_text_node(&reopened, &rich.node_id)
+                    .unwrap()
+                    .xlsx_runs
+                    .unwrap()
+            )
+            .unwrap(),
+            restored
+        );
+        assert!(!cells
+            .iter()
+            .any(|node| node.source.paragraph_id.as_deref() == Some("H1")));
+        assert_eq!(
+            cells
+                .iter()
+                .find(|node| node.source.paragraph_id.as_deref() == Some("E3"))
+                .unwrap()
+                .text,
+            "26%"
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let latest = hcd_core::get_text_node(&bundle, &prose.node_id).unwrap();
+        apply("later-style", 49, 3, json!([{"op":"xlsx.richText.set","nodeId":prose.node_id,
+            "precondition":{"nodeHash":latest.node.node_hash},"runs":[{"text":"After merge📍","properties":{"b":{}}}]}])).unwrap();
+        assert!(apply(
+            "stale-style",
+            65,
+            3,
+            json!([{"op":"xlsx.richText.set","nodeId":prose.node_id,
+            "precondition":{"nodeHash":latest.node.node_hash},"runs":restored}])
+        )
+        .is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, 4);
+    }
+    #[test]
+    fn selective_cell_clear_keeps_native_blank_after_grid_edits_and_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("clear.xlsx");
+        let bundle_path = temp.path().join("clear.hcd");
+        let exported = temp.path().join("cleared.xlsx");
+        let document_id = "selective-cell-clear";
+        create_plain_rows_fixture(&source, 4);
+        let manifest = import_xlsx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new(document_id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let sheet_id = bundle.read_index_page(&manifest, 0).unwrap().chunks[0]
+            .grid
+            .as_ref()
+            .unwrap()
+            .sheet_id
+            .clone();
+        let apply = |name: &str, version: u32, operations| {
+            let revision = bundle.manifest().unwrap().revision;
+            hcd_core::apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: format!("hcd-patch/{version}"),
+                    document_id: document_id.to_string(),
+                    patch_id: name.to_string(),
+                    base_revision: revision,
+                    actor: BTreeMap::new(),
+                    operations,
+                    metadata: BTreeMap::new(),
+                },
+                revision,
+            )
+        };
+        let write = |row, column| PatchOperation::XlsxCellSet {
+            sheet_id: sheet_id.clone(),
+            row,
+            column,
+            text: "Initial".into(),
+        };
+        let written = apply("initial-writes", 19, vec![write(2, 2), write(2, 3)]).unwrap();
+        let added =
+            hcd_core::xlsx_added_literals(&bundle, &bundle.revision(written.revision).unwrap())
+                .unwrap();
+        assert_eq!(
+            added
+                .iter()
+                .map(|cell| (cell.row, cell.column))
+                .collect::<Vec<_>>(),
+            [(2, 2), (2, 3)]
+        );
+        let replace = |id: &str, value: &str| {
+            let current = hcd_core::get_text_node(&bundle, id).unwrap().node;
+            PatchOperation::TextSplice {
+                node_id: id.into(),
+                start: 0,
+                delete_count: current.text.chars().count(),
+                insert_text: value.into(),
+                precondition: NodePrecondition {
+                    node_hash: current.node_hash,
+                },
+            }
+        };
+        apply("someone-edited", 1, vec![replace(&added[1].id, "Revised")]).unwrap();
+        apply(
+            "same-visible-value",
+            1,
+            vec![replace(&added[1].id, "Initial")],
+        )
+        .unwrap();
+        let another = extract_text_page(&bundle, None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.paragraph_id.as_deref() == Some("A2"))
+            .unwrap();
+        apply(
+            "other-cell",
+            1,
+            vec![replace(&another.node_id, "Contributor kept")],
+        )
+        .unwrap();
+        apply(
+            "new-row",
+            12,
+            vec![PatchOperation::XlsxRowInsert {
+                sheet_id: sheet_id.clone(),
+                before_row: 2,
+            }],
+        )
+        .unwrap();
+        apply(
+            "new-column",
+            13,
+            vec![PatchOperation::XlsxColumnInsert {
+                sheet_id: sheet_id.clone(),
+                before_column: 2,
+            }],
+        )
+        .unwrap();
+        let clear = |index: usize| PatchOperation::XlsxCellClear {
+            node_id: added[index].id.clone(),
+            sheet_id: sheet_id.clone(),
+            created_revision: written.revision,
+            precondition: NodePrecondition {
+                node_hash: added[index].hash.clone(),
+            },
+        };
+        let before_clear = bundle.manifest().unwrap().revision;
+        assert!(matches!(
+            apply("mixed-conflict", 54, vec![clear(0), clear(1)]),
+            Err(HcdError::PreconditionFailed(_))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, before_clear);
+        assert_eq!(
+            hcd_core::get_text_node(&bundle, &added[0].id)
+                .unwrap()
+                .node
+                .source
+                .paragraph_id
+                .as_deref(),
+            Some("C3")
+        );
+        let cleared = apply("clear-first", 54, vec![clear(0)]).unwrap();
+        assert!(bundle
+            .revision(cleared.revision)
+            .unwrap()
+            .removed_node_ids
+            .contains(&added[0].id));
+        assert!(hcd_core::get_text_node(&bundle, &added[0].id).is_err());
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
+        assert!(!worksheet.contains("r=\"C3\""));
+        assert!(worksheet.contains("Contributor kept"));
+        assert!(worksheet.contains("r=\"D3\" t=\"inlineStr\""));
+        let reopened = temp.path().join("reopened.hcd");
+        import_xlsx(
+            &exported,
+            &reopened,
+            &ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let entries = extract_text_page(&Bundle::open(&reopened).unwrap(), None, 20)
+            .unwrap()
+            .entries;
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.source.paragraph_id.as_deref() == Some("C3")));
+        assert!(entries.iter().any(|entry| entry.text == "Contributor kept"));
+
+        let rewritten = apply("rewrite-blank", 7, vec![write(3, 3)]).unwrap();
+        assert_ne!(rewritten.dirty_node_ids, vec![added[0].id.clone()]);
+        assert!(matches!(
+            apply("delayed-clear", 54, vec![clear(0)]),
+            Err(HcdError::PreconditionFailed(_))
+        ));
+        let rewritten_file = temp.path().join("rewritten.xlsx");
+        export_xlsx(&bundle, &source, &rewritten_file, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&rewritten_file, "xl/worksheets/sheet1.xml")
+            .contains("r=\"C3\" t=\"inlineStr\""));
     }
 
     #[test]

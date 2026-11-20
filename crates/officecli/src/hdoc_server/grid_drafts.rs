@@ -26,8 +26,10 @@ pub(super) async fn review(
     }
     let bundle = open(&state, &id)?;
     let manifest = bundle.manifest().map_err(hcd_error)?;
-    if manifest.source.format != "xlsx" {
-        return Err(bad("node patch review currently supports XLSX only"));
+    if !manifest.source.is_spreadsheet() {
+        return Err(bad(
+            "node patch review currently supports spreadsheets only",
+        ));
     }
     let mut result = json!({"protocolVersion":"hcd-node-patch-review/1", "documentId":id,
         "patchId":patch.patch_id,"revision":manifest.revision,"rootHash":manifest.root_hash,
@@ -63,6 +65,61 @@ pub(super) async fn review(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delimited_grid_intents_can_be_reviewed_and_reconciled() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"delimited-grid-recovery-unit-secret";
+        let state = super::super::tests::test_state(secret, temp.path());
+        for (format, source_text) in [
+            ("csv", "name,value\nAlpha,1\n"),
+            ("tsv", "name\tvalue\nAlpha\t1\n"),
+        ] {
+            let id = format!("grid-{format}");
+            let source = temp.path().join(format!("source.{format}"));
+            std::fs::write(&source, source_text).unwrap();
+            hcd_formats::import_document(
+                &source,
+                temp.path().join(format!("{id}.hcd")),
+                &hcd_formats::ImportOptions::new(&id),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let bundle = open(&state, &id).unwrap();
+            let node = hcd_core::extract_text_page(&bundle, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.text == "Alpha")
+                .unwrap();
+            let mut headers =
+                super::super::tests::bearer_as(secret, &id, "write", Some("owner"), None);
+            headers.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+            let patch: PatchBatch = serde_json::from_value(json!({"schemaVersion":"hcd-patch/1",
+                "documentId":id,"patchId":"durable-grid-intent","baseRevision":0,
+                "operations":[{"op":"text.splice","nodeId":node.node_id,"start":0,"deleteCount":0,
+                    "insertText":"New ","precondition":{"nodeHash":node.node_hash}}]}))
+            .unwrap();
+            let inspect = || {
+                review(
+                    State(state.clone()),
+                    Path(id.clone()),
+                    headers.clone(),
+                    Json(patch.clone()),
+                )
+            };
+            assert_eq!(inspect().await.unwrap().0["state"], "ready");
+            let _ = node_patch(
+                State(state.clone()),
+                Path(id.clone()),
+                headers.clone(),
+                Json(patch.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(inspect().await.unwrap().0["state"], "applied");
+        }
+    }
 
     #[tokio::test]
     async fn review_proves_exact_payload_author_and_commit_without_writing_or_replaying() {

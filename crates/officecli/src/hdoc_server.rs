@@ -27,8 +27,10 @@ mod image_jobs;
 mod image_workspace;
 mod integration;
 mod mcp_http;
+mod pdf_view;
 mod selection_transfers;
 mod spreadsheet;
+mod word_review;
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -88,6 +90,7 @@ struct ServerState {
     transfer_slots: Arc<tokio::sync::Semaphore>,
     transfer_cancellations: Arc<Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>>>,
     integration: Option<Arc<integration::Integration>>,
+    backup: Option<integration::backup::Gate>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -228,6 +231,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .as_ref()
         .map(|path| integration::Integration::open(path, &root).map(Arc::new))
         .transpose()?;
+    let backup = (integration.is_some()
+        && remote.is_none()
+        && std::env::var("HCD_LOCAL_WORKSPACE_BACKUP").as_deref() == Ok("true"))
+    .then(integration::backup::Gate::default);
     let state = ServerState {
         root,
         catalog,
@@ -251,6 +258,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         transfer_slots: Arc::new(tokio::sync::Semaphore::new(4)),
         transfer_cancellations: Default::default(),
         integration,
+        backup,
     };
     integration::start_events(&state);
     let router = Router::new()
@@ -270,6 +278,13 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/integration/v1/sessions", post(integration::open_session))
         .route("/integration/v1/sessions/{session_id}/refresh", post(integration::refresh_session))
         .route("/integration/v1/sessions/{session_id}", delete(integration::close_session))
+        .route("/integration/v1/boards/{id}/mentions", get(integration::mentions::read))
+        .route("/integration/v1/publications", get(integration::recovery::list))
+        .route("/integration/v1/publications/{id}", get(integration::recovery::read))
+        .route("/integration/v1/publications/{id}/reconcile", post(integration::recovery::reconcile))
+        .route("/integration/v1/publications/{id}/artifact", get(integration::recovery::artifact))
+        .route("/integration/v1/publications/{id}/event-retry", post(integration::recovery::retry_event))
+        .route("/integration/v1/backup-leases/{id}", axum::routing::put(integration::backup::acquire).delete(integration::backup::release))
         .route("/v1/documents/{id}/integration", get(integration::document_status))
         .route("/v1/documents/{id}/publications", post(integration::publish))
         .route("/v1/documents/{id}/publications/{publication_id}", get(integration::publication_status))
@@ -290,6 +305,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             post(image_workspace::upload).layer(DefaultBodyLimit::max(34 * 1024 * 1024)),
         )
         .route("/v1/documents/{id}/image", get(image_workspace::info))
+        .route("/v1/documents/{id}/image/layer-thumbnail/{hash}", get(image_workspace::layer_thumbnail))
         .route(
             "/v1/documents/{id}/image/content",
             get(image_workspace::content),
@@ -326,6 +342,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         )
         .route("/v1/jobs/{job_id}", get(job_status))
         .route("/v1/documents/{id}/editor", get(editor))
+        .route("/v1/documents/{id}/word-review", get(word_review::read).post(word_review::edit))
         .route("/v1/documents/{id}/project", post(project))
         .route("/v1/documents/{id}/selection-transfers", post(selection_transfers::start))
         .route("/v1/documents/{id}/selection-transfers/{run_id}", get(selection_transfers::read).delete(selection_transfers::cancel))
@@ -337,15 +354,23 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/v1/documents/{id}/grid-sort", post(grid_sort))
         .route("/v1/documents/{id}/grid-filter", get(grid_filter))
         .route("/v1/documents/{id}/pdf-layout", get(pdf_layout))
+        .route("/v1/documents/{id}/pdf-ocr", get(pdf_view::ocr_pages))
+        .route("/v1/documents/{id}/pdf-render/{page}", get(pdf_view::render))
         .route("/v1/documents/{id}/checkpoints", post(checkpoint))
         .route("/v1/documents/{id}/revisions", get(revisions))
         .route("/v1/documents/{id}/revisions/{revision}", get(revision))
+        .route(
+            "/v1/documents/{id}/patch-receipts/{patch_id}",
+            get(patch_receipt),
+        )
         .route("/v1/documents/{id}/restore/{revision}", post(restore))
         .route("/v1/documents/{id}/index/{page}", get(index_page))
         .route("/v1/documents/{id}/chunks/{sequence}", get(chunk))
         .route("/v1/documents/{id}/search", get(search))
         .route("/v1/documents/{id}/nodes/{node_id}", get(text_node))
         .route("/v1/documents/{id}/sheets/{index}", get(spreadsheet::read))
+        .route("/v1/documents/{id}/sheet-charts/{sheet}", get(spreadsheet::charts))
+        .route("/v1/documents/{id}/sheet-pivot-preview/{sheet}", get(spreadsheet::pivot_preview))
         .route(
             "/v1/documents/{id}/agents",
             get(agent_list).post(agent_focus),
@@ -387,6 +412,10 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route(
             "/v1/documents/{id}/image-jobs/{job_id}/insert",
             post(image_jobs::insert),
+        )
+        .route(
+            "/v1/documents/{id}/assets",
+            post(stage_raster_asset).layer(DefaultBodyLimit::max(hcd_formats::images::MAX_IMAGE_BYTES)),
         )
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
@@ -465,6 +494,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         )
         .layer(axum::middleware::from_fn(protocol_guard))
         .layer(axum::middleware::from_fn_with_state(state.clone(), integration::guard))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), integration::backup::admit))
         .layer(DefaultBodyLimit::max(MAX_PATCH_JSON_BYTES as usize))
         .with_state(state);
     let address: SocketAddr = command.bind.parse().context("invalid --bind address")?;
@@ -736,7 +766,7 @@ async fn import_document(
     let remote = state.remote.clone();
     let catalog = state.catalog.clone();
     let default_theme = state.default_theme.clone();
-    tokio::spawn(async move {
+    integration::backup::spawn(async move {
         let run = async {
             write_job(
                 &job_path,
@@ -829,7 +859,7 @@ async fn import_hcd_archive(
     let job_document_id = document_id.clone();
     let catalog = state.catalog.clone();
     let default_theme = state.default_theme.clone();
-    tokio::spawn(async move {
+    integration::backup::spawn(async move {
         let run = async {
             write_job(
                 &job_path,
@@ -1448,6 +1478,8 @@ fn font_faces_only(css: &str) -> String {
 struct SearchQuery {
     q: String,
     revision: Option<u64>,
+    #[serde(default)]
+    workspace: bool,
 }
 
 #[derive(Deserialize)]
@@ -1495,11 +1527,16 @@ async fn search(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    let result =
-        tokio::task::spawn_blocking(move || search_bundle(&bundle, query.revision, &query.q))
-            .await
-            .map_err(internal)?
-            .map_err(hcd_error)?;
+    let result = tokio::task::spawn_blocking(move || {
+        if query.workspace && query.revision.is_none() {
+            hcd_core::search_workspace(&bundle, &query.q)
+        } else {
+            search_bundle(&bundle, query.revision, &query.q)
+        }
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
@@ -1914,6 +1951,8 @@ async fn patch_structure_locked(
             op,
             hcd_core::StructureOperation::TableInsert { .. }
                 | hcd_core::StructureOperation::TableEdit { .. }
+                | hcd_core::StructureOperation::TableCellsMerge { .. }
+                | hcd_core::StructureOperation::TableCellSplit { .. }
                 | hcd_core::StructureOperation::TableDelete { .. }
                 | hcd_core::StructureOperation::TableRestore { .. }
         )
@@ -2008,9 +2047,18 @@ async fn node_patch(
                     | hcd_core::PatchOperation::ImageInsert { .. }
                     | hcd_core::PatchOperation::ImageReplace { .. }
                     | hcd_core::PatchOperation::ImageGeometry { .. }
+                    | hcd_core::PatchOperation::DocxPictureLayoutSet { .. }
             )
         }) {
             return Err(bad("semantic node edits accept mapped text and image operations; use structure patches for block changes"));
+        }
+        if let [hcd_core::PatchOperation::DocxPictureLayoutSet {
+            node_id, layout, ..
+        }] = patch.operations.as_slice()
+        {
+            let source = state.root.join("sources").join(format!("{id}.docx"));
+            hcd_formats::validate_docx_picture_target(&bundle, &source, node_id, layout.as_ref())
+                .map_err(hcd_error)?;
         }
     } else if !matches!(
         format,
@@ -2022,7 +2070,11 @@ async fn node_patch(
         check_collaboration_epoch(&state, &id, &headers).await?;
         image_workspace::check_region(&state, &id, None).await?;
     }
-    let result = match apply_patch(&bundle, &patch, patch.base_revision) {
+    let result = match hcd_formats::worksheet_pivots::apply_workbook_patch(
+        &bundle,
+        &patch,
+        patch.base_revision,
+    ) {
         Ok(result) => result,
         Err(error) => {
             agent_result(
@@ -2384,6 +2436,124 @@ struct RevisionListQuery {
     limit: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchReceiptQuery {
+    base_revision: u64,
+    #[serde(default)]
+    include_added: bool,
+}
+
+async fn patch_receipt(
+    State(state): State<ServerState>,
+    Path((id, patch_id)): Path<(String, uuid::Uuid)>,
+    Query(query): Query<PatchReceiptQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    let author = actor.sub.ok_or_else(|| {
+        ApiError(
+            StatusCode::FORBIDDEN,
+            "patch receipts require a user identity".into(),
+        )
+    })?;
+    let bundle = open(&state, &id)?;
+    let patch_id = patch_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest().map_err(hcd_error)?;
+        let oldest = query
+            .base_revision
+            .saturating_add(1)
+            .max(head.revision.saturating_sub(4095));
+        for number in (oldest..=head.revision).rev() {
+            let record = bundle.revision(number).map_err(hcd_error)?;
+            if record.patch_id.as_deref() == Some(patch_id.as_str())
+                && record.patch_base_revision == Some(query.base_revision)
+                && record.author_id.as_deref() == Some(author.as_str())
+            {
+                let mut receipt = json!({ "patchId": patch_id, "revision": number });
+                if query.include_added {
+                    receipt["added"] = added_patch_targets(&bundle, &head.source.format, &record)?;
+                }
+                return Ok(Json(receipt));
+            }
+        }
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "patch receipt not found".into(),
+        ))
+    })
+    .await
+    .map_err(internal)?
+}
+
+// A receipt exposes only the identities and hashes of new objects attributed
+// to the caller's patch. Undo does not require reading either historical file.
+fn added_patch_targets(
+    bundle: &Bundle,
+    format: &str,
+    record: &hcd_core::RevisionRecord,
+) -> Result<Value, ApiError> {
+    use std::collections::HashSet;
+
+    let parent = record
+        .parent_revision
+        .ok_or_else(|| bad("append receipt has no parent revision"))?;
+    let dirty: HashSet<_> = record.dirty_node_ids.iter().map(String::as_str).collect();
+    if format == "excalidraw" {
+        let before = hcd_core::canvas::read_scene(bundle, Some(parent)).map_err(hcd_error)?;
+        let after =
+            hcd_core::canvas::read_scene(bundle, Some(record.revision)).map_err(hcd_error)?;
+        let existing: HashSet<_> = before
+            .elements
+            .iter()
+            .filter_map(|element| element["id"].as_str())
+            .collect();
+        let added: Vec<_> = after
+            .elements
+            .iter()
+            .filter_map(|element| {
+                let id = element["id"].as_str()?;
+                if existing.contains(id)
+                    || !dirty.contains(hcd_core::canvas::node_id(&record.document_id, id).as_str())
+                {
+                    return None;
+                }
+                Some(json!({ "id": id, "hash": canvas_core::element_hash(element) }))
+            })
+            .collect();
+        return Ok(json!(added));
+    }
+    if matches!(format, "xlsx" | "csv" | "tsv") {
+        return Ok(json!(
+            hcd_core::xlsx_added_literals(bundle, record).map_err(hcd_error)?
+        ));
+    }
+    let before = editor_projection(bundle, Some(parent)).map_err(hcd_error)?;
+    let after = editor_projection(bundle, Some(record.revision)).map_err(hcd_error)?;
+    let existing: HashSet<_> = before
+        .blocks
+        .iter()
+        .map(|block| block.block_id.as_str())
+        .collect();
+    Ok(json!(after
+        .blocks
+        .iter()
+        .filter(|block| {
+            !existing.contains(block.block_id.as_str())
+                && !block.read_only
+                && block.region == "body"
+                && !block.content.inlines.is_empty()
+                && block
+                    .content
+                    .inlines
+                    .iter()
+                    .all(|run| run.node_id.as_deref().is_some_and(|id| dirty.contains(id)))
+        })
+        .map(|block| json!({ "id": block.block_id, "hash": block.block_hash }))
+        .collect::<Vec<_>>()))
+}
+
 async fn revision(
     State(state): State<ServerState>,
     Path((id, number)): Path<(String, u64)>,
@@ -2523,6 +2693,34 @@ async fn chunk(
     }
     Ok(Json(
         json!({"revision": revision, "descriptor": descriptor, "html": html, "map": map}),
+    ))
+}
+
+async fn stage_raster_asset(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    write_claims(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    let format = bundle.manifest().map_err(hcd_error)?.source.format;
+    if format != "pptx" && !hcd_formats::images::is_image_format(&format) {
+        return Err(bad(
+            "positioned image upload requires a presentation or raster document",
+        ));
+    }
+    let (hash, width, height) = tokio::task::spawn_blocking(move || {
+        let (image, _) = hcd_formats::images::decode_raster(&body)?;
+        let png = hcd_formats::images::png_bytes(&image)?;
+        let asset = bundle.stage_asset_from_reader("png", &mut png.as_slice())?;
+        Ok::<_, hcd_core::HcdError>((asset.hash, image.width(), image.height()))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
+    Ok(Json(
+        json!({"assetHash":hash,"width":width,"height":height}),
     ))
 }
 
@@ -4218,6 +4416,94 @@ mod tests {
             current_table.editable_text_node_ids.len(),
             table.editable_text_node_ids.len() + 2
         );
+        let cells_patch = || StructurePatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_67.into(),
+            document_id: id.into(),
+            patch_id: "guarded-cell-merge".into(),
+            base_revision: current.revision,
+            operations: vec![hcd_core::StructureOperation::TableCellsMerge {
+                block_id: current_table.block_id.clone(),
+                table_index: 0,
+                range: hcd_core::TableCellRange {
+                    row: 0,
+                    column: 0,
+                    rows: 1,
+                    columns: 2,
+                },
+                precondition: hcd_core::BlockPrecondition {
+                    block_hash: current_table.block_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("read", "reader", 1),
+                Json(cells_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 1),
+            Json(PendingCollaboration {
+                dirty: true,
+                sequence: 3,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 1),
+                Json(cells_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, current.revision);
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 1),
+            Json(PendingCollaboration {
+                dirty: false,
+                sequence: 4,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(cells_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        let _ = patch(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "human", 1),
+            Json(cells_patch()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 2);
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
     }
 
     #[tokio::test]
@@ -4915,6 +5201,7 @@ mod tests {
             transfer_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             transfer_cancellations: Default::default(),
             integration: None,
+            backup: None,
         }
     }
 

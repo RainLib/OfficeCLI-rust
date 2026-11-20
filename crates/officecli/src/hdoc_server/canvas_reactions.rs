@@ -36,6 +36,22 @@ async fn load(state: &ServerState, id: &str, epoch: u64) -> Result<Votes, ApiErr
         ..Votes::default()
     })
 }
+
+pub(super) async fn protect_reacted_objects(
+    state: &ServerState,
+    id: &str,
+    epoch: u64,
+    removing: &HashSet<&str>,
+) -> Result<(), ApiError> {
+    let book = load(state, id, epoch).await?;
+    if removing.iter().any(|id| book.elements.contains_key(*id)) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "新增对象已有协作反馈，已保留反馈及对象。".into(),
+        ));
+    }
+    Ok(())
+}
 fn present(book: &Votes, actor: Option<&str>) -> Value {
     let mut elements = BTreeMap::new();
     for (id, votes) in &book.elements {

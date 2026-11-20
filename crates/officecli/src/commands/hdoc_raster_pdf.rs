@@ -5,6 +5,7 @@ use handler_common::HandlerError;
 use hcd_core::{hash_file, Bundle, HcdManifest};
 use image::ImageDecoder;
 use lopdf::{dictionary, Document, Object, ObjectId, Stream};
+use pdf_handler::ocr_text::{append_ocr_text, OcrTextLine, OcrTextPage};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -33,6 +34,13 @@ struct PageOverlay {
     height: f32,
     content_id: ObjectId,
     edits: Vec<EditedText>,
+    source_ocr: Vec<OcrTextLine>,
+}
+
+pub(super) struct RasterPdfExport {
+    pub pages: usize,
+    pub ocr_pages: usize,
+    pub edited_text: bool,
 }
 
 fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
@@ -46,7 +54,12 @@ fn edited_text(html: &str, pattern: &Regex) -> Result<Vec<EditedText>, HandlerEr
     let mut result = Vec::new();
     for capture in pattern.captures_iter(html) {
         let paragraph = &capture[1];
-        if !capture[2].contains(" data-hcd-patched=\"true\"") {
+        if !capture[2].contains(" data-hcd-patched=\"true\"")
+            || matches!(
+                attribute(paragraph, "data-hcd-mapping"),
+                Some("ocr" | "source-ocr")
+            )
+        {
             continue;
         }
         let number = |name: &str| -> Result<f32, HandlerError> {
@@ -89,13 +102,63 @@ fn edited_text(html: &str, pattern: &Regex) -> Result<Vec<EditedText>, HandlerEr
     Ok(result)
 }
 
+fn source_ocr_text(
+    html: &str,
+    pattern: &Regex,
+    page_height: f32,
+) -> Result<Vec<OcrTextLine>, HandlerError> {
+    let mut lines = Vec::new();
+    if !html.contains(" data-hcd-mapping=\"source-ocr\"") {
+        return Ok(lines);
+    }
+    for capture in pattern.captures_iter(html) {
+        if attribute(&capture[1], "data-hcd-mapping") != Some("source-ocr") {
+            continue;
+        }
+        let text = quick_xml::escape::unescape(&capture[3]).map_err(error)?;
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(style) = attribute(&capture[1], "style") else {
+            continue;
+        };
+        let points = |property: &str| {
+            style
+                .split(';')
+                .find_map(|value| {
+                    value
+                        .trim()
+                        .strip_prefix(property)?
+                        .strip_suffix("pt")?
+                        .parse::<f32>()
+                        .ok()
+                })
+                .filter(|value| value.is_finite() && value.abs() <= 14_400.0)
+        };
+        let [Some(left), Some(top), Some(width), Some(height)] = [
+            points("left:"),
+            points("top:"),
+            points("width:"),
+            points("height:"),
+        ] else {
+            continue;
+        };
+        if !text.is_empty() && width > 0.0 && height > 0.0 {
+            lines.push(OcrTextLine::from_display_box(
+                text,
+                [left, top, width, height],
+                page_height,
+            ));
+        }
+    }
+    Ok(lines)
+}
+
 pub(super) fn export(
     bundle: &Bundle,
     manifest: &HcdManifest,
     revision: u64,
     output: &Path,
     range: Option<PdfPageRange>,
-) -> Result<usize, HandlerError> {
+) -> Result<RasterPdfExport, HandlerError> {
     let layout = hcd_core::pdf_page_layout(bundle, manifest).map_err(error)?;
     let selected_layout = match (layout.is_empty(), range) {
         (false, Some(range)) => layout
@@ -166,6 +229,11 @@ pub(super) fn export(
                     .filter(|item| item.source_page == Some(source_page))
                 {
                     overlay.edits.extend(edited_text(&html, &patched_text)?);
+                    overlay.source_ocr.extend(source_ocr_text(
+                        &html,
+                        &patched_text,
+                        overlay.height,
+                    )?);
                 }
                 continue;
             };
@@ -256,6 +324,7 @@ pub(super) fn export(
                 height,
                 content_id,
                 edits: edited_text(&html, &patched_text)?,
+                source_ocr: source_ocr_text(&html, &patched_text, height)?,
             });
         }
     }
@@ -279,6 +348,7 @@ pub(super) fn export(
             height,
             content_id,
             edits: Vec::new(),
+            source_ocr: Vec::new(),
         });
     }
     let count = overlays.len();
@@ -323,6 +393,13 @@ pub(super) fn export(
         Object::Dictionary(dictionary! { "Type" => "Catalog", "Pages" => pages_id }),
     );
     document.trailer.set("Root", Object::Reference(catalog_id));
+    let edited_text = overlays.iter().any(|page| !page.edits.is_empty());
+    let mut recognized: HashMap<_, _> = hcd_core::pdf_ocr::pdf_ocr_layers(bundle, manifest)
+        .map_err(error)?
+        .into_iter()
+        .map(|page| (page.page, page.lines))
+        .collect();
+    let mut ocr_pages = Vec::new();
     for (
         index,
         PageOverlay {
@@ -330,14 +407,41 @@ pub(super) fn export(
             height,
             content_id,
             edits,
+            source_page,
+            source_ocr,
             ..
         },
     ) in overlays.into_iter().enumerate()
     {
+        let page_number = index + 1;
+        let mut lines = source_ocr;
+        if let Some(layer) = source_page.and_then(|page| recognized.remove(&page)) {
+            lines.extend(layer.into_iter().map(|line| {
+                let bounds = line.bounds;
+                OcrTextLine::from_display_box(
+                    line.text,
+                    [
+                        bounds.left * width,
+                        bounds.top * height,
+                        (bounds.right - bounds.left) * width,
+                        (bounds.bottom - bounds.top) * height,
+                    ],
+                    height,
+                )
+            }));
+        }
+        if !lines.is_empty() {
+            // The page image already uses the original PDF's displayed orientation.
+            // The new page's /Rotate applies to both the raster and the text.
+            ocr_pages.push(OcrTextPage {
+                page: page_number as u32,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                lines,
+            });
+        }
         if edits.is_empty() {
             continue;
         }
-        let page_number = index + 1;
         let mut masks = String::new();
         for edit in &edits {
             if edit.width <= 0.0
@@ -404,6 +508,7 @@ pub(super) fn export(
             }
         }
     }
+    append_ocr_text(&mut document, &ocr_pages)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -412,5 +517,9 @@ pub(super) fn export(
     document.save_to(temporary.as_file_mut()).map_err(error)?;
     temporary.as_file().sync_all()?;
     temporary.persist(output).map_err(error)?;
-    Ok(count)
+    Ok(RasterPdfExport {
+        pages: count,
+        ocr_pages: ocr_pages.len(),
+        edited_text,
+    })
 }

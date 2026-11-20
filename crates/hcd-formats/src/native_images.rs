@@ -17,15 +17,19 @@ struct Picture {
     geometry: ImageGeometry,
     file: PathBuf,
     alt: String,
+    slide_position: (usize, usize),
+    later_shapes: usize,
 }
 fn pictures(bundle: &Bundle, revision: Option<u64>) -> Result<Vec<Picture>, HcdError> {
     let (manifest, _) = hcd_core::manifest_at_revision(bundle, &bundle.manifest()?, revision)?;
+    let pptx = manifest.source.format == "pptx";
     let assets: HashMap<_, _> = bundle
         .read_asset_index_for_revision(manifest.revision)?
         .into_iter()
         .map(|asset| (asset.hash.clone(), asset))
         .collect();
     let mut output = vec![];
+    let mut slide_shapes: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for page in 0..manifest.index_page_count {
         for chunk in bundle.read_index_page(&manifest, page)?.chunks {
             let map = bundle.read_map_verified(&chunk)?;
@@ -34,10 +38,28 @@ fn pictures(bundle: &Bundle, revision: Option<u64>) -> Result<Vec<Picture>, HcdE
                 .iter()
                 .filter(|entry| entry.source.created_in_hcd && entry.source.node_kind == "image")
                 .collect();
-            if added.is_empty() {
+            if added.is_empty() && !pptx {
                 continue;
             }
             let html = bundle.read_chunk_verified(&chunk)?;
+            if pptx {
+                let authored = crate::pptx::authored_shape_positions(&html, &map);
+                if !authored.is_empty() {
+                    let part = html
+                        .split_once("data-hcd-source-part=\"")
+                        .and_then(|(_, value)| value.split_once('"'))
+                        .map(|(part, _)| part)
+                        .ok_or_else(|| HcdError::InvalidBundle("slide part missing".into()))?;
+                    slide_shapes.entry(part.into()).or_default().extend(
+                        authored
+                            .into_iter()
+                            .map(|(_, offset)| (chunk.sequence, offset)),
+                    );
+                }
+            }
+            if added.is_empty() {
+                continue;
+            }
             let nodes = hcd_core::extract_html_image_nodes(&html)?;
             let page_height = html
                 .split_once("height:")
@@ -78,8 +100,24 @@ fn pictures(bundle: &Bundle, revision: Option<u64>) -> Result<Vec<Picture>, HcdE
                         .ok_or_else(|| HcdError::InvalidBundle("image has no rectangle".into()))?,
                     file,
                     alt: image_alt(&html, &entry.node_id).unwrap_or_default(),
+                    slide_position: (
+                        chunk.sequence,
+                        html.find(&format!(" data-hcd-id=\"{}\"", entry.node_id))
+                            .unwrap_or_default(),
+                    ),
+                    later_shapes: 0,
                 });
             }
+        }
+    }
+    if pptx {
+        output.sort_by_key(|picture| picture.slide_position);
+        for picture in &mut output {
+            picture.later_shapes = slide_shapes.get(&picture.part).map_or(0, |list| {
+                list.iter()
+                    .filter(|&&shape| shape > picture.slide_position)
+                    .count()
+            });
         }
     }
     Ok(output)
@@ -110,7 +148,7 @@ fn escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
-fn insert(xml: &mut String, before: &str, child: &str) -> Result<(), HcdError> {
+pub(crate) fn insert(xml: &mut String, before: &str, child: &str) -> Result<(), HcdError> {
     // Match local container names and expand empty containers without assuming
     // a package's namespace prefixes or whitespace conventions.
     let closing = before.starts_with("</");
@@ -163,11 +201,72 @@ fn insert(xml: &mut String, before: &str, child: &str) -> Result<(), HcdError> {
     }
     Ok(())
 }
-fn rels(part: &str) -> String {
+
+// The slide writer already inserted its new shapes in scene order. Insert each
+// picture before the remaining authored shapes above it in that same order.
+fn insert_slide_picture(
+    xml: &mut String,
+    child: &str,
+    later_shapes: usize,
+) -> Result<(), HcdError> {
+    let bom = if xml.starts_with('\u{feff}') { 3 } else { 0 };
+    let mut reader = Reader::from_str(xml);
+    let mut depth = 0usize;
+    let mut tree = None;
+    let mut trailer = None;
+    let mut shapes = Vec::new();
+    let at = loop {
+        let offset = reader.buffer_position() as usize + bom;
+        match reader
+            .read_event()
+            .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+        {
+            Event::Start(start) => {
+                match local_name(start.name().as_ref()) {
+                    "spTree" if tree.is_none() => tree = Some(depth + 1),
+                    "sp" if tree == Some(depth) => shapes.push(offset),
+                    "extLst" if tree == Some(depth) => trailer = Some(offset),
+                    _ => {}
+                }
+                depth += 1;
+            }
+            Event::Empty(start)
+                if tree == Some(depth) && local_name(start.name().as_ref()) == "extLst" =>
+            {
+                trailer = Some(offset);
+            }
+            Event::End(end) => {
+                if tree == Some(depth) && local_name(end.name().as_ref()) == "spTree" {
+                    if later_shapes == 0 {
+                        break Some(trailer.unwrap_or(offset));
+                    }
+                    let index = shapes.len().checked_sub(later_shapes).ok_or_else(|| {
+                        HcdError::InvalidBundle("slide image has missing shape siblings".into())
+                    })?;
+                    break Some(shapes[index]);
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => break None,
+            _ => {}
+        }
+    };
+    if let Some(at) = at {
+        xml.insert_str(at, child);
+        Ok(())
+    } else if later_shapes == 0 {
+        insert(xml, "</p:spTree>", child)
+    } else {
+        Err(HcdError::InvalidBundle(
+            "slide image has no shape tree".into(),
+        ))
+    }
+}
+pub(crate) fn rels(part: &str) -> String {
     let (dir, file) = part.rsplit_once('/').unwrap_or(("", part));
     format!("{dir}/_rels/{file}.rels")
 }
-fn read(
+pub(crate) fn read(
     archive: &mut StreamingOxmlArchive,
     changes: &HashMap<String, Vec<u8>>,
     part: &str,
@@ -185,7 +284,7 @@ fn read(
     String::from_utf8(bytes).map_err(|error| HcdError::InvalidBundle(error.to_string()))
 }
 const RELS:&str="<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>";
-fn relationship(
+pub(crate) fn relationship(
     archive: &mut StreamingOxmlArchive,
     changes: &mut HashMap<String, Vec<u8>>,
     part: &str,
@@ -252,9 +351,22 @@ fn resolve_part(base: &str, target: &str) -> Result<String, HcdError> {
     }
     Ok(segments.join("/"))
 }
-fn pic(id: u64, rid: &str, alt: &str, prefix: &str, rect: (i64, i64, i64, i64)) -> String {
+fn pic(
+    id: u64,
+    rid: &str,
+    alt: &str,
+    prefix: &str,
+    rect: (i64, i64, i64, i64),
+    stable_id: &str,
+) -> String {
     let (x, y, w, h) = rect;
-    format!("<{prefix}:pic xmlns:{prefix}=\"http://schemas.openxmlformats.org/{namespace}/2006/{suffix}\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><{prefix}:nvPicPr><{prefix}:cNvPr id=\"{id}\" name=\"HCD image {id}\" descr=\"{alt}\"/><{prefix}:cNvPicPr/>{nv}</{prefix}:nvPicPr><{prefix}:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></{prefix}:blipFill><{prefix}:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{w}\" cy=\"{h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></{prefix}:spPr></{prefix}:pic>",namespace=if prefix=="p"{"presentationml"}else{"drawingml"},suffix=if prefix=="p"{"main"}else if prefix=="xdr"{"spreadsheetDrawing"}else{"picture"},nv=if prefix=="p"{"<p:nvPr/>"}else{""})
+    let id_markup = if prefix == "p" {
+        let creation_id = crate::pptx::animations::creation_id_xml(stable_id);
+        format!(">{creation_id}</p:cNvPr>")
+    } else {
+        "/>".to_string()
+    };
+    format!("<{prefix}:pic xmlns:{prefix}=\"http://schemas.openxmlformats.org/{namespace}/2006/{suffix}\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><{prefix}:nvPicPr><{prefix}:cNvPr id=\"{id}\" name=\"HCD image {id}\" descr=\"{alt}\"{id_markup}<{prefix}:cNvPicPr/>{nv}</{prefix}:nvPicPr><{prefix}:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></{prefix}:blipFill><{prefix}:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{w}\" cy=\"{h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></{prefix}:spPr></{prefix}:pic>",namespace=if prefix=="p"{"presentationml"}else{"drawingml"},suffix=if prefix=="p"{"main"}else if prefix=="xdr"{"spreadsheetDrawing"}else{"picture"},nv=if prefix=="p"{"<p:nvPr/>"}else{""})
 }
 
 pub(crate) fn apply(
@@ -422,9 +534,10 @@ pub(crate) fn apply(
                 "pic"
             },
             (x, y, w, h),
+            &picture.id,
         );
         if format == "pptx" {
-            insert(&mut xml, "</p:spTree>", &picture_xml)?;
+            insert_slide_picture(&mut xml, &picture_xml, picture.later_shapes)?;
         } else if format == "xlsx" {
             insert(&mut xml,"</xdr:wsDr>",&format!("<xdr:absoluteAnchor xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\"><xdr:pos x=\"{x}\" y=\"{y}\"/><xdr:ext cx=\"{w}\" cy=\"{h}\"/>{picture_xml}<xdr:clientData/></xdr:absoluteAnchor>"))?;
         } else {

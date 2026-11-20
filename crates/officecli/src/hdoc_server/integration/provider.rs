@@ -101,6 +101,8 @@ impl Descriptor {
             format,
             "docx"
                 | "xlsx"
+                | "csv"
+                | "tsv"
                 | "pptx"
                 | "pdf"
                 | "html"

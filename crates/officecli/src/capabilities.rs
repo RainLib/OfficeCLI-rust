@@ -100,7 +100,7 @@ pub fn runtime() -> &'static Value {
             schemas.insert(
                 version.into(),
                 json!({
-                    "route": if version == "hcd-patch/4" { "/patch" } else { "/node-patch" },
+                    "route": if matches!(version, "hcd-patch/4" | "hcd-patch/67") { "/patch" } else { "/node-patch" },
                     "operations": names,
                 }),
             );
@@ -117,7 +117,8 @@ pub fn runtime() -> &'static Value {
             "docxInlineEdits": {"protocolVersion":"hcd-docx-inline/1","marks":["bold","italic"],"stableSourceAnchors":true,"sourceBackedExport":true,"hyperlinkChangesRequireSemanticRebuild":true},
             "xlsxRichText": {"protocolVersion":"hcd-xlsx-rich-text/1","readNodeField":"xlsxRuns","operation":"xlsx.richText.set","schemaVersion":"hcd-patch/49","existingStringCellsOnly":true,"maxRuns":4096,"maxUtf16Units":32767,"sourceBackedExport":true},
             "xlsxContentBatch": {"protocolVersion":"hcd-xlsx-content/1","schemaVersion":"hcd-patch/50","richCreateOperation":"xlsx.richText.create","richSetConvertsWritableCellsToText":true,"mixedCellContent":true,"atomic":true,"maxOperations":10000},
-            "nodePatchReview": {"protocolVersion":"hcd-node-patch-review/1","route":"/node-patch-review","formats":["xlsx"],"exactPayloadAndAuthor":true,"readOnly":true},
+            "xlsxLiteralRestore": {"schemaVersion":"hcd-patch/65","atomic":true,"richText":true,"createdCellClear":true,"numbers":true},
+            "nodePatchReview": {"protocolVersion":"hcd-node-patch-review/1","route":"/node-patch-review","formats":["xlsx","csv","tsv"],"exactPayloadAndAuthor":true,"readOnly":true},
             "agentContinuation": {"protocolVersion":AGENT_CONTINUATION_PROTOCOL,"actions":["review","resume"],"explicitAuthorizationRequired":true,"maxAttempts":16,"maxConcurrentAgents":4},
             "agentWorkflow": {"protocolVersion":AGENT_WORKFLOW_PROTOCOL,"planSchema":agent_workflow_plan_schema(),"selectionIdentityGuard":true,"actions":["create","list","read","review","continue","compensate","cancel"],"maxDocuments":16,"maxSteps":32,"maxFacts":64,"maxConcurrentAgents":4,"documentGrantsHeader":"x-hcd-document-grants","explicitAuthorizationRequired":true,"atomicAcrossDocuments":false},
         });
@@ -186,6 +187,11 @@ mod tests {
                 .contains(&json!(name)));
         }
         assert_eq!(caps["patchSchemas"]["hcd-patch/29"]["route"], "/node-patch");
+        assert_eq!(caps["patchSchemas"]["hcd-patch/67"]["route"], "/patch");
+        assert_eq!(
+            caps["patchSchemas"]["hcd-patch/67"]["operations"],
+            json!(["table.cell.split", "table.cells.merge"])
+        );
         assert_eq!(caps["patchSchemas"]["hcd-patch/49"]["route"], "/node-patch");
         assert_eq!(
             caps["patchSchemas"]["hcd-patch/49"]["operations"],
@@ -196,6 +202,16 @@ mod tests {
         assert_eq!(caps["xlsxRichText"]["existingStringCellsOnly"], true);
         assert_eq!(caps["patchSchemas"]["hcd-patch/50"]["route"], "/node-patch");
         assert_eq!(caps["xlsxContentBatch"]["atomic"], true);
+        assert_eq!(caps["patchSchemas"]["hcd-patch/65"]["route"], "/node-patch");
+        assert_eq!(
+            caps["patchSchemas"]["hcd-patch/65"]["operations"],
+            json!([
+                "text.splice",
+                "xlsx.cell.clear",
+                "xlsx.number.set",
+                "xlsx.richText.set"
+            ])
+        );
         assert_eq!(
             caps["nodePatchReview"]["protocolVersion"],
             "hcd-node-patch-review/1"

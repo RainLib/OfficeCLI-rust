@@ -145,20 +145,34 @@ fn build_capabilities_with_range(
         });
     }
     if hcd_formats::images::is_image_format(&source_format) {
+        let layered = hcd_core::image_layers::saved_snapshot(&bundle, revision)
+            .map_err(hcd_error)?
+            .is_some();
         let formats = office_engine::registry::image_export_formats()
             .into_iter()
-            .map(|format| FormatCapability {
-                format: format.into(),
-                available: format != "hcd" || revision == head.revision,
-                recommended_mode: if format == "hcd" { "archive" } else { "raster" }.into(),
-                modes: vec![ExportMode::new(
-                    if format == "hcd" { "archive" } else { "raster" },
-                    if format == "webp" {
-                        vec!["lossless_webp".into()]
-                    } else {
-                        vec![]
-                    },
-                )],
+            .map(|format| {
+                let archive = format == "hcd";
+                let mode = if archive { "archive" } else { "raster" };
+                let mut warnings = Vec::new();
+                if layered {
+                    warnings.push(
+                        if archive {
+                            "image_layers_archive"
+                        } else {
+                            "image_layers_flattened"
+                        }
+                        .into(),
+                    );
+                }
+                if format == "webp" {
+                    warnings.push("lossless_webp".into());
+                }
+                FormatCapability {
+                    format: format.into(),
+                    available: !archive || revision == head.revision,
+                    recommended_mode: mode.into(),
+                    modes: vec![ExportMode::new(mode, warnings)],
+                }
             })
             .collect();
         return Ok(ExportCapabilities {

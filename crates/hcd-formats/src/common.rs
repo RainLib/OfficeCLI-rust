@@ -384,7 +384,9 @@ pub(crate) fn collect_dirty_nodes(
                         entry.node_id, entry.source.part
                     )));
                 }
-                if entry.source.node_kind == "image" && entry.source.created_in_hcd {
+                if entry.source.node_kind == "image"
+                    && (entry.source.created_in_hcd || manifest.source.format == "pptx")
+                {
                     found.insert(entry.node_id.clone());
                     continue;
                 }
@@ -563,11 +565,29 @@ fn reject_image_source_export(
         let page = bundle.read_index_page(manifest, page_number)?;
         for descriptor in page.chunks {
             let source_map = bundle.read_map(&descriptor)?;
-            if let Some(entry) = source_map.entries.iter().find(|entry| {
-                dirty_nodes.contains(&entry.node_id)
-                    && entry.source.node_kind == "image"
-                    && !entry.source.created_in_hcd
-            }) {
+            let mut images = source_map
+                .entries
+                .iter()
+                .filter(|entry| {
+                    dirty_nodes.contains(&entry.node_id)
+                        && entry.source.node_kind == "image"
+                        && !entry.source.created_in_hcd
+                })
+                .peekable();
+            if images.peek().is_none() {
+                continue;
+            }
+            let html = if manifest.source.format == "pptx" {
+                Some(bundle.read_chunk_verified(&descriptor)?)
+            } else {
+                None
+            };
+            for entry in images {
+                if html.as_ref().is_some_and(|html| {
+                    crate::pptx::has_native_picture_geometry(html, &entry.node_id)
+                }) {
+                    continue;
+                }
                 return Err(HcdError::Unsupported(format!(
                     "revision changes image node {}; source-backed {} image rewrite is not implemented and export was stopped before writing output; omit --source to use the pure-Rust semantic rebuild",
                     entry.node_id, manifest.source.format

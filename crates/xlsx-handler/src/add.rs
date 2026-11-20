@@ -955,6 +955,7 @@ pub(crate) fn insert_pivot_cache_entry(
     cache_id: usize,
     relationship_id: &str,
 ) -> Result<String, HandlerError> {
+    let xml = ensure_relationship_namespace(xml, "workbook")?;
     let entry = format!(
         "<pivotCache cacheId=\"{}\" r:id=\"{}\"/>",
         cache_id, relationship_id
@@ -2090,9 +2091,11 @@ fn add_conditional_format(
     _position: InsertPosition,
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
-    let parent_trimmed = parent.trim_start_matches('/');
-    let sheet_name = parent_trimmed;
-
+    use crate::worksheet_conditions::{
+        create_condition_xml, read_sheet_conditions, write_sheet_conditions, ConditionColors,
+        NativeCondition,
+    };
+    let sheet_name = parent.trim_start_matches('/');
     let range = properties
         .get("range")
         .or_else(|| properties.get("ref"))
@@ -2102,7 +2105,7 @@ fn add_conditional_format(
             )
         })?;
 
-    let rule_type = properties
+    let kind = properties
         .get("type")
         .or_else(|| properties.get("ruleType"))
         .map(|s| s.as_str())
@@ -2112,7 +2115,76 @@ fn add_conditional_format(
         .get("operator")
         .map(|s| s.as_str())
         .unwrap_or("greaterThan");
-    let formula = properties.get("formula").map(|s| s.as_str()).unwrap_or("0");
+    let formula = |key: &str| {
+        properties
+            .get(key)
+            .map(|value| value.strip_prefix('=').unwrap_or(value).to_owned())
+    };
+    let formulas = match kind {
+        "cellIs" => {
+            if !matches!(
+                operator,
+                "equal"
+                    | "notEqual"
+                    | "greaterThan"
+                    | "greaterThanOrEqual"
+                    | "lessThan"
+                    | "lessThanOrEqual"
+                    | "between"
+                    | "notBetween"
+            ) {
+                return Err(HandlerError::InvalidArgument(
+                    "invalid conditional format operator".into(),
+                ));
+            }
+            let mut formulas = vec![formula("formula").unwrap_or_else(|| "0".into())];
+            if matches!(operator, "between" | "notBetween") {
+                formulas.push(formula("formula2").ok_or_else(|| {
+                    HandlerError::InvalidArgument("between requires 'formula2'".into())
+                })?);
+            }
+            formulas
+        }
+        "expression" => vec![formula("formula").ok_or_else(|| {
+            HandlerError::InvalidArgument("expression requires 'formula'".into())
+        })?],
+        "duplicateValues" | "uniqueValues" => Vec::new(),
+        _ => {
+            return Err(HandlerError::InvalidArgument(
+                "unsupported conditional format type".into(),
+            ))
+        }
+    };
+    let valid_cell = |reference: &str| {
+        let reference = reference.replace('$', "");
+        let split = reference
+            .find(|ch: char| ch.is_ascii_digit())
+            .unwrap_or(reference.len());
+        let (letters, digits) = reference.split_at(split);
+        if letters.is_empty()
+            || letters.len() > 3
+            || !letters.bytes().all(|byte| byte.is_ascii_alphabetic())
+        {
+            return false;
+        }
+        let column = letters.bytes().fold(0_u32, |column, byte| {
+            column * 26 + u32::from(byte.to_ascii_uppercase() - b'A' + 1)
+        });
+        column <= 16_384
+            && digits
+                .parse::<u32>()
+                .is_ok_and(|row| (1..=1_048_576).contains(&row))
+    };
+    if range.trim().is_empty()
+        || !range.split_whitespace().all(|item| {
+            let (start, end) = item.split_once(':').unwrap_or((item, item));
+            valid_cell(start) && valid_cell(end)
+        })
+    {
+        return Err(HandlerError::InvalidArgument(
+            "expected an A1 conditional formatting range".into(),
+        ));
+    }
     let fill_color = properties
         .get("fill")
         .or_else(|| properties.get("fillColor"))
@@ -2131,26 +2203,52 @@ fn add_conditional_format(
         .read_part_xml(&part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-    // Build the conditional formatting XML block
-    let cf_block = format!(
-        r#"<conditionalFormatting sqref="{}">
-  <cfRule type="{}" operator="{}" priority="1">
-    <formula>{}</formula>
-    <dxf><fill><patternFill><bgColor rgb="FF{}"/></patternFill></fill></dxf>
-  </cfRule>
-</conditionalFormatting>"#,
-        range, rule_type, operator, formula, fill_color
-    );
-
-    // Insert before </worksheet>
-    let modified = if let Some(pos) = xml.find("</worksheet>") {
-        let mut result = xml.clone();
-        result.insert_str(pos, &cf_block);
-        result
-    } else {
-        xml.clone()
+    let rels = package
+        .part_rels("xl/workbook.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let styles_part = rels
+        .all()
+        .values()
+        .find(|rel| rel.target_mode != "External" && rel.type_uri.ends_with("/styles"))
+        .map(|rel| package.resolve_rel_target("xl/workbook.xml", &rel.target))
+        .unwrap_or_else(|| "xl/styles.xml".into());
+    let mut styles = package
+        .read_part_xml(&styles_part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let current =
+        read_sheet_conditions(xml.as_bytes(), &[]).map_err(HandlerError::OperationFailed)?;
+    let priority = current.last_priority.checked_add(1).ok_or_else(|| {
+        HandlerError::OperationFailed("worksheet conditional priority exhausted".into())
+    })?;
+    let rule = NativeCondition {
+        reference: range.clone(),
+        kind: kind.into(),
+        operator: (kind == "cellIs").then(|| operator.into()),
+        formulas,
+        colors: ConditionColors {
+            fill: Some(fill_color.into()),
+            color: properties.get("color").cloned(),
+        },
+        stop_if_true: properties
+            .get("stopIfTrue")
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true")),
     };
+    let cf_block = create_condition_xml(&mut styles, &rule, priority, &current.namespace)
+        .map_err(HandlerError::InvalidArgument)?;
+    let mut output = Vec::with_capacity(xml.len() + cf_block.len());
+    write_sheet_conditions(
+        xml.as_bytes(),
+        &mut output,
+        &std::collections::BTreeSet::new(),
+        &cf_block,
+    )
+    .map_err(HandlerError::OperationFailed)?;
+    let modified = String::from_utf8(output)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
 
+    package
+        .write_part_xml(&styles_part, &styles)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
     package
         .write_part_xml(&part_path, &modified)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;

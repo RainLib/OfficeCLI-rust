@@ -7,8 +7,8 @@ use crate::{
     extract_html_font_nodes, extract_html_text_nodes, hash_bytes, node_bloom, stable_node_id,
     AnnotationSet, ApplyResult, Bundle, ChunkDescriptor, ChunkIndexPage, ChunkSourceMap,
     FidelityWarning, HcdError, HcdManifest, HtmlFontNode, NodeMapEntry, RevisionRecord,
-    SourceAnchor, HCD_PATCH_SCHEMA_VERSION_4, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES, MAX_REVISION,
+    SourceAnchor, HCD_PATCH_SCHEMA_VERSION_4, HCD_PATCH_SCHEMA_VERSION_67, HCD_SCHEMA_VERSION,
+    MAX_CHUNK_BYTES, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES, MAX_REVISION,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -21,7 +21,10 @@ const MAX_INLINE_BYTES: usize = 1024 * 1024;
 const MAX_OPS: usize = 10_000;
 const CHUNK_SOFT_BYTES: usize = 512 * 1024;
 mod table;
-pub use table::TableEditAction;
+mod tracked;
+pub use table::{TableCellRange, TableEditAction};
+pub(crate) use tracked::apply_tracked_edit;
+pub use tracked::word_review_anchors;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -248,6 +251,8 @@ pub enum StructureOperation {
         after_block_id: Option<String>,
         rows: usize,
         columns: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        values: Option<Vec<Vec<String>>>,
     },
     #[serde(rename = "table.edit")]
     TableEdit {
@@ -256,6 +261,23 @@ pub enum StructureOperation {
         table_index: usize,
         action: TableEditAction,
         index: usize,
+        precondition: BlockPrecondition,
+    },
+    #[serde(rename = "table.cells.merge")]
+    TableCellsMerge {
+        block_id: String,
+        #[serde(default)]
+        table_index: usize,
+        range: TableCellRange,
+        precondition: BlockPrecondition,
+    },
+    #[serde(rename = "table.cell.split")]
+    TableCellSplit {
+        block_id: String,
+        #[serde(default)]
+        table_index: usize,
+        row: usize,
+        column: usize,
         precondition: BlockPrecondition,
     },
     #[serde(rename = "table.cell.activate")]
@@ -486,7 +508,7 @@ fn ensure_semantic_flow(manifest: &HcdManifest) -> Result<(), HcdError> {
     Ok(())
 }
 
-fn revision_record(
+pub(crate) fn revision_record(
     bundle: &Bundle,
     manifest: &HcdManifest,
     revision: u64,
@@ -523,6 +545,7 @@ fn revision_record(
         grid_filter_changed: false,
         grid_values_reordered: false,
         pdf_layout_changed: false,
+        pptx_scene_changed: false,
         converted_formula_node_ids: Vec::new(),
         grid_row_insertions: Vec::new(),
         grid_row_deletions: Vec::new(),
@@ -535,6 +558,9 @@ fn revision_record(
         slide_removals: Vec::new(),
         slide_reorders: Vec::new(),
         slide_copies: Vec::new(),
+        slide_group_edit: None,
+        pptx_master_backgrounds: Default::default(),
+        pptx_master_text_styles: Default::default(),
         structural_change,
     })
 }
@@ -1029,15 +1055,33 @@ pub fn apply_structure_patch(
         ));
     }
     let patch_hash = hash_bytes(&encoded);
-    if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_4
-        || patch.document_id != manifest.document_id
+    if !matches!(
+        patch.schema_version.as_str(),
+        HCD_PATCH_SCHEMA_VERSION_4 | HCD_PATCH_SCHEMA_VERSION_67
+    ) || patch.document_id != manifest.document_id
         || patch.patch_id.is_empty()
         || patch.patch_id.len() > 256
         || patch.operations.is_empty()
         || patch.operations.len() > MAX_OPS
     {
         return Err(HcdError::InvalidPatch(
-            "invalid hcd-patch/4 header".to_string(),
+            "invalid semantic structure patch header".to_string(),
+        ));
+    }
+    let cell_shape = |operation: &StructureOperation| {
+        matches!(
+            operation,
+            StructureOperation::TableCellsMerge { .. } | StructureOperation::TableCellSplit { .. }
+        )
+    };
+    if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_67
+        && !patch.operations.iter().all(cell_shape)
+        || patch.schema_version == HCD_PATCH_SCHEMA_VERSION_4
+            && patch.operations.iter().any(cell_shape)
+    {
+        return Err(HcdError::InvalidPatch(
+            "merge and split require hcd-patch/67; other structural operations require hcd-patch/4"
+                .into(),
         ));
     }
     for revision in 1..=manifest.revision {
@@ -1221,6 +1265,7 @@ fn apply_operation(
             after_block_id,
             rows,
             columns,
+            values,
         } => {
             let insertion = insertion_index(blocks, after_block_id.as_deref())?;
             if !insertion_touches_region(blocks, insertion, "body")
@@ -1230,7 +1275,14 @@ fn apply_operation(
                     "tables require a rich document body".into(),
                 ));
             }
-            let generated = table::insert(manifest, patch_id, operation_index, *rows, *columns)?;
+            let generated = table::insert(
+                manifest,
+                patch_id,
+                operation_index,
+                *rows,
+                *columns,
+                values.as_deref(),
+            )?;
             dirty_nodes.extend(generated.entries.iter().map(|entry| entry.node_id.clone()));
             dirty_parts.extend(
                 generated
@@ -1277,6 +1329,63 @@ fn apply_operation(
             );
             blocks[position] = updated;
         }
+        StructureOperation::TableCellsMerge {
+            block_id,
+            table_index,
+            range: _,
+            precondition,
+        }
+        | StructureOperation::TableCellSplit {
+            block_id,
+            table_index,
+            row: _,
+            column: _,
+            precondition,
+        } => {
+            let position = block_index(blocks, block_id, precondition)?;
+            if blocks[position].region != "body" || manifest.source.format == "txt" {
+                return Err(HcdError::Unsupported(
+                    "cannot reshape cells outside a rich document body".into(),
+                ));
+            }
+            let split_range;
+            let (range, split) = match operation {
+                StructureOperation::TableCellsMerge { range, .. } => (range, false),
+                StructureOperation::TableCellSplit { row, column, .. } => {
+                    split_range = TableCellRange {
+                        row: *row,
+                        column: *column,
+                        rows: 1,
+                        columns: 1,
+                    };
+                    (&split_range, true)
+                }
+                _ => unreachable!(),
+            };
+            let updated = table::reshape(
+                &blocks[position],
+                manifest,
+                patch_id,
+                operation_index,
+                *table_index,
+                range,
+                split,
+            )?;
+            dirty_nodes.extend(
+                blocks[position]
+                    .entries
+                    .iter()
+                    .chain(&updated.entries)
+                    .map(|entry| entry.node_id.clone()),
+            );
+            dirty_parts.extend(
+                updated
+                    .entries
+                    .iter()
+                    .map(|entry| entry.source.part.clone()),
+            );
+            blocks[position] = updated;
+        }
         StructureOperation::TableCellActivate {
             block_id,
             table_index,
@@ -1300,7 +1409,16 @@ fn apply_operation(
                 *row,
                 *column,
             )?;
-            for entry in updated.entries.iter().skip(old.entries.len()) {
+            let previous: HashSet<_> = old
+                .entries
+                .iter()
+                .map(|entry| entry.node_id.as_str())
+                .collect();
+            for entry in updated
+                .entries
+                .iter()
+                .filter(|entry| !previous.contains(entry.node_id.as_str()))
+            {
                 dirty_nodes.insert(entry.node_id.clone());
                 dirty_parts.insert(entry.source.part.clone());
             }
@@ -2155,7 +2273,7 @@ fn filter_annotations(
     if set.annotations.len() == before {
         return Ok((Some(href.clone()), manifest.annotation_root_hash.clone()));
     }
-    if set.annotations.is_empty() {
+    if set.annotations.is_empty() && set.docx_review.is_empty() {
         return Ok((None, hash_bytes(b"[]")));
     }
     let (href, hash) = bundle.write_json_object("annotations", &set)?;
@@ -2217,6 +2335,7 @@ mod tests {
                 after_block_id: Some(projection.blocks[0].block_id.clone()),
                 rows: 3,
                 columns: 2,
+                values: None,
             }],
         };
         let inserted = apply_structure_patch(&bundle, &batch, projection.revision).unwrap();
@@ -2277,6 +2396,146 @@ mod tests {
     }
 
     #[test]
+    fn table_insert_values_preserve_editable_text_and_reject_ragged_rows_atomically() {
+        let (_temp, bundle) = fixture_format("html");
+        project_editor(&bundle, bundle.manifest().unwrap().revision).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let values = vec![
+            vec!["华东 & <合作伙伴>".to_string(), "108".to_string()],
+            vec!["第一行\n第二行".to_string(), String::new()],
+        ];
+        let make_patch = |rows| StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: before.document_id.clone(),
+            patch_id: "paste-source-range".into(),
+            base_revision: before.revision,
+            operations: vec![StructureOperation::TableInsert {
+                after_block_id: Some(before.blocks[0].block_id.clone()),
+                rows: 2,
+                columns: 2,
+                values: Some(rows),
+            }],
+        };
+        assert!(apply_structure_patch(
+            &bundle,
+            &make_patch(vec![values[0].clone()]),
+            before.revision
+        )
+        .is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, before.revision);
+        let patch = make_patch(values.clone());
+        let result = apply_structure_patch(&bundle, &patch, before.revision).unwrap();
+        let after = editor_projection(&bundle, None).unwrap();
+        let inserted = &after.blocks[1];
+        assert_eq!(inserted.editable_text_node_ids.len(), 4);
+        assert_eq!(
+            inserted
+                .content
+                .inlines
+                .iter()
+                .map(|inline| &inline.text)
+                .collect::<Vec<_>>(),
+            values.iter().flatten().collect::<Vec<_>>()
+        );
+        let html = inserted.read_only_html.as_ref().unwrap();
+        assert!(html.contains("华东 &amp; &lt;合作伙伴&gt;"));
+        assert_eq!(after.blocks[0].block_hash, before.blocks[0].block_hash);
+        assert!(
+            apply_structure_patch(&bundle, &patch, before.revision)
+                .unwrap()
+                .idempotent_replay
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, result.revision);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn cell_shape_batches_are_atomic_versioned_idempotent_and_hash_guarded() {
+        let (_temp, bundle) = fixture_format("html");
+        project_editor(&bundle, bundle.manifest().unwrap().revision).unwrap();
+        let before = editor_projection(&bundle, None).unwrap();
+        let insert = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: before.document_id,
+            patch_id: "shape-table".into(),
+            base_revision: before.revision,
+            operations: vec![StructureOperation::TableInsert {
+                after_block_id: Some(before.blocks[0].block_id.clone()),
+                rows: 2,
+                columns: 3,
+                values: Some(vec![
+                    vec!["A".into(), "B".into(), "C".into()],
+                    vec!["D".into(), "E".into(), "F".into()],
+                ]),
+            }],
+        };
+        apply_structure_patch(&bundle, &insert, before.revision).unwrap();
+        let state = editor_projection(&bundle, None).unwrap();
+        let table = &state.blocks[1];
+        let merge = StructureOperation::TableCellsMerge {
+            block_id: table.block_id.clone(),
+            table_index: 0,
+            range: TableCellRange {
+                row: 0,
+                column: 0,
+                rows: 2,
+                columns: 2,
+            },
+            precondition: BlockPrecondition {
+                block_hash: table.block_hash.clone(),
+            },
+        };
+        let mut patch = StructurePatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: state.document_id.clone(),
+            patch_id: "merge-shape".into(),
+            base_revision: state.revision,
+            operations: vec![merge.clone()],
+        };
+        assert!(apply_structure_patch(&bundle, &patch, state.revision).is_err());
+        patch.schema_version = HCD_PATCH_SCHEMA_VERSION_67.into();
+        patch.operations.push(StructureOperation::TableCellSplit {
+            block_id: table.block_id.clone(),
+            table_index: 0,
+            row: 0,
+            column: 99,
+            precondition: BlockPrecondition {
+                block_hash: table.block_hash.clone(),
+            },
+        });
+        assert!(apply_structure_patch(&bundle, &patch, state.revision).is_err());
+        assert_eq!(bundle.manifest().unwrap().revision, state.revision);
+        assert_eq!(
+            editor_projection(&bundle, None).unwrap().blocks[1].block_hash,
+            table.block_hash
+        );
+        patch.operations.truncate(1);
+        let merged = apply_structure_patch(&bundle, &patch, state.revision).unwrap();
+        assert_eq!(
+            editor_projection(&bundle, None).unwrap().blocks[1]
+                .content
+                .inlines
+                .iter()
+                .map(|inline| inline.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "D", "E", "C", "F"]
+        );
+        assert!(
+            apply_structure_patch(&bundle, &patch, state.revision)
+                .unwrap()
+                .idempotent_replay
+        );
+        patch.patch_id = "stale-hash-shape".into();
+        patch.base_revision = merged.revision;
+        assert!(matches!(
+            apply_structure_patch(&bundle, &patch, merged.revision),
+            Err(HcdError::PreconditionFailed(_))
+        ));
+        assert_eq!(bundle.manifest().unwrap().revision, merged.revision);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
     fn table_undo_restores_only_guarded_table_and_keeps_other_blocks() {
         let (_temp, bundle) = fixture_format("html");
         project_editor(&bundle, 0).unwrap();
@@ -2299,6 +2558,7 @@ mod tests {
             after_block_id: Some(first.blocks[0].block_id.clone()),
             rows: 2,
             columns: 2,
+            values: None,
         }])
         .unwrap();
         let inserted = editor_projection(&bundle, None).unwrap();

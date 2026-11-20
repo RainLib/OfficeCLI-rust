@@ -481,6 +481,9 @@ pub(in crate::patch) fn mint_xlsx_sheet_chunk(
             default_row_height_emu: None,
             sheet_part: Some(addition.sheet_part.clone()),
             auto_filter: None,
+            charts: Vec::new(),
+            conditions: Vec::new(),
+            pivots: Vec::new(),
         }),
     })
 }

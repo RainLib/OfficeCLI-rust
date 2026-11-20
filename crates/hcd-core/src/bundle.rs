@@ -866,6 +866,7 @@ impl BundleWriter {
             grid_values_reordered: false,
             grid_filter_changed: false,
             pdf_layout_changed: false,
+            pptx_scene_changed: false,
             grid_row_insertions: Vec::new(),
             grid_row_deletions: Vec::new(),
             grid_column_insertions: Vec::new(),
@@ -877,6 +878,9 @@ impl BundleWriter {
             slide_removals: Vec::new(),
             slide_reorders: Vec::new(),
             slide_copies: Vec::new(),
+            slide_group_edit: None,
+            pptx_master_backgrounds: Default::default(),
+            pptx_master_text_styles: Default::default(),
             structural_change: false,
         };
         atomic_write_json(

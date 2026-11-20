@@ -103,6 +103,27 @@ pub fn sort_grid(
             request.base_revision, manifest.revision
         )));
     }
+    let selection = crate::WorksheetChartRange {
+        start_row: first_data_row,
+        end_row: request.end_row,
+        start_column: request.start_column,
+        end_column: request.end_column,
+    };
+    if crate::worksheet_pivots(bundle, &manifest)?
+        .into_iter()
+        .any(|(grid, pivot)| {
+            grid.sheet_id == request.sheet_id
+                && (crate::pivot_output_range(&pivot)
+                    .is_some_and(|range| range.overlaps(selection))
+                    || pivot
+                        .origin
+                        .is_some_and(|origin| origin.range.overlaps(selection)))
+        })
+    {
+        return Err(HcdError::PreconditionFailed(
+            "Sort the data source of the PivotTable instead of its result".into(),
+        ));
+    }
     let mut chunks = Vec::new();
     let mut bytes = 0;
     let mut found_sheet = false;

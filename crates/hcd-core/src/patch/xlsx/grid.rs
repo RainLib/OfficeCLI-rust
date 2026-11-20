@@ -1546,11 +1546,13 @@ pub(in crate::patch) fn shift_xlsx_visual_anchor(
             HcdError::InvalidBundle("XLSX drawing anchor tag is not closed".to_string())
         })?;
     let tag = &html[start..=end];
+    let one_cell = xlsx_attribute(tag, "data-hcd-anchor-kind") == Some("one-cell");
     let mut shifted = Vec::new();
-    for name in ["data-hcd-anchor-from", "data-hcd-anchor-to"] {
+    let markers = ["data-hcd-anchor-from", "data-hcd-anchor-to"];
+    for &name in &markers[..if one_cell { 1 } else { 2 }] {
         let reference = xlsx_attribute(tag, name).ok_or_else(|| {
             HcdError::Unsupported(
-                "XLSX drawing requires two cell markers for structural deletion".to_string(),
+                "XLSX drawing is missing a cell marker required for the grid change".to_string(),
             )
         })?;
         let (row, column) = xlsx_cell_coordinates(reference).ok_or_else(|| {
@@ -1611,9 +1613,9 @@ pub(in crate::patch) fn shift_xlsx_visual_anchor(
         .as_mut()
         .ok_or_else(|| HcdError::InvalidBundle("XLSX drawing has no grid address".to_string()))?;
     grid.row_start = Some(u64::from(shifted[0].2 .0));
-    grid.row_end = Some(u64::from(shifted[1].2 .0));
+    grid.row_end = shifted.get(1).map(|marker| u64::from(marker.2 .0));
     grid.column_start = Some(shifted[0].2 .1);
-    grid.column_end = Some(shifted[1].2 .1);
+    grid.column_end = shifted.get(1).map(|marker| marker.2 .1);
     Ok(())
 }
 

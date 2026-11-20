@@ -15,6 +15,16 @@ pub enum TableEditAction {
     DeleteColumn,
 }
 
+/// Zero-based logical grid rectangle; existing merged cells must be wholly inside it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableCellRange {
+    pub row: usize,
+    pub column: usize,
+    pub rows: usize,
+    pub columns: usize,
+}
+
 #[derive(Clone)]
 struct Element {
     tag: String,
@@ -296,7 +306,7 @@ struct Builder<'a> {
     entries: Vec<NodeMapEntry>,
 }
 impl Builder<'_> {
-    fn cell(&mut self, template: Option<&Element>) -> Result<Xml, HcdError> {
+    fn cell(&mut self, template: Option<&Element>, text: &str) -> Result<Xml, HcdError> {
         self.number += 1;
         let id = stable_node_id(&[
             &self.manifest.document_id,
@@ -306,7 +316,7 @@ impl Builder<'_> {
             &self.number.to_string(),
         ]);
         let paragraph = stable_node_id(&[&id, "paragraph"]);
-        let hash = hash_bytes(b"");
+        let hash = hash_bytes(text.as_bytes());
         let mut attrs = template.map(|cell| cell.attrs.clone()).unwrap_or_else(|| {
             BTreeMap::from([(
                 "style".into(),
@@ -326,7 +336,24 @@ impl Builder<'_> {
             )
         });
         let tag = template.map(|cell| cell.tag.as_str()).unwrap_or("td");
-        let html=format!("<{tag}{}><p class=\"hcd-paragraph hcd-empty-paragraph\" data-hcd-id=\"{paragraph}\" style=\"min-height:1em;margin:0\"><span data-hcd-id=\"{id}\" data-hcd-node-hash=\"{hash}\"></span></p></{tag}>",attrs.iter().map(|(key,value)|format!(" {key}=\"{}\"",escape_html(value))).collect::<String>());
+        let attributes = attrs
+            .iter()
+            .map(|(key, value)| format!(" {key}=\"{}\"", escape_html(value)))
+            .collect::<String>();
+        let extra_class = if text.is_empty() {
+            " hcd-empty-paragraph"
+        } else {
+            ""
+        };
+        let extra_style = if text.is_empty() {
+            ""
+        } else {
+            ";white-space:pre-wrap"
+        };
+        let html = format!(
+            "<{tag}{attributes}><p class=\"hcd-paragraph{extra_class}\" data-hcd-id=\"{paragraph}\" style=\"min-height:1em;margin:0{extra_style}\"><span data-hcd-id=\"{id}\" data-hcd-node-hash=\"{hash}\">{}</span></p></{tag}>",
+            escape_html(text).replace('\r', "&#13;")
+        );
         self.entries.push(NodeMapEntry {
             node_id: id.clone(),
             node_hash: hash,
@@ -354,22 +381,48 @@ impl Builder<'_> {
 fn rebuild(original: &Block, html: String, added: Vec<NodeMapEntry>) -> Result<Block, HcdError> {
     let texts = extract_html_text_nodes(&html)?;
     let marks = extract_marks(&html)?;
+    fn ordered(nodes: &[Xml], texts: &BTreeMap<String, String>, out: &mut Vec<String>) {
+        for node in nodes {
+            if let Xml::Element(element) = node {
+                if let Some(id) = element
+                    .attrs
+                    .get("data-hcd-id")
+                    .filter(|id| texts.contains_key(*id))
+                {
+                    out.push(id.clone());
+                }
+                ordered(&element.children, texts, out);
+            }
+        }
+    }
+    let mut order = vec![];
+    ordered(&parse(&html)?, &texts, &mut order);
     let mut updated = original.clone();
     updated.html = html;
     updated.entries.extend(added);
     updated
         .entries
         .retain(|entry| texts.contains_key(&entry.node_id));
-    updated.content.inlines = updated
-        .entries
+    // A fresh editor projection follows source-map order. Persist the visible
+    // order as well, so AI reads the merged cell's paragraphs before its next
+    // neighbour instead of reconstructing the old grid's row order.
+    let rank: HashMap<_, _> = order
         .iter()
-        .filter_map(|entry| {
-            texts.get(&entry.node_id).map(|text| {
-                let mark = marks.get(&entry.node_id);
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    updated
+        .entries
+        .sort_by_key(|entry| rank[entry.node_id.as_str()]);
+    updated.content.inlines = order
+        .iter()
+        .filter_map(|id| {
+            texts.get(id).map(|text| {
+                let mark = marks.get(id);
                 EditorInline {
-                    format: Default::default(),
+                    format: mark.map(|mark| mark.3.clone()).unwrap_or_default(),
                     text: text.clone(),
-                    node_id: Some(entry.node_id.clone()),
+                    node_id: Some(id.clone()),
                     bold: mark.is_some_and(|mark| mark.0),
                     italic: mark.is_some_and(|mark| mark.1),
                     link: mark.and_then(|mark| mark.2.clone()),
@@ -385,8 +438,23 @@ pub(super) fn insert(
     operation: usize,
     rows: usize,
     columns: usize,
+    values: Option<&[Vec<String>]>,
 ) -> Result<Block, HcdError> {
     dimensions(rows, columns)?;
+    if let Some(values) = values {
+        if values.len() != rows || values.iter().any(|row| row.len() != columns) {
+            return Err(invalid("table values must match the declared dimensions"));
+        }
+        let contents = values.iter().flatten();
+        if contents.clone().map(String::len).sum::<usize>() > 1024 * 1024 {
+            return Err(HcdError::ResourceLimit("table text exceeds 1 MiB".into()));
+        }
+        if contents.flat_map(|text| text.chars()).any(|c| {
+            !matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+        }) {
+            return Err(invalid("table contains invalid XML characters"));
+        }
+    }
     let id = stable_node_id(&[
         &manifest.document_id,
         patch,
@@ -401,10 +469,11 @@ pub(super) fn insert(
         entries: vec![],
     };
     let mut html=format!("<table class=\"hcd-table hcd-editor-table\" data-hcd-id=\"{id}\" style=\"width:100%;table-layout:fixed;margin:12px 0\"><tbody>");
-    for _ in 0..rows {
+    for row in 0..rows {
         html.push_str("<tr>");
-        for _ in 0..columns {
-            html.push_str(&render(&[builder.cell(None)?]));
+        for column in 0..columns {
+            let text = values.map_or("", |values| values[row][column].as_str());
+            html.push_str(&render(&[builder.cell(None, text)?]));
         }
         html.push_str("</tr>");
     }
@@ -597,7 +666,7 @@ pub(super) fn edit(
                             && c < cell.column + cell.columns
                     })
                     .map(|cell| element(&table.children, &cell.path));
-                new.children.push(builder.cell(template)?);
+                new.children.push(builder.cell(template, "")?);
             }
             let anchor = &before.rows[index.min(before.rows.len() - 1)];
             let at = anchor[anchor.len() - 1] + usize::from(index == before.rows.len());
@@ -671,7 +740,7 @@ pub(super) fn edit(
                             && index.min(before.width - 1) < cell.column + cell.columns
                     })
                     .map(|cell| element(&table.children, &cell.path));
-                let added = builder.cell(template)?;
+                let added = builder.cell(template, "")?;
                 let at = before
                     .cells
                     .iter()
@@ -704,6 +773,11 @@ pub(super) fn edit(
             edit_columns(table, index, false)?;
         }
     }
+    finish(table, &mut builder)?;
+    rebuild(original, render(&nodes), builder.entries)
+}
+
+fn finish(table: &mut Element, builder: &mut Builder<'_>) -> Result<(), HcdError> {
     // Add a writable run only to genuinely empty cells. Never flatten visible
     // unmapped text, pictures, drawings or nested tables into an empty paragraph.
     for rowpath in row_paths(table) {
@@ -714,7 +788,7 @@ pub(super) fn edit(
                     && extract_html_text_nodes(&render(&cell.children))?.is_empty()
                     && empty_content(&cell.children)
                 {
-                    seed_empty_cell(cell, &mut builder)?;
+                    seed_empty_cell(cell, builder)?;
                 }
             }
         }
@@ -764,6 +838,145 @@ pub(super) fn edit(
             table.set(key, Some(value.to_string()));
         }
     }
+    Ok(())
+}
+
+/// Merge/split changes grid ownership only. Original paragraph/run identities
+/// move with their contents; generated cells receive fresh source-map entries.
+pub(super) fn reshape(
+    original: &Block,
+    manifest: &HcdManifest,
+    patch: &str,
+    operation: usize,
+    table_index: usize,
+    range: &TableCellRange,
+    split: bool,
+) -> Result<Block, HcdError> {
+    ensure_table(original)?;
+    let mut nodes = parse(&original.html)?;
+    let path =
+        find_table(&nodes, table_index).ok_or_else(|| invalid("table index was not found"))?;
+    let table = element_mut(&mut nodes, &path);
+    if table
+        .attrs
+        .get("data-hcd-continuation")
+        .is_some_and(|v| v == "true")
+        || table
+            .attrs
+            .get("data-hcd-table-fragment")
+            .is_some_and(|v| v != "0")
+        || table
+            .attrs
+            .get("data-hcd-table-final")
+            .is_some_and(|v| v != "true")
+    {
+        return Err(invalid(
+            "fragmented tables must be consolidated before merging or splitting",
+        ));
+    }
+    normalize(table);
+    let before = grid(table)?;
+    let anchor = before
+        .cells
+        .iter()
+        .find(|cell| cell.row == range.row && cell.column == range.column)
+        .ok_or_else(|| invalid("range must start at a cell anchor"))?;
+    let (rows, columns) = if split {
+        if anchor.rows == 1 && anchor.columns == 1 {
+            return Err(invalid("only a merged cell can be split"));
+        }
+        (anchor.rows, anchor.columns)
+    } else {
+        dimensions(range.rows, range.columns)?;
+        (range.rows, range.columns)
+    };
+    let bottom = range
+        .row
+        .checked_add(rows)
+        .ok_or_else(|| invalid("cell range overflow"))?;
+    let right = range
+        .column
+        .checked_add(columns)
+        .ok_or_else(|| invalid("cell range overflow"))?;
+    if bottom > before.rows.len() || right > before.width {
+        return Err(invalid("cell range exceeds the table grid"));
+    }
+    let selected = before
+        .cells
+        .iter()
+        .filter(|cell| {
+            cell.row < bottom
+                && range.row < cell.row + cell.rows
+                && cell.column < right
+                && range.column < cell.column + cell.columns
+        })
+        .collect::<Vec<_>>();
+    if selected.iter().any(|cell| {
+        cell.row < range.row
+            || cell.column < range.column
+            || cell.row + cell.rows > bottom
+            || cell.column + cell.columns > right
+    }) {
+        return Err(invalid("merge range cuts through an existing merged cell"));
+    }
+    if !split && selected.len() < 2 {
+        return Err(invalid("merge requires at least two complete cells"));
+    }
+    let mut replacement = element(&table.children, &anchor.path).clone();
+    replacement.set("rowspan", (rows > 1 && !split).then(|| rows.to_string()));
+    replacement.set(
+        "colspan",
+        (columns > 1 && !split).then(|| columns.to_string()),
+    );
+    replacement.set("data-hcd-v-merge", None);
+    if !split {
+        replacement.children = selected
+            .iter()
+            .flat_map(|cell| element(&table.children, &cell.path).children.clone())
+            .collect();
+    }
+    let mut builder = Builder {
+        manifest,
+        patch,
+        operation,
+        number: 0,
+        entries: vec![],
+    };
+    // Assemble every row before mutation so paths remain stable and source
+    // cells retain their order even when a rowspan covers subsequent rows.
+    let selected_paths: HashSet<_> = selected.iter().map(|cell| cell.path.as_slice()).collect();
+    let mut row_cells: Vec<Vec<(usize, Xml)>> = vec![vec![]; before.rows.len()];
+    for cell in &before.cells {
+        if !selected_paths.contains(cell.path.as_slice()) {
+            row_cells[cell.row].push((
+                cell.column,
+                Xml::Element(element(&table.children, &cell.path).clone()),
+            ));
+        }
+    }
+    row_cells[range.row].push((range.column, Xml::Element(replacement.clone())));
+    if split {
+        for (r, cells) in row_cells
+            .iter_mut()
+            .enumerate()
+            .take(bottom)
+            .skip(range.row)
+        {
+            for c in range.column..right {
+                if r != range.row || c != range.column {
+                    cells.push((c, builder.cell(Some(&replacement), "")?));
+                }
+            }
+        }
+    }
+    for (path, mut cells) in before.rows.iter().zip(row_cells) {
+        cells.sort_by_key(|(column, _)| *column);
+        let row = element_mut(&mut table.children, path);
+        row.children
+            .retain(|node| !matches!(node, Xml::Element(e) if e.is_cell()));
+        row.children.extend(cells.into_iter().map(|(_, node)| node));
+    }
+    finish(table, &mut builder)?;
     rebuild(original, render(&nodes), builder.entries)
 }
 pub(super) fn activate_cell(
@@ -815,7 +1028,7 @@ pub(super) fn activate_cell(
 }
 
 fn seed_empty_cell(cell: &mut Element, builder: &mut Builder<'_>) -> Result<(), HcdError> {
-    let Xml::Element(blank) = builder.cell(Some(cell))? else {
+    let Xml::Element(blank) = builder.cell(Some(cell), "")? else {
         unreachable!()
     };
     if let Some(paragraph) = empty_paragraph(&mut cell.children) {
@@ -1012,7 +1225,7 @@ mod tests {
     #[test]
     fn edits_keep_existing_source_runs_and_make_blank_cells_writable() {
         let manifest = manifest();
-        let original = insert(&manifest, "initial", 0, 2, 2).unwrap();
+        let original = insert(&manifest, "initial", 0, 2, 2, None).unwrap();
         let added = edit(
             &original,
             &manifest,
@@ -1055,10 +1268,93 @@ mod tests {
         assert!(edited.html.contains("<td>Unmapped text</td>"));
         assert_eq!(edited.entries.len(), 4);
     }
+
+    #[test]
+    fn rectangle_merge_split_keep_text_identities_order_styles_and_editability() {
+        let manifest = manifest();
+        let values = vec![
+            vec!["甲🙂".into(), "乙 & <b>".into(), "丙".into()],
+            vec!["丁".into(), "戊".into(), "己".into()],
+        ];
+        let mut original = insert(&manifest, "initial", 0, 2, 3, Some(&values)).unwrap();
+        original.html = original.html.replace(
+            "<span data-hcd-id=",
+            "<span style=\"font-weight:700;color:#b43145\" data-hcd-id=",
+        );
+        let range = TableCellRange {
+            row: 0,
+            column: 0,
+            rows: 2,
+            columns: 2,
+        };
+        let merged = reshape(&original, &manifest, "merge", 0, 0, &range, false).unwrap();
+        let (_, width, cells) = shape(&merged);
+        assert_eq!(width, 3);
+        assert_eq!(cells.len(), 3);
+        assert_eq!((cells[0].rows, cells[0].columns), (2, 2));
+        let texts = extract_html_text_nodes(&merged.html).unwrap();
+        for entry in &original.entries {
+            assert!(merged.entries.contains(entry));
+            assert_eq!(
+                texts.get(&entry.node_id),
+                extract_html_text_nodes(&original.html)
+                    .unwrap()
+                    .get(&entry.node_id)
+            );
+        }
+        let nodes = parse(&merged.html).unwrap();
+        let table = element(&nodes, &find_table(&nodes, 0).unwrap());
+        let first = render(&element(&table.children, &cells[0].path).children);
+        for pair in [
+            (">甲🙂<", ">乙 &amp; &lt;b&gt;<"),
+            (">乙 &amp; &lt;b&gt;<", ">丁<"),
+            (">丁<", ">戊<"),
+        ] {
+            assert!(first.find(pair.0).unwrap() < first.find(pair.1).unwrap());
+        }
+        assert_eq!(
+            merged.html.matches("font-weight:700;color:#b43145").count(),
+            6
+        );
+        let split = reshape(&merged, &manifest, "split", 0, 0, &range, true).unwrap();
+        assert_eq!(shape(&split).2.len(), 6);
+        assert!(shape(&split)
+            .2
+            .iter()
+            .all(|cell| cell.rows == 1 && cell.columns == 1));
+        assert_eq!(split.entries.len(), original.entries.len() + 3);
+        assert_eq!(table_text_node_ids(&split).len(), split.entries.len());
+        for entry in &original.entries {
+            assert!(split.entries.contains(entry));
+        }
+        let selected = TableCellRange {
+            row: 0,
+            column: 1,
+            rows: 1,
+            columns: 2,
+        };
+        assert!(reshape(&merged, &manifest, "partial", 0, 0, &selected, false).is_err());
+        assert!(reshape(&original, &manifest, "not-merged", 0, 0, &range, true).is_err());
+        assert!(reshape(
+            &original,
+            &manifest,
+            "overflow",
+            0,
+            0,
+            &TableCellRange {
+                row: 0,
+                column: 0,
+                rows: usize::MAX,
+                columns: 2
+            },
+            false
+        )
+        .is_err());
+    }
     #[test]
     fn bounded_table_edits_reject_last_dimension_fragments_and_bad_grids() {
         let manifest = manifest();
-        let original = insert(&manifest, "single", 0, 1, 1).unwrap();
+        let original = insert(&manifest, "single", 0, 1, 1, None).unwrap();
         for (action, index) in [
             (TableEditAction::DeleteRow, 0),
             (TableEditAction::DeleteColumn, 0),
@@ -1067,7 +1363,7 @@ mod tests {
         ] {
             assert!(edit(&original, &manifest, "invalid", 0, 0, action, index).is_err());
         }
-        assert!(insert(&manifest, "huge", 0, 1000, 128).is_err());
+        assert!(insert(&manifest, "huge", 0, 1000, 128, None).is_err());
         let fragment =
             from_html("<table data-hcd-continuation=\"true\"><tr><td>A</td></tr></table>");
         assert!(edit(
