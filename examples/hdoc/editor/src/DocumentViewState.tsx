@@ -39,7 +39,7 @@ function readView(key?: string): Partial<SavedView> {
     if (data.selectedRevision === null || Number.isSafeInteger(data.selectedRevision) && data.selectedRevision >= 0) result.selectedRevision = data.selectedRevision
     if (['settings', 'revisions', 'properties', 'word-review', null].includes(data.rightPanel)) result.rightPanel = data.rightPanel
     if (['agents', 'settings', 'revisions', 'properties', 'word-review'].includes(data.lastRightPanel)) result.lastRightPanel = data.lastRightPanel
-    if (['home', 'insert', 'view', 'review', 'revisions', 'format', 'sheet', 'data', 'animation', 'layout', 'references', 'formula', 'design', 'show', 'pages', 'ocr'].includes(data.activeTab)) result.activeTab = data.activeTab
+    if (['home', 'insert', 'view', 'review', 'revisions', 'format', 'sheet', 'data', 'animation', 'transition', 'layout', 'references', 'formula', 'design', 'show', 'pages', 'ocr'].includes(data.activeTab)) result.activeTab = data.activeTab
     return result
   } catch { return {} }
 }

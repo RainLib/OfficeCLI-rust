@@ -1,3 +1,4 @@
+import { OfficeFeatureTools, useOfficeSnapshot } from './OfficeFeatures'
 import { SlideShow } from './SlideShow'
 import { AlignLeft, AlignCenter, AlignRight, AlignJustify, AlignVerticalJustifyCenter, AlignStartVertical, AlignEndVertical, Bold, Italic, Underline, Check, ArrowDown, ArrowUp, Columns2, Copy, FilePlus2, ImagePlus, LayoutTemplate, Presentation, ScanText, Sparkles, TextCursorInput, Trash2 } from 'lucide-react'
 import { keepHistory } from './editHistory.ts'
@@ -428,6 +429,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const selectedMetadata = revisions.find(item => item.revision === viewRevision)
   const revisionMetadata = [selectedMetadata?.authorName || localizeSource(locale, viewRevision === 0 ? '初始导入' : '作者未记录'),
     selectedMetadata?.createdAtEpochMs ? new Date(selectedMetadata.createdAtEpochMs).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''].filter(Boolean).join(' · ')
+  const officeSnapshot = useOfficeSnapshot(session, displayedRevision)
   const activePdfLayout = pdfLayout?.revision === displayedRevision ? pdfLayout : null
   const hasPdfOrder = !!activePdfLayout?.pages.length
   const associatedNotes = useAssociatedNoteChunks(session, descriptors, displayedRevision)
@@ -1534,7 +1536,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
   const fileHeader = <EditorHeader session={session} revision={displayedRevision} status={status} onClose={() => void closeEditor()} onSearch={() => setSearchOpen(true)} focused={focused} onFocus={() => setFocused(value => !value)} beforeExport={saveBeforeExport} presence={layout.showCollaborators ? collaboration.avatars : null} />
   return <div data-format={session.format} data-document-scope={session.scope} data-hcd-history={historical ? 'true' : undefined} className={`workspace semantic-workspace fixed-workspace ${embedded ? 'embedded' : ''} ${layout.compact ? 'compact-header' : ''} ${layout.showOutline && !focused ? '' : 'outline-hidden'} ${(rightPanel || panelOpen) && !focused ? '' : 'right-hidden'} ${focused ? 'focus-mode' : ''}`}>
     {shown && <SlideShow key={shown.chunkId} index={showIndex} total={deckFullyLoaded?slidePages.length:null} preview={previews[shown.sequence]}
-      hasNext={showIndex+1<slidePages.length || !deckFullyLoaded} next={()=>void advanceSlide()} previous={()=>setPresenting(slidePages[Math.max(0,showIndex-1)].chunkId)} close={()=>setPresenting(null)}/>}
+      transition={officeSnapshot?.slides.find(slide => slide.chunkId === shown.chunkId)?.transition} hasNext={showIndex+1<slidePages.length || !deckFullyLoaded} next={()=>void advanceSlide()} previous={()=>setPresenting(slidePages[Math.max(0,showIndex-1)].chunkId)} close={()=>setPresenting(null)}/>}
     {animationDraft && <PptxAnimations draft={animationDraft} close={() => setAnimationDraft(null)}
       save={effects => applySlideObjectPatch('hcd-patch/60', animationDraft.revision,
         { op: 'pptx.animations.set', chunkId: animationDraft.chunkId, effects }, '编辑幻灯片动画')} />}
@@ -1591,6 +1593,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
         <button disabled={slideBusy} onClick={()=>void insertSlideLayout(false)}><LayoutTemplate/><LocalText source="标题与正文"/></button>
         <button disabled={slideBusy} onClick={()=>void insertSlideLayout(true)}><Columns2/><LocalText source="双栏内容"/></button>
       </div>}{(placingText || session.format==='pdf') && <span className="ribbon-note"><LocalText source={placingText?'点击页面空白处放置文字框':'新增文字框保留页面布局'}/></span>}</>}
+      {activeTab === 'transition' && session.format === 'pptx' && <RibbonGroup label="切换到此幻灯片" priority={0}><OfficeFeatureTools session={session} mode="transition" disabled={readOnly || historical || saving || historyBusy || !currentSlide} chunkId={currentSlide?.chunkId} beforeEdit={saveBeforeExport} afterEdit={revision => { recordEdit(revision, '设置幻灯片转场'); setManifest(previous => previous && ({ ...previous, revision })); collaboration.announceRevision(revision) }}/></RibbonGroup>}
       {activeTab === 'animation' && session.format === 'pptx' && <div className="tool-group">
         <button disabled={slideBusy} onClick={() => void openSlideAnimations()}><Sparkles size={16} /><LocalText source="编辑本页动画" /></button>
       </div>}

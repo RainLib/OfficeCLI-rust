@@ -10,6 +10,7 @@ mod html;
 mod image_codec;
 mod image_insert;
 pub mod image_layers;
+pub mod office_features;
 mod patch;
 mod pdf_layout;
 pub mod pdf_ocr;

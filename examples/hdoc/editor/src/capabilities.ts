@@ -7,6 +7,7 @@ export type RuntimeCapabilities = {
   protocolFingerprint: string
   patchSchemas: Record<string, { route: string; operations: string[] }>
   calculation: { contractVersion: string; verifiedFunctions: string[] }
+  officeFeatures?: { protocolVersion: string; route: string; operations: string[]; sourceBackedExport: boolean }
   agentWorkflow?: { protocolVersion: string; actions: string[]; selectionIdentityGuard?: boolean }
   nodePatchReview?: { protocolVersion: string; route: string; exactPayloadAndAuthor: boolean }
 }

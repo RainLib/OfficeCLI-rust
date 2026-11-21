@@ -1827,6 +1827,8 @@ fn semantic_export(
         theme.plan,
         word_formats,
     )?;
+    hcd_formats::apply_office_features(bundle, output_path, Some(revision))
+        .map_err(handler_error)?;
     let image_count = summary.image_count;
     let embedded_image_count = summary.embedded_image_count;
     let conversion_engine = summary.engine;

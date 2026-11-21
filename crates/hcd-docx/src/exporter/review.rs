@@ -578,7 +578,7 @@ fn reserve_para_id(used: &mut HashSet<String>, id: i32) -> Result<String, HcdErr
     Ok(next)
 }
 
-fn body_pairs<'a, 'b>(
+pub(crate) fn body_pairs<'a, 'b>(
     doc: &'a Document<'a>,
     blocks: &'b [EditorBlockView],
 ) -> Vec<(Node<'a, 'a>, &'b EditorBlockView)> {
@@ -888,6 +888,58 @@ fn invalid(error: impl Into<String>) -> HcdError {
 
 fn handler_error(error: impl std::fmt::Display) -> HcdError {
     invalid(error.to_string())
+}
+
+/// Insert an inline native reference at a verified Unicode scalar boundary.
+pub(crate) fn insert_inline_reference(
+    xml: &str,
+    block: &EditorBlockView,
+    blocks: &[EditorBlockView],
+    offset: usize,
+    marker: &str,
+) -> Result<String, HcdError> {
+    let doc = parse(xml)?;
+    let pairs = body_pairs(&doc, blocks);
+    let paragraph = pairs
+        .iter()
+        .find(|(_, view)| view.block_id == block.block_id)
+        .map(|(node, _)| *node)
+        .filter(|node| word(*node, "p"))
+        .ok_or_else(|| {
+            HcdError::PreconditionFailed(
+                "The footnote paragraph cannot be mapped to the native document".into(),
+            )
+        })?;
+    if native_text(paragraph, paragraph) != block_text(block) {
+        return Err(HcdError::PreconditionFailed(
+            "The footnote paragraph changed; reread before inserting".into(),
+        ));
+    }
+    let point = boundary(paragraph, offset)
+        .or_else(|| {
+            (offset == 0 && block_text(block).is_empty()).then(|| {
+                Boundary::Between(
+                    paragraph
+                        .children()
+                        .find(|n| word(*n, "pPr"))
+                        .map(|n| n.range().end)
+                        .unwrap_or_else(|| {
+                            paragraph.range().start
+                                + xml[paragraph.range()].find('>').unwrap_or(0)
+                                + 1
+                        }),
+                )
+            })
+        })
+        .ok_or_else(|| {
+            HcdError::Unsupported(
+                "This footnote point crosses a complex Word field; select ordinary body text"
+                    .into(),
+            )
+        })?;
+    let mut plan = MarkerPlan::default();
+    plan.place(point, marker);
+    plan.finish(xml)
 }
 
 #[cfg(test)]

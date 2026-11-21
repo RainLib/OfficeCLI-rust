@@ -38,6 +38,7 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
             | "capabilities"
             | "editor"
             | "word-review"
+            | "office-features"
             | "index"
             | "chunks"
             | "search"
@@ -78,7 +79,7 @@ fn operation_requirements(method: &str, route: &str) -> Result<Vec<&'static str>
             (
                 "POST",
                 "project" | "patch" | "node-patch" | "checkpoints" | "collaboration"
-                | "word-review",
+                | "word-review" | "office-features",
             ) => required.push("document.edit"),
             // Both routes operate on an editor's own write intent. Review only
             // reads the receipt, but it still requires the same edit authority

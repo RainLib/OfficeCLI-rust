@@ -5,6 +5,10 @@ mod common;
 pub mod images;
 mod mermaid;
 mod native_images;
+mod office_features;
+pub use office_features::{
+    apply_office_features, edit_office_features, read_office_features, OfficeSnapshot,
+};
 mod pdf;
 mod pptx;
 pub mod registry;
@@ -72,7 +76,10 @@ pub fn export_document(
         pptx::groups::GroupExport::default()
     };
     let output = target.as_ref();
-    let staged = if groups.is_empty() {
+    let (version, _) = hcd_core::manifest_at_revision(&opened, &manifest, options.revision)?;
+    let has_office_features = !hcd_core::office_features::read(&opened, &version)?.is_empty()
+        || manifest.source.format == "docx" && office_features::has_managed_toc(source.as_ref())?;
+    let staged = if groups.is_empty() && !has_office_features {
         None
     } else {
         if output.exists() {
@@ -88,9 +95,11 @@ pub fn export_document(
         std::fs::create_dir_all(dir)?;
         Some(tempfile::tempdir_in(dir)?)
     };
-    let staged_path = staged
-        .as_ref()
-        .map(|scratch| scratch.path().join("presentation.pptx"));
+    let staged_path = staged.as_ref().map(|scratch| {
+        scratch
+            .path()
+            .join(format!("office.{}", manifest.source.format))
+    });
     let target = staged_path.as_deref().unwrap_or(output);
     let mut initial_options = options.clone();
     if staged.is_some() {
@@ -119,6 +128,7 @@ pub fn export_document(
         0
     };
     let group_slides = groups.write(target)?;
+    apply_office_features(&opened, target, options.revision)?;
     if staged.is_some() {
         tempfile::TempPath::try_from_path(target)?
             .persist_noclobber(output)
@@ -158,6 +168,9 @@ pub fn export_document(
             report.preserved.push(format!(
                 "{animations} slide animation tracks written as native PresentationML timing"
             ));
+        }
+        if has_office_features {
+            report.preserved.push("Versioned Office page layout, linked table of contents, footnotes, print settings and transitions materialized in native parts".into());
         }
         if group_slides > 0 {
             report.preserved.push(format!("{group_slides} slide drawing trees retain native editable groups and stable member IDs"));

@@ -29,6 +29,7 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
             "number":{"type":"integer","minimum":0,"description":"Index page, chunk sequence or revision number"},
             "category":{"type":"string","enum":["brush","sticker","avatar","reaction","emoji"]},"material_id":{"type":"string","maxLength":128},"node_id":{"type":"string","pattern":"^[A-Za-z0-9_.:-]{1,256}$","description":"Mapped text node ID, or a canvas element ID when resource=canvas"}, "query":{"type":"string"}
         }), &["document_id","resource"]),
+        make("hcd_office_features", "Read native Word sections, linked TOC, footnotes, worksheet print settings and slide transitions. To edit, first read this resource and auth. Supply a validated action with current expected_revision, collaboration_epoch and a new UUID patch_id. Action op is word.pageLayout.set, word.toc.set, word.footnote.set, xlsx.printLayout.set or pptx.transition.set. Word note anchors use current block ID, Unicode offset, SHA256 paragraphHash, and up to 32 adjacent Unicode characters in before/after. Settings are versioned independently of body text; native export writes actual Office parts. On conflict reread and replan. Read back and export/reopen to verify.", json!({"action":{"type":"object"},"expected_revision":{"type":"integer","minimum":0},"collaboration_epoch":{"type":"integer","minimum":0},"patch_id":{"type":"string","format":"uuid"},"revision":{"type":"integer","minimum":0}}), &["document_id"]),
         make("hcd_canvas_plan", "Plan an append-only native canvas layout or catalog material without writing. Supply either a composition or a material_id for a sticker, avatar or emoji, using the current revision. Provide generated content; the service arranges editable bubbles/cards/notes or semantic flowcharts, architecture diagrams, mind maps and teaching boards with the OfficeCLI palette and finds empty space. Graph layouts use items:[], diagram:{nodes,edges,groups}; card layouts use items and diagram:null. Plan visual style, palette, paper, brush and semantic stickers yourself when requested; visual is optional for legacy layouts. Choose watercolor, fountain or pastel for textured marks and motion auto for motif-specific gestures such as drifting petals, butterfly wings or a paper plane. Journal decoration stays native, with at most 4 stickers and 2 motion accents. Select a suitable layout when the request does not specify one. Diagram node IDs are local content identifiers, not existing canvas object IDs. Commit the returned batch unchanged with hcd_patch mode=canvas. vacantRegions reject a concurrent human moving into that space. On conflict reread, use a NEW patch_id and replan; never move existing content to make room.", json!({
             "expected_revision":{"type":"integer","minimum":0},"patch_id":{"type":"string","maxLength":96},
             "composition":canvas_core::composition_schema(),"material_id":{"type":"string","maxLength":128},
@@ -167,6 +168,21 @@ pub(super) fn execute(name: &str, params: &HashMap<String, Value>) -> Result<Val
         value
     };
     match name {
+        "hcd_office_features" => {
+            if let Some(action) = params.get("action") {
+                let capabilities = send(client.get(route("/capabilities")).bearer_auth(&token))?;
+                if capabilities["officeFeatures"]["protocolVersion"] != hcd_core::office_features::PROTOCOL { return Err("service does not support Office feature edits".into()); }
+                send(client.post(route("/office-features")).bearer_auth(token)
+                    .header("x-hcd-protocol-fingerprint", capabilities["protocolFingerprint"].as_str().ok_or("missing protocol fingerprint")?)
+                    .header("X-HCD-Collaboration-Epoch", number(params,"collaboration_epoch")?)
+                    .header("X-HCD-Agent-Edit", "true")
+                    .json(&json!({"protocolVersion":hcd_core::office_features::PROTOCOL,"baseRevision":number(params,"expected_revision")?,"patchId":string(params,"patch_id")?,"action":action})))
+            } else {
+                let mut request = client.get(route("/office-features")).bearer_auth(token);
+                if let Some(revision) = params.get("revision") { request = request.query(&[("revision",revision.to_string())]); }
+                send(request)
+            }
+        }
         "hcd_workflow" => {
             use base64::Engine;
             let mut request_headers = reqwest::header::HeaderMap::new();

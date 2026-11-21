@@ -4574,6 +4574,7 @@ fn apply_annotations(
             schema_version: manifest.schema_version.clone(),
             annotations: Vec::new(),
             docx_review: Default::default(),
+            office_features: Default::default(),
         }
     };
     let previous_count = set.annotations.len();

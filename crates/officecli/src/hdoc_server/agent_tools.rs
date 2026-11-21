@@ -123,6 +123,29 @@ pub(super) async fn call(
             "tool document differs from authenticated session".into(),
         ));
     }
+    if name == "hcd_office_features" {
+        if let Some(action) = args.get("action") {
+            headers.insert(
+                "x-hcd-collaboration-epoch",
+                number(&args, "collaboration_epoch")?.into(),
+            );
+            headers.insert("x-hcd-agent-edit", header::HeaderValue::from_static("true"));
+            let request = serde_json::from_value(json!({"protocolVersion":hcd_core::office_features::PROTOCOL,"baseRevision":number(&args,"expected_revision")?,"patchId":string(&args,"patch_id")?,"action":action})).map_err(bad)?;
+            return office_features::edit(State(state), Path(id), headers, Json(request))
+                .await
+                .map(|v| serde_json::to_value(v.0).expect("Office receipt"));
+        }
+        return office_features::read(
+            State(state),
+            Path(id),
+            Query(RevisionQuery {
+                revision: args["revision"].as_u64(),
+            }),
+            headers,
+        )
+        .await
+        .map(|v| v.0);
+    }
     if name == "hcd_image_edit" {
         let action = string(&args, "action")?;
         if !matches!(action, "info" | "content" | "jobs") {

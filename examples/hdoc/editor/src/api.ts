@@ -42,6 +42,12 @@ export async function api(session: Session, route: string, init: RequestInit = {
     assertPatchSupported(capabilities, route === '/node-patch-review' ? '/node-patch' : route, JSON.parse(init.body))
     headers.set('x-hcd-protocol-fingerprint', capabilities.protocolFingerprint)
   }
+  if (route === '/office-features' && init.method?.toUpperCase() === 'POST') {
+    const capabilities = await readCapabilities(session)
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) as {protocolVersion: string; action: {op: string}} : null
+    if (capabilities.officeFeatures?.protocolVersion !== body?.protocolVersion || !capabilities.officeFeatures?.operations.includes(body?.action.op ?? '')) throw new Error('当前服务不支持此 Office 设置，请更新服务后重试。')
+    headers.set('x-hcd-protocol-fingerprint', capabilities.protocolFingerprint)
+  }
   const response = await fetch(`${session.apiUrl || '/v1/documents'}/${encodeURIComponent(session.documentId)}${route}`, {
     ...init,
     headers,

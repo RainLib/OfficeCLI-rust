@@ -443,6 +443,11 @@ pub struct Annotation {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnnotationSet {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::office_features::OfficeFeatures::is_empty"
+    )]
+    pub office_features: crate::office_features::OfficeFeatures,
     pub schema_version: String,
     pub annotations: Vec<Annotation>,
     #[serde(

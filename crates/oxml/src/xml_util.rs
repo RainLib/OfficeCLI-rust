@@ -614,3 +614,122 @@ mod tests {
         assert!(matches!(err, XmlUtilError::XPathNotFound(_)));
     }
 }
+
+/// Replace or insert one direct child without serializing unrelated OOXML.
+/// `order` is the parent's schema child order; existing sibling bytes survive.
+pub fn replace_direct_child(
+    xml: &str,
+    parent_range: std::ops::Range<usize>,
+    namespace: &str,
+    name: &str,
+    replacement: &str,
+    order: &[&str],
+) -> Result<String, XmlUtilError> {
+    let doc =
+        roxmltree::Document::parse(xml).map_err(|e| XmlUtilError::ReadError(e.to_string()))?;
+    let parent = doc
+        .descendants()
+        .find(|n| n.is_element() && n.range() == parent_range)
+        .ok_or_else(|| XmlUtilError::XPathNotFound(name.into()))?;
+    let matches: Vec<_> = parent
+        .children()
+        .filter(|n| n.has_tag_name((namespace, name)))
+        .collect();
+    let mut edits: Vec<_> = matches.iter().map(|n| (n.range(), String::new())).collect();
+    if !replacement.is_empty() {
+        if let Some(first) = edits.first_mut() {
+            first.1 = replacement.into();
+        } else {
+            let raw = &xml[parent_range.clone()];
+            if raw.trim_end().ends_with("/>") {
+                let end = raw
+                    .rfind("/>")
+                    .ok_or_else(|| XmlUtilError::ReadError("missing XML boundary".into()))?;
+                let tag = raw[1..]
+                    .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+                    .next()
+                    .unwrap_or_default();
+                let value = format!("{}>{}</{}>", &raw[..end], replacement, tag);
+                edits.push((parent_range, value));
+            } else {
+                let rank = order.iter().position(|n| *n == name).unwrap_or(order.len());
+                let at = parent
+                    .children()
+                    .find(|n| {
+                        n.is_element()
+                            && n.tag_name().namespace() == Some(namespace)
+                            && order
+                                .iter()
+                                .position(|name| *name == n.tag_name().name())
+                                .is_some_and(|r| r > rank)
+                    })
+                    .map(|n| n.range().start)
+                    .or_else(|| raw.rfind("</").map(|at| parent_range.start + at))
+                    .ok_or_else(|| XmlUtilError::ReadError("missing XML end tag".into()))?;
+                edits.push((at..at, replacement.into()));
+            }
+        }
+    }
+    apply_xml_edits(xml, edits)
+}
+
+pub fn apply_xml_edits(
+    xml: &str,
+    mut edits: Vec<(std::ops::Range<usize>, String)>,
+) -> Result<String, XmlUtilError> {
+    edits.sort_by_key(|(range, _)| (range.start, range.end));
+    let mut result = String::with_capacity(xml.len());
+    let mut at = 0;
+    for (range, replacement) in edits {
+        if range.start < at || range.end > xml.len() {
+            return Err(XmlUtilError::WriteError("overlapping XML changes".into()));
+        }
+        result.push_str(&xml[at..range.start]);
+        result.push_str(&replacement);
+        at = range.end;
+    }
+    result.push_str(&xml[at..]);
+    Ok(result)
+}
+
+#[cfg(test)]
+mod direct_child_tests {
+    use super::*;
+    #[test]
+    fn inserts_in_schema_order_and_preserves_other_bytes() {
+        let xml = r#"<s:sheet xmlns:s="s"><s:data/><s:extLst keep="yes"/></s:sheet>"#;
+        let range = roxmltree::Document::parse(xml)
+            .unwrap()
+            .root_element()
+            .range();
+        let next = replace_direct_child(
+            xml,
+            range,
+            "s",
+            "page",
+            r#"<s:page n="1"/>"#,
+            &["data", "page", "extLst"],
+        )
+        .unwrap();
+        assert_eq!(
+            next,
+            r#"<s:sheet xmlns:s="s"><s:data/><s:page n="1"/><s:extLst keep="yes"/></s:sheet>"#
+        );
+        let xml = r#"<w:p xmlns:w="w"><w:pPr/></w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let node = doc
+            .descendants()
+            .find(|n| n.has_tag_name(("w", "pPr")))
+            .unwrap();
+        assert!(replace_direct_child(
+            xml,
+            node.range(),
+            "w",
+            "jc",
+            r#"<w:jc w:val="right"/>"#,
+            &[]
+        )
+        .unwrap()
+        .contains("<w:pPr><w:jc"));
+    }
+}

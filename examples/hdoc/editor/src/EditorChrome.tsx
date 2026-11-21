@@ -9,7 +9,7 @@ import { ExportControl } from './ExportControl.tsx'
 import type { Session } from './api.ts'
 import { HostPublicationControl, permits, useHostPolicy } from './HostIntegration.tsx'
 
-export type EditorTab = 'home' | 'insert' | 'view' | 'review' | 'revisions' | 'format' | 'sheet' | 'data' | 'animation' | 'layout' | 'references' | 'formula' | 'design' | 'show' | 'pages' | 'ocr'
+export type EditorTab = 'home' | 'insert' | 'view' | 'review' | 'revisions' | 'format' | 'sheet' | 'data' | 'animation' | 'transition' | 'layout' | 'references' | 'formula' | 'design' | 'show' | 'pages' | 'ocr'
 
 export function FileActionsMenu({ children }: { children: ReactNode }) {
   const { locale } = useI18n()
@@ -53,10 +53,11 @@ export function ContentToolbar({ activeTab, onTab, expanded, onToggle, readOnly,
     ['home', '开始'],
     ...(workbook ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []),
     ...(format !== 'txt' ? [['insert', '插入']] as [EditorTab, string][] : []),
+    ...(format === 'xlsx' ? [['layout', '页面布局']] as [EditorTab, string][] : []),
     ...(format === 'docx' ? [['layout', '布局'], ['references', '引用'], ['review', '审阅']] as [EditorTab, string][] : []),
     ...(['html', 'md'].includes(format) ? [['references', '引用']] as [EditorTab, string][] : []),
     ...(workbook ? [['formula', '公式'], ['data', '数据']] as [EditorTab, string][] : []),
-    ...(format === 'pptx' ? [['design', '设计'], ['animation', '动画'], ['show', '放映'], ['review', '审阅']] as [EditorTab, string][] : []),
+    ...(format === 'pptx' ? [['design', '设计'], ['transition', '切换'], ['animation', '动画'], ['show', '放映'], ['review', '审阅']] as [EditorTab, string][] : []),
     ...(format === 'pdf' ? [['pages', '页面'], ['ocr', '识别']] as [EditorTab, string][] : []),
     ['view', '视图'], ['revisions', '修订'],
   ]

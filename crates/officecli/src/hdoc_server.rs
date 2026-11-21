@@ -27,6 +27,7 @@ mod image_jobs;
 mod image_workspace;
 mod integration;
 mod mcp_http;
+mod office_features;
 mod pdf_view;
 mod selection_transfers;
 mod spreadsheet;
@@ -342,6 +343,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         )
         .route("/v1/jobs/{job_id}", get(job_status))
         .route("/v1/documents/{id}/editor", get(editor))
+        .route("/v1/documents/{id}/office-features", get(office_features::read).post(office_features::edit))
         .route("/v1/documents/{id}/word-review", get(word_review::read).post(word_review::edit))
         .route("/v1/documents/{id}/project", post(project))
         .route("/v1/documents/{id}/selection-transfers", post(selection_transfers::start))
@@ -512,6 +514,7 @@ async fn protocol_guard(request: axum::extract::Request, next: axum::middleware:
         && (request.uri().path().ends_with("/patch")
             || request.uri().path().ends_with("/node-patch")
             || request.uri().path().ends_with("/node-patch-review")
+            || request.uri().path().ends_with("/office-features")
             || request.uri().path().ends_with("/agent-workflows"))
         && request
             .headers()
