@@ -50,6 +50,8 @@ export async function verifyWordMargin(page, output, checks) {
   await button('Project Phoenix kickoff agenda', first).click()
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe('Project Phoenix kickoff agenda')
   await page.keyboard.press('ArrowLeft')
+  await expect.poll(() => content.evaluate(element => element.editor.state.selection.empty
+    && element.contains(document.activeElement) && window.getSelection()?.isCollapsed)).toBe(true)
   await page.keyboard.insertText('会议：')
   await expect.poll(highlighted).toBe('Project Phoenix kickoff agenda')
   await button('Project Phoenix kickoff agenda', first).click()

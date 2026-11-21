@@ -808,11 +808,22 @@ function SemanticEditor({ session, onClose, onEpochChange, embedded }: { session
         // empty. Always reconcile the range after the comment click/layout;
         // Tiptap's focus command may otherwise return early on hasFocus.
         const clickedFrom = document.activeElement
-        requestAnimationFrame(() => {
+        const pendingSelection = editor.state.selection
+        const pendingFocus = new AbortController()
+        const frame = requestAnimationFrame(() => {
+          pendingFocus.abort()
           if (!editor.isDestroyed && editor.view.dom.getClientRects().length
+            && editor.state.selection.eq(pendingSelection)
             && (document.activeElement === clickedFrom || document.activeElement === document.body
               || editor.view.dom.contains(document.activeElement))) editor.view.focus()
         })
+        // An arrow key or a new pointer action owns the next selection. A
+        // delayed focus must not restore the comment range over that input.
+        const cancelFocus = () => { cancelAnimationFrame(frame); pendingFocus.abort() }
+        for (const type of ['keydown', 'beforeinput', 'pointerdown']) {
+          editor.view.dom.ownerDocument.addEventListener(type, cancelFocus,
+            { capture: true, once: true, signal: pendingFocus.signal })
+        }
         return
       } catch { /* The live Yjs paragraph may have moved ahead of the saved range. */ }
     }
