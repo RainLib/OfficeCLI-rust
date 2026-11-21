@@ -1,0 +1,58 @@
+{
+  "scope": "new-tab-designs",
+  "reports": [
+    {
+      "id": "RL1I3",
+      "count": 274,
+      "issues": []
+    },
+    {
+      "id": "Nogq5",
+      "count": 218,
+      "issues": []
+    },
+    {
+      "id": "ubFwQ",
+      "count": 216,
+      "issues": []
+    },
+    {
+      "id": "lvcGj",
+      "count": 210,
+      "issues": []
+    },
+    {
+      "id": "hka0P",
+      "count": 238,
+      "issues": []
+    },
+    {
+      "id": "TQ6Ex",
+      "count": 269,
+      "issues": []
+    },
+    {
+      "id": "c3D5yx",
+      "count": 639,
+      "issues": []
+    }
+  ],
+  "textContrast": [
+    {
+      "name": "body",
+      "ratio": 13.99929774177379
+    },
+    {
+      "name": "muted",
+      "ratio": 4.791346680753572
+    },
+    {
+      "name": "active",
+      "ratio": 5.385814156081464
+    },
+    {
+      "name": "trackedDelete",
+      "ratio": 5.546305469477321
+    }
+  ]
+}

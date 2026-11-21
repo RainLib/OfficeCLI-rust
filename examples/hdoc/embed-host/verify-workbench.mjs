@@ -772,7 +772,7 @@ try {
     await visiblePane.getByRole("button", { name: "插入", exact: true }).click();
     const savePoint = visiblePane.getByRole("button", { name: "保存点", exact: true });
     if (!await savePoint.isVisible()) {
-      await visiblePane.getByRole("button", { name: "展开更多命令", exact: true }).click();
+      await visiblePane.getByRole("button", { name: "展开功能区", exact: true }).click();
     }
     await savePoint.click();
     await expect.poll(async () => (await readBack(manualText)).docx.contains, {timeout:25000}).toBe(true);

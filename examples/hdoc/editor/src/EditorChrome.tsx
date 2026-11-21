@@ -9,7 +9,7 @@ import { ExportControl } from './ExportControl.tsx'
 import type { Session } from './api.ts'
 import { HostPublicationControl, permits, useHostPolicy } from './HostIntegration.tsx'
 
-export type EditorTab = 'home' | 'insert' | 'view' | 'review' | 'revisions' | 'format' | 'sheet' | 'data' | 'animation'
+export type EditorTab = 'home' | 'insert' | 'view' | 'review' | 'revisions' | 'format' | 'sheet' | 'data' | 'animation' | 'layout' | 'references' | 'formula' | 'design' | 'show' | 'pages' | 'ocr'
 
 export function FileActionsMenu({ children }: { children: ReactNode }) {
   const { locale } = useI18n()
@@ -48,7 +48,18 @@ export function ContentToolbar({ activeTab, onTab, expanded, onToggle, readOnly,
 }) {
   const { locale } = useI18n()
   const policy = useHostPolicy()
-  const tabs: [EditorTab, string][] = [['home', '开始'], ...(format === 'xlsx' ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []), ['insert', '插入'], ...(['xlsx', 'csv', 'tsv'].includes(format) ? [['data', '数据']] as [EditorTab, string][] : []), ...(format === 'pptx' ? [['animation', '动画']] as [EditorTab, string][] : []), ['view', '视图'], ...(format === 'docx' ? [['review', '审阅']] as [EditorTab, string][] : []), ['revisions', '修订']]
+  const workbook = ['xlsx', 'csv', 'tsv'].includes(format)
+  const tabs: [EditorTab, string][] = [
+    ['home', '开始'],
+    ...(workbook ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []),
+    ...(format !== 'txt' ? [['insert', '插入']] as [EditorTab, string][] : []),
+    ...(format === 'docx' ? [['layout', '布局'], ['references', '引用'], ['review', '审阅']] as [EditorTab, string][] : []),
+    ...(['html', 'md'].includes(format) ? [['references', '引用']] as [EditorTab, string][] : []),
+    ...(workbook ? [['formula', '公式'], ['data', '数据']] as [EditorTab, string][] : []),
+    ...(format === 'pptx' ? [['design', '设计'], ['animation', '动画'], ['show', '放映'], ['review', '审阅']] as [EditorTab, string][] : []),
+    ...(format === 'pdf' ? [['pages', '页面'], ['ocr', '识别']] as [EditorTab, string][] : []),
+    ['view', '视图'], ['revisions', '修订'],
+  ]
   return <div className="content-toolbar">
     {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="只读预览" /><small>{format.toUpperCase()}</small>{fileMenu && <button aria-pressed={activeTab === 'view'} onClick={() => onTab('view')}><LocalText source="视图" /></button>}{format === 'docx' && <button aria-pressed={activeTab === 'review'} onClick={() => onTab('review')}><LocalText source="审阅" /></button>}{['xlsx', 'csv', 'tsv'].includes(format) && <button aria-pressed={activeTab === 'data'} onClick={() => onTab('data')}><LocalText source="数据" /></button>}</span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
     <div className="content-toolbar-actions">{actions}{fileMenu}<button className="toolbar-search" aria-label={localizeSource(locale, '查找全文')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={15} /><span><LocalText source="查找" /></span></button>

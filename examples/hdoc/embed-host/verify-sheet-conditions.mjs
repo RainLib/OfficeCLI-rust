@@ -97,7 +97,7 @@ export async function verifySheetConditions(page, folder, checks) {
   await button('开始').click()
   const undoStarted = Date.now()
   const undoReceipt = page.waitForResponse(response => /\/restore\/\d+$/.test(new URL(response.url()).pathname) && response.request().method() === 'POST')
-  await button('↶ 撤销').click()
+  await button('撤销').click()
   assert((await undoReceipt).ok(), 'conditional rule undo must commit')
   try {
     await expect.poll(() => colorCount('acd8bd'), {timeout: 15_000}).toBeGreaterThan(100)
@@ -120,9 +120,9 @@ export async function verifySheetConditions(page, folder, checks) {
     throw error
   }
   const paintedAfterMs = Date.now() - undoStarted
-  await button('↷ 重做').click()
+  await button('重做').click()
   await expect.poll(() => colorCount('acd8bd'), {timeout: 15_000}).toBe(0)
-  await button('↶ 撤销').click()
+  await button('撤销').click()
   await expect.poll(() => colorCount('acd8bd'), {timeout: 15_000}).toBeGreaterThan(100)
   writeFileSync(join(folder, 'conditional-undo.json'), JSON.stringify({ paintedAfterMs, redoRemovedFill: true, secondUndoRestoredFill: true }, null, 2))
   checks.push('Downloaded XLSX, opened it as a new tab, removed its native rule and restored it using revision undo; redo and a second undo immediately update the grid colors.')

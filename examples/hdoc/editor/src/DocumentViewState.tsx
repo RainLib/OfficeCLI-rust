@@ -24,21 +24,22 @@ type DocumentViewState = {
   rightPanel: PanelState['rightPanel']; setRightPanel: Dispatch<SetStateAction<PanelState['rightPanel']>>
   agentPanelOpen: boolean; setAgentPanelOpen: Dispatch<SetStateAction<boolean>>
   lastRightPanel: RightPanel; closeRightPanel: () => void; reopenRightPanel: () => void
+  ribbonExpanded: boolean; setRibbonExpanded: Dispatch<SetStateAction<boolean>>
   activeTab: EditorTab; setActiveTab: Dispatch<SetStateAction<EditorTab>>
 }
 const ViewContext = createContext<DocumentViewState | null>(null)
-type SavedView = Pick<DocumentViewState, 'focused' | 'wrapText' | 'selectedRevision' | 'comparing' | 'rightPanel' | 'agentPanelOpen' | 'activeTab' | 'lastRightPanel' | 'stickerMotionPaused'>
+type SavedView = Pick<DocumentViewState, 'focused' | 'wrapText' | 'selectedRevision' | 'comparing' | 'rightPanel' | 'agentPanelOpen' | 'activeTab' | 'lastRightPanel' | 'stickerMotionPaused' | 'ribbonExpanded'>
 function readView(key?: string): Partial<SavedView> {
   try {
     if (!key) return {}
     const data = JSON.parse(sessionStorage.getItem(`hcd-view-v1:${key}`) || '{}')
     if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
     const result: Partial<SavedView> = {}
-    for (const property of ['focused', 'wrapText', 'comparing', 'agentPanelOpen', 'stickerMotionPaused'] as const) if (typeof data[property] === 'boolean') result[property] = data[property]
+    for (const property of ['focused', 'wrapText', 'comparing', 'agentPanelOpen', 'stickerMotionPaused', 'ribbonExpanded'] as const) if (typeof data[property] === 'boolean') result[property] = data[property]
     if (data.selectedRevision === null || Number.isSafeInteger(data.selectedRevision) && data.selectedRevision >= 0) result.selectedRevision = data.selectedRevision
     if (['settings', 'revisions', 'properties', 'word-review', null].includes(data.rightPanel)) result.rightPanel = data.rightPanel
     if (['agents', 'settings', 'revisions', 'properties', 'word-review'].includes(data.lastRightPanel)) result.lastRightPanel = data.lastRightPanel
-    if (['home', 'insert', 'view', 'review', 'revisions', 'format', 'sheet', 'data', 'animation'].includes(data.activeTab)) result.activeTab = data.activeTab
+    if (['home', 'insert', 'view', 'review', 'revisions', 'format', 'sheet', 'data', 'animation', 'layout', 'references', 'formula', 'design', 'show', 'pages', 'ocr'].includes(data.activeTab)) result.activeTab = data.activeTab
     return result
   } catch { return {} }
 }
@@ -61,12 +62,13 @@ export function DocumentViewProvider({ storageKey, children }: { storageKey?: st
   const setAgentPanelOpen = useCallback<DocumentViewState['setAgentPanelOpen']>(value => dispatchPanel({ type: 'agents', value }), [])
   const closeRightPanel = useCallback(() => dispatchPanel({ type: 'close' }), [])
   const reopenRightPanel = useCallback(() => dispatchPanel({ type: 'reopen' }), [])
+  const [ribbonExpanded, setRibbonExpanded] = useState(saved.ribbonExpanded ?? false)
   const [activeTab, setActiveTab] = useState<EditorTab>(saved.activeTab ?? 'home')
   useEffect(() => {
     if (!storageKey) return
-    try { sessionStorage.setItem(`hcd-view-v1:${storageKey}`, JSON.stringify({ focused, wrapText, selectedRevision, comparing, rightPanel, agentPanelOpen, lastRightPanel, activeTab, stickerMotionPaused })) } catch { /* Storage is optional. */ }
-  }, [storageKey, focused, wrapText, selectedRevision, comparing, rightPanel, agentPanelOpen, lastRightPanel, activeTab, stickerMotionPaused])
-  return <ViewContext.Provider value={{ focused, setFocused, wrapText, setWrapText, selectedRevision, setSelectedRevision, comparing, setComparing, rightPanel, setRightPanel, agentPanelOpen, setAgentPanelOpen, lastRightPanel, closeRightPanel, reopenRightPanel, activeTab, setActiveTab, stickerMotionPaused, setStickerMotionPaused }}>{children}</ViewContext.Provider>
+    try { sessionStorage.setItem(`hcd-view-v1:${storageKey}`, JSON.stringify({ focused, wrapText, selectedRevision, comparing, rightPanel, agentPanelOpen, lastRightPanel, activeTab, ribbonExpanded, stickerMotionPaused })) } catch { /* Storage is optional. */ }
+  }, [storageKey, focused, wrapText, selectedRevision, comparing, rightPanel, agentPanelOpen, lastRightPanel, activeTab, ribbonExpanded, stickerMotionPaused])
+  return <ViewContext.Provider value={{ focused, setFocused, wrapText, setWrapText, selectedRevision, setSelectedRevision, comparing, setComparing, rightPanel, setRightPanel, agentPanelOpen, setAgentPanelOpen, lastRightPanel, closeRightPanel, reopenRightPanel, activeTab, setActiveTab, ribbonExpanded, setRibbonExpanded, stickerMotionPaused, setStickerMotionPaused }}>{children}</ViewContext.Provider>
 }
 
 export function useDocumentViewState() {

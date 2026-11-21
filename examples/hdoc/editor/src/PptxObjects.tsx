@@ -1,3 +1,4 @@
+import { RibbonButton } from './DocumentRibbon'
 import { Group, Move, Ungroup } from 'lucide-react'
 import { useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from 'react'
 import type { PptxGeometry } from './FixedViewer'
@@ -177,16 +178,16 @@ export function PptxArrange({ selected, mode, disabled, toggle, align, group, un
     }))
   }
   return <div className="tool-group">
-    <button type="button" aria-pressed={mode} disabled={disabled} onClick={toggle}><Move size={15} /><LocalText source="选择对象" /></button>
+    <RibbonButton icon={Move} label={localizeSource(locale, "选择对象")} aria-pressed={mode} disabled={disabled} onClick={toggle}/>
     {selected.length > 1 && <select aria-label={localizeSource(locale, '对象对齐')} value="" disabled={disabled}
       onChange={event => apply(event.currentTarget.value as Alignment)}>
       <option value="" disabled>{localizeSource(locale, '对象对齐')}</option>
       {alignments.map(([value, name]) => <option key={value} value={value}>{localizeSource(locale, name)}</option>)}
     </select>}
     {selected.length > 1 && selected.every(object => object.groupable) &&
-      <button type="button" disabled={disabled} onClick={group}><Group size={15}/><LocalText source="组合" /></button>}
+      <RibbonButton icon={Group} label={localizeSource(locale, "组合")} disabled={disabled} onClick={group}/>}
     {selected.length === 1 && selected[0].kind === 'group' &&
-      <button type="button" disabled={disabled || !selected[0].canUngroup} onClick={ungroup}><Ungroup size={15}/><LocalText source="取消组合" /></button>}
+      <RibbonButton icon={Ungroup} label={localizeSource(locale, "取消组合")} disabled={disabled || !selected[0].canUngroup} onClick={ungroup}/>}
   </div>
 }
 

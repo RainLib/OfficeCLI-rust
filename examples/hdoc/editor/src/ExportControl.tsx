@@ -103,7 +103,7 @@ export function ExportControl({ session, revision, beforeExport, activeSheetName
       const allowed = checked.formats.find(item => item.format === chosen.format)?.modes.find(item => item.id === chosen.mode)
       if (!allowed?.available) throw new Error(localizeSource(locale, reasonLabels[allowed?.reasonCode || ''] || '当前导出方式不可用，请重新选择。'))
       const filename = session.title || session.documentId
-      const response = await api(session, `/downloads/${chosen.format}?revision=${savedRevision}${chosenMode.source ? '&source=true' : ''}&filename=${encodeURIComponent(filename)}${parameters}`, { method: 'POST', signal: request.signal })
+      const response = await api(session, `/downloads/${chosen.format}?revision=${savedRevision}&source=${chosenMode.source}&filename=${encodeURIComponent(filename)}${parameters}`, { method: 'POST', signal: request.signal })
       const ticket = await response.json() as { url: string; filename: string; revision: number }
       if (request.signal.aborted) return
       if (latestRevision.current !== savedRevision || ticket.revision !== savedRevision) throw new Error(localizeSource(locale, '文档已更新，请重新准备导出。'))

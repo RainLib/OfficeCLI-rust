@@ -24,7 +24,7 @@ export async function verifyPptxInheritance(page, output, checks, { baseline = f
     await expect(title).toBeVisible()
   }
   async function command(name) {
-    if (!(await tool(name).isVisible())) await tool('展开更多命令').click()
+    if (!(await tool(name).isVisible())) await tool('展开功能区').click()
     await tool(name).click()
   }
   async function capture(name) {

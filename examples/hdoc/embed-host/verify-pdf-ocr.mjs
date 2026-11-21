@@ -35,7 +35,7 @@ export async function verifyPdfOcr(page, proof, checks) {
   const recognized = (i, mapping = 'ocr') => sheet(i).locator(`.hcd-pdf-text[data-hcd-mapping="${mapping}"]`)
   const findTool = async locator => {
     if(!(await locator.isVisible())) {
-      const more=tool('展开更多命令')
+      const more=tool('展开功能区')
       if(await more.isVisible()) await more.click()
     }
     await expect(locator).toBeVisible()

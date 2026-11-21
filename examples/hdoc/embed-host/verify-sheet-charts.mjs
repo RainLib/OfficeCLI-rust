@@ -111,7 +111,7 @@ export async function verifySheetCharts(page, output, checks) {
   await expect(overlay).toHaveCount(0);
   await expect.poll(async () => (await readCharts()).charts).toEqual([]);
   await button("开始").click();
-  await button("↶ 撤销").click();
+  await button("撤销").click();
   await expect(overlay.getByRole("img", { name: title })).toBeVisible();
   checks.push("The XLSX workbench creates a native chart from the actual grid selection, reflects a changed literal and dependent formula, exports and reopens the editable chart, and supports deletion and undo.");
 }

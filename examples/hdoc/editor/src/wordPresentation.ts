@@ -100,14 +100,18 @@ async function measure(projection: Projection, css: string, signal: AbortSignal)
   } finally { frame.remove() }
 }
 
-function decorate(doc: PmNode, styles: ParagraphStyles, only?: Set<string>): { decorations: Decoration[] } {
+function decorate(doc: PmNode, styles: ParagraphStyles, only?: Set<string>, refreshBlocks = false): { decorations: Decoration[] } {
   const decorations: Decoration[] = []
   doc.descendants((node, pos) => {
     const id = node.attrs.hcdBlockId as string | undefined
     const presentation = id && styles.get(id)
     if (!id || !presentation || node.type.name === 'hcdOpaque') return
+    if (only?.has(id) && !refreshBlocks) return false
+    // Source CSS supplies layout fidelity, while an explicit semantic alignment
+    // is the current editable value (including collaborative undo/redo).
+    const alignment = ['left', 'center', 'right', 'justify'].includes(node.attrs.hcdAlignment) ? `;text-align:${node.attrs.hcdAlignment}` : ''
+    decorations.push(Decoration.node(pos, pos + node.nodeSize, { style: presentation.style + alignment, 'data-word-presentation': 'true' }, { blockId: id, wordBlock: true }))
     if (only?.has(id)) return false
-    decorations.push(Decoration.node(pos, pos + node.nodeSize, { style: presentation.style, 'data-word-presentation': 'true' }, { blockId: id, wordBlock: true }))
     // A dirty local paragraph keeps mapped decorations; a late fetch must not
     // assign old run boundaries to unrelated draft text.
     if (node.textContent === presentation.text) for (const run of presentation.runs) {
@@ -161,8 +165,12 @@ export const wordPresentation = Extension.create({
           }
           const mapped = previous.decorations.map(transaction.mapping, transaction.doc)
           const existing = new Set<string>(mapped.find().filter(decoration=>decoration.spec.wordBlock).map(decoration => decoration.spec.blockId))
-          const added = decorate(transaction.doc, previous.styles, existing)
-          return { ...previous, decorations: mapped.add(transaction.doc, added.decorations) }
+          const current = decorate(transaction.doc, previous.styles, existing, true).decorations
+          // Rebuild block styles when attributes change; keep mapped run ranges
+          // for dirty local text so a style update cannot restore stale runs.
+          const retained = mapped.find().filter(decoration => !decoration.spec.wordBlock)
+          const updated = current.filter(decoration => decoration.spec.wordBlock || !existing.has(decoration.spec.blockId))
+          return { ...previous, decorations: DecorationSet.create(transaction.doc, [...retained, ...updated]) }
         },
       },
       view(view) {

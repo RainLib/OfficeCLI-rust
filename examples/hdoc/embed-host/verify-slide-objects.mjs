@@ -22,7 +22,7 @@ export async function verifySlideObjects(page, output, checks, { notesOnly = fal
   async function command(name) {
     const action = button(name);
     if (!(await action.isVisible())) {
-      const more = button("展开更多命令");
+      const more = button("展开功能区");
       if (await more.isVisible()) await more.click();
     }
     await action.click();

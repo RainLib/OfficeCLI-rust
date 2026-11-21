@@ -1,8 +1,8 @@
 import { SlideShow } from './SlideShow'
-import { ArrowDown, ArrowUp, Columns2, Copy, FilePlus2, ImagePlus, LayoutTemplate, Presentation, ScanText, Sparkles, TextCursorInput, Trash2 } from 'lucide-react'
+import { AlignLeft, AlignCenter, AlignRight, AlignJustify, AlignVerticalJustifyCenter, AlignStartVertical, AlignEndVertical, Bold, Italic, Underline, Check, ArrowDown, ArrowUp, Columns2, Copy, FilePlus2, ImagePlus, LayoutTemplate, Presentation, ScanText, Sparkles, TextCursorInput, Trash2 } from 'lucide-react'
 import { keepHistory } from './editHistory.ts'
 import { AppearanceSelect } from './Appearance.tsx'
-import { DocumentRibbon } from './DocumentRibbon'
+import { DocumentRibbon, RibbonButton, RibbonGroup } from './DocumentRibbon'
 import { DocumentPanelTools } from './DocumentPanelTools.tsx'
 import { WorkspacePanel } from './WorkspacePanel.tsx'
 import { WorkspaceDrawers } from './WorkspaceDrawers.tsx'
@@ -170,21 +170,20 @@ function PptxRunFormatBar({ node, disabled, onApply }: { node: TextNode; disable
   }, [node.nodeId, node.nodeHash, node.runFontSizePt, node.runColor])
   const parsedSize = Number(size)
   const sizeValid = Number.isFinite(parsedSize) && parsedSize >= 1 && parsedSize <= 256
-  return <div className="tool-group" aria-label={localizeSource(locale, "文字格式")}>
-    <button className={node.runBold ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runBold} onClick={() => onApply({ bold: !node.runBold })}><LocalText source={"加粗"} /></button>
-    <button className={node.runItalic ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runItalic} onClick={() => onApply({ italic: !node.runItalic })}><LocalText source={"斜体"} /></button>
-    <button className={node.runUnderline ? 'primary' : ''} disabled={disabled || !node.editable} aria-pressed={!!node.runUnderline} onClick={() => onApply({ underline: !node.runUnderline })}><LocalText source={"下划线"} /></button>
-    <label><LocalText source={"字号"} /><input aria-label={localizeSource(locale, "字号")} type="number" min="1" max="256" step="0.5" value={size} disabled={disabled || !node.editable} onChange={event => setSize(event.target.value)} style={{ width: 68 }} /></label>
-    <button disabled={disabled || !node.editable || !sizeValid || parsedSize === node.runFontSizePt} onClick={() => onApply({ fontSizePt: parsedSize })}><LocalText source={"应用字号"} /></button>
-    <label><LocalText source={"颜色"} /><input aria-label={localizeSource(locale, "文字颜色")} type="color" value={color} disabled={disabled || !node.editable} onChange={event => setColor(event.target.value)} /></label>
-    <button disabled={disabled || !node.editable || color.toLowerCase() === (node.runColor || '').toLowerCase()} onClick={() => onApply({ color })}><LocalText source={"应用颜色"} /></button>
+  return <div className="tool-group" aria-label={localizeSource(locale, '文字格式')}>
+    <RibbonButton icon={Bold} iconOnly label={localizeSource(locale, '加粗')} disabled={disabled || !node.editable} aria-pressed={!!node.runBold} onClick={() => onApply({ bold: !node.runBold })}/>
+    <RibbonButton icon={Italic} iconOnly label={localizeSource(locale, '斜体')} disabled={disabled || !node.editable} aria-pressed={!!node.runItalic} onClick={() => onApply({ italic: !node.runItalic })}/>
+    <RibbonButton icon={Underline} iconOnly label={localizeSource(locale, '下划线')} disabled={disabled || !node.editable} aria-pressed={!!node.runUnderline} onClick={() => onApply({ underline: !node.runUnderline })}/>
+    <input aria-label={localizeSource(locale, '字号')} title={localizeSource(locale, '字号')} type="number" min="1" max="256" step="0.5" value={size} disabled={disabled || !node.editable} onChange={event => setSize(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && sizeValid && !disabled) onApply({ fontSizePt: parsedSize }) }} style={{ width: 64 }}/>
+    <RibbonButton icon={Check} iconOnly label={localizeSource(locale, '应用字号')} disabled={disabled || !node.editable || !sizeValid || parsedSize === node.runFontSizePt} onClick={() => onApply({ fontSizePt: parsedSize })}/>
+    <input aria-label={localizeSource(locale, '文字颜色')} title={localizeSource(locale, '文字颜色')} type="color" value={color} disabled={disabled || !node.editable} onChange={event => setColor(event.target.value)}/>
+    <RibbonButton icon={Check} iconOnly label={localizeSource(locale, '应用颜色')} disabled={disabled || !node.editable || color.toLowerCase() === (node.runColor || '').toLowerCase()} onClick={() => onApply({ color })}/>
   </div>
 }
 
 function PptxShapeAlignBar({ node, disabled, onApply }: { node: TextNode; disabled: boolean; onApply: (align: PptxShapeAlign) => void }) {
   const { locale } = useI18n()
-  // The whole box moves, so the button that already reads this value is greyed out
-  // rather than left to be refused by the patch.
+  // These controls format text inside the box. Object positioning is separate.
   const keys: Array<{ axis: 'horizontal' | 'vertical'; value: string; label: string }> = [
     { axis: 'horizontal', value: 'left', label: '左对齐' },
     { axis: 'horizontal', value: 'center', label: '居中' },
@@ -197,12 +196,13 @@ function PptxShapeAlignBar({ node, disabled, onApply }: { node: TextNode; disabl
   ]
   const active = (key: { axis: 'horizontal' | 'vertical'; value: string }) =>
     (key.axis === 'horizontal' ? node.shapeHorizontal : node.shapeVertical) === key.value
+  const icons = [AlignLeft, AlignCenter, AlignRight, AlignJustify, AlignJustify, AlignStartVertical, AlignVerticalJustifyCenter, AlignEndVertical]
   return <div className="tool-group" aria-label={localizeSource(locale, '形状对齐')}>
-    {keys.map(key => <button key={`${key.axis}-${key.value}`} className={active(key) ? 'primary' : ''}
+    {keys.map((key, index) => <RibbonButton key={`${key.axis}-${key.value}`} icon={icons[index]} iconOnly label={localizeSource(locale, key.label)}
       disabled={disabled || !node.editable || active(key)} aria-pressed={active(key)}
       onClick={() => onApply(key.axis === 'horizontal'
         ? { horizontal: key.value as PptxHorizontalAlign }
-        : { vertical: key.value as PptxVerticalAlign })}><LocalText source={key.label} /></button>)}
+        : { vertical: key.value as PptxVerticalAlign })}/>) }
   </div>
 }
 
@@ -1558,11 +1558,11 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       <section className="content-shell" aria-label={localizeSource(locale, '文档内容')}>
         {!focused && <ContentToolbar actions={play} fileMenu={session.integratedToolbar ? fileHeader : undefined} onSearch={() => setSearchOpen(true)} activeTab={activeTab} onTab={tab => { setPlacingText(false); setActiveTab(tab); if (session.integratedToolbar && !layout.showToolbar) setLayoutOption('showToolbar', true); if (tab === 'revisions') { setPanelOpen(false); showRightPanel('revisions') } }} expanded={layout.showToolbar} onToggle={() => setLayoutOption('showToolbar', !layout.showToolbar)} readOnly={readOnly || !!historical} format={session.format} />}
     {layout.showToolbar && !focused && (!readOnly && !historical || activeTab === 'view') && <DocumentRibbon key={activeTab} adaptive={!!session.integratedToolbar} label={localizeSource(locale, "编辑工具栏")}>
-      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div>{session.format === 'pptx' && selected && <PptxRunFormatBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={format => void saveRunFormat(selected.node, format)} />}{session.format === 'pptx' && selected && <PptxShapeAlignBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={align => void saveShapeAlign(selected.node, align)} />}{session.format === 'pptx' && <>
-        <PptxArrange selected={objectsPicked?.objects ?? []} mode={objectMode} disabled={slideBusy}
+      {activeTab === 'home' && <><div className="tool-group"><button title={localizeSource(locale, "撤销（⌘/Ctrl+Z）")} disabled={historyLocked || !(canUndoDraft || canUndoSaved)} onClick={() => travel('undo')}><LocalText source={"↶ 撤销"} /></button><button title={localizeSource(locale, "重做（⌘/Ctrl+Shift+Z 或 Ctrl+Y）")} disabled={historyLocked || !(canRedoDraft || canRedoSaved)} onClick={() => travel('redo')}><LocalText source={"↷ 重做"} /></button></div>{session.format === 'pptx' && selected && <RibbonGroup label="字体" priority={0}><PptxRunFormatBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={format => void saveRunFormat(selected.node, format)} /></RibbonGroup>}{session.format === 'pptx' && selected && <RibbonGroup label="文字对齐" priority={0}><PptxShapeAlignBar node={selected.node} disabled={readOnly || historical || saving || historyBusy || draft !== selected.node.text} onApply={align => void saveShapeAlign(selected.node, align)} /></RibbonGroup>}{session.format === 'pptx' && <>
+        <RibbonGroup label="对象排列" priority={1}><PptxArrange selected={objectsPicked?.objects ?? []} mode={objectMode} disabled={slideBusy}
           toggle={() => { setObjectMode(!objectMode); if (objectMode) setObjectsPicked(null) }}
           group={() => void changeSlideGroup(true)} ungroup={() => void changeSlideGroup(false)}
-          align={moves => { if (objectsPicked) void moveSlideObjects(objectsPicked.chunkId, moves) }} />
+          align={moves => { if (objectsPicked) void moveSlideObjects(objectsPicked.chunkId, moves) }} /></RibbonGroup>
         <div className="tool-group slide-command-group">
           <button disabled={slideBusy} onClick={()=>void addSlide()}><FilePlus2/><LocalText source="新增幻灯片"/></button>
           <button disabled={slideBusy} onClick={()=>void duplicateSlide(currentSlide.chunkId)}><Copy/><LocalText source="复制本页"/></button>
@@ -1594,7 +1594,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
       {activeTab === 'animation' && session.format === 'pptx' && <div className="tool-group">
         <button disabled={slideBusy} onClick={() => void openSlideAnimations()}><Sparkles size={16} /><LocalText source="编辑本页动画" /></button>
       </div>}
-      {activeTab === 'view' && session.format === 'pdf' && !readOnly && !historical && <div className="tool-group pdf-page-organizer" role="group" aria-label={localizeSource(locale, '页面组织')}>
+      {(activeTab === 'view' || activeTab === 'pages') && session.format === 'pdf' && !readOnly && !historical && <div className="tool-group pdf-page-organizer" role="group" aria-label={localizeSource(locale, '页面组织')}>
         <label><LocalText source="页面组织" /> <input type="number" min="1" max={activePdfLayout?.pageCount} value={pdfPageInput}
           aria-label={localizeSource(locale, '要调整的页码')} onChange={event => setPdfPageInput(event.target.value)} /></label>
         <button disabled={organizationLocked || controlledPage <= 1} onClick={() => void organizePdfPage({ kind: 'move', step: -1 })}><LocalText source="上移一页" /></button>
@@ -1604,7 +1604,7 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
         <button disabled={organizationLocked || (activePdfLayout?.pageCount ?? 0) >= 100000} onClick={() => void organizePdfPage({ kind: 'insert' })}><LocalText source="在后面插入空白页" /></button>
         <button disabled={organizationLocked || (activePdfLayout?.pageCount ?? 0) <= 1} onClick={() => void organizePdfPage({ kind: 'delete' })}><LocalText source="删除本页" /></button>
       </div>}
-      {activeTab === 'view' && session.format === 'pdf' && !readOnly && !historical && <div className="tool-group">
+      {(activeTab === 'view' || activeTab === 'ocr') && session.format === 'pdf' && !readOnly && !historical && <div className="tool-group">
         <button disabled={!manifest || saving || historyBusy || organizing} onClick={() => void openPdfOcr()}>
           <ScanText size={16} /><LocalText source="识别扫描文字" />
         </button>
@@ -1617,6 +1617,16 @@ export function FixedViewer({ session, onClose, embedded }: { session: Session; 
         {session.format==='pptx' && !readOnly && <button disabled={slideBusy} onClick={() => void openSlideMaster()}><LayoutTemplate size={16} /><LocalText source="幻灯片母版" /></button>}
         {session.integratedToolbar && session.format==='pptx' && <button aria-pressed={rightPanel==='properties'} onClick={() => rightPanel==='properties' ? setRightPanel(null) : showRightPanel('properties')}><LocalText source="形状属性" /></button>}
         <button className="right-sidebar-toggle" aria-pressed={rightPanel==='settings'} onClick={() => rightPanel==='settings' ? setRightPanel(null) : showRightPanel('settings')}><LocalText source="界面设置" /></button></>}
+      {activeTab === 'design' && session.format === 'pptx' && <RibbonGroup label="母版与版式" priority={0}>
+        <button disabled={slideBusy} onClick={() => void openSlideMaster()}><LocalText source="幻灯片母版"/></button>
+        <button disabled={slideBusy} onClick={() => void insertSlideLayout(false)}><LocalText source="标题与正文"/></button>
+        <button disabled={slideBusy} onClick={() => void insertSlideLayout(true)}><LocalText source="双栏内容"/></button>
+      </RibbonGroup>}
+      {activeTab === 'show' && session.format === 'pptx' && <RibbonGroup label="幻灯片放映" priority={0}>{play}</RibbonGroup>}
+      {activeTab === 'review' && session.format === 'pptx' && <RibbonGroup label="演讲者备注" priority={0}>
+        <button aria-pressed={notesOpen} disabled={!currentSlide || saving || historyBusy} onClick={() => void (async () => { if (await saveBeforeExport() !== null) { setSelected(null); setNotesOpen(open => !open) } })()}><LocalText source="演讲者备注"/></button>
+        <button onClick={() => showRightPanel('revisions')}><LocalText source="查看修订历史"/></button>
+      </RibbonGroup>}
       {activeTab === 'revisions' && <><button onClick={() => showRightPanel('revisions')}><LocalText source={"查看修订历史"} /></button><button disabled={historyLocked || !canUndoSaved} onClick={() => travel('undo')}><LocalText source={"撤销 "} />{editHistory.past.length} <LocalText source={" 步"} /></button><button disabled={historyLocked || !canRedoSaved} onClick={() => travel('redo')}><LocalText source={"重做 "} />{editHistory.future.length} <LocalText source={" 步"} /></button><span className="ribbon-note"><LocalText source={"当前版本 r"} />{manifest?.revision ?? '…'} · {editHistory.past.length ? `下一步可撤销：${editHistory.past.at(-1)?.label}` : '当前会话无已保存的可撤销步骤'}</span></>}
       {selected && !readOnly && !historical && <label className="tool-group font-group" title={localizeSource(locale, themeFonts.length ? '把选中文字改成钉住主题的字体' : '文档没有钉住主题字体，先在管理后台钉住主题')}><LocalText source={"字体"} /><select value={selectedFamily ?? ''} disabled={saving || historyBusy || !selected.node.editable || themeFonts.length === 0} onChange={event => {
         const option = themeFonts.find(item => item.family === event.target.value)
