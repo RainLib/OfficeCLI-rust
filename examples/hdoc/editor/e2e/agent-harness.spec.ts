@@ -1659,7 +1659,9 @@ async function openWorkflowTabs(page:Page, ids:string[], active:string, options:
   await expect(page.locator(`.document-tab-panel[data-document-id="${active}"] .hcd-editor-body`)).toBeVisible()
 }
 async function openWorkflowPanel(page:Page,id:string) {
+  await expect(page.locator('[data-workspace-restoring]')).toHaveAttribute('data-workspace-restoring','false')
   const document=page.locator(`.document-tab-panel[data-document-id="${id}"]`),drawer=document.locator('.agent-activity-panel')
+  await expect(document.locator('.hcd-editor-body')).toBeVisible()
   if(!await drawer.isVisible())await document.locator('.collaboration-trigger').click()
   await drawer.getByRole('button',{name:'多文档工作流',exact:true}).click()
   const panel=drawer.getByRole('region',{name:'多文档工作流',exact:true})
