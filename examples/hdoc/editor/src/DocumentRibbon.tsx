@@ -32,7 +32,7 @@ type Descriptor = { label: string; icon: LucideIcon; group: string; priority: nu
 function describe(source: string): Descriptor {
   const label = source.replace(/^[↶↷𝐁𝑰＋+\s]+/u, '').trim()
   const result = (icon: LucideIcon, group: string, priority = 1, short = false) => ({ label, icon, group, priority, short })
-  if (/撤销|重做/.test(label)) return result(/重做/.test(label) ? Redo2 : Undo2, '撤销与重做', 2, true)
+  if (/撤销|重做/.test(label)) return result(/重做/.test(label) ? Redo2 : Undo2, '撤销与重做', -1, true)
   if (/^应用(字号|颜色|填充|数字格式)$/.test(label)) return result(Check, /填充/.test(label) ? '单元格外观' : /数字/.test(label) ? '数字' : '字体', 0, true)
   if (/字号|文字颜色|应用颜色|^颜色|^字体|主题字体/.test(label)) return result(Type, '字体', 0)
   if (/加粗|斜体|下划线|删除线/.test(label)) return result(/加粗/.test(label) ? Bold : /斜体/.test(label) ? Italic : /删除线/.test(label) ? Strikethrough : Underline, '字体', 0, true)
