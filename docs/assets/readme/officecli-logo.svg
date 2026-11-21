@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="350" height="76" viewBox="0 0 350 76" role="img" aria-labelledby="title desc">
+  <title id="title">OfficeCLI · 折页</title>
+  <desc id="desc">The folded-page mark used by the OfficeCLI collaborative workspace.</desc>
+  <rect x="1" y="6" width="64" height="64" rx="18" fill="#242B2F"/>
+  <path d="M13 48 27.4 23.6c1.2-2 2.2-2.8 4-2.8h19L35 48Z" fill="#FAFCFB"/>
+  <path d="m30 53.4 16.6-27.6 6.2 10.2-10 17.4Z" fill="#A8CFC1"/>
+  <text x="84" y="48" fill="#242B2F" font-family="Inter,Arial,Helvetica,sans-serif" font-size="37" font-weight="700" letter-spacing="-1.2">OfficeCLI</text>
+  <path d="M259 24v29" stroke="#D8E0DC" stroke-width="1.5"/>
+  <text x="276" y="46" fill="#537069" font-family="PingFang SC,Microsoft YaHei,Arial,sans-serif" font-size="25" font-weight="600">折页</text>
+</svg>
