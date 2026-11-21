@@ -652,18 +652,19 @@ print('Native cover paragraph layout, 24pt blue runs, explicit bold/normal and u
     return {doc:element.contentDocument===before.doc,anchor:before.anchor.isConnected,loads:before.loads}
   })).toEqual({doc:true,anchor:true,loads:0})
   await viewport.evaluate(element=>{element.scrollTop=0})
-  // An independent reader cannot see the writer's uncommitted local draft.
+  // Readers receive live Yjs edits before the canonical save point advances.
   await expect(editor).toContainText('MARK_WORD_RICH')
   expect(await editorHandle!.evaluate(element=>element===document.querySelector('[data-document-id="harness-rich-docx"] .hcd-editor-body'))).toBe(true)
   const title=editor.locator(':scope > p').first()
   await title.click()
   await title.evaluate(element=>{const range=document.createRange();range.selectNodeContents(element);range.collapse(false);const selection=window.getSelection()!;selection.removeAllRanges();selection.addRange(range)})
-  await page.keyboard.press(process.platform==='darwin'?'Meta+b':'Control+b');await page.keyboard.insertText(' 中文😀')
   const beforeDraft=(await json(id,'')).revision
+  await page.keyboard.press(process.platform==='darwin'?'Meta+b':'Control+b');await page.keyboard.insertText(' 中文😀')
   await expect(editor).toContainText('中文😀')
-  await expect(target).not.toContainText('中文😀')
+  await expect(target).toContainText('中文😀')
   expect(await metrics()).toEqual(baseline)
   expect((await json(id,'')).revision).toBe(beforeDraft)
+  expect(JSON.stringify((await json(id,`/editor?revision=${beforeDraft}`)).blocks[0].content)).not.toContain('中文😀')
   await page.screenshot({path:info.outputPath('word-cover-local-draft.png')})
   await active.getByRole('button',{name:'保存点',exact:true}).click()
   await expect.poll(async()=>JSON.stringify((await json(id,'/editor')).blocks[0].content)).toContain('中文😀')
