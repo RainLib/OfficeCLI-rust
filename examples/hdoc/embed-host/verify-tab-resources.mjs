@@ -80,6 +80,7 @@ export async function verifyTabResources(page, checks) {
   const files = await page.evaluate(async () => (await (await fetch('/workspace/api/files')).json()).files)
   const id = name => files.find(f => f.name === name).resourceDocumentId
   const wordDraft = '保留这一段的修改要求', sheetDraft = '核对这四个单元格', boardDraft = '整理这张引用卡'
+  if (await page.getByRole('tab',{name:board,exact:true}).count()) await close(board)
   await open(doc)
   const paragraph = pane.locator('.tiptap p').filter({hasText:'可以验证的假设'}).first()
   const selectParagraph = async () => {
@@ -104,10 +105,27 @@ export async function verifyTabResources(page, checks) {
   await expect(scope(doc)).toContainText('正文')
   await target(doc).check()
   await prompt.fill(wordDraft)
-  await open(board)
+  const snapshotRoute = '**/v1/documents/' + id(board) + '/canvas'
+  let releaseSnapshot
+  const snapshotGate = new Promise(resolve => { releaseSnapshot = resolve })
+  const delaySnapshot = async route => { await snapshotGate; await route.continue() }
+  await page.route(snapshotRoute, delaySnapshot)
+  try {
+    await open(board)
+    const insertResource = pane.getByRole('button',{name:'插入资源',exact:true})
+    await expect(insertResource).toBeDisabled()
+    releaseSnapshot()
+    await expect(insertResource).toBeEnabled({timeout:45000})
+  } finally {
+    releaseSnapshot()
+    await page.unroute(snapshotRoute, delaySnapshot)
+  }
+  checks.push('Resource insertion stays disabled while the real board snapshot is delayed, then becomes available after the canvas initializes.')
   await expect(pane.getByRole('button',{name:'插入资源',exact:true})).toBeVisible({timeout:45000})
   async function insert(name, range, presentation) {
-    await pane.getByRole('button',{name:'插入资源',exact:true}).click()
+    const insertResource = pane.getByRole('button',{name:'插入资源',exact:true})
+    await expect(insertResource).toBeEnabled({timeout:45000})
+    await insertResource.click()
     const dialog = page.getByRole('dialog',{name:'插入资源引用'})
     await dialog.getByLabel('引用源文件').selectOption(id(name))
     if (range) {

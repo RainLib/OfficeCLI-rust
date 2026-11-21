@@ -108,6 +108,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
   const { theme } = useAppearance()
   const [state, setState] = useState<CanvasConnectionState | null>(null)
   const [editor, setEditor] = useState<ExcalidrawImperativeAPI | null>(null)
+  const resourceInsertReady = !!editor && !!state?.ready && !!state.snapshot
   const stampCache = useMemo<StampPaintCache>(() => new Map(), [editor])
   const [stampPaint, setStampPaint] = useState(0)
   const [editingMind, setEditingMind] = useState<string | null>(null)
@@ -636,11 +637,13 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     } catch (error) { setNotice(String(error)) }
   }
   const insertReference = async (reference: ResourceReference, size:{width:number;height:number}) => {
-    if (!editor || !connection.current) throw new Error('画布尚未就绪。')
-    await flush()
-    const client = connection.current, snapshot = client.state.snapshot
+    const canvas = nativeEditor.current, client = connection.current
+    if (!canvas || !client || !client.state.ready) throw new Error('画布尚未就绪。')
+    await client.flush()
+    if (connection.current !== client || nativeEditor.current !== canvas) throw new Error('画布已切换，请重新放置。')
+    const snapshot = client.state.snapshot
     if (!snapshot) throw Error('画布尚未就绪。')
-    const app = editor.getAppState(), id = `resource-${crypto.randomUUID()}`
+    const app = canvas.getAppState(), id = `resource-${crypto.randomUUID()}`
     const box = {x:-app.scrollX+(app.width/app.zoom.value-size.width)/2, y:-app.scrollY+(app.height/app.zoom.value-size.height)/2,...size}
     // Move only the new card. Adjacent cards share a baseline and a 32-unit gutter.
     for (const e of snapshot.scene.elements.filter(e => !e.isDeleted).sort((a,b) => a.x - b.x)) {
@@ -654,8 +657,8 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
       patchId: id, vacantRegions: [box], operations: elements.map(element => ({ op: 'element.add', element: element as unknown as CanvasElement }))}, snapshot.collaborationEpoch)
     // The connection projects the committed scene, including fitted reference heights.
     // Selecting a new card must not reinstall older geometry over that projection.
-    editor.updateScene({ appState: { selectedElementIds: { [id]: true } }, captureUpdate: CaptureUpdateAction.NEVER })
-    editor.scrollToContent(elements, {animate: false})
+    canvas.updateScene({ appState: { selectedElementIds: { [id]: true } }, captureUpdate: CaptureUpdateAction.NEVER })
+    canvas.scrollToContent(elements, {animate: false})
   }
   const ask = () => {
     setFocused(false)
@@ -791,7 +794,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     <header className="editor-header canvas-header">
       {!fill && <div className="document-identity"><button className="icon-button back-library" aria-label="返回文档库" title="返回文档库" onClick={onClose}><ArrowLeft size={18} /></button><div className="document-title"><strong title={session.title || session.documentId}>{session.title || session.documentId}</strong><small>工作空间 / 自由画布 · r{state?.snapshot?.revision ?? '…'}</small></div><span className="status" role="status"><Check size={13} />{state?.status || '正在打开画布'}</span></div>}
       <div className="header-actions">{fill && draftRecovery}<details ref={peopleMenu} className="board-people"><summary aria-label="查看在线协作者"><span className="canvas-connection" data-connected={state?.connected} data-paused={stickerMotionPaused}>{avatar && <span className="canvas-self-avatar" data-avatar={avatar} aria-label="我的协作头像"><StickerIllustration motif={avatar} motion="auto"/></span>}{[...peers].filter(([,peer])=>isAvatar(peer.avatar)).slice(0,3).map(([id,peer])=><span key={id} className="canvas-self-avatar" title={peer.name || '协作者'} data-peer-avatar={peer.avatar}><StickerIllustration motif={peer.avatar!} motion="auto"/></span>)}<i />{state?.connected ? '实时协作已连接' : '正在连接协作'}<small>{peers.size + 1-agentsHere} 人{agentsHere>0 ? ' · '+agentsHere+' Agent' : ''}</small></span></summary><div className="board-people-list"><strong>在线协作者</strong><span>{session.displayName||session.userId||'我'} · 我</span>{[...peers].map(([id,peer])=><button key={id} disabled={!peer.viewport} aria-label={'跟随 '+peer.name} onClick={()=>follow(following===id?'':id)}>{peer.name||'协作者'}<small>{following===id?'返回我的视图':peer.actorKind==='agent'?'Agent':'跟随'}</small></button>)}</div></details><ShareControl /><AppearanceSelect />
-        {resourceWorkspace && session.scope === 'write' && <button className="canvas-resource-insert" onClick={() => setResourcePicker(true)}><Plus size={16} />插入资源</button>}
+        {resourceWorkspace && session.scope === 'write' && <button className="canvas-resource-insert" disabled={!resourceInsertReady} onClick={() => setResourcePicker(true)}><Plus size={16} />插入资源</button>}
         {session.scope === 'write' && permits(session, 'document.edit') && <button className="canvas-resource-insert" aria-label={session.hideNativeChat ? '画布排版' : 'AI 创作'} title={session.hideNativeChat ? '画布排版' : 'AI 创作'} disabled={!state?.ready || state.pending} onClick={() => setComposeOpen(true)}><Sparkles size={16} /><span>{session.hideNativeChat ? '画布排版' : 'AI 创作'}</span></button>}
         {session.scope === 'write' && <button className="icon-button canvas-save" aria-label="保存画布" title="保存画布" onClick={() => void flush().catch(error => setNotice(String(error)))}><Save size={17} /></button>}
         <HostPublicationControl session={session} revision={state?.snapshot?.revision ?? null} beforeSave={flush} />
@@ -895,6 +898,7 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
 
       {exportIds && <BoardDocumentTransfer owner={session} ids={exportIds} onClose={() => setExportIds(null)} />}
       {(resourcePicker || hostWorkspace?.placement?.boardId === session.documentId) && <ResourcePicker owner={session}
+        disabled={!resourceInsertReady}
         preset={hostWorkspace?.placement?.boardId === session.documentId ? hostWorkspace.placement.source : undefined}
         onInsert={insertReference} onClose={() => { setResourcePicker(false); if (hostWorkspace?.placement?.boardId === session.documentId) hostWorkspace.finishPlacement() }} />}
       {composeOpen && <CanvasComposePanel aiAllowed={aiAllowed} scoped={!!regionSelection} motionPaused={stickerMotionPaused} onAppend={appendComposition} onAsk={askComposition} onClose={() => setComposeOpen(false)} />}

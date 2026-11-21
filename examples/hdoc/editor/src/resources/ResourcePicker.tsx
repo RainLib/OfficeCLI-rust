@@ -7,7 +7,7 @@ import { useWorkflowWorkspace } from '../WorkflowWorkspace.tsx'
 import { useResourceWorkspace } from './ResourceWorkspace.tsx'
 import { RESOURCE_SCHEMA, sameResourceWorkspace, sheetResource, textResource, columnName, parseRange, rangeAnchors, readSheet, resourceService, sheetChoices, sheetPresentations, type ResourceReference, type SheetPresentation } from './resourceReference.ts'
 
-export function ResourcePicker({ owner, preset, onInsert, onClose }: { owner: Session; preset?: ResourcePreset; onInsert: (ref: ResourceReference, size:{width:number;height:number}) => Promise<void>; onClose: () => void }) {
+export function ResourcePicker({ owner, preset, disabled = false, onInsert, onClose }: { owner: Session; preset?: ResourcePreset; disabled?: boolean; onInsert: (ref: ResourceReference, size:{width:number;height:number}) => Promise<void>; onClose: () => void }) {
   const workspace = useResourceWorkspace(), workflow = useWorkflowWorkspace()
   const group = useEmbeddedWorkspace()
   const open = workspace?.sessions.filter(s => sameResourceWorkspace(s, owner)) || []
@@ -65,7 +65,7 @@ export function ResourcePicker({ owner, preset, onInsert, onClose }: { owner: Se
     return () => { controller.abort(); lifetime.current++ }
   }, [id, mounted, resolve, owner.documentId, owner.userId, owner.serviceId, preset])
   async function insert() {
-    if (!source || busy) return
+    if (!source || busy || disabled) return
     setBusy(true); setError('')
     try {
       if (mounted?.scope === 'write') await prepare.current?.([mounted])
@@ -98,7 +98,7 @@ export function ResourcePicker({ owner, preset, onInsert, onClose }: { owner: Se
         <small>最多 200 个单元格。表格和图表会跟随源单元格更新及移位。</small>
       </> : <label>引用内容<select aria-label="引用段落" value={blockId} disabled={busy} onChange={e => setBlockId(e.target.value)}><option value="">整份文档摘要</option>{blocks.map((block, i) => <option key={block.blockId} value={block.blockId}>{i + 1}. {block.content.inlines.map(t => t.text).join('').slice(0, 70) || '内容块'}</option>)}</select></label>}
       {error && <p role="alert" className="resource-error">{error}</p>}
-      <footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button type="button" className="resource-primary" disabled={loading || busy || !loaded || !source || sheetResource(source.format) && !sheetId} onClick={() => void insert()}>{sheetResource(source?.format || '') ? <Table2 size={15} /> : <FileText size={15} />}{busy ? '正在插入…' : '插入白板'}</button></footer>
+      <footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button type="button" className="resource-primary" disabled={disabled || loading || busy || !loaded || !source || sheetResource(source.format) && !sheetId} onClick={() => void insert()}>{sheetResource(source?.format || '') ? <Table2 size={15} /> : <FileText size={15} />}{busy ? '正在插入…' : '插入白板'}</button></footer>
     </>}
   </section></div>
 }
