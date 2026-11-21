@@ -1277,6 +1277,71 @@ fn font_operation(entry: &Value, font: Value) -> Value {
 }
 
 #[test]
+fn edited_word_exports_to_text_formats_and_reopens_without_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("word-source.docx");
+    let bundle = temp.path().join("word-bundle");
+    officecli()
+        .args(["create", source.to_string_lossy().as_ref()])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            source.to_string_lossy().as_ref(),
+            "/body/p[1]",
+            "text=Secret 123 中文😀",
+        ])
+        .assert()
+        .success();
+    let extracted = import_and_extract(&source, &bundle, "word-text-export");
+    let entry = extracted["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "Secret 123 中文😀")
+        .unwrap();
+    apply_text_patch(
+        temp.path(),
+        &bundle,
+        "word-text-export",
+        entry,
+        7,
+        3,
+        "done",
+    );
+    std::fs::remove_file(&source).unwrap();
+
+    for extension in ["md", "txt"] {
+        let output = temp.path().join(format!("word-output.{extension}"));
+        officecli()
+            .args([
+                "hdoc",
+                "export",
+                bundle.to_string_lossy().as_ref(),
+                "--output",
+                output.to_string_lossy().as_ref(),
+                "--revision",
+                "1",
+                "--json",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(r#""level": "SEMANTIC""#));
+        let text = std::fs::read_to_string(&output).unwrap();
+        assert!(text.contains("Secret done 中文😀"));
+        assert!(!text.contains("Secret 123"));
+        let reopened = temp.path().join(format!("readback-{extension}"));
+        let readback = import_and_extract(&output, &reopened, "word-text-readback");
+        assert!(readback["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["text"] == "Secret done 中文😀"));
+    }
+}
+
+#[test]
 fn pinned_block_fonts_reach_semantic_docx_and_pptx_exports() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("font-source.html");

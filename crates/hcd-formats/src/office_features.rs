@@ -867,15 +867,15 @@ pub fn apply_office_features(
     revision: Option<u64>,
 ) -> Result<(), HcdError> {
     let (manifest, _) = manifest_at_revision(bundle, &bundle.manifest()?, revision)?;
-    let state = hcd_core::office_features::read(bundle, &manifest)?;
-    if state.is_empty() && !(manifest.source.format == "docx" && has_managed_toc(target)?) {
-        return Ok(());
-    }
     let suffix = target
         .extension()
         .and_then(|v| v.to_str())
         .unwrap_or_default();
     if !suffix.eq_ignore_ascii_case(&manifest.source.format) {
+        return Ok(());
+    }
+    let state = hcd_core::office_features::read(bundle, &manifest)?;
+    if state.is_empty() && !(manifest.source.format == "docx" && has_managed_toc(target)?) {
         return Ok(());
     }
     let mut package = OxmlPackage::open(

@@ -26,7 +26,8 @@ binary = str(args.binary.resolve())
 
 def cli(*argv):
     result = subprocess.run([binary, 'hdoc', *map(str, argv), '--json'],
-                            cwd=REPO, capture_output=True, text=True, check=True)
+                            cwd=REPO, capture_output=True, text=True)
+    assert result.returncode == 0, (result.args, result.stdout, result.stderr)
     envelope = json.loads(result.stdout)
     assert envelope['success'], envelope
     return envelope['data']
