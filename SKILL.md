@@ -13,10 +13,10 @@ If `officecli` is not installed:
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/RainLib/Foldly/main/install.sh | bash
 
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/RainLib/Foldly/main/install.ps1 | iex
 ```
 
 Verify with `officecli --version`. If still not found after install, open a new terminal.

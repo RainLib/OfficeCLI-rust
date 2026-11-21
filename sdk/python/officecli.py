@@ -34,7 +34,7 @@ import subprocess
 _IS_WIN = sys.platform.startswith("win")
 _builtin_open = open  # preserved; this module defines its own open()
 
-_INSTALL_URL = "https://raw.githubusercontent.com/RainLib/OfficeCli-rust/refs/heads/main/install.sh"
+_INSTALL_URL = "https://raw.githubusercontent.com/RainLib/Foldly/refs/heads/main/install.sh"
 _MISSING_CLI = (
     "officecli CLI not found: {bin!r} is not on PATH nor in the default install "
     "location (~/.local/bin). This SDK only forwards commands to the officecli "
@@ -297,7 +297,7 @@ def install():
     if _IS_WIN:
         raise OfficeCliError(1,
             "Automatic install isn't supported on Windows. "
-            "Download officecli from https://github.com/RainLib/OfficeCli-rust/releases "
+            "Download officecli from https://github.com/RainLib/Foldly/releases "
             "and put it on PATH.")
     print(f"Installing officecli via {_INSTALL_URL} ...", file=sys.stderr)
     r = subprocess.run(["bash", "-c", f"curl -fsSL {_INSTALL_URL} | bash"])

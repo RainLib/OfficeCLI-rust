@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme/officecli-logo.svg" width="280" alt="OfficeCLI · 折页" />
+  <img src="docs/assets/readme/foldly-logo.svg" width="280" alt="Foldly · 折页" />
 </p>
 
 <h1 align="center">Documents for teams. Tools for agents.</h1>
@@ -14,11 +14,11 @@
 
 <p align="center"><b>English</b> · <a href="README_zh.md">中文</a> · <a href="README_ja.md">日本語</a> · <a href="README_ko.md">한국어</a></p>
 
-![OfficeCLI connects documents, worksheets, slides and whiteboards](docs/assets/readme/officecli-banner.svg)
+![Foldly connects documents, worksheets, slides and whiteboards](docs/assets/readme/foldly-banner.svg)
 
-**OfficeCLI brings documents, spreadsheets, presentations and whiteboards into one workspace.** Open several files, work with teammates, and let a global AI assistant operate on the files and selections you choose. Embed an editor in your own product, or connect an external agent through MCP without showing a chat panel.
+**Foldly brings documents, spreadsheets, presentations and whiteboards into one workspace.** Open several files, work with teammates, and let a global AI assistant operate on the files and selections you choose. Embed an editor in your own product, or connect an external agent through MCP without showing a chat panel.
 
-The same project also provides a native Rust CLI for reading, creating, editing and exporting files from scripts, developer tools and agent workflows.
+Its Rust document engine is exposed through the `officecli` command for reading, creating, editing and exporting files from scripts, developer tools and agent workflows.
 
 [Try the workspace](#run-the-workspace) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
 
@@ -251,4 +251,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and validation requirements. 
 
 ## License and acknowledgements
 
-[Apache License 2.0](LICENSE). OfficeCLI's command model originated in [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI). This repository develops a Rust engine and collaborative workspace, using projects including Excalidraw, Yjs, Tiptap and Univer under their respective licenses.
+[Apache License 2.0](LICENSE). The `officecli` command model originated in [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI). This repository develops a Rust engine and collaborative workspace, using projects including Excalidraw, Yjs, Tiptap and Univer under their respective licenses.

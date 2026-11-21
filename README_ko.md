@@ -1,12 +1,12 @@
-<p align="center"><img src="docs/assets/readme/officecli-logo.svg" width="280" alt="OfficeCLI · 折页" /></p>
+<p align="center"><img src="docs/assets/readme/foldly-logo.svg" width="280" alt="Foldly · 折页" /></p>
 
 <h1 align="center">사람과 AI가 같은 파일에서 함께 작업합니다.</h1>
 
 <p align="center"><a href="README.md">English</a> · <a href="README_zh.md">中文</a> · <a href="README_ja.md">日本語</a> · <b>한국어</b></p>
 
-![OfficeCLI collaborative workspace](docs/assets/readme/officecli-banner.svg)
+![Foldly collaborative workspace](docs/assets/readme/foldly-banner.svg)
 
-**OfficeCLI는 문서, 스프레드시트, 프레젠테이션과 화이트보드를 하나로 연결하는 협업 작업 공간입니다.** 여러 파일을 탭으로 열고, 사람과 AI가 지정된 파일 및 선택 영역을 편집할 수 있습니다. Rust CLI, MCP 도구와 React 임베드 컴포넌트도 제공합니다.
+**Foldly는 문서, 스프레드시트, 프레젠테이션과 화이트보드를 하나로 연결하는 협업 작업 공간입니다.** 여러 파일을 탭으로 열고, 사람과 AI가 지정된 파일 및 선택 영역을 편집할 수 있습니다. Rust CLI, MCP 도구와 React 임베드 컴포넌트도 제공합니다.
 
 이 페이지는 개요입니다. 전체 실행 방법, 코드 예제와 지원 범위는 [English](README.md) 또는 [中文](README_zh.md) 문서를 확인하세요.
 

@@ -1,4 +1,4 @@
-$repo = "RainLib/OfficeCli-rust"
+$repo = "RainLib/Foldly"
 $binary = "officecli.exe"
 $githubRawBase = "https://raw.githubusercontent.com/$repo/main"
 

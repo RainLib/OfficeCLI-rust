@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="460" viewBox="0 0 1440 460" role="img" aria-labelledby="title desc">
-  <title id="title">OfficeCLI — a shared workspace for people and agents</title>
-  <desc id="desc">A folded page connects a document, a worksheet and a whiteboard. Ink, warm white and mint echo the real OfficeCLI workspace.</desc>
+  <title id="title">Foldly — a shared workspace for people and agents</title>
+  <desc id="desc">A folded page connects a document, a worksheet and a whiteboard. Ink, warm white and mint echo the real Foldly workspace.</desc>
   <defs>
     <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#D7E1DB"/></pattern>
     <filter id="lift" x="-30%" y="-30%" width="160%" height="180%"><feDropShadow dy="7" stdDeviation="12" flood-color="#253F35" flood-opacity=".07"/></filter>

@@ -19,7 +19,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://officecli.ai"
-Repository = "https://github.com/RainLib/OfficeCli-rust"
+Repository = "https://github.com/RainLib/Foldly"
 
 [tool.setuptools]
 py-modules = ["officecli"]

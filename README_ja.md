@@ -1,12 +1,12 @@
-<p align="center"><img src="docs/assets/readme/officecli-logo.svg" width="280" alt="OfficeCLI · 折页" /></p>
+<p align="center"><img src="docs/assets/readme/foldly-logo.svg" width="280" alt="Foldly · 折页" /></p>
 
 <h1 align="center">人と AI が、同じファイルで共同作業。</h1>
 
 <p align="center"><a href="README.md">English</a> · <a href="README_zh.md">中文</a> · <b>日本語</b> · <a href="README_ko.md">한국어</a></p>
 
-![OfficeCLI collaborative workspace](docs/assets/readme/officecli-banner.svg)
+![Foldly collaborative workspace](docs/assets/readme/foldly-banner.svg)
 
-**OfficeCLI は、文書、表計算、プレゼンテーション、ホワイトボードを一つにまとめた共同編集ワークスペースです。** 複数のファイルをタブで開き、人と AI が指定されたファイルや選択範囲を編集できます。Rust 製 CLI、MCP ツール、React 埋め込みコンポーネントも提供します。
+**Foldly は、文書、表計算、プレゼンテーション、ホワイトボードを一つにまとめた共同編集ワークスペースです。** 複数のファイルをタブで開き、人と AI が指定されたファイルや選択範囲を編集できます。Rust 製 CLI、MCP ツール、React 埋め込みコンポーネントも提供します。
 
 このページは概要です。起動手順、コード例、対応範囲は [English](README.md) または [中文](README_zh.md) の完全版をご覧ください。
 

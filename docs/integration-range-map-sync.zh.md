@@ -473,7 +473,7 @@ officecli get /tmp/t.docx '/body/p[@paraId=<id>]' --json
 ```bash
 # 安装 v0.1.3
 OFFICECLI_VERSION=v0.1.3 curl -fsSL \
-  https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
+  https://raw.githubusercontent.com/RainLib/Foldly/main/install.sh | bash
 
 # 或本地构建
 cargo build --release

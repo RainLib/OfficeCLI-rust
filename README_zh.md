@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme/officecli-logo.svg" width="280" alt="OfficeCLI · 折页" />
+  <img src="docs/assets/readme/foldly-logo.svg" width="280" alt="Foldly · 折页" />
 </p>
 
 <h1 align="center">让团队与 AI，在同一份文件上协作。</h1>
@@ -14,11 +14,11 @@
 
 <p align="center"><a href="README.md">English</a> · <b>中文</b> · <a href="README_ja.md">日本語</a> · <a href="README_ko.md">한국어</a></p>
 
-![OfficeCLI：连接文档、表格、演示与白板](docs/assets/readme/officecli-banner.svg)
+![Foldly：连接文档、表格、演示与白板](docs/assets/readme/foldly-banner.svg)
 
-**OfficeCLI（折页）把多种文件、团队协作和 AI 操作放到同一个工作空间。** 在多个标签间处理 Word、Excel、PPT 和白板，让全局 AI 按指定的文件与选区协同编辑；也可以将单个编辑器嵌入自己的业务系统，由外部 Agent 通过 MCP 操作，聊天面板按需显示。
+**Foldly（折页）把多种文件、团队协作和 AI 操作放到同一个工作空间。** 在多个标签间处理 Word、Excel、PPT 和白板，让全局 AI 按指定的文件与选区协同编辑；也可以将单个编辑器嵌入自己的业务系统，由外部 Agent 通过 MCP 操作，聊天面板按需显示。
 
-底层同时提供原生 Rust CLI，供脚本、开发工具和 AI 编程助手读取、创建、修改、渲染与导出文件。
+底层 Rust 文档引擎通过 `officecli` 命令提供，供脚本、开发工具和 AI 编程助手读取、创建、修改、渲染与导出文件。
 
 [启动工作台](#启动工作台) · [AI 与编程 Agent 接入](#接入-ai-与编程-agent) · [嵌入业务系统](#嵌入业务系统) · [开发文档](#开发文档)
 
@@ -251,4 +251,4 @@ npm run test:workbench --prefix apps/workspace
 
 ## 开源协议与致谢
 
-采用 [Apache License 2.0](LICENSE)。OfficeCLI 的命令模型源自 [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI)。本仓库发展 Rust 文档引擎与协同工作台，并使用 Excalidraw、Yjs、Tiptap、Univer 等开源项目，遵循各自许可证。
+采用 [Apache License 2.0](LICENSE)。`officecli` 的命令模型源自 [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI)。本仓库发展 Rust 文档引擎与协同工作台，并使用 Excalidraw、Yjs、Tiptap、Univer 等开源项目，遵循各自许可证。

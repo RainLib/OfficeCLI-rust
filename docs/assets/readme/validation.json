@@ -19,5 +19,22 @@
   },
   "mcpExample": "Executed README.md JavaScript against the real selection MCP server; saved revision and engine read-back verified. See screenshots.json.",
   "cliExamples": "create, add, extract-text, view and help executed successfully.",
-  "failures": []
+  "failures": [],
+  "repositoryRename": {
+    "verifiedOn": "2026-11-21",
+    "repositoryId": 1249305626,
+    "previousName": "RainLib/OfficeCLI-rust",
+    "name": "RainLib/Foldly",
+    "beforeStars": 22,
+    "afterStars": 22,
+    "cliCommand": "officecli"
+  },
+  "brandingReview": {
+    "name": "Foldly",
+    "english": true,
+    "chinese": true,
+    "brokenImages": 0,
+    "horizontalOverflow": false,
+    "screenshot": "readme-preview.jpg"
+  }
 }
