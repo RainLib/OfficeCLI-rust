@@ -183,8 +183,15 @@ try {
   await field(peer).fill('AI新增格【同事】')
   await pane(peer).getByRole('button', { name: '应用内容', exact: true }).click()
   await expect.poll(async () => (await sheet()).cells.find(cell => cell.address === 'B2')?.text).toBe('AI新增格【同事】')
+  // The canonical write precedes the browser's index refresh. Structural
+  // commands are available once the protected input has finished reconciling.
+  await expect(field(peer)).toBeEnabled()
   await pane(peer).getByRole('button', { name: '插入', exact: true }).click()
+  const insertedRow = peer.waitForResponse(response => response.url().endsWith('/node-patch')
+    && response.request().method() === 'POST')
   await pane(peer).getByRole('button', { name: '在选中行前插入 1 行', exact: true }).click()
+  const rowResponse = await insertedRow
+  assert(rowResponse.ok(), await rowResponse.text())
   await expect.poll(async () => (await sheet()).cells.find(cell => cell.nodeId === richCell.nodeId)?.address).toBe('A3')
   const beforeUndo = await sheet()
   await owner.reload()
